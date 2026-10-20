@@ -28,7 +28,8 @@ def amdf_windows_sidecar_library(
         srcs,
         deps = None,
         linkopts = None,
-        visibility = None):
+        visibility = None,
+        testonly = False):
     """Builds a private x86-64 Windows DLL with the release static CRT.
 
     The sidecar owns every object allocated by binary-only dependencies so no
@@ -40,6 +41,7 @@ def amdf_windows_sidecar_library(
       deps: Private link dependencies.
       linkopts: Private linker options.
       visibility: Bazel visibility of the sidecar artifact.
+      testonly: Whether the private DLL is exclusively a test dependency.
     """
     amdf_cc_binary(
         name = name,
@@ -48,20 +50,33 @@ def amdf_windows_sidecar_library(
         linkopts = linkopts,
         linkshared = True,
         visibility = visibility,
+        testonly = testonly,
         **_SIDECAR_ATTRIBUTES
     )
 
-def amdf_windows_sidecar_test(name, srcs, deps = None):
+def amdf_windows_sidecar_test(
+        name,
+        srcs,
+        deps = None,
+        linkopts = None,
+        tags = None,
+        resource_group = None):
     """Tests private sidecar implementation with its production C++ and CRT ABI.
 
     Args:
       name: Test target name.
       srcs: Sidecar implementation and test sources.
       deps: Private link dependencies using the release static CRT.
+      linkopts: Private linker options.
+      tags: Test selection and runtime resource requirements.
+      resource_group: Local resource exclusion group for hardware tests.
     """
     amdf_cc_test(
         name = name,
         srcs = srcs,
         deps = deps,
+        linkopts = linkopts,
+        tags = tags,
+        resource_group = resource_group,
         **_SIDECAR_ATTRIBUTES
     )

@@ -1,0 +1,160 @@
+// RUN: pass vector-memory-footprint
+
+// A row guard constrains the dividend even when address canonicalization has
+// replaced the row/group decomposition with a flat coordinate.
+func.def @quotient_guard_bounds_flat_vector(%buffer: buffer, %raw: index) {
+  %base = index.constant 0 : offset
+  %linear = index.assume %raw [range(%raw, 0, 2367)] : index
+  %groups = index.constant 32 : index
+  %rows = index.constant 73 : index
+  %width = index.constant 16 : index
+  %row = index.div %linear, %groups : index
+  %inside = index.cmp ult, %row, %rows : index
+  %view = buffer.view %buffer[%base] : buffer -> view<37376xbf16>
+  scf.if %inside {
+    %origin = index.mul %linear, %width : index
+    %value = vector.load %view[%origin] : view<37376xbf16> -> vector<16xbf16>
+    test.use %value : vector<16xbf16>
+  }
+  func.return
+}
+
+// ====
+
+// The indexed CFG relation table retains the same consequence on a reversed
+// comparison's false edge; the rejecting edge carries no memory operation.
+func.def @shift_guard_bounds_flat_vector_cfg(%buffer: buffer, %raw: index) {
+  %base = index.constant 0 : offset
+  %linear = index.assume %raw [range(%raw, 0, 2367)] : index
+  %shift = index.constant 5 : index
+  %rows = index.constant 73 : index
+  %width = index.constant 16 : index
+  %row = index.shrui %linear, %shift : index
+  %outside = index.cmp ule, %rows, %row : index
+  %view = buffer.view %buffer[%base] : buffer -> view<37376xbf16>
+  cfg.cond_br %outside, ^exit, ^read
+^read:
+  %origin = index.mul %linear, %width : index
+  %value = vector.load %view[%origin] : view<37376xbf16> -> vector<16xbf16>
+  test.use %value : vector<16xbf16>
+  cfg.br ^exit
+^exit:
+  func.return
+}
+
+// ====
+
+// A bounded runtime divisor requires its largest scale for this upper bound.
+func.def @interval_divisor_bounds_dividend(%buffer: buffer, %raw: index, %scale0: index) {
+  %base = index.constant 0 : offset
+  %linear = index.assume %raw [range(%raw, 0, 255)] : index
+  %scale = index.assume %scale0 [range(%scale0, 16, 32)] : index
+  %limit = index.constant 3 : index
+  %quotient = index.div %linear, %scale : index
+  %inside = index.cmp ult, %quotient, %limit : index
+  %view = buffer.view %buffer[%base] : buffer -> view<96xf32>
+  scf.if %inside {
+    %value = view.load %view[%linear] : view<96xf32> -> f32
+    test.use %value : f32
+  }
+  func.return
+}
+
+// ====
+
+// Signed truncation's zero quotient includes both positive and negative
+// residues. The bias maps [-31,31] into the 63-element view.
+func.def @signed_zero_quotient_bounds_both_sides(%buffer: buffer, %raw: i32) {
+  %base = index.constant 0 : offset
+  %linear = scalar.assume %raw [range(%raw, -127, 127)] : i32
+  %scale = scalar.constant 32 : i32
+  %c0 = scalar.constant 0 : i32
+  %bias = scalar.constant 31 : i32
+  %quotient = scalar.divsi %linear, %scale : i32
+  %inside = scalar.cmpi eq, %quotient, %c0 : i32
+  %view = buffer.view %buffer[%base] : buffer -> view<63xf32>
+  scf.if %inside {
+    %biased = scalar.addi %linear, %bias : i32
+    %origin = index.cast %biased : i32 to index
+    %value = view.load %view[%origin] : view<63xf32> -> f32
+    test.use %value : f32
+  }
+  func.return
+}
+
+// ====
+
+func.def @floor_zero_quotient_has_nonnegative_residue(%buffer: buffer, %raw: i32) {
+  %base = index.constant 0 : offset
+  %linear = scalar.assume %raw [range(%raw, -127, 127)] : i32
+  %scale = scalar.constant 32 : i32
+  %c0 = scalar.constant 0 : i32
+  %quotient = scalar.floordivsi %linear, %scale : i32
+  %inside = scalar.cmpi eq, %quotient, %c0 : i32
+  %view = buffer.view %buffer[%base] : buffer -> view<32xf32>
+  scf.if %inside {
+    %origin = index.cast %linear : i32 to index
+    %value = view.load %view[%origin] : view<32xf32> -> f32
+    test.use %value : f32
+  }
+  func.return
+}
+
+// ====
+
+func.def @ceil_quotient_bounds_exact_final_multiple(%buffer: buffer, %raw: i32) {
+  %base = index.constant 0 : offset
+  %linear = scalar.assume %raw [range(%raw, 0, 255)] : i32
+  %scale = scalar.constant 32 : i32
+  %limit = scalar.constant 3 : i32
+  %quotient = scalar.ceildivui %linear, %scale : i32
+  %inside = scalar.cmpi ult, %quotient, %limit : i32
+  %view = buffer.view %buffer[%base] : buffer -> view<65xf32>
+  scf.if %inside {
+    %origin = index.cast %linear : i32 to index
+    %value = view.load %view[%origin] : view<65xf32> -> f32
+    test.use %value : f32
+  }
+  func.return
+}
+
+// ====
+
+// ceil(64/32)=2 satisfies the guard, but element 64 is outside this view.
+func.def @ceil_quotient_does_not_drop_final_multiple(%buffer: buffer, %raw: i32) {
+  %base = index.constant 0 : offset
+  %linear = scalar.assume %raw [range(%raw, 0, 255)] : i32
+  %scale = scalar.constant 32 : i32
+  %limit = scalar.constant 3 : i32
+  %quotient = scalar.ceildivui %linear, %scale : i32
+  %inside = scalar.cmpi ult, %quotient, %limit : i32
+  %view = buffer.view %buffer[%base] : buffer -> view<64xf32>
+  scf.if %inside {
+    %origin = index.cast %linear : i32 to index
+    // ERROR@+1: SUBRANGE/024 {op_name="view.load", view_axis="0"}
+    %value = view.load %view[%origin] : view<64xf32> -> f32
+    test.use %value : f32
+  }
+  func.return
+}
+
+// ====
+
+// The arithmetic source contract does not rule out any quotient for a zero
+// divisor. A quotient guard cannot prove a smaller dividend range here.
+func.def @possible_zero_divisor_does_not_constrain_dividend(%buffer: buffer, %raw: i32, %scale0: i32) {
+  %base = index.constant 0 : offset
+  %linear = scalar.assume %raw [range(%raw, 0, 255)] : i32
+  %scale = scalar.assume %scale0 [range(%scale0, 0, 32)] : i32
+  %limit = scalar.constant 3 : i32
+  %quotient = scalar.divui %linear, %scale : i32
+  %inside = scalar.cmpi ult, %quotient, %limit : i32
+  %view = buffer.view %buffer[%base] : buffer -> view<96xf32>
+  scf.if %inside {
+    %origin = index.cast %linear : i32 to index
+    // ERROR@+1: SUBRANGE/024 {op_name="view.load", view_axis="0"}
+    %value = view.load %view[%origin] : view<96xf32> -> f32
+    test.use %value : f32
+  }
+  func.return
+}

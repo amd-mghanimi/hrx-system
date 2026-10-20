@@ -292,7 +292,7 @@ static iree_status_t iree_benchmark_loom_append_artifact_bundle_manifest_json(
   IREE_RETURN_IF_ERROR(loom_json_object_end(&paths_object));
   IREE_RETURN_IF_ERROR(iree_benchmark_loom_write_manifest_files_json(
       bundle, run, allocator, &object));
-  if (hal_context->execution.device_provider != NULL) {
+  if (!iree_string_view_is_empty(hal_context->execution.driver_name)) {
     IREE_RETURN_IF_ERROR(
         loom_json_object_begin_field(&object, IREE_SV("device")));
     loom_json_object_writer_t device_object;

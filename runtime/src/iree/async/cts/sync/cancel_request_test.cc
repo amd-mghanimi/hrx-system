@@ -127,6 +127,14 @@ class CancelRequestTest : public SocketTestBase<> {
     operation->events = IREE_ASYNC_POLL_EVENT_IN;
   }
 
+  void InitializeTimer(iree_async_timer_operation_t* operation,
+                       CancelJoin* join, iree_time_t deadline) {
+    iree_async_operation_initialize(
+        &operation->base, IREE_ASYNC_OPERATION_TYPE_TIMER,
+        IREE_ASYNC_OPERATION_FLAG_NONE, CancelJoin::Complete, join);
+    operation->deadline_ns = deadline;
+  }
+
   void PollAvailable() {
     iree_status_t status =
         iree_async_proactor_poll(proactor_, iree_immediate_timeout(), nullptr);
@@ -188,6 +196,106 @@ TEST_P(CancelRequestTest, CancelRegisteredWaitWithoutPeerProgress) {
   PollUntilCondition([&] { return join.done(); });
   EXPECT_EQ(join.code, IREE_STATUS_CANCELLED);
   EXPECT_EQ(join.receipts, 1);
+}
+
+TEST_P(CancelRequestTest, CancelTimerBeforeFirstPoll) {
+  CancelJoin join(proactor_);
+  iree_async_timer_operation_t timer = {};
+  InitializeTimer(&timer, &join, IREE_TIME_INFINITE_FUTURE);
+  IREE_ASSERT_OK(iree_async_proactor_submit_one(proactor_, &timer.base));
+  join.Cancel(&timer.base);
+  PollUntilCondition([&] { return join.done(); });
+  EXPECT_EQ(join.code, IREE_STATUS_CANCELLED);
+  EXPECT_EQ(join.terminals, 1);
+  EXPECT_EQ(join.receipts, 1);
+}
+
+TEST_P(CancelRequestTest, CancelRegisteredTimer) {
+  CancelJoin join(proactor_);
+  iree_async_timer_operation_t timer = {};
+  InitializeTimer(&timer, &join, IREE_TIME_INFINITE_FUTURE);
+  IREE_ASSERT_OK(iree_async_proactor_submit_one(proactor_, &timer.base));
+  PollAvailable();
+  EXPECT_EQ(join.terminals, 0);
+  Dispatch([&] { join.Cancel(&timer.base); });
+  PollUntilCondition([&] { return join.done(); });
+  EXPECT_EQ(join.code, IREE_STATUS_CANCELLED);
+  EXPECT_EQ(join.terminals, 1);
+  EXPECT_EQ(join.receipts, 1);
+}
+
+TEST_P(CancelRequestTest, TimerExpiryRacesCancellation) {
+  CancelJoin join(proactor_);
+  iree_async_timer_operation_t timer = {};
+  InitializeTimer(&timer, &join, iree_time_now());
+  IREE_ASSERT_OK(iree_async_proactor_submit_one(proactor_, &timer.base));
+  join.Cancel(&timer.base);
+  PollUntilCondition([&] { return join.done(); });
+  EXPECT_TRUE(join.code == IREE_STATUS_OK ||
+              join.code == IREE_STATUS_CANCELLED);
+  EXPECT_EQ(join.terminals, 1);
+  EXPECT_EQ(join.receipts, 1);
+}
+
+TEST_P(CancelRequestTest, JoinedTimerAddressCanBeReusedImmediately) {
+  CancelJoin join(proactor_);
+  iree_async_timer_operation_t timer = {};
+  InitializeTimer(&timer, &join, IREE_TIME_INFINITE_FUTURE);
+  CompletionTracker replacement;
+  struct State {
+    // Owner shared by both executions of the deadline timer.
+    iree_async_proactor_t* proactor;
+    // Storage reused only after the target and cancellation key retire.
+    iree_async_timer_operation_t* timer;
+    // Completion witness for the uncancelled replacement timer.
+    CompletionTracker* replacement;
+  } state{proactor_, &timer, &replacement};
+  join.user_data = &state;
+  join.joined = [](void* user_data) {
+    auto* state = static_cast<State*>(user_data);
+    iree_async_operation_initialize(
+        &state->timer->base, IREE_ASYNC_OPERATION_TYPE_TIMER,
+        IREE_ASYNC_OPERATION_FLAG_NONE, CompletionTracker::Callback,
+        state->replacement);
+    state->timer->deadline_ns = iree_time_now();
+    IREE_ASSERT_OK(
+        iree_async_proactor_submit_one(state->proactor, &state->timer->base));
+  };
+  IREE_ASSERT_OK(iree_async_proactor_submit_one(proactor_, &timer.base));
+  join.Cancel(&timer.base);
+  PollUntilCondition([&] { return replacement.call_count == 1; });
+  EXPECT_TRUE(join.done());
+  EXPECT_EQ(join.code, IREE_STATUS_CANCELLED);
+  EXPECT_EQ(join.terminals, 1);
+  EXPECT_EQ(join.receipts, 1);
+  IREE_EXPECT_OK(replacement.ConsumeStatus());
+}
+
+TEST_P(CancelRequestTest, TimerJoinCallbackDestroysItsOwner) {
+  struct Owner {
+    // Independent target and cancellation obligations.
+    CancelJoin join;
+    // Deadline state destroyed together with its cancellation receipt.
+    iree_async_timer_operation_t timer = {};
+    // Witness that remains alive after both obligations retire.
+    bool* destroyed;
+  };
+  bool destroyed = false;
+  auto* owner = new Owner{CancelJoin(proactor_), {}, &destroyed};
+  InitializeTimer(&owner->timer, &owner->join, IREE_TIME_INFINITE_FUTURE);
+  owner->join.user_data = owner;
+  owner->join.joined = [](void* user_data) {
+    auto* owner = static_cast<Owner*>(user_data);
+    EXPECT_EQ(owner->join.code, IREE_STATUS_CANCELLED);
+    EXPECT_EQ(owner->join.terminals, 1);
+    EXPECT_EQ(owner->join.receipts, 1);
+    *owner->destroyed = true;
+    delete owner;
+  };
+  IREE_ASSERT_OK(iree_async_proactor_submit_one(proactor_, &owner->timer.base));
+  owner->join.Cancel(&owner->timer.base);
+  PollUntilCondition([&] { return destroyed; });
+  Dispatch([] {});
 }
 
 TEST_P(CancelRequestTest, CallbackCancelsWaitBeforeRegistration) {

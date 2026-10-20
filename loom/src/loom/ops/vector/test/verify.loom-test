@@ -1,5 +1,65 @@
 // RUN: verify
 
+// vector.refine may relate dynamic extents or narrow one to a static extent,
+// but it cannot assert an obvious static shape contradiction.
+func.def @refine_static_dimension_mismatch(%source: vector<4xf32>) {
+  // ERROR@+1: SHAPE/001 "source static dimension" "4" "result static dimension" "8"
+  %refined = vector.refine %source : vector<4xf32> -> vector<8xf32>
+  func.return
+}
+
+// ====
+
+func.def @refine_element_mismatch(%source: vector<4xf32>) {
+  // ERROR@+1: TYPE/002
+  %refined = vector.refine %source : vector<4xf32> -> vector<4xi32>
+  func.return
+}
+
+// ====
+
+func.def @refine_rank_mismatch(%source: vector<4xf32>) {
+  // ERROR@+1: SHAPE/001
+  %refined = vector.refine %source : vector<4xf32> -> vector<1x4xf32>
+  func.return
+}
+
+// ====
+
+// Address casts accept fixed integers and address domains, with at least one
+// side crossing an address boundary.
+func.def @index_cast_float_input(%value: vector<4xf32>) {
+  // ERROR@+1: TYPE/003 "vector with integer, index, or offset elements"
+  %result = vector.index_cast %value : vector<4xf32> to vector<4xindex>
+  func.return
+}
+
+// ====
+
+func.def @index_cast_float_result(%value: vector<4xindex>) {
+  // ERROR@+1: TYPE/004 "vector with integer, index, or offset elements"
+  %result = vector.index_cast %value : vector<4xindex> to vector<4xf32>
+  func.return
+}
+
+// ====
+
+func.def @index_cast_fixed_integer_only(%value: vector<4xi8>) {
+  // ERROR@+1: TYPE/004 "vector index or offset boundary"
+  %result = vector.index_cast %value : vector<4xi8> to vector<4xi32>
+  func.return
+}
+
+// ====
+
+func.def @index_cast_shape_mismatch(%value: vector<4xi32>) {
+  // ERROR@+1: SHAPE/002
+  %result = vector.index_cast %value : vector<4xi32> to vector<2xindex>
+  func.return
+}
+
+// ====
+
 // Floating-point lanewise ops require floating-point vector elements.
 func.def @addf_integer(%a: vector<4xi32>, %b: vector<4xi32>) {
   // ERROR@+1: TYPE/004 "float_element"
@@ -1730,6 +1790,48 @@ func.def @atomic_offsets_reject_i1(%buffer: buffer, %base: offset, %row: index, 
   %view = buffer.view %buffer[%base] : buffer -> view<8x8xi32, %layout>
   // ERROR@+1: TYPE/003 "offsets" "index or non-i1 integer element type"
   %old = vector.atomic.rmw<addi> %v, %view[%row, %col][%offsets] {ordering = relaxed, scope = workgroup} : vector<4xi32>, view<8x8xi32, %layout>, vector<4xi1>
+  func.return
+}
+
+// ====
+
+// Vector atomics carry the same byte-addressable memory-object contract as
+// their scalar forms.
+func.def @atomic_reduce_rejects_i1_payload(%view: view<4xi1>, %value: vector<2xi1>, %offsets: vector<2xindex>) {
+  // ERROR@+1: TYPE/003 "value" "vector<2xi1>" "byte-addressable fixed-width integer or floating-point element type"
+  vector.atomic.reduce<andi> %value, %view[0][%offsets] {ordering = relaxed, scope = workgroup} : vector<2xi1>, view<4xi1>, vector<2xindex>
+  func.return
+}
+
+// ====
+
+func.def @atomic_reduce_mask_rejects_i1_payload(%view: view<4xi1>, %value: vector<2xi1>, %offsets: vector<2xindex>, %mask: vector<2xi1>) {
+  // ERROR@+1: TYPE/003 "value" "vector<2xi1>" "byte-addressable fixed-width integer or floating-point element type"
+  vector.atomic.reduce.mask<andi> %value, %view[0][%offsets], %mask {ordering = relaxed, scope = workgroup} : vector<2xi1>, view<4xi1>, vector<2xindex>, vector<2xi1>
+  func.return
+}
+
+// ====
+
+func.def @atomic_rmw_rejects_i1_payload(%view: view<4xi1>, %value: vector<2xi1>, %offsets: vector<2xindex>) {
+  // ERROR@+1: TYPE/003 "value" "vector<2xi1>" "byte-addressable fixed-width integer or floating-point element type"
+  %old = vector.atomic.rmw<andi> %value, %view[0][%offsets] {ordering = relaxed, scope = workgroup} : vector<2xi1>, view<4xi1>, vector<2xindex>
+  func.return
+}
+
+// ====
+
+func.def @atomic_rmw_mask_rejects_i1_payload(%view: view<4xi1>, %value: vector<2xi1>, %offsets: vector<2xindex>, %mask: vector<2xi1>) {
+  // ERROR@+1: TYPE/003 "value" "vector<2xi1>" "byte-addressable fixed-width integer or floating-point element type"
+  %old = vector.atomic.rmw.mask<andi> %value, %view[0][%offsets], %mask, %value {ordering = relaxed, scope = workgroup} : vector<2xi1>, view<4xi1>, vector<2xindex>, vector<2xi1>, vector<2xi1>
+  func.return
+}
+
+// ====
+
+func.def @atomic_cmpxchg_rejects_index_payload(%view: view<4xindex>, %value: vector<2xindex>, %offsets: vector<2xindex>) {
+  // ERROR@+1: TYPE/003 "expected" "vector<2xindex>" "byte-addressable fixed-width integer or floating-point element type"
+  %old = vector.atomic.cmpxchg %value, %value, %view[0][%offsets] {failure_ordering = relaxed, scope = workgroup, success_ordering = relaxed} : vector<2xindex>, view<4xindex>, vector<2xindex> -> vector<2xindex>
   func.return
 }
 

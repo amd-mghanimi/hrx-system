@@ -129,7 +129,7 @@ def test_native_integer_instruction_matrix_is_exact_and_unique() -> None:
         instruction.packet_form for instruction in ORDINARY_VECTOR_INTEGER_INSTRUCTIONS
     )
     assert packet_forms == {
-        "LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE": 165,
+        "LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE": 165,
         "LOOM_SPIRV_PACKET_FORM_UNARY_TYPED": 24,
         "LOOM_SPIRV_PACKET_FORM_COMPARE_SAME_TYPE": 120,
     }

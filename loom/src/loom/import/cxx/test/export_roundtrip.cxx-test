@@ -1,0 +1,235 @@
+// RUN: emit cxx
+// REQUIRES: loom-export-cxx
+#include <loomcxx/atomic.h>
+#include <loomcxx/kernel.h>
+#include <loomcxx/predicate.h>
+#include <loomcxx/vector.h>
+
+using Half8 = _Float16 __attribute__((ext_vector_type(8)));
+using Float4 = float __attribute__((ext_vector_type(4)));
+
+using loom::atomic::kind;
+using loom::atomic::ordering;
+using loom::atomic::scope;
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void copy_one(const float* input, float* output) {
+  auto* constant_input = loom::buffer::assume::memory_space<loom::memory_space::constant>(input);
+  auto input_view = loom::buffer::view<4>(constant_input, {}, loom::encoding::layout::dense<1>());
+  unsigned workitem = static_cast<unsigned>(loom::kernel::workitem::id.x);
+  auto slice = loom::view::subview<1>(input_view, {workitem}, {});
+  float value = loom::view::load(slice, 0);
+  auto output_view = loom::buffer::view<4>(output, {}, loom::encoding::layout::dense<1>());
+  loom::view::store(value, output_view, workitem);
+}
+
+// Auto-deduced topology values preserve index predicates and arithmetic while
+// fixed-width consumers retain their explicit conversion boundary.
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void topology_identity(unsigned* output) {
+  auto output_view = loom::buffer::view<64>(output, {}, loom::encoding::layout::dense<1>());
+  auto coordinate = loom::kernel::workitem::id.x;
+  loom::assume(loom::predicate::range(coordinate, 0, 62));
+  auto shifted = static_cast<loom::type::index>(coordinate) + loom::type::index{1};
+  unsigned lane = coordinate;
+  auto wide = loom::index::cast<unsigned long long>(static_cast<loom::type::index>(coordinate));
+  loom::view::store(lane, output_view, coordinate);
+  loom::view::store(lane, output_view, shifted);
+}
+
+// Loop-carried state and dynamic schedules remain source-level C++ constructs.
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void scheduled_sum(const float* input, float* output, unsigned count, unsigned unroll, unsigned pipeline) {
+  auto source = loom::buffer::view<64>(input, {}, loom::encoding::layout::dense<1>());
+  float total = 0.0f;
+  [[loom::unroll(unroll), loom::pipeline(pipeline), loom::schedule("recurrence")]]
+  for (unsigned index = 0; index < count; ++index) {
+    float value = loom::view::load(source, index);
+    if (value > 0.0f) {
+      total += value;
+    }
+  }
+  auto destination = loom::buffer::view<1>(output, {}, loom::encoding::layout::dense<1>());
+  loom::view::store(total, destination, 0);
+}
+
+// Explicit striding composes with native vectors and pairwise dot products.
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(4, 1, 1)]]
+void strided_pair_dot(const _Float16* lhs, const _Float16* rhs, float* output, unsigned lhs_stride, unsigned rhs_stride) {
+  auto lhs_layout = loom::encoding::layout::strided(lhs_stride, 1);
+  auto rhs_layout = loom::encoding::layout::strided(rhs_stride, 1);
+  auto lhs_view = loom::buffer::view<4, 8>(lhs, {}, lhs_layout);
+  auto rhs_view = loom::buffer::view<4, 8>(rhs, {}, rhs_layout);
+  auto output_view = loom::buffer::view<4, 4>(output, {}, loom::encoding::layout::dense<2>());
+  unsigned row = static_cast<unsigned>(loom::kernel::workitem::id.x);
+  Half8 lhs_values = loom::vector::load<Half8>(lhs_view, {row, 0});
+  Half8 rhs_values = loom::vector::load<Half8>(rhs_view, {row, 0});
+  Float4 accumulator = {0.0f, 0.0f, 0.0f, 0.0f};
+  Float4 result = loom::vector::dot2f(lhs_values, rhs_values, accumulator);
+  loom::vector::store(result, output_view, {row, 0});
+}
+
+// Workgroup allocation and asynchronous gather retain their staging structure.
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(64, 1, 1)]]
+void gather_tile(const unsigned char* input) {
+  auto source = loom::buffer::view<4>(input, {}, loom::encoding::layout::dense<1>());
+  auto* storage = loom::buffer::alloca<unsigned char, loom::memory_space::workgroup, 64>(256);
+  auto destination = loom::buffer::view<64, 4>(storage, {}, loom::encoding::layout::dense<2>());
+  auto transfer = loom::kernel::async::gather<loom::cache::scope::workgroup, loom::cache::temporal::regular>(source, destination);
+  auto stage = loom::kernel::async::group(transfer);
+  loom::kernel::async::wait<0>(stage);
+}
+
+// Atomic accesses retain one shared typed view and its multidimensional
+// logical coordinates through C++ projection.
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void atomic_grid(unsigned* storage, unsigned row) {
+  auto values = loom::buffer::view<4, 8>(storage, {}, loom::encoding::layout::dense<2>());
+  unsigned observed = loom::view::atomic::load<ordering::acquire, scope::device>(values, row, 0);
+  loom::view::atomic::store<ordering::release, scope::device>(observed, values, row, 1);
+  unsigned old = loom::view::atomic::rmw<kind::addi, ordering::acq_rel, scope::device>(1u, values, row, 2);
+  loom::view::atomic::reduce<kind::maxui, ordering::relaxed, scope::device>(old, values, row, 3);
+  (void)loom::view::atomic::cmpxchg<ordering::acq_rel, ordering::acquire, scope::device>(observed, old, values, row, 4);
+}
+
+// ----
+#include <loomcxx/atomic.h>
+#include <loomcxx/kernel.h>
+#include <loomcxx/predicate.h>
+#include <loomcxx/vector.h>
+
+#include <stdfloat>
+
+using Float16x8 = std::float16_t __attribute__((ext_vector_type(8)));
+using Float32x4 = float __attribute__((ext_vector_type(4)));
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void copy_one(const float* input, float* output) {
+  auto constant_input = loom::buffer::assume::memory_space<loom::memory_space::constant>(input);
+  auto input_view = loom::buffer::view<4>(constant_input, {}, loom::encoding::layout::dense<1>());
+  unsigned workitem = static_cast<unsigned>(loom::kernel::workitem::id.x);
+  auto slice = loom::view::subview<1>(input_view, loom::type::indices{loom::index::cast(workitem)}, {});
+  float value = loom::view::load(slice, loom::type::index{0});
+  auto output_view = loom::buffer::view<4>(output, {}, loom::encoding::layout::dense<1>());
+  loom::view::store(value, output_view, loom::index::cast(workitem));
+}
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void topology_identity(unsigned* output) {
+  auto output_view = loom::buffer::view<64>(output, {}, loom::encoding::layout::dense<1>());
+  auto coordinate = loom::kernel::workitem::id.x;
+  loom::assume(loom::predicate::range(coordinate, 0, 62));
+  loom::type::index shifted = static_cast<loom::type::index>(coordinate) + loom::type::index{1};
+  unsigned lane = static_cast<unsigned>(coordinate);
+  unsigned long long wide = loom::index::cast<unsigned long long>(static_cast<loom::type::index>(coordinate));
+  loom::view::store(lane, output_view, coordinate);
+  loom::view::store(lane, output_view, shifted);
+}
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void scheduled_sum(const float* input, float* output, unsigned count, unsigned unroll, unsigned pipeline) {
+  auto source = loom::buffer::view<64>(input, {}, loom::encoding::layout::dense<1>());
+  float total = 0.0f;
+  [[loom::unroll(loom::index::cast(unroll)), loom::pipeline(loom::index::cast(pipeline)), loom::schedule("recurrence")]]
+  for (unsigned index = 0u; index < count; ++index) {
+    float value = loom::view::load(source, loom::index::cast(index));
+    if (value > 0.0f) {
+      total = total + value;
+    }
+  }
+  auto destination = loom::buffer::view<1>(output, {}, loom::encoding::layout::dense<1>());
+  loom::view::store(total, destination, loom::type::index{0});
+}
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(4, 1, 1)]]
+void strided_pair_dot(const std::float16_t* lhs, const std::float16_t* rhs, float* output, unsigned lhs_stride, unsigned rhs_stride) {
+  auto lhs_layout = loom::encoding::layout::strided(loom::index::cast(lhs_stride), loom::type::index{1});
+  auto rhs_layout = loom::encoding::layout::strided(loom::index::cast(rhs_stride), loom::type::index{1});
+  auto lhs_view = loom::buffer::view<4, 8>(lhs, {}, lhs_layout);
+  auto rhs_view = loom::buffer::view<4, 8>(rhs, {}, rhs_layout);
+  auto output_view = loom::buffer::view<4, 4>(output, {}, loom::encoding::layout::dense<2>());
+  unsigned row = static_cast<unsigned>(loom::kernel::workitem::id.x);
+  Float16x8 lhs_values = loom::vector::load<Float16x8>(lhs_view, loom::type::indices{loom::index::cast(row), loom::type::index{0}});
+  Float16x8 rhs_values = loom::vector::load<Float16x8>(rhs_view, loom::type::indices{loom::index::cast(row), loom::type::index{0}});
+  Float32x4 accumulator = Float32x4{0.0f, 0.0f, 0.0f, 0.0f};
+  Float32x4 result = loom::vector::dot2f(lhs_values, rhs_values, accumulator);
+  loom::vector::store(result, output_view, loom::type::indices{loom::index::cast(row), loom::type::index{0}});
+}
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(64, 1, 1)]]
+void gather_tile(const unsigned char* input) {
+  auto source = loom::buffer::view<4>(input, {}, loom::encoding::layout::dense<1>());
+  auto* storage = loom::buffer::alloca<unsigned char, loom::memory_space::workgroup, 64>(loom::type::index{256});
+  auto destination = loom::buffer::view<64, 4>(storage, {}, loom::encoding::layout::dense<2>());
+  auto transfer = loom::kernel::async::gather<loom::cache::scope::workgroup, loom::cache::temporal::regular>(source, destination);
+  auto transfer_group = loom::kernel::async::group(transfer);
+  loom::kernel::async::wait<0>(transfer_group);
+}
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void atomic_grid(unsigned* storage, unsigned row) {
+  auto values = loom::buffer::view<4, 8>(storage, {}, loom::encoding::layout::dense<2>());
+  unsigned observed = loom::view::atomic::load<loom::atomic::ordering::acquire, loom::atomic::scope::device>(values, loom::index::cast(row), loom::type::index{0});
+  loom::view::atomic::store<loom::atomic::ordering::release, loom::atomic::scope::device>(observed, values, loom::index::cast(row), loom::type::index{1});
+  unsigned old = loom::view::atomic::rmw<loom::atomic::kind::addi, loom::atomic::ordering::acq_rel, loom::atomic::scope::device>(1u, values, loom::index::cast(row), loom::type::index{2});
+  loom::view::atomic::reduce<loom::atomic::kind::maxui, loom::atomic::ordering::relaxed, loom::atomic::scope::device>(old, values, loom::index::cast(row), loom::type::index{3});
+  (void)loom::view::atomic::cmpxchg<loom::atomic::ordering::acq_rel, loom::atomic::ordering::acquire, loom::atomic::scope::device>(observed, old, values, loom::index::cast(row), loom::type::index{4});
+}
+
+// ====
+#include <loomcxx/kernel.h>
+#include <loomcxx/numeric.h>
+#include <loomcxx/vector.h>
+
+using Int4 = int __attribute__((ext_vector_type(4)));
+using UInt4 = unsigned __attribute__((ext_vector_type(4)));
+using Float4 = float __attribute__((ext_vector_type(4)));
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void convert_vectors(const int* integer_input, const float* float_input, float* signed_float_output, float* unsigned_float_output, int* signed_integer_output, unsigned* unsigned_integer_output) {
+  auto integer_input_view = loom::buffer::view<4>(integer_input, {}, loom::encoding::layout::dense<1>());
+  auto float_input_view = loom::buffer::view<4>(float_input, {}, loom::encoding::layout::dense<1>());
+  auto signed_float_output_view = loom::buffer::view<4>(signed_float_output, {}, loom::encoding::layout::dense<1>());
+  auto unsigned_float_output_view = loom::buffer::view<4>(unsigned_float_output, {}, loom::encoding::layout::dense<1>());
+  auto signed_integer_output_view = loom::buffer::view<4>(signed_integer_output, {}, loom::encoding::layout::dense<1>());
+  auto unsigned_integer_output_view = loom::buffer::view<4>(unsigned_integer_output, {}, loom::encoding::layout::dense<1>());
+  Int4 integers = loom::vector::load<Int4>(integer_input_view, {0});
+  Float4 floats = loom::vector::load<Float4>(float_input_view, {0});
+  Float4 signed_floats = loom::convert<Float4>(integers);
+  Float4 unsigned_floats = loom::convert<Float4>(loom::convert<UInt4>(integers));
+  Int4 signed_integers = loom::convert<Int4>(floats);
+  UInt4 unsigned_integers = loom::convert<UInt4>(floats);
+  loom::vector::store(signed_floats, signed_float_output_view, {0});
+  loom::vector::store(unsigned_floats, unsigned_float_output_view, {0});
+  loom::vector::store(signed_integers, signed_integer_output_view, {0});
+  loom::vector::store(unsigned_integers, unsigned_integer_output_view, {0});
+}
+
+// ----
+#include <loomcxx/kernel.h>
+#include <loomcxx/numeric.h>
+#include <loomcxx/vector.h>
+
+using Float32x4 = float __attribute__((ext_vector_type(4)));
+using Int32x4 = int __attribute__((ext_vector_type(4)));
+using UInt32x4 = unsigned __attribute__((ext_vector_type(4)));
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void convert_vectors(const int* integer_input, const float* float_input, float* signed_float_output, float* unsigned_float_output, int* signed_integer_output, unsigned* unsigned_integer_output) {
+  auto integer_input_view = loom::buffer::view<4>(integer_input, {}, loom::encoding::layout::dense<1>());
+  auto float_input_view = loom::buffer::view<4>(float_input, {}, loom::encoding::layout::dense<1>());
+  auto signed_float_output_view = loom::buffer::view<4>(signed_float_output, {}, loom::encoding::layout::dense<1>());
+  auto unsigned_float_output_view = loom::buffer::view<4>(unsigned_float_output, {}, loom::encoding::layout::dense<1>());
+  auto signed_integer_output_view = loom::buffer::view<4>(signed_integer_output, {}, loom::encoding::layout::dense<1>());
+  auto unsigned_integer_output_view = loom::buffer::view<4>(unsigned_integer_output, {}, loom::encoding::layout::dense<1>());
+  Int32x4 integers = loom::vector::load<Int32x4>(integer_input_view, loom::type::indices{loom::type::index{0}});
+  Float32x4 floats = loom::vector::load<Float32x4>(float_input_view, loom::type::indices{loom::type::index{0}});
+  Float32x4 signed_floats = loom::convert<Float32x4>(integers);
+  Float32x4 unsigned_floats = loom::convert<Float32x4>(loom::convert<UInt32x4>(integers));
+  Int32x4 signed_integers = loom::convert<Int32x4>(floats);
+  UInt32x4 unsigned_integers = loom::convert<UInt32x4>(floats);
+  loom::vector::store(signed_floats, signed_float_output_view, loom::type::indices{loom::type::index{0}});
+  loom::vector::store(unsigned_floats, unsigned_float_output_view, loom::type::indices{loom::type::index{0}});
+  loom::vector::store(signed_integers, signed_integer_output_view, loom::type::indices{loom::type::index{0}});
+  loom::vector::store(unsigned_integers, unsigned_integer_output_view, loom::type::indices{loom::type::index{0}});
+}

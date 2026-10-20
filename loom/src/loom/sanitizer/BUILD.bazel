@@ -16,6 +16,8 @@ loom_cc_library(
     name = "options",
     srcs = ["options.c"],
     hdrs = ["options.h"],
+    # Option parsing and formatting carry no shared mutable state.
+    tags = ["LINKABLE_MORE_THAN_ONCE"],
     deps = [
         "//runtime/src/iree/base",
     ],
@@ -33,7 +35,6 @@ loom_cc_library(
         "//loom/src/loom/ops/sanitizer",
         "//loom/src/loom/util:walk",
         "//runtime/src/iree/base",
-        "//runtime/src/iree/base/internal:arena",
     ],
 )
 
@@ -47,6 +48,7 @@ loom_cc_library(
         ":site_location",
         ":site_payload",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/index",
         "//loom/src/loom/ops/sanitizer",
@@ -54,11 +56,13 @@ loom_cc_library(
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/vector",
         "//loom/src/loom/ops/view",
+        "//loom/src/loom/pass:options",
         "//loom/src/loom/pass:pipeline",
         "//loom/src/loom/pass:registry",
         "//loom/src/loom/pass:types",
         "//loom/src/loom/pass:value_facts",
         "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/util:predicate_facts",
         "//runtime/src/iree/base",
     ],
 )
@@ -69,6 +73,7 @@ loom_cc_library(
     hdrs = ["materialize_assertions.h"],
     deps = [
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/index",
@@ -92,13 +97,16 @@ loom_cc_library(
         ":site_location",
         ":site_payload",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:atomic",
         "//loom/src/loom/ops/index",
         "//loom/src/loom/ops/kernel",
         "//loom/src/loom/ops/sanitizer",
+        "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/vector",
         "//loom/src/loom/ops/view",
+        "//loom/src/loom/pass:options",
         "//loom/src/loom/pass:pipeline",
         "//loom/src/loom/pass:registry",
         "//loom/src/loom/pass:types",

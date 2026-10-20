@@ -109,7 +109,7 @@ static void iree_hal_amdgpu_pm4_command_buffer_resident_allocation_free(
   iree_allocator_free(resident_pool->host_allocator, allocation);
 }
 
-iree_status_t iree_hal_amdgpu_pm4_command_buffer_resident_pool_create(
+iree_status_t iree_hal_amdgpu_pm4_command_buffer_resident_pool_allocate(
     const iree_hal_amdgpu_libhsa_t* libhsa, hsa_agent_t host_agent,
     hsa_agent_t device_agent, hsa_amd_memory_pool_t resident_memory_pool,
     hsa_amd_memory_pool_t host_staging_memory_pool,
@@ -246,7 +246,7 @@ void iree_hal_amdgpu_pm4_command_buffer_resident_pool_trim(
   IREE_TRACE_ZONE_END(z0);
 }
 
-void iree_hal_amdgpu_pm4_command_buffer_resident_pool_destroy(
+void iree_hal_amdgpu_pm4_command_buffer_resident_pool_free(
     iree_hal_amdgpu_pm4_command_buffer_resident_pool_t* resident_pool) {
   if (!resident_pool) {
     return;
@@ -2022,7 +2022,6 @@ static iree_status_t iree_hal_amdgpu_pm4_command_buffer_verify_create(
 }
 
 iree_status_t iree_hal_amdgpu_pm4_command_buffer_create(
-    iree_hal_allocator_t* device_allocator,
     const iree_hal_queue_family_t* queue_family,
     iree_hal_command_buffer_mode_t mode,
     iree_hal_command_category_t command_categories,
@@ -2042,7 +2041,6 @@ iree_status_t iree_hal_amdgpu_pm4_command_buffer_create(
     iree_arena_block_pool_t* resource_set_block_pool,
     iree_allocator_t host_allocator,
     iree_hal_command_buffer_t** out_command_buffer) {
-  IREE_ASSERT_ARGUMENT(device_allocator);
   IREE_ASSERT_ARGUMENT(queue_family);
   IREE_ASSERT_ARGUMENT(out_command_buffer);
   *out_command_buffer = NULL;
@@ -2098,8 +2096,8 @@ iree_status_t iree_hal_amdgpu_pm4_command_buffer_create(
   memset(command_buffer, 0, sizeof(*command_buffer));
   iree_slim_mutex_initialize(&command_buffer->publication_mutex);
   iree_hal_command_buffer_initialize(
-      device_allocator, queue_family, mode, command_categories,
-      binding_capacity, (uint8_t*)command_buffer + validation_state_offset,
+      queue_family, mode, command_categories, binding_capacity,
+      (uint8_t*)command_buffer + validation_state_offset,
       &iree_hal_amdgpu_pm4_command_buffer_vtable, &command_buffer->base);
   command_buffer->host_allocator = host_allocator;
   command_buffer->resource_set_block_pool = resource_set_block_pool;
@@ -2489,41 +2487,31 @@ static iree_status_t iree_hal_amdgpu_pm4_command_buffer_end_debug_group(
   return iree_ok_status();
 }
 
-static iree_status_t iree_hal_amdgpu_pm4_command_buffer_execution_barrier(
+static iree_status_t iree_hal_amdgpu_pm4_command_buffer_barrier(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_execution_stage_t source_stage_mask,
-    iree_hal_execution_stage_t target_stage_mask,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers) {
+    const iree_hal_barrier_t* barrier) {
   iree_hal_amdgpu_pm4_command_buffer_t* command_buffer =
       iree_hal_amdgpu_pm4_command_buffer_cast(base_command_buffer);
-  const iree_hal_execution_barrier_flags_t supported_flags =
-      IREE_HAL_EXECUTION_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE |
-      IREE_HAL_EXECUTION_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE;
-  if (IREE_UNLIKELY(flags & ~supported_flags)) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "unsupported AMDGPU PM4 execution barrier flags: 0x%016" PRIx64,
-        flags & ~supported_flags);
-  }
+
   const iree_hal_amdgpu_barrier_scopes_t scopes =
       iree_hal_amdgpu_barrier_resolve_scopes(
-          source_stage_mask, target_stage_mask, flags, memory_barrier_count,
-          memory_barriers, buffer_barrier_count, buffer_barriers);
+          barrier->source_stage_mask, barrier->target_stage_mask,
+          barrier->flags, barrier->memory_barrier_count,
+          barrier->memory_barriers, barrier->buffer_barrier_count,
+          barrier->buffer_barriers);
   iree_hal_amdgpu_pm4_barrier_state_accumulate(
       &command_buffer->recording.barrier_state, scopes.acquire, scopes.release);
-  for (iree_host_size_t i = 0; i < memory_barrier_count; ++i) {
+  for (iree_host_size_t i = 0; i < barrier->memory_barrier_count; ++i) {
     iree_hal_amdgpu_pm4_barrier_state_accumulate_access_scopes(
         &command_buffer->recording.barrier_state,
-        memory_barriers[i].source_scope, memory_barriers[i].target_scope);
+        barrier->memory_barriers[i].source_scope,
+        barrier->memory_barriers[i].target_scope);
   }
-  for (iree_host_size_t i = 0; i < buffer_barrier_count; ++i) {
+  for (iree_host_size_t i = 0; i < barrier->buffer_barrier_count; ++i) {
     iree_hal_amdgpu_pm4_barrier_state_accumulate_access_scopes(
         &command_buffer->recording.barrier_state,
-        buffer_barriers[i].source_scope, buffer_barriers[i].target_scope);
+        barrier->buffer_barriers[i].source_scope,
+        barrier->buffer_barriers[i].target_scope);
   }
   return iree_ok_status();
 }
@@ -3067,8 +3055,7 @@ static const iree_hal_command_buffer_vtable_t
         .begin_debug_group =
             iree_hal_amdgpu_pm4_command_buffer_begin_debug_group,
         .end_debug_group = iree_hal_amdgpu_pm4_command_buffer_end_debug_group,
-        .execution_barrier =
-            iree_hal_amdgpu_pm4_command_buffer_execution_barrier,
+        .barrier = iree_hal_amdgpu_pm4_command_buffer_barrier,
         .atomic_wait = iree_hal_amdgpu_pm4_command_buffer_atomic_wait,
         .atomic_store = iree_hal_amdgpu_pm4_command_buffer_atomic_store,
         .atomic_rmw = iree_hal_amdgpu_pm4_command_buffer_atomic_rmw,

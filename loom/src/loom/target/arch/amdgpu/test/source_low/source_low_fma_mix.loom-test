@@ -347,7 +347,7 @@ func.def target(@gfx11_target) @f16_fma_mixlo_insert_f32(%dest: vector<2xf16>, %
 // ----
 low.func.def target<amdgpu.gfx11.generic.core>(@gfx11_target) abi(hal_kernel) @f16_fma_mixlo_insert_f32(%dest: reg<amdgpu.vgpr>, %a: reg<amdgpu.vgpr>, %b: reg<amdgpu.vgpr>, %c: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
   %result = v_fma_mixlo_f16_f32_f32_f32 %dest, %a, %b, %c
-  %14 = v_bfe_u32_offset_0_width_16_low16 %result
+  %14 = v_bfe_u32_offset_0_width_inline_low16 %result
   return %14
 }
 
@@ -432,7 +432,7 @@ func.def target(@gfx9_4_target) @f16_mad_mixlo_insert_f32(%dest: vector<2xf16>, 
 // ----
 low.func.def target<amdgpu.gfx9_4.generic.core>(@gfx9_4_target) abi(hal_kernel) @f16_mad_mixlo_insert_f32(%dest: reg<amdgpu.vgpr>, %a: reg<amdgpu.vgpr>, %b: reg<amdgpu.vgpr>, %c: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
   %result = v_mad_mixlo_f16_f32_f32_f32 %dest, %a, %b, %c
-  %14 = v_bfe_u32_offset_0_width_16_low16 %result
+  %14 = v_bfe_u32_offset_0_width_inline_low16 %result
   return %14
 }
 
@@ -499,19 +499,17 @@ func.def target(@gfx11_target) @f16_fma_mix_dynamic_insert_rejected(%dest: vecto
 low.func.def target<amdgpu.gfx11.generic.core>(@gfx11_target) abi(hal_kernel) @f16_fma_mix_dynamic_insert_rejected(%dest: reg<amdgpu.vgpr>, %a: reg<amdgpu.vgpr>, %b: reg<amdgpu.vgpr>, %c: reg<amdgpu.vgpr>, %lane: reg<amdgpu.sgpr>) -> (reg<amdgpu.vgpr>) asm {
   %fma = v_fma_f32 %a, %b, %c
   %half = v_cvt_f16_f32 %fma
-  %17 = v_bfe_u32_offset_0_width_16_low16 %half
+  %17 = v_bfe_u32_offset_0_width_inline_low16 %half
   %18 = v_mov_b32_copy %lane
   %19 = v_and_b32_lit %dest, 4294901760
   %20 = v_or_b32 %19, %17
-  %21 = v_mov_b32 0
-  %22 = v_cmp_eq_i32 %18, %21
-  %23 = v_cndmask_b32 %dest, %20, %22
-  %24 = v_and_b32_lit %dest, 65535
-  %25 = v_lshlrev_b32_src0_inline %17, 16
-  %26 = v_or_b32 %24, %25
-  %27 = v_mov_b32 1
-  %28 = v_cmp_eq_i32 %18, %27
-  %result = v_cndmask_b32 %23, %26, %28
+  %21 = v_cmp_eq_i32_src1_inline %18 {rhs = 0}
+  %22 = v_cndmask_b32 %dest, %20, %21
+  %23 = v_and_b32_lit %dest, 65535
+  %24 = v_lshlrev_b32_src0_inline %17, 16
+  %25 = v_or_b32 %23, %24
+  %26 = v_cmp_eq_i32_src1_inline %18 {rhs = 1}
+  %result = v_cndmask_b32 %22, %25, %26
   return %result
 }
 
@@ -531,7 +529,7 @@ func.def target(@gfx11_target) @f16_fma_mix_mulf_requires_relaxed_zero_add_rejec
 low.func.def target<amdgpu.gfx11.generic.core>(@gfx11_target) abi(hal_kernel) @f16_fma_mix_mulf_requires_relaxed_zero_add_rejected(%dest: reg<amdgpu.vgpr>, %a: reg<amdgpu.vgpr>, %b: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>) asm {
   %product = v_mul_f32 %a, %b
   %half = v_cvt_f16_f32 %product
-  %13 = v_bfe_u32_offset_0_width_16_low16 %half
+  %13 = v_bfe_u32_offset_0_width_inline_low16 %half
   %14 = v_and_b32_lit %dest, 4294901760
   %result = v_or_b32 %14, %13
   return %result
@@ -633,11 +631,11 @@ func.def target(@gfx11_target) @vector_f32_mulf_fragment_splat_extf(%q: vector<2
 
 // ----
 low.func.def target<amdgpu.gfx11.generic.core>(@gfx11_target) abi(hal_kernel) @vector_f32_mulf_fragment_splat_extf(%q: reg<amdgpu.vgpr x2>, %scale_half: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr x2>) asm {
-  %14 = slice %q[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %12 = slice %q[0] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
+  %13 = v_fma_mix_f32_f16lo_f32_f32_src2_lit %scale_half, %12, 0
+  %14 = slice %q[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
   %15 = v_fma_mix_f32_f16lo_f32_f32_src2_lit %scale_half, %14, 0
-  %16 = slice %q[1] : reg<amdgpu.vgpr x2> -> reg<amdgpu.vgpr>
-  %17 = v_fma_mix_f32_f16lo_f32_f32_src2_lit %scale_half, %16, 0
-  %result = concat(%15, %17) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
+  %result = concat(%13, %15) : (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) -> reg<amdgpu.vgpr x2>
   return %result
 }
 

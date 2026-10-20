@@ -24,110 +24,109 @@ enum {
   LOOM_OP_SCALAR_MULI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 2),
   LOOM_OP_SCALAR_DIVSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 3),
   LOOM_OP_SCALAR_DIVUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 4),
-  LOOM_OP_SCALAR_REMSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 5),
-  LOOM_OP_SCALAR_REMUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 6),
-  LOOM_OP_SCALAR_CEILDIVSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 7),
-  LOOM_OP_SCALAR_CEILDIVUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 8),
-  LOOM_OP_SCALAR_FLOORDIVSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 9),
-  LOOM_OP_SCALAR_NEGI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 10),
-  LOOM_OP_SCALAR_ABSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 11),
-  LOOM_OP_SCALAR_MINSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 12),
-  LOOM_OP_SCALAR_MAXSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 13),
-  LOOM_OP_SCALAR_MINUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 14),
-  LOOM_OP_SCALAR_MAXUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 15),
-  LOOM_OP_SCALAR_FMAI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 16),
-  LOOM_OP_SCALAR_ADDF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 17),
-  LOOM_OP_SCALAR_SUBF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 18),
-  LOOM_OP_SCALAR_MULF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 19),
-  LOOM_OP_SCALAR_DIVF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 20),
-  LOOM_OP_SCALAR_REMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 21),
-  LOOM_OP_SCALAR_NEGF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 22),
-  LOOM_OP_SCALAR_ABSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 23),
-  LOOM_OP_SCALAR_MINIMUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 24),
-  LOOM_OP_SCALAR_MAXIMUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 25),
-  LOOM_OP_SCALAR_MINNUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 26),
-  LOOM_OP_SCALAR_MAXNUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 27),
-  LOOM_OP_SCALAR_CLAMPF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 28),
-  LOOM_OP_SCALAR_COPYSIGNF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 29),
-  LOOM_OP_SCALAR_EXPF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 30),
-  LOOM_OP_SCALAR_EXP2F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 31),
-  LOOM_OP_SCALAR_EXPM1F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 32),
-  LOOM_OP_SCALAR_LOGF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 33),
-  LOOM_OP_SCALAR_LOG2F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 34),
-  LOOM_OP_SCALAR_LOG10F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 35),
-  LOOM_OP_SCALAR_LOG1PF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 36),
-  LOOM_OP_SCALAR_POWF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 37),
-  LOOM_OP_SCALAR_SQRTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 38),
-  LOOM_OP_SCALAR_RSQRTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 39),
-  LOOM_OP_SCALAR_CBRTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 40),
-  LOOM_OP_SCALAR_SINF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 41),
-  LOOM_OP_SCALAR_COSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 42),
-  LOOM_OP_SCALAR_SINTURNSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 43),
-  LOOM_OP_SCALAR_COSTURNSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 44),
-  LOOM_OP_SCALAR_TANF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 45),
-  LOOM_OP_SCALAR_ASINF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 46),
-  LOOM_OP_SCALAR_ACOSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 47),
-  LOOM_OP_SCALAR_ATANF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 48),
-  LOOM_OP_SCALAR_ATAN2F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 49),
-  LOOM_OP_SCALAR_SINHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 50),
-  LOOM_OP_SCALAR_COSHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 51),
-  LOOM_OP_SCALAR_TANHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 52),
-  LOOM_OP_SCALAR_ASINHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 53),
-  LOOM_OP_SCALAR_ACOSHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 54),
-  LOOM_OP_SCALAR_ATANHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 55),
-  LOOM_OP_SCALAR_ERFF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 56),
-  LOOM_OP_SCALAR_ERFCF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 57),
-  LOOM_OP_SCALAR_LOGISTICF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 58),
-  LOOM_OP_SCALAR_SILUF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 59),
-  LOOM_OP_SCALAR_SOFTPLUSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 60),
-  LOOM_OP_SCALAR_GELUF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 61),
-  LOOM_OP_SCALAR_FMAF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 62),
-  LOOM_OP_SCALAR_CEILF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 63),
-  LOOM_OP_SCALAR_FLOORF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 64),
-  LOOM_OP_SCALAR_ROUNDF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 65),
-  LOOM_OP_SCALAR_ROUNDEVENF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 66),
-  LOOM_OP_SCALAR_TRUNCF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 67),
-  LOOM_OP_SCALAR_CMPI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 68),
-  LOOM_OP_SCALAR_CMPF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 69),
-  LOOM_OP_SCALAR_ISNANF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 70),
-  LOOM_OP_SCALAR_ISINFF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 71),
-  LOOM_OP_SCALAR_ISFINITEF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 72),
-  LOOM_OP_SCALAR_SIGNF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 73),
-  LOOM_OP_SCALAR_SIGNI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 74),
-  LOOM_OP_SCALAR_SITOFP = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 75),
-  LOOM_OP_SCALAR_UITOFP = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 76),
-  LOOM_OP_SCALAR_FPTOSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 77),
-  LOOM_OP_SCALAR_FPTOUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 78),
-  LOOM_OP_SCALAR_EXTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 79),
-  LOOM_OP_SCALAR_FPTRUNC = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 80),
-  LOOM_OP_SCALAR_EXTSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 81),
-  LOOM_OP_SCALAR_EXTUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 82),
-  LOOM_OP_SCALAR_TRUNCI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 83),
-  LOOM_OP_SCALAR_BITCAST = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 84),
-  LOOM_OP_SCALAR_CONSTANT = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 85),
-  LOOM_OP_SCALAR_POISON = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 86),
-  LOOM_OP_SCALAR_ANDI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 87),
-  LOOM_OP_SCALAR_ORI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 88),
-  LOOM_OP_SCALAR_XORI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 89),
-  LOOM_OP_SCALAR_SHLI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 90),
-  LOOM_OP_SCALAR_SHRSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 91),
-  LOOM_OP_SCALAR_SHRUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 92),
-  LOOM_OP_SCALAR_ROTLI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 93),
-  LOOM_OP_SCALAR_ROTRI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 94),
-  LOOM_OP_SCALAR_CTLZI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 95),
-  LOOM_OP_SCALAR_CTTZI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 96),
-  LOOM_OP_SCALAR_CTPOPI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 97),
-  LOOM_OP_SCALAR_BITFIELD_EXTRACTU = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 98),
-  LOOM_OP_SCALAR_BITFIELD_EXTRACTS = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 99),
-  LOOM_OP_SCALAR_ASSUME = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 100),
-  LOOM_OP_SCALAR_COUNT_ = 101,
+  LOOM_OP_SCALAR_DIVREMSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 5),
+  LOOM_OP_SCALAR_DIVREMUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 6),
+  LOOM_OP_SCALAR_REMSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 7),
+  LOOM_OP_SCALAR_REMUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 8),
+  LOOM_OP_SCALAR_CEILDIVSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 9),
+  LOOM_OP_SCALAR_CEILDIVUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 10),
+  LOOM_OP_SCALAR_FLOORDIVSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 11),
+  LOOM_OP_SCALAR_NEGI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 12),
+  LOOM_OP_SCALAR_ABSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 13),
+  LOOM_OP_SCALAR_MINSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 14),
+  LOOM_OP_SCALAR_MAXSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 15),
+  LOOM_OP_SCALAR_MINUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 16),
+  LOOM_OP_SCALAR_MAXUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 17),
+  LOOM_OP_SCALAR_FMAI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 18),
+  LOOM_OP_SCALAR_ADDF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 19),
+  LOOM_OP_SCALAR_SUBF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 20),
+  LOOM_OP_SCALAR_MULF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 21),
+  LOOM_OP_SCALAR_DIVF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 22),
+  LOOM_OP_SCALAR_REMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 23),
+  LOOM_OP_SCALAR_NEGF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 24),
+  LOOM_OP_SCALAR_ABSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 25),
+  LOOM_OP_SCALAR_MINIMUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 26),
+  LOOM_OP_SCALAR_MAXIMUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 27),
+  LOOM_OP_SCALAR_MINNUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 28),
+  LOOM_OP_SCALAR_MAXNUMF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 29),
+  LOOM_OP_SCALAR_CLAMPF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 30),
+  LOOM_OP_SCALAR_COPYSIGNF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 31),
+  LOOM_OP_SCALAR_EXPF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 32),
+  LOOM_OP_SCALAR_EXP2F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 33),
+  LOOM_OP_SCALAR_EXPM1F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 34),
+  LOOM_OP_SCALAR_LOGF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 35),
+  LOOM_OP_SCALAR_LOG2F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 36),
+  LOOM_OP_SCALAR_LOG10F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 37),
+  LOOM_OP_SCALAR_LOG1PF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 38),
+  LOOM_OP_SCALAR_POWF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 39),
+  LOOM_OP_SCALAR_SQRTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 40),
+  LOOM_OP_SCALAR_RSQRTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 41),
+  LOOM_OP_SCALAR_CBRTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 42),
+  LOOM_OP_SCALAR_SINF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 43),
+  LOOM_OP_SCALAR_COSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 44),
+  LOOM_OP_SCALAR_SINTURNSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 45),
+  LOOM_OP_SCALAR_COSTURNSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 46),
+  LOOM_OP_SCALAR_TANF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 47),
+  LOOM_OP_SCALAR_ASINF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 48),
+  LOOM_OP_SCALAR_ACOSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 49),
+  LOOM_OP_SCALAR_ATANF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 50),
+  LOOM_OP_SCALAR_ATAN2F = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 51),
+  LOOM_OP_SCALAR_SINHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 52),
+  LOOM_OP_SCALAR_COSHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 53),
+  LOOM_OP_SCALAR_TANHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 54),
+  LOOM_OP_SCALAR_ASINHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 55),
+  LOOM_OP_SCALAR_ACOSHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 56),
+  LOOM_OP_SCALAR_ATANHF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 57),
+  LOOM_OP_SCALAR_ERFF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 58),
+  LOOM_OP_SCALAR_ERFCF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 59),
+  LOOM_OP_SCALAR_LOGISTICF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 60),
+  LOOM_OP_SCALAR_SILUF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 61),
+  LOOM_OP_SCALAR_SOFTPLUSF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 62),
+  LOOM_OP_SCALAR_GELUF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 63),
+  LOOM_OP_SCALAR_FMAF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 64),
+  LOOM_OP_SCALAR_CEILF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 65),
+  LOOM_OP_SCALAR_FLOORF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 66),
+  LOOM_OP_SCALAR_ROUNDF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 67),
+  LOOM_OP_SCALAR_ROUNDEVENF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 68),
+  LOOM_OP_SCALAR_TRUNCF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 69),
+  LOOM_OP_SCALAR_CMPI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 70),
+  LOOM_OP_SCALAR_CMPF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 71),
+  LOOM_OP_SCALAR_ISNANF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 72),
+  LOOM_OP_SCALAR_ISINFF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 73),
+  LOOM_OP_SCALAR_ISFINITEF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 74),
+  LOOM_OP_SCALAR_SIGNF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 75),
+  LOOM_OP_SCALAR_SIGNI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 76),
+  LOOM_OP_SCALAR_SITOFP = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 77),
+  LOOM_OP_SCALAR_UITOFP = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 78),
+  LOOM_OP_SCALAR_FPTOSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 79),
+  LOOM_OP_SCALAR_FPTOUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 80),
+  LOOM_OP_SCALAR_EXTF = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 81),
+  LOOM_OP_SCALAR_FPTRUNC = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 82),
+  LOOM_OP_SCALAR_EXTSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 83),
+  LOOM_OP_SCALAR_EXTUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 84),
+  LOOM_OP_SCALAR_TRUNCI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 85),
+  LOOM_OP_SCALAR_BITCAST = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 86),
+  LOOM_OP_SCALAR_CONSTANT = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 87),
+  LOOM_OP_SCALAR_POISON = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 88),
+  LOOM_OP_SCALAR_ANDI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 89),
+  LOOM_OP_SCALAR_ORI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 90),
+  LOOM_OP_SCALAR_XORI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 91),
+  LOOM_OP_SCALAR_SHLI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 92),
+  LOOM_OP_SCALAR_SHRSI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 93),
+  LOOM_OP_SCALAR_SHRUI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 94),
+  LOOM_OP_SCALAR_ROTLI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 95),
+  LOOM_OP_SCALAR_ROTRI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 96),
+  LOOM_OP_SCALAR_CTLZI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 97),
+  LOOM_OP_SCALAR_CTTZI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 98),
+  LOOM_OP_SCALAR_CTPOPI = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 99),
+  LOOM_OP_SCALAR_BITFIELD_EXTRACTU = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 100),
+  LOOM_OP_SCALAR_BITFIELD_EXTRACTS = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 101),
+  LOOM_OP_SCALAR_ASSUME = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 102),
+  LOOM_OP_SCALAR_CONSTEXPR = LOOM_OP_KIND(LOOM_DIALECT_SCALAR, 103),
+  LOOM_OP_SCALAR_COUNT_ = 104,
 };
 
-// Integer overflow behavior flags.
-#define LOOM_SCALAR_INTOVERFLOWFLAGS_NSW ((uint8_t)1)
-#define LOOM_SCALAR_INTOVERFLOWFLAGS_NUW ((uint8_t)2)
-
-// IEEE 754 fast-math relaxation flags for float operations.
+// IEEE 754 fast-math relaxation flags for float operations. nnan and ninf are independent author promises, not runtime checks or requests to clamp results. Together they guarantee finite floating-point results, but do not imply exact representability in a narrower type or absence of subnormals. Behavior outside an authored promise is not constrained by the operation's ordinary special-value contract. Flags do not refine unrelated uses of an operand.
 #define LOOM_SCALAR_FASTMATHFLAGS_REASSOC ((uint8_t)1)
 #define LOOM_SCALAR_FASTMATHFLAGS_NNAN ((uint8_t)2)
 #define LOOM_SCALAR_FASTMATHFLAGS_NINF ((uint8_t)4)
@@ -136,6 +135,21 @@ enum {
 #define LOOM_SCALAR_FASTMATHFLAGS_CONTRACT ((uint8_t)32)
 #define LOOM_SCALAR_FASTMATHFLAGS_AFN ((uint8_t)64)
 #define LOOM_SCALAR_FASTMATHFLAGS_FAST ((uint8_t)127)
+
+// Trigonometric math permissions and requirements. AFN permits native approximation with target-dependent zero signs unless preserve is requested. Other fast-math permissions retain their meanings; preserve does not require correctly rounded nonzero approximations.
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_REASSOC ((uint8_t)1)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_NNAN ((uint8_t)2)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_NINF ((uint8_t)4)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_NSZ ((uint8_t)8)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_ARCP ((uint8_t)16)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_CONTRACT ((uint8_t)32)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_AFN ((uint8_t)64)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_FAST ((uint8_t)127)
+#define LOOM_SCALAR_TRIGONOMETRYMATHFLAGS_PRESERVE ((uint8_t)128)
+
+// Independent DAZ and FTZ permissions for floating-point conversions.
+#define LOOM_SCALAR_FLOATCONVERSIONFLAGS_DAZ ((uint8_t)1)
+#define LOOM_SCALAR_FLOATCONVERSIONFLAGS_FTZ ((uint8_t)2)
 
 // Floating-point clamp NaN and comparison policy.
 typedef enum loom_scalar_clampf_mode_e {
@@ -200,7 +214,8 @@ iree_status_t loom_scalar_addi_build(
     loom_type_t result_type, loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_scalar_addi_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
-loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_scalar_addi_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
@@ -220,7 +235,8 @@ iree_status_t loom_scalar_subi_build(
     loom_type_t result_type, loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_scalar_subi_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
-loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_scalar_subi_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
@@ -240,14 +256,15 @@ iree_status_t loom_scalar_muli_build(
     loom_type_t result_type, loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_scalar_muli_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
-loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_scalar_muli_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_DIVSI: Signed integer division (rounds toward zero).
+// LOOM_OP_SCALAR_DIVSI: Signed integer division rounding toward zero. The divisor must be nonzero and the quotient must be representable in the result type.
 // %result = scalar.divsi %lhs, %rhs : i32
 LOOM_DEFINE_ISA(loom_scalar_divsi_isa, LOOM_OP_SCALAR_DIVSI)
 LOOM_DEFINE_OPERAND(loom_scalar_divsi_lhs, 0)
@@ -264,7 +281,7 @@ iree_status_t loom_scalar_divsi_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_DIVUI: Unsigned integer division.
+// LOOM_OP_SCALAR_DIVUI: Unsigned integer division with a nonzero divisor.
 // %result = scalar.divui %lhs, %rhs : i32
 LOOM_DEFINE_ISA(loom_scalar_divui_isa, LOOM_OP_SCALAR_DIVUI)
 LOOM_DEFINE_OPERAND(loom_scalar_divui_lhs, 0)
@@ -281,7 +298,49 @@ iree_status_t loom_scalar_divui_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_REMSI: Signed integer remainder.
+// LOOM_OP_SCALAR_DIVREMSI: Signed integer quotient and remainder computed from one division. The quotient rounds toward zero, the remainder has the sign of the dividend, the divisor must be nonzero, and the quotient must be representable in the result type.
+// %q, %r = scalar.divremsi %lhs, %rhs : i32
+LOOM_DEFINE_ISA(loom_scalar_divremsi_isa, LOOM_OP_SCALAR_DIVREMSI)
+LOOM_DEFINE_OPERAND(loom_scalar_divremsi_lhs, 0)
+LOOM_DEFINE_OPERAND(loom_scalar_divremsi_rhs, 1)
+LOOM_DEFINE_RESULT(loom_scalar_divremsi_quotient, 0)
+LOOM_DEFINE_RESULT(loom_scalar_divremsi_remainder, 1)
+iree_status_t loom_scalar_divremsi_build(
+    loom_builder_t* builder,
+    loom_value_id_t lhs,
+    loom_value_id_t rhs,
+    const loom_type_t* result_types,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_scalar_divremsi_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
+iree_status_t loom_scalar_divremsi_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
+
+// LOOM_OP_SCALAR_DIVREMUI: Unsigned integer quotient and remainder computed from one division with a nonzero divisor.
+// %q, %r = scalar.divremui %lhs, %rhs : i32
+LOOM_DEFINE_ISA(loom_scalar_divremui_isa, LOOM_OP_SCALAR_DIVREMUI)
+LOOM_DEFINE_OPERAND(loom_scalar_divremui_lhs, 0)
+LOOM_DEFINE_OPERAND(loom_scalar_divremui_rhs, 1)
+LOOM_DEFINE_RESULT(loom_scalar_divremui_quotient, 0)
+LOOM_DEFINE_RESULT(loom_scalar_divremui_remainder, 1)
+iree_status_t loom_scalar_divremui_build(
+    loom_builder_t* builder,
+    loom_value_id_t lhs,
+    loom_value_id_t rhs,
+    const loom_type_t* result_types,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_scalar_divremui_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
+iree_status_t loom_scalar_divremui_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
+
+// LOOM_OP_SCALAR_REMSI: Signed integer remainder with the sign of the dividend and a nonzero divisor. The minimum signed value modulo minus one is zero.
 // %result = scalar.remsi %lhs, %rhs : i32
 LOOM_DEFINE_ISA(loom_scalar_remsi_isa, LOOM_OP_SCALAR_REMSI)
 LOOM_DEFINE_OPERAND(loom_scalar_remsi_lhs, 0)
@@ -298,7 +357,7 @@ iree_status_t loom_scalar_remsi_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_REMUI: Unsigned integer remainder.
+// LOOM_OP_SCALAR_REMUI: Unsigned integer remainder with a nonzero divisor.
 // %result = scalar.remui %lhs, %rhs : i32
 LOOM_DEFINE_ISA(loom_scalar_remui_isa, LOOM_OP_SCALAR_REMUI)
 LOOM_DEFINE_OPERAND(loom_scalar_remui_lhs, 0)
@@ -469,7 +528,8 @@ iree_status_t loom_scalar_fmai_build(
     loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_scalar_fmai_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
-loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_scalar_integer_arithmetic_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_scalar_fmai_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
@@ -900,12 +960,12 @@ iree_status_t loom_scalar_cbrtf_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_SINF: Sine.
+// LOOM_OP_SCALAR_SINF: Sine in radians. AFN permits native approximation with target-dependent zero signs; preserve requires source-defined zero signs.
 // %result = scalar.sinf %input : f32
 LOOM_DEFINE_ISA(loom_scalar_sinf_isa, LOOM_OP_SCALAR_SINF)
 LOOM_DEFINE_OPERAND(loom_scalar_sinf_input, 0)
 LOOM_DEFINE_RESULT(loom_scalar_sinf_result, 0)
-LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_sinf_fastmath)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_sinf_math)
 iree_status_t loom_scalar_sinf_build(
     loom_builder_t* builder, uint8_t instance_flags,
     loom_value_id_t input, loom_type_t result_type,
@@ -916,12 +976,12 @@ iree_status_t loom_scalar_sinf_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_COSF: Cosine.
+// LOOM_OP_SCALAR_COSF: Cosine in radians. AFN permits native approximation with target-dependent zero signs; preserve requires source-defined zero signs.
 // %result = scalar.cosf %input : f32
 LOOM_DEFINE_ISA(loom_scalar_cosf_isa, LOOM_OP_SCALAR_COSF)
 LOOM_DEFINE_OPERAND(loom_scalar_cosf_input, 0)
 LOOM_DEFINE_RESULT(loom_scalar_cosf_result, 0)
-LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_cosf_fastmath)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_cosf_math)
 iree_status_t loom_scalar_cosf_build(
     loom_builder_t* builder, uint8_t instance_flags,
     loom_value_id_t input, loom_type_t result_type,
@@ -932,12 +992,12 @@ iree_status_t loom_scalar_cosf_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_SINTURNSF: Sine over turns: sin(2*pi*x), preserving finite-input periodicity and exact quarter-turn cardinals. Non-finite inputs produce NaN.
+// LOOM_OP_SCALAR_SINTURNSF: Sine over turns: sin(2*pi*x), preserving finite-input periodicity and exact quarter-turn cardinal values. Non-finite inputs produce NaN. AFN permits target-dependent zero signs; preserve requires the input sign at zero and integer or half-integer turns.
 // %result = scalar.sinturnsf %input : f32
 LOOM_DEFINE_ISA(loom_scalar_sinturnsf_isa, LOOM_OP_SCALAR_SINTURNSF)
 LOOM_DEFINE_OPERAND(loom_scalar_sinturnsf_input, 0)
 LOOM_DEFINE_RESULT(loom_scalar_sinturnsf_result, 0)
-LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_sinturnsf_fastmath)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_sinturnsf_math)
 iree_status_t loom_scalar_sinturnsf_build(
     loom_builder_t* builder, uint8_t instance_flags,
     loom_value_id_t input, loom_type_t result_type,
@@ -948,12 +1008,12 @@ iree_status_t loom_scalar_sinturnsf_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_COSTURNSF: Cosine over turns: cos(2*pi*x), preserving finite-input periodicity and exact quarter-turn cardinals. Non-finite inputs produce NaN.
+// LOOM_OP_SCALAR_COSTURNSF: Cosine over turns: cos(2*pi*x), preserving finite-input periodicity and exact quarter-turn cardinal values. Non-finite inputs produce NaN. AFN permits target-dependent zero signs; preserve requires positive zero at odd quarter-turns.
 // %result = scalar.costurnsf %input : f32
 LOOM_DEFINE_ISA(loom_scalar_costurnsf_isa, LOOM_OP_SCALAR_COSTURNSF)
 LOOM_DEFINE_OPERAND(loom_scalar_costurnsf_input, 0)
 LOOM_DEFINE_RESULT(loom_scalar_costurnsf_result, 0)
-LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_costurnsf_fastmath)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_costurnsf_math)
 iree_status_t loom_scalar_costurnsf_build(
     loom_builder_t* builder, uint8_t instance_flags,
     loom_value_id_t input, loom_type_t result_type,
@@ -1253,7 +1313,7 @@ iree_status_t loom_scalar_geluf_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_SCALAR_FMAF: Fused multiply-add: a*b + c with single rounding.
+// LOOM_OP_SCALAR_FMAF: Fused multiply-add: a*b + c with single rounding. AFN permits a target-native fused form with weaker subnormal handling.
 // %result = scalar.fmaf %a, %b, %c : f32
 LOOM_DEFINE_ISA(loom_scalar_fmaf_isa, LOOM_OP_SCALAR_FMAF)
 LOOM_DEFINE_OPERAND(loom_scalar_fmaf_a, 0)
@@ -1544,30 +1604,34 @@ iree_status_t loom_scalar_fptoui_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_EXTF: Float precision extension to a strictly wider format: e.g. f16 to f32.
+// LOOM_OP_SCALAR_EXTF: Float precision extension to a strictly wider format. Without flags, the conversion preserves subnormal inputs and results. `daz` permits replacing a subnormal input with its signed zero before conversion; `ftz` permits replacing a subnormal result with its signed zero.
 // %result = scalar.extf %input : f16 to f32
 LOOM_DEFINE_ISA(loom_scalar_extf_isa, LOOM_OP_SCALAR_EXTF)
 LOOM_DEFINE_OPERAND(loom_scalar_extf_input, 0)
 LOOM_DEFINE_RESULT(loom_scalar_extf_result, 0)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_extf_subnormal)
 iree_status_t loom_scalar_extf_build(
-    loom_builder_t* builder, loom_value_id_t input,
-    loom_type_t input_type, loom_type_t result_type,
-    loom_location_id_t location, loom_op_t** out_op);
+    loom_builder_t* builder, uint8_t instance_flags,
+    loom_value_id_t input, loom_type_t input_type,
+    loom_type_t result_type, loom_location_id_t location,
+    loom_op_t** out_op);
 iree_status_t loom_scalar_extf_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_FPTRUNC: Float precision truncation using round-to-nearest, ties-to-even. The result format must be strictly narrower than the input format. Special values follow the destination format: f8E4M3 saturates finite overflow and infinities to its signed maximum finite value while preserving NaNs; IEEE formats preserve infinities and NaNs.
+// LOOM_OP_SCALAR_FPTRUNC: Float precision truncation using round-to-nearest, ties-to-even. The result format must be strictly narrower than the input format. Special values follow the destination format: f8E4M3 saturates finite overflow and infinities to its signed maximum finite value while preserving NaNs; IEEE formats preserve infinities and NaNs. Without flags, the conversion preserves subnormal inputs and results. `daz` permits replacing a subnormal input with its signed zero before conversion; `ftz` permits replacing a subnormal result with its signed zero.
 // %result = scalar.fptrunc %input : f32 to f16
 LOOM_DEFINE_ISA(loom_scalar_fptrunc_isa, LOOM_OP_SCALAR_FPTRUNC)
 LOOM_DEFINE_OPERAND(loom_scalar_fptrunc_input, 0)
 LOOM_DEFINE_RESULT(loom_scalar_fptrunc_result, 0)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_scalar_fptrunc_subnormal)
 iree_status_t loom_scalar_fptrunc_build(
-    loom_builder_t* builder, loom_value_id_t input,
-    loom_type_t input_type, loom_type_t result_type,
-    loom_location_id_t location, loom_op_t** out_op);
+    loom_builder_t* builder, uint8_t instance_flags,
+    loom_value_id_t input, loom_type_t input_type,
+    loom_type_t result_type, loom_location_id_t location,
+    loom_op_t** out_op);
 iree_status_t loom_scalar_fptrunc_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
 iree_status_t loom_scalar_fptrunc_facts(
     loom_fact_context_t* context,
@@ -1768,7 +1832,7 @@ iree_status_t loom_scalar_shrui_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_ROTLI: Left rotate.
+// LOOM_OP_SCALAR_ROTLI: Rotate bits left by the count modulo the integer width. One-bit rotation is identity.
 // %result = scalar.rotli %lhs, %rhs : i32
 LOOM_DEFINE_ISA(loom_scalar_rotli_isa, LOOM_OP_SCALAR_ROTLI)
 LOOM_DEFINE_OPERAND(loom_scalar_rotli_lhs, 0)
@@ -1785,7 +1849,7 @@ iree_status_t loom_scalar_rotli_facts(
     const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts);
 
-// LOOM_OP_SCALAR_ROTRI: Right rotate.
+// LOOM_OP_SCALAR_ROTRI: Rotate bits right by the count modulo the integer width. One-bit rotation is identity.
 // %result = scalar.rotri %lhs, %rhs : i32
 LOOM_DEFINE_ISA(loom_scalar_rotri_isa, LOOM_OP_SCALAR_ROTRI)
 LOOM_DEFINE_OPERAND(loom_scalar_rotri_lhs, 0)
@@ -1890,7 +1954,7 @@ iree_status_t loom_scalar_bitfield_extracts_facts(
     loom_value_facts_t* result_facts);
 
 // LOOM_OP_SCALAR_ASSUME: Identity with predicate constraints on scalar payload results. Use index.assume for index or offset values.
-// %n2 = scalar.assume %n [mul(%n, 16)] : i64
+// %n2 = scalar.assume %n [multiple_of(%n, 16)] : i64
 LOOM_DEFINE_ISA(loom_scalar_assume_isa, LOOM_OP_SCALAR_ASSUME)
 LOOM_DEFINE_VARIADIC_OPERANDS(loom_scalar_assume_values, 0)
 LOOM_DEFINE_VARIADIC_RESULTS(loom_scalar_assume_results, 0)
@@ -1906,6 +1970,21 @@ iree_status_t loom_scalar_assume_build(
     loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_scalar_assume_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
+
+// LOOM_OP_SCALAR_CONSTEXPR: Require a scalar payload value to become exact during specialization. Configured canonicalization replaces the result with an ordinary constant once exact facts are available; target lowering diagnoses an unresolved requirement.
+// %tile_size = scalar.constexpr %configured : i32
+LOOM_DEFINE_ISA(loom_scalar_constexpr_isa, LOOM_OP_SCALAR_CONSTEXPR)
+LOOM_DEFINE_OPERAND(loom_scalar_constexpr_input, 0)
+LOOM_DEFINE_RESULT(loom_scalar_constexpr_result, 0)
+iree_status_t loom_scalar_constexpr_build(
+    loom_builder_t* builder, loom_value_id_t input,
+    loom_type_t result_type, loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_scalar_constexpr_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
     const loom_value_facts_t* operand_facts,

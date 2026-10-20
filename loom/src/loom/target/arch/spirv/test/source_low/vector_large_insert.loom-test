@@ -1,40 +1,109 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/vector_large_insert.loom-test
-// RUN: emit source-low target=spirv:vulkan1.3+bda output=low control-flow=structured-low
+// RUN: pass target-legalize{mode=eager},canonicalize,dce
 
-func.def @i64x16_insert_static(%values: vector<16xi64>, %value: i64) -> (vector<16xi64>) {
-  // ERROR@+1: TARGET/002 {op_name="vector.insert", field_name="dest"}
-  %result = vector.insert %value into %values[1] : i64, vector<16xi64>
-  func.return %result : vector<16xi64>
+spirv.target<vulkan1_3> @target
+
+func.def target(@target) @insert_tail(%input: buffer, %output: buffer, %value: i32) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<5xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<5xi32>
+  %values = vector.load %source[0] : view<5xi32> -> vector<5xi32>
+  %result = vector.insert %value into %values[4] : i32, vector<5xi32>
+  vector.store %result, %destination[0] : vector<5xi32>, view<5xi32>
+  func.return
+}
+
+// ----
+spirv.target<vulkan1_3> @target
+
+func.def target(@target) @insert_tail(%input: buffer, %output: buffer, %value: i32) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<5xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<5xi32>
+  %12 = view.load %source[0] : view<5xi32> -> i32
+  %13 = view.load %source[1] : view<5xi32> -> i32
+  %14 = view.load %source[2] : view<5xi32> -> i32
+  %15 = view.load %source[3] : view<5xi32> -> i32
+  %16 = view.load %source[4] : view<5xi32> -> i32
+  %values = vector.from_elements %12, %13, %14, %15, %16 : vector<5xi32>
+  %8 = vector.slice %values[0] : vector<5xi32> -> vector<4xi32>
+  %9 = vector.slice %values[4] : vector<5xi32> -> vector<1xi32>
+  %10 = vector.insert %value into %9[0] : i32, vector<1xi32>
+  %result = vector.concat<0> %8, %10 : vector<4xi32>, vector<1xi32> -> vector<5xi32>
+  vector.store %result, %destination[0] : vector<5xi32>, view<5xi32>
+  func.return
 }
 
 // ====
 
-func.def @i32x32_insert_static(%values: vector<32xi32>, %value: i32) -> (vector<32xi32>) {
-  // ERROR@+1: TARGET/002 {op_name="vector.insert", field_name="dest"}
-  %result = vector.insert %value into %values[17] : i32, vector<32xi32>
-  func.return %result : vector<32xi32>
+spirv.target<vulkan1_3> @target
+
+func.def target(@target) @insert_dynamic(%input: buffer, %output: buffer, %value: i64, %position: index) where [range(%position, 0, 4)] {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<5xi64>
+  %destination = buffer.view %output[%base] : buffer -> view<5xi64>
+  %values = vector.load %source[0] : view<5xi64> -> vector<5xi64>
+  %result = vector.insert %value into %values[%position] : i64, vector<5xi64>
+  vector.store %result, %destination[0] : vector<5xi64>, view<5xi64>
+  func.return
+}
+
+// ----
+spirv.target<vulkan1_3> @target
+
+func.def target(@target) @insert_dynamic(%input: buffer, %output: buffer, %value: i64, %position: index) where [range(%position, 0, 4)] {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<5xi64>
+  %destination = buffer.view %output[%base] : buffer -> view<5xi64>
+  %26 = view.load %source[0] : view<5xi64> -> i64
+  %27 = view.load %source[1] : view<5xi64> -> i64
+  %28 = view.load %source[2] : view<5xi64> -> i64
+  %29 = view.load %source[3] : view<5xi64> -> i64
+  %30 = view.load %source[4] : view<5xi64> -> i64
+  %values = vector.from_elements %26, %27, %28, %29, %30 : vector<5xi64>
+  %9 = index.constant 0 : index
+  %10 = index.constant 4 : index
+  %11 = index.cmp ult, %position, %10 : index
+  %14 = index.cmp uge, %position, %10 : index
+  %16 = vector.slice %values[0] : vector<5xi64> -> vector<4xi64>
+  %17 = scf.select %11, %position, %9 : index
+  %18 = vector.insert %value into %16[%17] : i64, vector<4xi64>
+  %19 = scf.select %11, %18, %16 : vector<4xi64>
+  %20 = vector.slice %values[4] : vector<5xi64> -> vector<1xi64>
+  %34 = vector.insert %value into %20[0] : i64, vector<1xi64>
+  %24 = scf.select %14, %34, %20 : vector<1xi64>
+  %result = vector.concat<0> %19, %24 : vector<4xi64>, vector<1xi64> -> vector<5xi64>
+  vector.store %result, %destination[0] : vector<5xi64>, view<5xi64>
+  func.return
 }
 
 // ====
+// RUN: pass target-legalize{mode=final},canonicalize,dce
 
-func.def @i64x16_insert_dynamic(%values: vector<16xi64>, %value: i64, %position: index) -> (vector<16xi64>) {
-  // ERROR@+1: TARGET/002 {op_name="vector.insert", field_name="dest"}
-  %result = vector.insert %value into %values[%position] : i64, vector<16xi64>
-  func.return %result : vector<16xi64>
-}
+spirv.target<vulkan1_3> @target
 
-// ====
-
-func.def @i32x2x2_insert_static(%values: vector<2x2xi32>, %value: i32) -> (vector<2x2xi32>) {
-  // ERROR@+1: TARGET/002 {op_name="vector.insert", field_name="dest"}
+func.def target(@target) @insert_rank_two(%input: buffer, %output: buffer, %value: i32) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<2x2xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<2x2xi32>
+  %values = vector.load %source[0, 0] : view<2x2xi32> -> vector<2x2xi32>
   %result = vector.insert %value into %values[1, 1] : i32, vector<2x2xi32>
-  func.return %result : vector<2x2xi32>
+  vector.store %result, %destination[0, 0] : vector<2x2xi32>, view<2x2xi32>
+  func.return
 }
 
-// ====
+// ----
+spirv.target<vulkan1_3> @target
 
-func.def @i32x16_insert_static(%values: vector<16xi32>, %value: i32) -> (vector<16xi32>) {
-  // ERROR@+1: TARGET/002 {op_name="vector.insert", field_name="dest"}
-  %result = vector.insert %value into %values[15] : i32, vector<16xi32>
-  func.return %result : vector<16xi32>
+func.def target(@target) @insert_rank_two(%input: buffer, %output: buffer, %value: i32) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<2x2xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<2x2xi32>
+  %11 = view.load %source[0, 0] : view<2x2xi32> -> i32
+  %12 = view.load %source[0, 1] : view<2x2xi32> -> i32
+  %13 = view.load %source[1, 0] : view<2x2xi32> -> i32
+  view.store %11, %destination[0, 0] : i32, view<2x2xi32>
+  view.store %12, %destination[0, 1] : i32, view<2x2xi32>
+  view.store %13, %destination[1, 0] : i32, view<2x2xi32>
+  view.store %value, %destination[1, 1] : i32, view<2x2xi32>
+  func.return
 }

@@ -34,7 +34,7 @@ iree_status_t EncodeDescriptor(
   iree_host_size_t encoded_operand_count = 0;
   for (uint16_t i = 0; i < descriptor->operand_count; ++i) {
     const loom_low_operand_t* operand =
-        &descriptor_set->operands[descriptor->operand_start + i];
+        loom_low_descriptor_operand(descriptor_set, descriptor, i);
     encoded_operand_count += operand->encoding_field_id != 0;
   }
   if (register_names.size() != encoded_operand_count) {
@@ -49,7 +49,7 @@ iree_status_t EncodeDescriptor(
   iree_host_size_t encoded_operand_index = 0;
   for (uint16_t i = 0; i < descriptor->operand_count; ++i) {
     const loom_low_operand_t* operand =
-        &descriptor_set->operands[descriptor->operand_start + i];
+        loom_low_descriptor_operand(descriptor_set, descriptor, i);
     if (operand->encoding_field_id == 0) {
       continue;
     }
@@ -62,19 +62,18 @@ iree_status_t EncodeDescriptor(
       return iree_make_status(IREE_STATUS_NOT_FOUND,
                               "AIE2P test register was not found");
     }
-    assignments[i] = (loom_low_allocation_assignment_t){
-        /*.value_id=*/{},
-        /*.value_class=*/{},
-        /*.descriptor_reg_class_id=*/
-        descriptor_set->reg_class_alts[operand->reg_class_alt_start]
-            .reg_class_id,
-        /*.flags=*/{},
-        /*.start_point=*/{},
-        /*.end_point=*/{},
-        /*.unit_count=*/1,
-        /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
-        /*.location_base=*/register_id,
-        /*.location_count=*/1,
+    assignments[i] = loom_low_allocation_assignment_t{
+        .value_id = {},
+        .descriptor_reg_class_id =
+            descriptor_set->reg_class_alts[operand->reg_class_alt_start]
+                .reg_class_id,
+        .flags = {},
+        .start_point = {},
+        .end_point = {},
+        .unit_count = 1,
+        .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+        .location_base = register_id,
+        .location_count = 1,
     };
     assignment_ptrs[i] = &assignments[i];
   }
@@ -257,6 +256,27 @@ TEST(DescriptorEncodingTest, VolatileAliasesPreservePhysicalEncoding) {
         test_case.registers, test_case.immediates, &volatile_slot));
     EXPECT_EQ(volatile_slot.slot, ordinary_slot.slot);
     EXPECT_EQ(volatile_slot.value, ordinary_slot.value);
+  }
+}
+
+TEST(DescriptorEncodingTest, AccumulatorMovesMatchOracleInstructionEncodings) {
+  struct TestCase {
+    std::vector<std::string_view> registers;
+    std::array<uint8_t, 4> expected;
+  };
+  const TestCase test_cases[] = {
+      {{"bmll2", "bmhl0"}, {0xF8, 0x12, 0x02, 0x1A}},
+      {{"bmhl0", "bmll2"}, {0xF8, 0x12, 0x88, 0x18}},
+      {{"bmll2", "bmll0"}, {0xF8, 0x12, 0x00, 0x1A}},
+  };
+
+  for (const TestCase& test_case : test_cases) {
+    std::vector<uint8_t> program;
+    IREE_ASSERT_OK(EncodeSingleDescriptor("amd.xdna.aie2p.move.accumulator512",
+                                          test_case.registers, {}, "I32_MV",
+                                          &program));
+    EXPECT_EQ(program, std::vector<uint8_t>(test_case.expected.begin(),
+                                            test_case.expected.end()));
   }
 }
 
@@ -730,14 +750,17 @@ TEST(DescriptorEncodingTest, MoveLookupMatchesEveryPhysicalRegisterPair) {
          destination < descriptor_set->physical_register_count; ++destination) {
       uint32_t expected = LOOM_LOW_DESCRIPTOR_ORDINAL_NONE;
       for (uint32_t ordinal : move_descriptors) {
-        const auto* operands =
-            descriptor_set->operands +
-            descriptor_set->descriptors[ordinal].operand_start;
+        const auto* descriptor = &descriptor_set->descriptors[ordinal];
+        const auto* destination_operand =
+            loom_low_descriptor_operand(descriptor_set, descriptor, 0);
+        const auto* source_operand =
+            loom_low_descriptor_operand(descriptor_set, descriptor, 1);
         const uint16_t destination_class =
-            descriptor_set->reg_class_alts[operands[0].reg_class_alt_start]
+            descriptor_set
+                ->reg_class_alts[destination_operand->reg_class_alt_start]
                 .reg_class_id;
         const uint16_t source_class =
-            descriptor_set->reg_class_alts[operands[1].reg_class_alt_start]
+            descriptor_set->reg_class_alts[source_operand->reg_class_alt_start]
                 .reg_class_id;
         if (loom_low_descriptor_set_find_physical_register_candidate(
                 descriptor_set, source_class, source, nullptr) &&
@@ -767,8 +790,8 @@ TEST(DescriptorEncodingTest, ScalarPairMovesPreserveBothWords) {
   for (unsigned source = 0; source < 16; ++source) {
     for (unsigned destination = 0; destination < 16; ++destination) {
       const loom_aie2p_register_move_t move = {
-          /*.source=*/register_id("l" + std::to_string(source)),
-          /*.destination=*/register_id("l" + std::to_string(destination)),
+          .source = register_id("l" + std::to_string(source)),
+          .destination = register_id("l" + std::to_string(destination)),
       };
       loom_aie2p_register_move_t parts[2];
       ASSERT_EQ(loom_aie2p_descriptor_move_parts(move, parts), 2);
@@ -790,13 +813,21 @@ TEST(DescriptorEncodingTest, ScalarPairMovesPreserveBothWords) {
   }
 }
 
-TEST(DescriptorEncodingTest, PhysicalRegisterRowsAlignWithMachineTable) {
+TEST(DescriptorEncodingTest, MachinePhysicalRegisterRowsRemainStablePrefix) {
   const loom_low_descriptor_set_t* descriptor_set =
       loom_aie2p_core_descriptor_set();
+  const uint32_t machine_register_count =
+      loom_aie2p_machine_physical_register_count();
+  const std::array<std::string_view, 4> allocation_only_registers = {
+      "predicate_pair0",
+      "predicate_pair1",
+      "predicate_pair2",
+      "predicate_pair3",
+  };
   ASSERT_EQ(descriptor_set->physical_register_count,
-            loom_aie2p_machine_physical_register_count());
-  for (uint32_t register_id = 0;
-       register_id < descriptor_set->physical_register_count; ++register_id) {
+            machine_register_count + allocation_only_registers.size());
+  for (uint32_t register_id = 0; register_id < machine_register_count;
+       ++register_id) {
     const loom_low_physical_register_t* descriptor_register =
         loom_low_descriptor_set_physical_register_at(descriptor_set,
                                                      register_id);
@@ -818,6 +849,17 @@ TEST(DescriptorEncodingTest, PhysicalRegisterRowsAlignWithMachineTable) {
                 loom_aie2p_machine_physical_register_atomic_unit(
                     (loom_aie2p_physical_register_id_t)register_id, i));
     }
+  }
+  for (iree_host_size_t i = 0; i < allocation_only_registers.size(); ++i) {
+    const loom_low_physical_register_t* descriptor_register =
+        loom_low_descriptor_set_physical_register_at(
+            descriptor_set, machine_register_count + i);
+    const iree_string_view_t name = loom_low_descriptor_set_string(
+        descriptor_set, descriptor_register->name_string_ref);
+    EXPECT_EQ(std::string_view(name.data, name.size),
+              allocation_only_registers[i]);
+    EXPECT_EQ(loom_aie2p_machine_find_physical_register(name),
+              LOOM_AIE2P_PHYSICAL_REGISTER_ID_INVALID);
   }
 }
 

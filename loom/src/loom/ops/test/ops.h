@@ -14,6 +14,7 @@
 
 #include "loom/ir/parameterized_attr.h"
 #include "loom/ops/op_defs.h"
+#include "loom/target/test/target_records.h"
 #include "loom/target/types.h"
 
 enum {
@@ -312,7 +313,11 @@ enum {
   LOOM_OP_TEST_MODULE_METADATA = LOOM_OP_KIND(LOOM_DIALECT_TEST, 116),
   LOOM_OP_TEST_MEMORY_FENCE = LOOM_OP_KIND(LOOM_DIALECT_TEST, 117),
   LOOM_OP_TEST_RESULT_PAIR = LOOM_OP_KIND(LOOM_DIALECT_TEST, 118),
-  LOOM_OP_TEST_COUNT_ = 119,
+  LOOM_OP_TEST_BLOCK_ARG_GROUPS = LOOM_OP_KIND(LOOM_DIALECT_TEST, 119),
+  LOOM_OP_TEST_SIGNATURE_SINK = LOOM_OP_KIND(LOOM_DIALECT_TEST, 120),
+  LOOM_OP_TEST_FACT_EXACT_FLOAT_TYPES = LOOM_OP_KIND(LOOM_DIALECT_TEST, 121),
+  LOOM_OP_TEST_STRING_ARRAY_ATTRS = LOOM_OP_KIND(LOOM_DIALECT_TEST, 122),
+  LOOM_OP_TEST_COUNT_ = 123,
 };
 
 // Synthetic flags for TemplateParamFlags parser/printer coverage.
@@ -354,13 +359,6 @@ typedef enum loom_test_record_kind_e {
   LOOM_TEST_RECORD_KIND_ARTIFACT = 2,
   LOOM_TEST_RECORD_KIND_COUNT_ = 3,
 } loom_test_record_kind_e;
-
-// Synthetic target kind for target-like interface tests.
-typedef enum loom_test_target_kind_e {
-  LOOM_TEST_TARGET_KIND_LOW_CORE = 1,
-  LOOM_TEST_TARGET_KIND_QUIRKY = 2,
-  LOOM_TEST_TARGET_KIND_COUNT_ = 3,
-} loom_test_target_kind_t;
 
 // Synthetic sparse enum for descriptor-backed aggregate coverage.
 typedef enum loom_test_enum_array_attrs_required_values_e {
@@ -946,7 +944,7 @@ iree_status_t loom_test_deflate_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_ASSUME: Test predicate-constrained identity (SSA assume).
-// %M2 = test.assume %M [mul(%M, 16)] : index
+// %M2 = test.assume %M [multiple_of(%M, 16)] : index
 LOOM_DEFINE_ISA(loom_test_assume_isa, LOOM_OP_TEST_ASSUME)
 LOOM_DEFINE_VARIADIC_OPERANDS(loom_test_assume_values, 0)
 LOOM_DEFINE_VARIADIC_RESULTS(loom_test_assume_results, 0)
@@ -986,7 +984,7 @@ iree_status_t loom_test_reduce_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_READ_RESOURCE: Test op that reads from a resource operand.
-// %tile = test.read_resource %pool : pool<[%BS]> -> tile<4xf32>
+// %tile = test.read_resource %pool : pool -> tile<4xf32>
 LOOM_DEFINE_ISA(loom_test_read_resource_isa, LOOM_OP_TEST_READ_RESOURCE)
 LOOM_DEFINE_OPERAND(loom_test_read_resource_source, 0)
 LOOM_DEFINE_RESULT(loom_test_read_resource_result, 0)
@@ -998,7 +996,7 @@ iree_status_t loom_test_read_resource_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_WRITE_RESOURCE: Test op that writes to a resource operand.
-// test.write_resource %pool, %tile : pool<[%BS]>, tile<4xf32>
+// test.write_resource %pool, %tile : pool, tile<4xf32>
 LOOM_DEFINE_ISA(loom_test_write_resource_isa, LOOM_OP_TEST_WRITE_RESOURCE)
 LOOM_DEFINE_OPERAND(loom_test_write_resource_target, 0)
 LOOM_DEFINE_OPERAND(loom_test_write_resource_data, 1)
@@ -1010,7 +1008,7 @@ iree_status_t loom_test_write_resource_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_MUTATE_RESOURCE: Test op that atomically reads and writes a resource operand.
-// %old = test.mutate_resource %pool, %delta : pool<[%BS]>, i32 -> i32
+// %old = test.mutate_resource %pool, %delta : pool, i32 -> i32
 LOOM_DEFINE_ISA(loom_test_mutate_resource_isa, LOOM_OP_TEST_MUTATE_RESOURCE)
 LOOM_DEFINE_OPERAND(loom_test_mutate_resource_target, 0)
 LOOM_DEFINE_OPERAND(loom_test_mutate_resource_value, 1)
@@ -1024,7 +1022,7 @@ iree_status_t loom_test_mutate_resource_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_ALLOC: Test allocation op. Each execution produces a distinct identity even with identical operands. Prevents CSE but allows DCE when unused.
-// %pool = test.alloc %sz : index -> pool<[%BS]>
+// %pool = test.alloc %sz : index -> pool
 LOOM_DEFINE_ISA(loom_test_alloc_isa, LOOM_OP_TEST_ALLOC)
 LOOM_DEFINE_OPERAND(loom_test_alloc_size, 0)
 LOOM_DEFINE_RESULT(loom_test_alloc_result, 0)
@@ -1986,7 +1984,7 @@ iree_status_t loom_target_record_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_TEST_RESOURCE_ALLOC: Test owned-resource allocation.
-// %resource = test.resource.alloc %sz : index -> pool<[%BS]>
+// %resource = test.resource.alloc %sz : index -> pool
 LOOM_DEFINE_ISA(loom_test_resource_alloc_isa, LOOM_OP_TEST_RESOURCE_ALLOC)
 LOOM_DEFINE_OPERAND(loom_test_resource_alloc_size, 0)
 LOOM_DEFINE_RESULT(loom_test_resource_alloc_result, 0)
@@ -1998,7 +1996,7 @@ iree_status_t loom_test_resource_alloc_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_BORROW: Test borrowed use of an owned resource.
-// test.resource.borrow %resource : pool<[%BS]>
+// test.resource.borrow %resource : pool
 LOOM_DEFINE_ISA(loom_test_resource_borrow_isa, LOOM_OP_TEST_RESOURCE_BORROW)
 LOOM_DEFINE_OPERAND(loom_test_resource_borrow_resource, 0)
 iree_status_t loom_test_resource_borrow_build(
@@ -2008,7 +2006,7 @@ iree_status_t loom_test_resource_borrow_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_BORROW_REF: Test borrowed by-reference use of an owned resource carrier.
-// test.resource.borrow_ref %resource : pool<[%BS]>
+// test.resource.borrow_ref %resource : pool
 LOOM_DEFINE_ISA(loom_test_resource_borrow_ref_isa, LOOM_OP_TEST_RESOURCE_BORROW_REF)
 LOOM_DEFINE_OPERAND(loom_test_resource_borrow_ref_resource, 0)
 iree_status_t loom_test_resource_borrow_ref_build(
@@ -2018,7 +2016,7 @@ iree_status_t loom_test_resource_borrow_ref_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_CONSUME: Test consuming use of an owned resource.
-// test.resource.consume %resource : pool<[%BS]>
+// test.resource.consume %resource : pool
 LOOM_DEFINE_ISA(loom_test_resource_consume_isa, LOOM_OP_TEST_RESOURCE_CONSUME)
 LOOM_DEFINE_OPERAND(loom_test_resource_consume_resource, 0)
 iree_status_t loom_test_resource_consume_build(
@@ -2028,7 +2026,7 @@ iree_status_t loom_test_resource_consume_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_RETAIN: Test retaining an additional owned reference to a resource.
-// %retained = test.resource.retain %resource : pool<[%BS]> -> pool<[%BS]>
+// %retained = test.resource.retain %resource : pool -> pool
 LOOM_DEFINE_ISA(loom_test_resource_retain_isa, LOOM_OP_TEST_RESOURCE_RETAIN)
 LOOM_DEFINE_OPERAND(loom_test_resource_retain_resource, 0)
 LOOM_DEFINE_RESULT(loom_test_resource_retain_result, 0)
@@ -2040,7 +2038,7 @@ iree_status_t loom_test_resource_retain_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_RELEASE: Test releasing an owned resource.
-// test.resource.release %resource : pool<[%BS]>
+// test.resource.release %resource : pool
 LOOM_DEFINE_ISA(loom_test_resource_release_isa, LOOM_OP_TEST_RESOURCE_RELEASE)
 LOOM_DEFINE_OPERAND(loom_test_resource_release_resource, 0)
 iree_status_t loom_test_resource_release_build(
@@ -2050,7 +2048,7 @@ iree_status_t loom_test_resource_release_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_DISCARD: Test discarding compiler ownership without releasing the resource.
-// test.resource.discard %resource : pool<[%BS]>
+// test.resource.discard %resource : pool
 LOOM_DEFINE_ISA(loom_test_resource_discard_isa, LOOM_OP_TEST_RESOURCE_DISCARD)
 LOOM_DEFINE_OPERAND(loom_test_resource_discard_resource, 0)
 iree_status_t loom_test_resource_discard_build(
@@ -2060,7 +2058,7 @@ iree_status_t loom_test_resource_discard_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_ESCAPE: Test transferring a resource to an untracked owner.
-// test.resource.escape %resource : pool<[%BS]>
+// test.resource.escape %resource : pool
 LOOM_DEFINE_ISA(loom_test_resource_escape_isa, LOOM_OP_TEST_RESOURCE_ESCAPE)
 LOOM_DEFINE_OPERAND(loom_test_resource_escape_resource, 0)
 iree_status_t loom_test_resource_escape_build(
@@ -2070,7 +2068,7 @@ iree_status_t loom_test_resource_escape_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_ALIAS: Test producing a borrowed alias of a resource.
-// %alias = test.resource.alias %resource : pool<[%BS]> -> pool<[%BS]>
+// %alias = test.resource.alias %resource : pool -> pool
 LOOM_DEFINE_ISA(loom_test_resource_alias_isa, LOOM_OP_TEST_RESOURCE_ALIAS)
 LOOM_DEFINE_OPERAND(loom_test_resource_alias_resource, 0)
 LOOM_DEFINE_RESULT(loom_test_resource_alias_result, 0)
@@ -2082,7 +2080,7 @@ iree_status_t loom_test_resource_alias_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_BORROWED: Test materializing a borrowed resource result.
-// %borrowed = test.resource.borrowed %resource : pool<[%BS]> -> pool<[%BS]>
+// %borrowed = test.resource.borrowed %resource : pool -> pool
 LOOM_DEFINE_ISA(loom_test_resource_borrowed_isa, LOOM_OP_TEST_RESOURCE_BORROWED)
 LOOM_DEFINE_OPERAND(loom_test_resource_borrowed_resource, 0)
 LOOM_DEFINE_RESULT(loom_test_resource_borrowed_result, 0)
@@ -2094,7 +2092,7 @@ iree_status_t loom_test_resource_borrowed_build(
     loom_op_t** out_op);
 
 // LOOM_OP_TEST_RESOURCE_MOVE: Test moving the exact ownership state of a resource.
-// %moved = test.resource.move %resource : pool<[%BS]> -> pool<[%BS]>
+// %moved = test.resource.move %resource : pool -> pool
 LOOM_DEFINE_ISA(loom_test_resource_move_isa, LOOM_OP_TEST_RESOURCE_MOVE)
 LOOM_DEFINE_OPERAND(loom_test_resource_move_source, 0)
 LOOM_DEFINE_RESULT(loom_test_resource_move_result, 0)
@@ -2378,6 +2376,75 @@ iree_status_t loom_test_result_pair_build(
     loom_builder_t* builder,
     loom_type_t second_type,
     loom_type_t first_type,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+
+// LOOM_OP_TEST_BLOCK_ARG_GROUPS: Test projected groups of one region entry signature.
+// test.block_arg_groups actual(%actual: f32) expected(%expected: f32) {
+//   test.yield
+// }
+LOOM_DEFINE_ISA(loom_test_block_arg_groups_isa, LOOM_OP_TEST_BLOCK_ARG_GROUPS)
+LOOM_DEFINE_ATTR_I64(loom_test_block_arg_groups_actual_count, 0)
+LOOM_DEFINE_REGION(loom_test_block_arg_groups_body, 0)
+iree_status_t loom_test_block_arg_groups_build(
+    loom_builder_t* builder,
+    const loom_type_t* actual_arg_types,
+    iree_host_size_t actual_arg_types_count,
+    const loom_type_t* expected_arg_types,
+    iree_host_size_t expected_arg_types_count,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+
+// LOOM_OP_TEST_SIGNATURE_SINK: Test terminal-style signature results that retain result identities for dependent types without exposing SSA values to following ops.
+// test.signature_sink() : () -> (%width: index, vector<[%width]xf32>)
+LOOM_DEFINE_ISA(loom_test_signature_sink_isa, LOOM_OP_TEST_SIGNATURE_SINK)
+LOOM_DEFINE_VARIADIC_OPERANDS(loom_test_signature_sink_operands, 0)
+LOOM_DEFINE_VARIADIC_RESULTS(loom_test_signature_sink_results, 0)
+iree_status_t loom_test_signature_sink_build(
+    loom_builder_t* builder,
+    loom_may_consume const loom_value_id_t* operands,
+    iree_host_size_t operands_count,
+    const loom_type_t* result_types,
+    iree_host_size_t result_count,
+    const loom_tied_result_t* tied_results,
+    iree_host_size_t tied_result_count,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+
+// LOOM_OP_TEST_FACT_EXACT_FLOAT_TYPES: Exposes the exact destination float-type set as an i64 constant.
+// %types = test.fact_exact_float_types %x : f32 -> i64
+LOOM_DEFINE_ISA(loom_test_fact_exact_float_types_isa, LOOM_OP_TEST_FACT_EXACT_FLOAT_TYPES)
+LOOM_DEFINE_OPERAND(loom_test_fact_exact_float_types_value, 0)
+LOOM_DEFINE_RESULT(loom_test_fact_exact_float_types_result, 0)
+iree_status_t loom_test_fact_exact_float_types_build(
+    loom_builder_t* builder,
+    loom_may_consume loom_value_id_t value,
+    loom_type_t result_type,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_test_fact_exact_float_types_facts(
+    loom_fact_context_t* context,
+    const loom_module_t* module, const loom_op_t* op,
+    const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts);
+
+// LOOM_OP_TEST_STRING_ARRAY_ATTRS: Test op with required and optional ordered string arrays.
+// test.string_array_attrs ["first", "second"] using []
+LOOM_DEFINE_ISA(loom_test_string_array_attrs_isa, LOOM_OP_TEST_STRING_ARRAY_ATTRS)
+LOOM_DEFINE_ATTR_STRING_ARRAY(loom_test_string_array_attrs_required_values, 0)
+LOOM_DEFINE_ATTR_STRING_ARRAY(loom_test_string_array_attrs_optional_values, 1)
+LOOM_DEFINE_ATTR_DICT(loom_test_string_array_attrs_dict, 2)
+enum loom_test_string_array_attrs_build_flag_bits_e {
+  LOOM_TEST_STRING_ARRAY_ATTRS_BUILD_FLAG_HAS_OPTIONAL_VALUES = 1u << 0,
+  LOOM_TEST_STRING_ARRAY_ATTRS_BUILD_FLAG_HAS_DICT = 1u << 1,
+};
+typedef uint32_t loom_test_string_array_attrs_build_flags_t;
+iree_status_t loom_test_string_array_attrs_build(
+    loom_builder_t* builder,
+    loom_test_string_array_attrs_build_flags_t build_flags,
+    loom_string_id_array_t required_values,
+    loom_optional loom_string_id_array_t optional_values,
+    loom_optional loom_named_attr_slice_t dict,
     loom_location_id_t location,
     loom_op_t** out_op);
 

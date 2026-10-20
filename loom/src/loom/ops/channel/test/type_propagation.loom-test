@@ -1,0 +1,104 @@
+// RUN: pass canonicalize
+
+// A view cannot specialize its payload dimensions independently of the
+// channel and owned access that define its record shape.
+func.def @records(%storage: buffer) {
+  %width = index.constant 8 : index
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x[%width]xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x[%width]xi32>, index -> channel<tile<[%width]xi32>>
+  %write, %destination = channel.reserve %channel : channel<tile<[%width]xi32>> -> (write<tile<[%width]xi32>>, view<[%width]xi32>)
+  %value = scalar.constant 7 : i32
+  %values = vector.splat %value : vector<[%width]xi32>
+  vector.store %values, %destination[0] : vector<[%width]xi32>, view<[%width]xi32>
+  channel.publish %write : write<tile<[%width]xi32>>
+  %read, %payload = channel.acquire<mutable> %channel : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>, mutable>, view<[%width]xi32>)
+  view.store %value, %payload[0] : i32, view<[%width]xi32>
+  channel.release %read : read<tile<[%width]xi32>, mutable>
+  func.return
+}
+
+// ----
+func.def @records(%storage: buffer) {
+  %width = index.constant 8 : index
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x[%width]xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x[%width]xi32>, index -> channel<tile<[%width]xi32>>
+  %write, %destination = channel.reserve %channel : channel<tile<[%width]xi32>> -> (write<tile<[%width]xi32>>, view<[%width]xi32>)
+  %value = scalar.constant 7 : i32
+  %values = vector.constant 7 : vector<8xi32>
+  vector.store %values, %destination[0] : vector<8xi32>, view<[%width]xi32>
+  channel.publish %write : write<tile<[%width]xi32>>
+  %read, %payload = channel.acquire<mutable> %channel : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>, mutable>, view<[%width]xi32>)
+  view.store %value, %payload[0] : i32, view<[%width]xi32>
+  channel.release %read : read<tile<[%width]xi32>, mutable>
+  func.return
+}
+
+// ====
+
+// Deferred consumption and fanout retain the same shape relationship. The
+// independent views may retire at different points without changing the type
+// of the shared record.
+func.def @deferred(%storage: buffer) {
+  %width = index.constant 8 : index
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x2x[%width]xbf16>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x2x[%width]xbf16>, index -> channel<tile<2x[%width]xbf16>>
+  %write, %destination = channel.reserve %channel : channel<tile<2x[%width]xbf16>> -> (write<tile<2x[%width]xbf16>>, view<2x[%width]xbf16>)
+  %initial_value = scalar.constant 0.0 : bf16
+  %values = vector.splat %initial_value : vector<2x[%width]xbf16>
+  vector.store %values, %destination[0, 0] : vector<2x[%width]xbf16>, view<2x[%width]xbf16>
+  channel.publish %write : write<tile<2x[%width]xbf16>>
+  %read = channel.accept %channel : channel<tile<2x[%width]xbf16>> -> read<tile<2x[%width]xbf16>>
+  %first, %second = channel.fanout %read : read<tile<2x[%width]xbf16>> -> (read<tile<2x[%width]xbf16>>, read<tile<2x[%width]xbf16>>)
+  %first_payload = channel.wait %first : read<tile<2x[%width]xbf16>> -> view<2x[%width]xbf16>
+  channel.release %first : read<tile<2x[%width]xbf16>>
+  %second_payload = channel.wait %second : read<tile<2x[%width]xbf16>> -> view<2x[%width]xbf16>
+  channel.release %second : read<tile<2x[%width]xbf16>>
+  func.return
+}
+
+// ----
+func.def @deferred(%storage: buffer) {
+  %width = index.constant 8 : index
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x2x[%width]xbf16>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x2x[%width]xbf16>, index -> channel<tile<2x[%width]xbf16>>
+  %write, %destination = channel.reserve %channel : channel<tile<2x[%width]xbf16>> -> (write<tile<2x[%width]xbf16>>, view<2x[%width]xbf16>)
+  %values = vector.constant 0.0 : vector<2x8xbf16>
+  vector.store %values, %destination[0, 0] : vector<2x8xbf16>, view<2x[%width]xbf16>
+  channel.publish %write : write<tile<2x[%width]xbf16>>
+  %read = channel.accept %channel : channel<tile<2x[%width]xbf16>> -> read<tile<2x[%width]xbf16>>
+  %first, %second = channel.fanout %read : read<tile<2x[%width]xbf16>> -> (read<tile<2x[%width]xbf16>>, read<tile<2x[%width]xbf16>>)
+  %first_payload = channel.wait %first : read<tile<2x[%width]xbf16>> -> view<2x[%width]xbf16>
+  channel.release %first : read<tile<2x[%width]xbf16>>
+  %second_payload = channel.wait %second : read<tile<2x[%width]xbf16>> -> view<2x[%width]xbf16>
+  channel.release %second : read<tile<2x[%width]xbf16>>
+  func.return
+}
+
+// ====
+
+// The storage's leading slot extent is independent of the record shape and
+// can specialize without redeclaring the channel payload.
+func.def @slot_extent(%width: index, %storage: buffer) -> (channel<tile<[%width]xi32>>) {
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<[%capacity]x[%width]xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<[%capacity]x[%width]xi32>, index -> channel<tile<[%width]xi32>>
+  func.return %channel : channel<tile<[%width]xi32>>
+}
+
+// ----
+func.def @slot_extent(%width: index, %storage: buffer) -> (channel<tile<[%width]xi32>>) {
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x[%width]xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x[%width]xi32>, index -> channel<tile<[%width]xi32>>
+  func.return %channel : channel<tile<[%width]xi32>>
+}

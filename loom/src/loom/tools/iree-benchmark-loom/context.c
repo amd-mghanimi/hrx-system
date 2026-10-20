@@ -16,7 +16,8 @@ void iree_benchmark_loom_hal_context_initialize(
       .configuration = configuration,
   };
   loom_run_hal_testbench_context_initialize(
-      configuration->device_provider_registry, host_allocator,
+      configuration->target_environment, configuration->hal_target_routes,
+      configuration->hal_target_route_count, host_allocator,
       &out_context->execution);
 }
 

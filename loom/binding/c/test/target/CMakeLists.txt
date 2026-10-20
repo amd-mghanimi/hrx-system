@@ -13,9 +13,9 @@ loom_cc_library(
   NAME
     iree_hal_execution_test_util
   HDRS
-    "iree_hal_execution.h"
+    "iree_hal_execution_test_util.h"
   SRCS
-    "iree_hal_execution.cc"
+    "iree_hal_execution_test_util.cc"
   DEPS
     iree::async
     iree::async::util::proactor_pool
@@ -62,6 +62,36 @@ loom_cc_test(
     iree::testing::gtest_main
     loom::binding::c::loomc
     loom::binding::c::target::spirv
+    loom::binding::c::test::test_util
+)
+endif()
+
+if(LOOM_TARGET_ARCH_VM)
+loom_cc_test(
+  NAME
+    vm_test
+  SRCS
+    "vm_test.cc"
+  DEPS
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::binding::c::loomc
+    loom::binding::c::target::vm
+    loom::binding::c::test::test_util
+)
+endif()
+
+if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+loom_cc_test(
+  NAME
+    wasm_test
+  SRCS
+    "wasm_test.cc"
+  DEPS
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::binding::c::loomc
+    loom::binding::c::target::wasm
     loom::binding::c::test::test_util
 )
 endif()

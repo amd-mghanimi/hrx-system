@@ -7,6 +7,7 @@
 #include "loom/transforms/symbol/template_application.h"
 
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ops/func/ops.h"
@@ -371,6 +372,7 @@ iree_status_t loom_template_application_emit_blocker(
         .label = entry->blocker_contract == LOOM_TEMPLATE_CONTRACT_FAMILY
                      ? IREE_SV("unresolved family condition")
                      : IREE_SV("unresolved provider condition"),
+        .module = module,
         .op = loom_func_like_isa(unresolved_contract) ? unresolved_contract.op
                                                       : NULL,
         .field_ref = loom_func_like_isa(unresolved_contract)
@@ -380,6 +382,7 @@ iree_status_t loom_template_application_emit_blocker(
                          : loom_diagnostic_field_ref_none(),
     };
     loom_diagnostic_emission_t emission = {
+        .module = module,
         .op = entry->application_op,
         .error = LOOM_ERR_LOWERING_048,
         .params = params,
@@ -401,10 +404,12 @@ iree_status_t loom_template_application_emit_blocker(
       .label = entry->blocker_contract == LOOM_TEMPLATE_CONTRACT_FAMILY
                    ? IREE_SV("family contract")
                    : IREE_SV("provider contract"),
+      .module = module,
       .op = loom_func_like_isa(blocker_contract) ? blocker_contract.op : NULL,
       .field_ref = loom_diagnostic_field_ref_none(),
   };
   loom_diagnostic_emission_t emission = {
+      .module = module,
       .op = entry->application_op,
       .error = LOOM_ERR_LOWERING_045,
       .params = params,

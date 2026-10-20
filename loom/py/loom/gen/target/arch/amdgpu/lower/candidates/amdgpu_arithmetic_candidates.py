@@ -142,6 +142,15 @@ _PACKED_TERNARY_DESCRIPTOR_CANDIDATE_ARRAYS = (
         ),
     ),
     _PackedTernaryDescriptorCandidateArray(
+        array_name="kLoomAmdgpuPackedFmafBF16DescriptorCandidates",
+        count_name="kLoomAmdgpuPackedFmafBF16DescriptorCandidateCount",
+        candidates=(
+            _PackedTernaryDescriptorCandidate(
+                descriptor_key="amdgpu.v_pk_fma_bf16",
+            ),
+        ),
+    ),
+    _PackedTernaryDescriptorCandidateArray(
         array_name="kLoomAmdgpuPackedFmafF32DescriptorCandidates",
         count_name="kLoomAmdgpuPackedFmafF32DescriptorCandidateCount",
         candidates=(
@@ -284,13 +293,20 @@ def _emit_packed_ternary_candidate_array(
     yield f"    {array.array_name}[] = {{"
     for candidate in array.candidates:
         _validate_packed_ternary_candidate(array, candidate, descriptor_ref_key_set)
-        descriptor_ref = required_descriptor_ref_constant_name(
-            f"AMDGPU packed ternary descriptor candidate {array.array_name}",
-            candidate.descriptor_key,
-            descriptor_ref_key_set,
-        )
         yield "        {"
-        yield f"            .descriptor_ref = {descriptor_ref},"
+        yield "            .descriptor_refs = {"
+        masks = range(1) if "LOOM_AMDGPU_PACKED_TERNARY_FLAG_TIED_ACCUMULATOR" in candidate.flags else range(8)
+        for mask in masks:
+            key = candidate.descriptor_key
+            if mask:
+                key += ".broadcast_" + "_".join(name for bit, name in enumerate(("a", "b", "c")) if mask & (1 << bit))
+            descriptor_ref = required_descriptor_ref_constant_name(
+                f"AMDGPU packed ternary descriptor candidate {array.array_name}",
+                key,
+                descriptor_ref_key_set,
+            )
+            yield f"                {descriptor_ref},"
+        yield "            },"
         yield f"            .source_permutation = {{{', '.join(str(source) for source in candidate.source_permutation)}}},"
         yield f"            .flags = {_packed_ternary_flags_expr(candidate)},"
         yield f"            .packet_unit_count = {candidate.packet_unit_count},"

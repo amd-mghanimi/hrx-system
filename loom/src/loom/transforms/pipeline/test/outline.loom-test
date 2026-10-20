@@ -1,0 +1,274 @@
+// RUN: pass inline-callables,outline-pipeline-strands,cfg-simplify
+
+// Ordinary inline helpers and outlining preserve execution placement. The
+// outlined body carries kernel operations until physical realization places it.
+
+func.def inline @process_workitem(%output: view<128xi32>) {
+  %item = kernel.workitem.id<x> : index
+  %width = kernel.workgroup.size<x> : index
+  %width_word = index.cast %width : index to i32
+  view.store %width_word, %output[%item] : i32, view<128xi32>
+  func.return
+}
+
+pipeline.def<kernel> @workitem_stream() run(%output: view<128xi32>) {
+  pipeline.strand workers([0, 0, 0], [1, 1, 1], [1, 1, 1]) {
+    func.call @process_workitem(%output) : (view<128xi32>)
+  }
+}
+
+// ----
+pipeline.def<kernel> @workitem_stream() run(%output: view<128xi32>) {
+  pipeline.strand workers([0, 0, 0], [1, 1, 1], [1, 1, 1]) {
+    func.call @__pipeline_strand_0(%output) : (view<128xi32>)
+  }
+}
+
+func.def inline @__pipeline_strand_0(%output: view<128xi32>) {
+  %item = kernel.workitem.id<x> : index
+  %width = kernel.workgroup.size<x> : index
+  %width_word = index.cast %width : index to i32
+  view.store %width_word, %output[%item] : i32, view<128xi32>
+  func.return
+}
+
+// ====
+
+// RUN: pass outline-pipeline-strands,cfg-simplify,outline-pipeline-strands
+
+// The capture set includes a dependent payload width and a bound that is used
+// only in a predicate. Worker selection remains outside the function.
+func.decl @process(%width: index, %data: view<[%width]xi32>)
+
+target.decl @npu
+
+pipeline.def target(@npu) @stream(%width: index, %limit: index, %column: index) run(%input: channel<tile<[%width]xi32>>, %count: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  pipeline.strand workers([%column, 2], [1, 1], [1, 1]) {
+    %bounded = index.assume %count [eq(%count, %limit)] : index
+    scf.for %record = [%begin to %bounded step %step] {
+      %read, %payload = channel.acquire %input : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>>, view<[%width]xi32>)
+      func.call @process(%width, %payload) : (index, view<[%width]xi32>)
+      channel.release %read : read<tile<[%width]xi32>>
+    }
+  }
+}
+
+// ----
+func.decl @process(%width: index, %data: view<[%width]xi32>)
+
+target.decl @npu
+
+pipeline.def target(@npu) @stream(%width: index, %limit: index, %column: index) run(%input: channel<tile<[%width]xi32>>, %count: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  pipeline.strand workers([%column, 2], [1, 1], [1, 1]) {
+    func.call @__pipeline_strand_0(%step, %count, %input, %width, %limit, %begin) : (index, index, channel<tile<[%width]xi32>>, index, index, index)
+  }
+}
+
+func.def inline @__pipeline_strand_0(%step: index, %count: index, %input: channel<tile<[%width]xi32>>, %width: index, %limit: index, %begin: index) {
+  %bounded = index.assume %count [eq(%count, %limit)] : index
+  scf.for %record = [%begin to %bounded step %step] {
+    %read, %payload = channel.acquire %input : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>>, view<[%width]xi32>)
+    func.call @process(%width, %payload) : (index, view<[%width]xi32>)
+    channel.release %read : read<tile<[%width]xi32>>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass scf-to-cfg,outline-pipeline-strands,cfg-simplify,ownership-lifetime
+
+// One raw record can produce several packets. Only its authored final release
+// ends the mutable read, after every packet has been published.
+func.decl @pack(%raw: view<6144xi32>, %packet: view<7168xi32>) -> (i1)
+
+pipeline.def @packet_stream() run(%raws: channel<tile<6144xi32>>, %packets: channel<tile<7168xi32>>, %records: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %yes = scalar.constant true : i1
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    scf.for %record = [%begin to %records step %step] {
+      %raw_read, %raw = channel.acquire<mutable> %raws : channel<tile<6144xi32>> -> (read<tile<6144xi32>, mutable>, view<6144xi32>)
+      %finished = scf.while(%more = %yes : i1) -> (i1) {
+        scf.condition %more, %more : i1, i1
+      } do(%active: i1) {
+        %packet_write, %packet = channel.reserve %packets : channel<tile<7168xi32>> -> (write<tile<7168xi32>>, view<7168xi32>)
+        %again = func.call @pack(%raw, %packet) : (view<6144xi32>, view<7168xi32>) -> (i1)
+        channel.publish %packet_write : write<tile<7168xi32>>
+        scf.yield %again : i1
+      }
+      channel.release %raw_read : read<tile<6144xi32>, mutable>
+    }
+  }
+}
+
+// ----
+func.decl @pack(%raw: view<6144xi32>, %packet: view<7168xi32>) -> (i1)
+
+pipeline.def @packet_stream() run(%raws: channel<tile<6144xi32>>, %packets: channel<tile<7168xi32>>, %records: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %yes = scalar.constant true : i1
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    func.call @__pipeline_strand_0(%begin, %records, %yes, %raws, %step, %packets) : (index, index, i1, channel<tile<6144xi32>>, index, channel<tile<7168xi32>>)
+  }
+}
+
+func.def inline @__pipeline_strand_0(%begin: index, %records: index, %yes: i1, %raws: channel<tile<6144xi32>>, %step: index, %packets: channel<tile<7168xi32>>) {
+  cfg.br ^_bb1(%begin: index)
+^_bb1(%18: index):
+  %20 = index.cmp slt, %18, %records : index
+  cfg.cond_br %20, ^_bb2, ^_bb6
+^_bb2:
+  %record = index.assume %18 [range(%18, 0, 9223372036854775806), lt(%18, %records)] : index
+  %raw_read, %raw = channel.acquire<mutable> %raws : channel<tile<6144xi32>> -> (read<tile<6144xi32>, mutable>, view<6144xi32>)
+  cfg.br ^_bb3(%yes: i1)
+^_bb3(%more: i1):
+  cfg.cond_br %more, ^_bb4, ^_bb5
+^_bb4:
+  %packet_write, %packet = channel.reserve %packets : channel<tile<7168xi32>> -> (write<tile<7168xi32>>, view<7168xi32>)
+  %again = func.call @pack(%raw, %packet) : (view<6144xi32>, view<7168xi32>) -> (i1)
+  channel.publish %packet_write : write<tile<7168xi32>>
+  cfg.br ^_bb3(%again: i1)
+^_bb5:
+  channel.release %raw_read : read<tile<6144xi32>, mutable>
+  %21 = index.add %record, %step : index
+  cfg.br ^_bb1(%21: index)
+^_bb6:
+  func.return
+}
+
+// ====
+// RUN: pass outline-pipeline-strands,cfg-simplify
+
+pipeline.def @nested() run(%incoming: channel<tile<16xi32>>) {
+  pipeline.strand workers([0], [1], [1]) {
+    pipeline.strand workers([1], [1], [1]) {
+      %read, %payload = channel.acquire %incoming : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+      channel.release %read : read<tile<16xi32>>
+    }
+  }
+}
+
+// ----
+pipeline.def @nested() run(%incoming: channel<tile<16xi32>>) {
+  pipeline.strand workers([0], [1], [1]) {
+    func.call @__pipeline_strand_1(%incoming) : (channel<tile<16xi32>>)
+  }
+}
+
+func.def inline @__pipeline_strand_0(%incoming: channel<tile<16xi32>>) {
+  %read, %payload = channel.acquire %incoming : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+  channel.release %read : read<tile<16xi32>>
+  func.return
+}
+
+func.def inline @__pipeline_strand_1(%incoming: channel<tile<16xi32>>) {
+  pipeline.strand workers([1], [1], [1]) {
+    func.call @__pipeline_strand_0(%incoming) : (channel<tile<16xi32>>)
+  }
+  func.return
+}
+
+// ====
+// RUN: pass specialize-target-callgraph,inline-callables{policy=target},outline-pipeline-strands,cfg-simplify,canonicalize
+
+// Outlining after source expansion retains each worker's target environment.
+// The later function-local fold must see the inherited or selected subgroup.
+test.target<device> @device32 {subgroup_size = 32}
+
+test.target<device> @device64 {subgroup_size = 64}
+
+pipeline.def public target(@device32) @publish_widths() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand workers([0], [1], [1]) {
+    %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %width = target.subgroup.size : index
+    %value = index.cast %width : index to i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  pipeline.strand target(@device64) workers([1], [1], [1]) {
+    %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %width = target.subgroup.size : index
+    %value = index.cast %width : index to i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ----
+test.target<device> @device32 {subgroup_size = 32}
+
+test.target<device> @device64 {subgroup_size = 64}
+
+pipeline.def public target(@device32) @publish_widths() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand workers([0], [1], [1]) {
+    func.call @__pipeline_strand_1(%first) : (channel<tile<1xi32>>)
+  }
+  pipeline.strand target(@device64) workers([1], [1], [1]) {
+    func.call @__pipeline_strand_0(%second) : (channel<tile<1xi32>>)
+  }
+}
+
+func.def inline @__pipeline_strand_0(%second: channel<tile<1xi32>>) {
+  %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+  %value = scalar.constant 64 : i32
+  view.store %value, %record[0] : i32, view<1xi32>
+  channel.publish %write : write<tile<1xi32>>
+  func.return
+}
+
+func.def inline @__pipeline_strand_1(%first: channel<tile<1xi32>>) {
+  %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+  %value = scalar.constant 32 : i32
+  view.store %value, %record[0] : i32, view<1xi32>
+  channel.publish %write : write<tile<1xi32>>
+  func.return
+}
+
+// ====
+// RUN: pass canonicalize,outline-pipeline-strands,cfg-simplify
+
+// Moving a strand into a function cannot leave a specialized borrowed view
+// behind while its channel payload becomes dependent on a new formal argument.
+pipeline.def @fixed_records() run(%storage: buffer) {
+  %width = index.constant 8 : index
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x[%width]xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x[%width]xi32>, index -> channel<tile<[%width]xi32>>
+  pipeline.strand workers([0], [1], [1]) {
+    %write, %destination = channel.reserve %channel : channel<tile<[%width]xi32>> -> (write<tile<[%width]xi32>>, view<[%width]xi32>)
+    %initial_value = scalar.constant 0 : i32
+    %values = vector.splat %initial_value : vector<[%width]xi32>
+    vector.store %values, %destination[0] : vector<[%width]xi32>, view<[%width]xi32>
+    channel.publish %write : write<tile<[%width]xi32>>
+    %read, %payload = channel.acquire %channel : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>>, view<[%width]xi32>)
+    channel.release %read : read<tile<[%width]xi32>>
+  }
+}
+
+// ----
+pipeline.def @fixed_records() run(%storage: buffer) {
+  %width = index.constant 8 : index
+  %capacity = index.constant 2 : index
+  %origin = index.constant 0 : offset
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x[%width]xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<2x[%width]xi32>, index -> channel<tile<[%width]xi32>>
+  pipeline.strand workers([0], [1], [1]) {
+    func.call @__pipeline_strand_0(%width, %channel) : (index, channel<tile<[%width]xi32>>)
+  }
+}
+
+func.def inline @__pipeline_strand_0(%width: index, %channel: channel<tile<[%width]xi32>>) {
+  %write, %destination = channel.reserve %channel : channel<tile<[%width]xi32>> -> (write<tile<[%width]xi32>>, view<[%width]xi32>)
+  %values = vector.constant 0 : vector<8xi32>
+  vector.store %values, %destination[0] : vector<8xi32>, view<[%width]xi32>
+  channel.publish %write : write<tile<[%width]xi32>>
+  %read, %payload = channel.acquire %channel : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>>, view<[%width]xi32>)
+  channel.release %read : read<tile<[%width]xi32>>
+  func.return
+}

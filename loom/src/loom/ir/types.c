@@ -551,7 +551,7 @@ bool loom_type_equal_after_value_remap(const loom_module_t* module,
       break;
   }
 
-  if (loom_type_is_shaped(source_type) || loom_type_is_pool(source_type)) {
+  if (loom_type_has_dimensions(source_type)) {
     if (source_type.header != target_type.header) {
       return false;
     }
@@ -625,7 +625,7 @@ bool loom_type_static_element_count(loom_type_t type,
 //===----------------------------------------------------------------------===//
 
 static bool loom_type_has_value_ref_dims(loom_type_t type) {
-  return loom_type_is_shaped(type) || loom_type_is_pool(type);
+  return loom_type_has_dimensions(type);
 }
 
 static iree_status_t loom_type_walk_value_ref_sequence(
@@ -1204,7 +1204,7 @@ loom_type_hash_after_value_remap(const loom_module_t* module, loom_type_t type,
       break;
   }
 
-  if (loom_type_is_shaped(type) || loom_type_is_pool(type)) {
+  if (loom_type_has_dimensions(type)) {
     uint32_t encoding = type.encoding_id;
     if (loom_type_has_ssa_encoding(type)) {
       encoding = loom_type_remap_value(module, remap,

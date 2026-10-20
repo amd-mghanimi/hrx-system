@@ -6,6 +6,7 @@
 
 #include "iree/async/platform/iocp/proactor.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "iree/async/buffer_pool.h"
@@ -631,30 +632,15 @@ static void iree_async_proactor_iocp_destroy(
       iree_async_proactor_iocp_cast(base_proactor);
   iree_allocator_t allocator = proactor->base.allocator;
 
-  // Cancel and release all active event wait carriers to the freelist.
-  while (proactor->active_carriers) {
-    iree_async_iocp_carrier_t* carrier = proactor->active_carriers;
-    proactor->active_carriers = carrier->next;
-    if (carrier->type == IREE_ASYNC_IOCP_CARRIER_EVENT_WAIT &&
-        carrier->data.event_wait.wait_handle != NULL) {
-      if (proactor->nt_wait_api.available) {
-        // WaitCompletionPacket path: cancel and close. Always non-blocking.
-        proactor->nt_wait_api.NtCancelWaitCompletionPacket(
-            carrier->data.event_wait.wait_handle, TRUE);
-        if (!CloseHandle(carrier->data.event_wait.wait_handle)) {
-          iree_abort();
-        }
-      } else {
-        // RegisterWaitForSingleObject path: INVALID_HANDLE_VALUE blocks until
-        // the threadpool callback has completed, ensuring no dangling refs.
-        if (!UnregisterWaitEx(carrier->data.event_wait.wait_handle,
-                              INVALID_HANDLE_VALUE)) {
-          iree_abort();
-        }
-      }
-      carrier->data.event_wait.wait_handle = NULL;
-    }
-    iree_async_proactor_iocp_release_carrier(proactor, carrier);
+  iree_status_t wait_status =
+      iree_async_proactor_iocp_deinitialize_waits(proactor);
+  if (!iree_status_is_ok(wait_status)) {
+    // An unresolved registration may still reach its carrier and this
+    // proactor. Diagnose the failure and retain their complete owner graph.
+    iree_status_fprint(stderr, wait_status);
+    iree_status_free(wait_status);
+    IREE_TRACE_ZONE_END(z0);
+    return;
   }
 
   // All carriers should have been returned to the freelist by completion
@@ -675,7 +661,16 @@ static void iree_async_proactor_iocp_destroy(
     iree_async_proactor_iocp_signal_deinitialize(proactor);
   }
 
-  iree_async_iocp_event_source_deinitialize_all(proactor);
+  iree_status_t event_source_status =
+      iree_async_iocp_event_source_deinitialize_all(proactor);
+  if (!iree_status_is_ok(event_source_status)) {
+    // Native reachability remains uncertain. Preserve the completion port and
+    // every object it may still reach instead of freeing live callback state.
+    iree_status_fprint(stderr, event_source_status);
+    iree_status_free(event_source_status);
+    IREE_TRACE_ZONE_END(z0);
+    return;
+  }
 
   iree_async_iocp_notification_deinitialize_relays(proactor);
 
@@ -1059,36 +1054,32 @@ static iree_status_t iree_async_proactor_iocp_drain_event_wait_cancellations(
 
     // Attempt to cancel the outstanding wait and determine whether we can
     // free the carrier now or must let Phase 6 handle a dequeued completion.
-    bool cancel_succeeded = false;
-    status = iree_async_proactor_iocp_cancel_wait(proactor, carrier,
-                                                  &cancel_succeeded);
-    if (!iree_status_is_ok(status)) {
+    iree_async_iocp_wait_cancel_result_t result =
+        IREE_ASYNC_IOCP_WAIT_CANCEL_UNRESOLVED;
+    iree_status_t cleanup_status =
+        iree_async_proactor_iocp_cancel_wait(proactor, carrier, &result);
+    if (result == IREE_ASYNC_IOCP_WAIT_CANCEL_UNRESOLVED) {
+      status = cleanup_status;
       break;
     }
 
-    if (cancel_succeeded) {
+    if (result == IREE_ASYNC_IOCP_WAIT_CANCEL_WITHDRAWN) {
       // Successfully cancelled before the completion was delivered.
-      // Unlink from active list (O(1) via prev/next).
-      if (carrier->prev) {
-        carrier->prev->next = carrier->next;
-      } else {
-        proactor->active_carriers = carrier->next;
-      }
-      if (carrier->next) {
-        carrier->next->prev = carrier->prev;
-      }
       iree_async_operation_t* operation = carrier->operation;
-      operation->next = NULL;
-      iree_async_proactor_iocp_release_carrier(proactor, carrier);
+      iree_async_proactor_iocp_release_wait_carrier(proactor, carrier);
       iree_atomic_fetch_sub(&proactor->pending_event_wait_cancellation_count, 1,
                             iree_memory_order_release);
       --cancellation_count;
       iree_async_proactor_iocp_dispatch_completion(
-          proactor, operation, iree_status_from_code(IREE_STATUS_CANCELLED),
+          proactor, operation,
+          iree_status_join(iree_status_from_code(IREE_STATUS_CANCELLED),
+                           cleanup_status),
           IREE_ASYNC_COMPLETION_FLAG_NONE, direct_completions);
     } else {
       // Completion already delivered to IOCP queue or in-flight callback.
       // Phase 6 carrier dispatch will check the CANCELLED flag.
+      carrier->data.event_wait.cleanup_status = iree_status_join(
+          carrier->data.event_wait.cleanup_status, cleanup_status);
       iree_atomic_fetch_sub(&proactor->pending_event_wait_cancellation_count, 1,
                             iree_memory_order_release);
       --cancellation_count;
@@ -1311,43 +1302,41 @@ static iree_host_size_t iree_async_proactor_iocp_drain_fallback_completions(
 // operations, populates result_events with POLLIN since
 // RegisterWaitForSingleObject / NtAssociateWaitCompletionPacket only fires on
 // signal.
-static void iree_async_proactor_iocp_complete_event_wait(
+static iree_status_t iree_async_proactor_iocp_complete_event_wait(
     iree_async_proactor_iocp_t* proactor, iree_async_iocp_carrier_t* carrier,
     iree_async_operation_t* operation, iree_host_size_t* completed_count) {
-  iree_status_t cleanup_status = iree_ok_status();
-
-  // Unlink carrier from active list (O(1) via prev/next).
-  if (carrier->prev) {
-    carrier->prev->next = carrier->next;
-  } else {
-    proactor->active_carriers = carrier->next;
-  }
-  if (carrier->next) {
-    carrier->next->prev = carrier->prev;
-  }
+  iree_status_t cleanup_status = carrier->data.event_wait.cleanup_status;
+  carrier->data.event_wait.cleanup_status = iree_ok_status();
   // Release the registration before recycling the carrier. The legacy path
   // synchronizes with the callback even for WT_EXECUTEONLYONCE waits.
   if (carrier->data.event_wait.wait_handle != NULL) {
     if (proactor->nt_wait_api.available) {
       if (!CloseHandle(carrier->data.event_wait.wait_handle)) {
         DWORD error_code = GetLastError();
-        cleanup_status = iree_make_status(
-            iree_status_code_from_win32_error(error_code),
-            "CloseHandle failed for wait completion packet (error %lu)",
-            (unsigned long)error_code);
+        cleanup_status = iree_status_join(
+            cleanup_status,
+            iree_make_status(
+                iree_status_code_from_win32_error(error_code),
+                "CloseHandle failed for wait completion packet (error %lu)",
+                (unsigned long)error_code));
       }
     } else if (!UnregisterWaitEx(carrier->data.event_wait.wait_handle,
                                  INVALID_HANDLE_VALUE)) {
       DWORD error_code = GetLastError();
-      cleanup_status = iree_make_status(
+      carrier->data.event_wait.cleanup_status = cleanup_status;
+      iree_atomic_store(&carrier->fallback_completion_state,
+                        IREE_ASYNC_IOCP_FALLBACK_COMPLETION_READY,
+                        iree_memory_order_release);
+      iree_async_iocp_completion_port_request_fallback_wake(
+          &proactor->completion_port);
+      return iree_make_status(
           iree_status_code_from_win32_error(error_code),
           "UnregisterWaitEx failed for completed event wait (error %lu)",
           (unsigned long)error_code);
     }
     carrier->data.event_wait.wait_handle = NULL;
   }
-  operation->next = NULL;
-  iree_async_proactor_iocp_release_carrier(proactor, carrier);
+  iree_async_proactor_iocp_release_wait_carrier(proactor, carrier);
 
   // Check CANCELLED flag — cancel() may have been called between the
   // completion being posted to IOCP and this dispatch. The cancellation drain
@@ -1370,18 +1359,21 @@ static void iree_async_proactor_iocp_complete_event_wait(
   iree_async_proactor_iocp_dispatch_completion(proactor, operation, status,
                                                IREE_ASYNC_COMPLETION_FLAG_NONE,
                                                completed_count);
+  return iree_ok_status();
 }
 
 // Dispatches legacy event-wait callbacks whose completion packet could not be
 // posted. The Windows callback publishes the flag before requesting its APC,
 // so this poll-thread scan observes the same completion exactly once without
 // requiring a second carrier queue.
-static iree_host_size_t
+static iree_status_t
 iree_async_proactor_iocp_drain_event_wait_fallback_completions(
-    iree_async_proactor_iocp_t* proactor) {
+    iree_async_proactor_iocp_t* proactor,
+    iree_host_size_t* out_completed_count) {
   iree_host_size_t completed_count = 0;
+  iree_status_t status = iree_ok_status();
   iree_async_iocp_carrier_t* carrier = proactor->active_carriers;
-  while (carrier) {
+  while (carrier && iree_status_is_ok(status)) {
     iree_async_iocp_carrier_t* next = carrier->next;
     int32_t fallback_state = iree_atomic_load(
         &carrier->fallback_completion_state, iree_memory_order_acquire);
@@ -1390,12 +1382,13 @@ iree_async_proactor_iocp_drain_event_wait_fallback_completions(
       iree_atomic_store(&carrier->fallback_completion_state,
                         IREE_ASYNC_IOCP_FALLBACK_COMPLETION_NONE,
                         iree_memory_order_relaxed);
-      iree_async_proactor_iocp_complete_event_wait(
+      status = iree_async_proactor_iocp_complete_event_wait(
           proactor, carrier, carrier->operation, &completed_count);
     }
     carrier = next;
   }
-  return completed_count;
+  *out_completed_count = completed_count;
+  return status;
 }
 
 static bool iree_async_proactor_iocp_operation_is_cancelled(
@@ -1495,67 +1488,58 @@ static void iree_async_proactor_iocp_complete_socket_io(
   }
 
   // Multishot re-arm for recv operations.
-  bool multishot_rearm = false;
-  const bool should_rearm =
-      iree_status_is_ok(io_status) && bytes_transferred > 0 &&
+  if (iree_status_is_ok(io_status) && bytes_transferred > 0 &&
       iree_any_bit_set(operation->flags, IREE_ASYNC_OPERATION_FLAG_MULTISHOT) &&
       (operation->type == IREE_ASYNC_OPERATION_TYPE_SOCKET_RECV ||
-       operation->type == IREE_ASYNC_OPERATION_TYPE_SOCKET_RECVFROM);
-  if (should_rearm) {
+       operation->type == IREE_ASYNC_OPERATION_TYPE_SOCKET_RECVFROM)) {
     // Dispatch with MORE flag, then re-arm.
     iree_async_proactor_iocp_dispatch_completion(
         proactor, operation, iree_ok_status(), IREE_ASYNC_COMPLETION_FLAG_MORE,
         completed_count);
-  }
-
-  // CancelIoEx cannot cancel the already-completed OVERLAPPED when the MORE
-  // callback cancels itself, so observe the flag before emulated re-arm.
-  if (should_rearm &&
-      iree_async_proactor_iocp_operation_is_cancelled(operation)) {
-    io_status = iree_status_from_code(IREE_STATUS_CANCELLED);
-  }
-
-  if (should_rearm && iree_status_is_ok(io_status)) {
-    // Zero OVERLAPPED and re-issue WSARecv/WSARecvFrom.
-    memset(&carrier->overlapped, 0, sizeof(carrier->overlapped));
-    carrier->data.socket_io.flags = 0;
-    int rearm_result = SOCKET_ERROR;
-    if (operation->type == IREE_ASYNC_OPERATION_TYPE_SOCKET_RECV) {
-      rearm_result =
-          WSARecv((SOCKET)carrier->io_handle, carrier->data.socket_io.wsabuf,
-                  carrier->data.socket_io.buffer_count, NULL,
-                  &carrier->data.socket_io.flags, &carrier->overlapped, NULL);
+    // CancelIoEx cannot cancel the already-completed OVERLAPPED when the MORE
+    // callback cancels itself, so observe the flag before emulated re-arm.
+    if (iree_async_proactor_iocp_operation_is_cancelled(operation)) {
+      io_status = iree_status_from_code(IREE_STATUS_CANCELLED);
     } else {
-      iree_async_socket_recvfrom_operation_t* rf =
-          (iree_async_socket_recvfrom_operation_t*)operation;
-      carrier->data.socket_io.sender_address_length =
-          (int)sizeof(rf->sender.storage);
-      rearm_result = WSARecvFrom(
-          (SOCKET)carrier->io_handle, carrier->data.socket_io.wsabuf,
-          carrier->data.socket_io.buffer_count, NULL,
-          &carrier->data.socket_io.flags, (struct sockaddr*)rf->sender.storage,
-          &carrier->data.socket_io.sender_address_length, &carrier->overlapped,
-          NULL);
-    }
+      // Zero OVERLAPPED and re-issue WSARecv/WSARecvFrom.
+      memset(&carrier->overlapped, 0, sizeof(carrier->overlapped));
+      carrier->data.socket_io.flags = 0;
+      int rearm_result = SOCKET_ERROR;
+      if (operation->type == IREE_ASYNC_OPERATION_TYPE_SOCKET_RECV) {
+        rearm_result =
+            WSARecv((SOCKET)carrier->io_handle, carrier->data.socket_io.wsabuf,
+                    carrier->data.socket_io.buffer_count, NULL,
+                    &carrier->data.socket_io.flags, &carrier->overlapped, NULL);
+      } else {
+        iree_async_socket_recvfrom_operation_t* rf =
+            (iree_async_socket_recvfrom_operation_t*)operation;
+        carrier->data.socket_io.sender_address_length =
+            (int)sizeof(rf->sender.storage);
+        rearm_result = WSARecvFrom(
+            (SOCKET)carrier->io_handle, carrier->data.socket_io.wsabuf,
+            carrier->data.socket_io.buffer_count, NULL,
+            &carrier->data.socket_io.flags,
+            (struct sockaddr*)rf->sender.storage,
+            &carrier->data.socket_io.sender_address_length,
+            &carrier->overlapped, NULL);
+      }
 
-    int rearm_error = (rearm_result == SOCKET_ERROR) ? WSAGetLastError() : 0;
-    if (rearm_result != SOCKET_ERROR || rearm_error == WSA_IO_PENDING) {
-      multishot_rearm = true;
-      iree_async_proactor_iocp_cancel_rearmed_socket_io(operation, carrier);
-    } else {
+      int rearm_error = (rearm_result == SOCKET_ERROR) ? WSAGetLastError() : 0;
+      if (rearm_result != SOCKET_ERROR || rearm_error == WSA_IO_PENDING) {
+        iree_async_proactor_iocp_cancel_rearmed_socket_io(operation, carrier);
+        return;
+      }
       io_status = iree_make_status(
           iree_status_code_from_win32_error(rearm_error),
           "multishot recv re-arm failed (WSA error %d)", rearm_error);
     }
   }
 
-  if (!multishot_rearm) {
-    operation->next = NULL;
-    iree_async_proactor_iocp_release_carrier(proactor, carrier);
-    iree_async_proactor_iocp_dispatch_completion(
-        proactor, operation, io_status, IREE_ASYNC_COMPLETION_FLAG_NONE,
-        completed_count);
-  }
+  operation->next = NULL;
+  iree_async_proactor_iocp_release_carrier(proactor, carrier);
+  iree_async_proactor_iocp_dispatch_completion(proactor, operation, io_status,
+                                               IREE_ASYNC_COMPLETION_FLAG_NONE,
+                                               completed_count);
 }
 
 // Completes a socket accept carrier. Handles SO_UPDATE_ACCEPT_CONTEXT, peer
@@ -1622,75 +1606,58 @@ static void iree_async_proactor_iocp_complete_accept(
   }
 
   // Multishot accept re-arm.
-  bool multishot_rearm = false;
-  const bool should_rearm =
-      iree_status_is_ok(io_status) &&
-      iree_any_bit_set(operation->flags, IREE_ASYNC_OPERATION_FLAG_MULTISHOT);
-  if (should_rearm) {
+  if (iree_status_is_ok(io_status) &&
+      iree_any_bit_set(operation->flags, IREE_ASYNC_OPERATION_FLAG_MULTISHOT)) {
     // Dispatch with MORE flag.
     iree_async_proactor_iocp_dispatch_completion(
         proactor, operation, iree_ok_status(), IREE_ASYNC_COMPLETION_FLAG_MORE,
         completed_count);
-  }
-
-  // CancelIoEx cannot cancel the already-completed OVERLAPPED when the MORE
-  // callback cancels itself, so observe the flag before emulated re-arm.
-  if (should_rearm &&
-      iree_async_proactor_iocp_operation_is_cancelled(operation)) {
-    io_status = iree_status_from_code(IREE_STATUS_CANCELLED);
-  }
-
-  if (should_rearm && iree_status_is_ok(io_status)) {
-    // Create a new accept socket for the next accept.
-    int domain = AF_INET;
-    int protocol = IPPROTO_TCP;
-    switch (accept_op->listen_socket->type) {
-      case IREE_ASYNC_SOCKET_TYPE_TCP6:
-        domain = AF_INET6;
-        break;
-      case IREE_ASYNC_SOCKET_TYPE_UNIX_STREAM:
-        domain = AF_UNIX;
-        protocol = 0;
-        break;
-      default:
-        break;
-    }
-
-    SOCKET new_accept_sock =
-        WSASocketW(domain, SOCK_STREAM, protocol, NULL, 0, WSA_FLAG_OVERLAPPED);
-    if (new_accept_sock == INVALID_SOCKET) {
-      int wsa_error = WSAGetLastError();
-      io_status = iree_make_status(
-          iree_status_code_from_win32_error(wsa_error),
-          "multishot accept re-arm: WSASocketW failed (WSA error %d)",
-          wsa_error);
+    // CancelIoEx cannot cancel the already-completed OVERLAPPED when the MORE
+    // callback cancels itself, so observe the flag before emulated re-arm.
+    if (iree_async_proactor_iocp_operation_is_cancelled(operation)) {
+      io_status = iree_status_from_code(IREE_STATUS_CANCELLED);
     } else {
-      HANDLE assoc_result = CreateIoCompletionPort(
-          (HANDLE)new_accept_sock, (HANDLE)proactor->completion_port.handle, 0,
-          0);
-      if (assoc_result == NULL) {
-        DWORD error = GetLastError();
-        closesocket(new_accept_sock);
-        io_status = iree_make_status(
-            iree_status_code_from_win32_error(error),
-            "multishot accept re-arm: IOCP association failed (error %lu)",
-            (unsigned long)error);
-      } else {
-        // Zero OVERLAPPED and re-arm AcceptEx.
-        memset(&carrier->overlapped, 0, sizeof(carrier->overlapped));
-        carrier->data.accept.accept_socket = new_accept_sock;
+      // Create a new accept socket for the next accept.
+      int domain = accept_op->listen_socket->type == IREE_ASYNC_SOCKET_TYPE_TCP6
+                       ? AF_INET6
+                       : AF_INET;
 
-        DWORD rearm_bytes = 0;
-        BOOL rearm_ok = proactor->wsa_extensions.AcceptEx(
-            listen_sock, new_accept_sock, carrier->data.accept.address_buffer,
-            0, carrier->data.accept.local_address_length,
-            carrier->data.accept.remote_address_length, &rearm_bytes,
-            &carrier->overlapped);
-        int rearm_error = rearm_ok ? 0 : WSAGetLastError();
-        if (rearm_ok || rearm_error == WSA_IO_PENDING) {
-          multishot_rearm = true;
-          iree_async_proactor_iocp_cancel_rearmed_socket_io(operation, carrier);
+      SOCKET new_accept_sock = WSASocketW(domain, SOCK_STREAM, IPPROTO_TCP,
+                                          NULL, 0, WSA_FLAG_OVERLAPPED);
+      if (new_accept_sock == INVALID_SOCKET) {
+        int wsa_error = WSAGetLastError();
+        io_status = iree_make_status(
+            iree_status_code_from_win32_error(wsa_error),
+            "multishot accept re-arm: WSASocketW failed (WSA error %d)",
+            wsa_error);
+      } else {
+        HANDLE assoc_result = CreateIoCompletionPort(
+            (HANDLE)new_accept_sock, (HANDLE)proactor->completion_port.handle,
+            0, 0);
+        if (assoc_result == NULL) {
+          DWORD error = GetLastError();
+          closesocket(new_accept_sock);
+          io_status = iree_make_status(
+              iree_status_code_from_win32_error(error),
+              "multishot accept re-arm: IOCP association failed (error %lu)",
+              (unsigned long)error);
         } else {
+          // Zero OVERLAPPED and re-arm AcceptEx.
+          memset(&carrier->overlapped, 0, sizeof(carrier->overlapped));
+          carrier->data.accept.accept_socket = new_accept_sock;
+
+          DWORD rearm_bytes = 0;
+          BOOL rearm_ok = proactor->wsa_extensions.AcceptEx(
+              listen_sock, new_accept_sock, carrier->data.accept.address_buffer,
+              0, carrier->data.accept.local_address_length,
+              carrier->data.accept.remote_address_length, &rearm_bytes,
+              &carrier->overlapped);
+          int rearm_error = rearm_ok ? 0 : WSAGetLastError();
+          if (rearm_ok || rearm_error == WSA_IO_PENDING) {
+            iree_async_proactor_iocp_cancel_rearmed_socket_io(operation,
+                                                              carrier);
+            return;
+          }
           closesocket(new_accept_sock);
           io_status = iree_make_status(
               iree_status_code_from_win32_error(rearm_error),
@@ -1701,13 +1668,11 @@ static void iree_async_proactor_iocp_complete_accept(
     }
   }
 
-  if (!multishot_rearm) {
-    operation->next = NULL;
-    iree_async_proactor_iocp_release_carrier(proactor, carrier);
-    iree_async_proactor_iocp_dispatch_completion(
-        proactor, operation, io_status, IREE_ASYNC_COMPLETION_FLAG_NONE,
-        completed_count);
-  }
+  operation->next = NULL;
+  iree_async_proactor_iocp_release_carrier(proactor, carrier);
+  iree_async_proactor_iocp_dispatch_completion(proactor, operation, io_status,
+                                               IREE_ASYNC_COMPLETION_FLAG_NONE,
+                                               completed_count);
 }
 
 // Completes a socket connect carrier. Applies SO_UPDATE_CONNECT_CONTEXT and
@@ -1761,61 +1726,52 @@ static void iree_async_proactor_iocp_complete_recv_pool(
   recv_pool_op->bytes_received = bytes_transferred;
 
   // Multishot recv_pool re-arm.
-  bool multishot_rearm = false;
-  const bool should_rearm =
-      iree_status_is_ok(io_status) && bytes_transferred > 0 &&
-      iree_any_bit_set(operation->flags, IREE_ASYNC_OPERATION_FLAG_MULTISHOT);
-  if (should_rearm) {
+  if (iree_status_is_ok(io_status) && bytes_transferred > 0 &&
+      iree_any_bit_set(operation->flags, IREE_ASYNC_OPERATION_FLAG_MULTISHOT)) {
     // Dispatch with MORE flag.
     iree_async_proactor_iocp_dispatch_completion(
         proactor, operation, iree_ok_status(), IREE_ASYNC_COMPLETION_FLAG_MORE,
         completed_count);
-  }
+    // CancelIoEx cannot cancel the already-completed OVERLAPPED when the MORE
+    // callback cancels itself, so observe the flag before emulated re-arm.
+    if (iree_async_proactor_iocp_operation_is_cancelled(operation)) {
+      io_status = iree_status_from_code(IREE_STATUS_CANCELLED);
+    } else {
+      // Acquire new buffer from pool for next receive.
+      iree_status_t acquire_status = iree_async_buffer_pool_acquire(
+          recv_pool_op->pool, &recv_pool_op->lease);
+      if (iree_status_is_ok(acquire_status)) {
+        carrier->data.recv_pool.wsabuf.buf =
+            (char*)iree_async_span_ptr(recv_pool_op->lease.span);
+        carrier->data.recv_pool.wsabuf.len =
+            (ULONG)recv_pool_op->lease.span.length;
+        carrier->data.recv_pool.flags = 0;
+        memset(&carrier->overlapped, 0, sizeof(carrier->overlapped));
 
-  // CancelIoEx cannot cancel the already-completed OVERLAPPED when the MORE
-  // callback cancels itself, so observe the flag before emulated re-arm.
-  if (should_rearm &&
-      iree_async_proactor_iocp_operation_is_cancelled(operation)) {
-    io_status = iree_status_from_code(IREE_STATUS_CANCELLED);
-  }
-
-  if (should_rearm && iree_status_is_ok(io_status)) {
-    // Acquire new buffer from pool for next receive.
-    iree_status_t acquire_status = iree_async_buffer_pool_acquire(
-        recv_pool_op->pool, &recv_pool_op->lease);
-    if (iree_status_is_ok(acquire_status)) {
-      carrier->data.recv_pool.wsabuf.buf =
-          (char*)iree_async_span_ptr(recv_pool_op->lease.span);
-      carrier->data.recv_pool.wsabuf.len =
-          (ULONG)recv_pool_op->lease.span.length;
-      carrier->data.recv_pool.flags = 0;
-      memset(&carrier->overlapped, 0, sizeof(carrier->overlapped));
-
-      int rearm_result = WSARecv(
-          (SOCKET)carrier->io_handle, &carrier->data.recv_pool.wsabuf, 1, NULL,
-          &carrier->data.recv_pool.flags, &carrier->overlapped, NULL);
-      int rearm_error = (rearm_result == SOCKET_ERROR) ? WSAGetLastError() : 0;
-      if (rearm_result != SOCKET_ERROR || rearm_error == WSA_IO_PENDING) {
-        multishot_rearm = true;
-        iree_async_proactor_iocp_cancel_rearmed_socket_io(operation, carrier);
-      } else {
+        int rearm_result = WSARecv(
+            (SOCKET)carrier->io_handle, &carrier->data.recv_pool.wsabuf, 1,
+            NULL, &carrier->data.recv_pool.flags, &carrier->overlapped, NULL);
+        int rearm_error =
+            (rearm_result == SOCKET_ERROR) ? WSAGetLastError() : 0;
+        if (rearm_result != SOCKET_ERROR || rearm_error == WSA_IO_PENDING) {
+          iree_async_proactor_iocp_cancel_rearmed_socket_io(operation, carrier);
+          return;
+        }
         iree_async_buffer_lease_release(&recv_pool_op->lease);
         io_status = iree_make_status(
             iree_status_code_from_win32_error(rearm_error),
             "multishot recv_pool re-arm failed (WSA error %d)", rearm_error);
+      } else {
+        io_status = acquire_status;
       }
-    } else {
-      io_status = acquire_status;
     }
   }
 
-  if (!multishot_rearm) {
-    operation->next = NULL;
-    iree_async_proactor_iocp_release_carrier(proactor, carrier);
-    iree_async_proactor_iocp_dispatch_completion(
-        proactor, operation, io_status, IREE_ASYNC_COMPLETION_FLAG_NONE,
-        completed_count);
-  }
+  operation->next = NULL;
+  iree_async_proactor_iocp_release_carrier(proactor, carrier);
+  iree_async_proactor_iocp_dispatch_completion(proactor, operation, io_status,
+                                               IREE_ASYNC_COMPLETION_FLAG_NONE,
+                                               completed_count);
 }
 
 // Completes a file I/O carrier (ReadFile/WriteFile). Writes bytes_read or
@@ -1879,7 +1835,7 @@ static void iree_async_proactor_iocp_complete_file_io(
 static iree_status_t iree_async_proactor_iocp_poll(
     iree_async_proactor_t* base_proactor, iree_timeout_t timeout,
     iree_host_size_t* out_completed_count) {
-  IREE_TRACE_ZONE_BEGIN(z0);
+  IREE_TRACE_ZONE_BEGIN_NAMED(z0, "iree_async_proactor_iocp_prepare");
   iree_convert_timeout_to_absolute(&timeout);
   iree_async_proactor_iocp_t* proactor =
       iree_async_proactor_iocp_cast(base_proactor);
@@ -1965,6 +1921,7 @@ static iree_status_t iree_async_proactor_iocp_poll(
   ULONG entry_count = 0;
   iree_status_t gqcs_status = iree_ok_status();
   bool retry_wait = false;
+  IREE_TRACE_ZONE_END(z0);
   do {
     // Recheck immediately before the alertable wait. A user callback executed
     // during an earlier phase may itself have entered an alertable wait and
@@ -2013,14 +1970,18 @@ static iree_status_t iree_async_proactor_iocp_poll(
 
     // Phase 5: Process expired timers (before GQCS completions for consistent
     // ordering — timer callbacks fire before I/O callbacks in the same poll).
+    IREE_TRACE_ZONE_BEGIN_NAMED(z1, "iree_async_proactor_iocp_expire_timers");
     completed_count +=
         iree_async_proactor_iocp_process_expired_timers(proactor);
+    IREE_TRACE_ZONE_END(z1);
 
     retry_wait = wait_timed_out && entry_count == 0 && completed_count == 0 &&
                  !force_nonblocking && !observed_wake &&
                  (iree_timeout_is_infinite(timeout) ||
                   iree_time_now() < iree_timeout_as_deadline_ns(timeout));
   } while (retry_wait);
+
+  IREE_TRACE_ZONE_BEGIN_NAMED(z2, "iree_async_proactor_iocp_dispatch");
 
   // A failed signal post leaves its bit in the durable process-global mask.
   // Dispatching unconditionally also coalesces normal signal packets.
@@ -2031,8 +1992,12 @@ static iree_status_t iree_async_proactor_iocp_poll(
   completed_count +=
       iree_async_proactor_iocp_drain_fallback_completions(proactor);
 
-  completed_count +=
-      iree_async_proactor_iocp_drain_event_wait_fallback_completions(proactor);
+  iree_host_size_t fallback_wait_completion_count = 0;
+  gqcs_status = iree_status_join(
+      gqcs_status,
+      iree_async_proactor_iocp_drain_event_wait_fallback_completions(
+          proactor, &fallback_wait_completion_count));
+  completed_count += fallback_wait_completion_count;
 
   // Phase 6: Process GQCS completions.
   for (ULONG i = 0; i < entry_count; ++i) {
@@ -2053,8 +2018,10 @@ static iree_status_t iree_async_proactor_iocp_poll(
 
     // Event source wake: dispatch the callback and re-arm the one-shot wait.
     if (entry->lpCompletionKey == IREE_ASYNC_IOCP_EVENT_SOURCE_COMPLETION_KEY) {
-      iree_async_iocp_event_source_dispatch(
-          proactor, (iree_async_event_source_t*)entry->lpOverlapped);
+      gqcs_status = iree_status_join(
+          gqcs_status,
+          iree_async_iocp_event_source_dispatch(
+              proactor, (iree_async_event_source_t*)entry->lpOverlapped));
       continue;
     }
 
@@ -2091,8 +2058,9 @@ static iree_status_t iree_async_proactor_iocp_poll(
                                                    &completed_count);
           break;
         case IREE_ASYNC_IOCP_CARRIER_EVENT_WAIT:
-          iree_async_proactor_iocp_complete_event_wait(
-              proactor, carrier, operation, &completed_count);
+          gqcs_status = iree_status_join(
+              gqcs_status, iree_async_proactor_iocp_complete_event_wait(
+                               proactor, carrier, operation, &completed_count));
           break;
         case IREE_ASYNC_IOCP_CARRIER_SOCKET_IO:
           iree_async_proactor_iocp_complete_socket_io(
@@ -2176,7 +2144,7 @@ static iree_status_t iree_async_proactor_iocp_poll(
   if (out_completed_count) {
     *out_completed_count = completed_count;
   }
-  IREE_TRACE_ZONE_END(z0);
+  IREE_TRACE_ZONE_END(z2);
   if (!iree_status_is_ok(gqcs_status)) {
     return gqcs_status;
   }
@@ -2363,6 +2331,12 @@ static iree_status_t iree_async_proactor_iocp_import_file(
                             "invalid file handle");
   }
 
+  // Allocate before the irreversible IOCP association. Import failure must not
+  // leave the caller's still-owned handle attached to this proactor.
+  iree_async_file_t* file = NULL;
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_allocator_malloc(allocator, sizeof(*file), (void**)&file));
+
   // Associate the file handle with the IOCP port. This is required for
   // overlapped ReadFile/WriteFile completions to flow to this port.
   HANDLE result = CreateIoCompletionPort(
@@ -2371,6 +2345,7 @@ static iree_status_t iree_async_proactor_iocp_import_file(
       /*NumberOfConcurrentThreads=*/0);
   if (result == NULL) {
     DWORD error = GetLastError();
+    iree_allocator_free(allocator, file);
     IREE_TRACE_ZONE_END(z0);
     return iree_make_status(iree_status_code_from_win32_error(error),
                             "CreateIoCompletionPort failed for file handle "
@@ -2378,10 +2353,7 @@ static iree_status_t iree_async_proactor_iocp_import_file(
                             (unsigned long)error);
   }
 
-  // Allocate and initialize the file structure.
-  iree_async_file_t* file = NULL;
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_allocator_malloc(allocator, sizeof(*file), (void**)&file));
+  // No fallible work remains after the native association.
   memset(file, 0, sizeof(*file));
 
   iree_atomic_ref_count_init(&file->ref_count);

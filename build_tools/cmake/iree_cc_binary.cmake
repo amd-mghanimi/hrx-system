@@ -104,12 +104,7 @@ function(iree_cc_binary)
       iree_generated_output_add_consumer("${_SOURCE}" "${_NAME}")
     endforeach()
   else()
-    set(_DUMMY_SRC "${CMAKE_CURRENT_BINARY_DIR}/${_NAME}_dummy.cc")
-    iree_make_empty_file("${_DUMMY_SRC}")
-    target_sources(${_NAME}
-      PRIVATE
-        ${_DUMMY_SRC}
-    )
+    iree_add_empty_object(${_NAME})
   endif()
   target_include_directories(${_NAME} SYSTEM
     PUBLIC
@@ -158,9 +153,14 @@ function(iree_cc_binary)
     PUBLIC
       ${_RULE_DEPS}
       ${IREE_DEFAULT_LINK_LIBRARIES}
+      ${IREE_DEFAULT_EXECUTABLE_LINK_LIBRARIES}
   )
   iree_add_data_dependencies(NAME ${_NAME} DATA ${_RULE_DATA}
     OUT_TARGET_DATA _DATA_TARGETS)
+  # Retain the declared link graph for final shared-library composition. The
+  # generated LINK_LIBRARIES also contains object and usage-only expressions.
+  set_property(TARGET ${_NAME} PROPERTY IREE_CC_DEPS "${_RULE_DEPS};${IREE_DEFAULT_LINK_LIBRARIES}")
+  set_property(TARGET ${_NAME} PROPERTY IREE_CC_LINKOPTS "${_RULE_LINKOPTS}")
   iree_target_sanitizer_suppressions("${_NAME}"
     DEPS ${_RULE_DEPS} ${_DATA_TARGETS})
 

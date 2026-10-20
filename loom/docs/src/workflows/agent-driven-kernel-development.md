@@ -5,13 +5,17 @@ workloads, compiler decisions, native artifacts, and physical measurements can
 all retain one experiment identity. An agent can therefore explore a large
 space without asking a benchmark number to stand in for understanding.
 
-The agent is not an oracle. Each edit is a bounded experiment whose expected
-compiler consequence is stated before compilation and whose winner is selected
-by matched physical evidence after correctness passes.
+Data reuse is the starting point. Optimization begins from a known-good
+oracle's emitted instruction mix, measured performance on the intended machine,
+and operand reuse policy. Each subsequent edit must have enough recoverable
+end-to-end cost to justify the experiment. Correctness bring-up and small wins
+over an inefficient baseline cannot establish that premise.
 
 ```text
 production witness
     -> semantic cut
+    -> oracle instructions, machine measurements, and data reuse policy
+    -> end-to-end opportunity and rejection gate
     -> checked source and workloads
     -> compiler hypothesis
     -> compiler and native evidence
@@ -49,9 +53,12 @@ independent numerical proof.
 
 Several workload buckets normally share the witness. Decode, small prefill,
 large prefill, non-multiple tails, and both sides of a routing or algorithm
-cliff expose different physical schedules. The first bucket keeps iteration
-cheap; the others prevent a locally winning schedule from becoming a one-shape
-artifact.
+cliff expose different physical schedules. The first optimization bucket
+preserves the competitive oracle's reuse and execution regime. Cheap correctness
+cases remain useful, but they cannot select the performance workload: a
+512-token prefill does not qualify a design whose competitive reference reuses
+weights across 16K tokens. That difference belongs in the initial traffic,
+capacity, occupancy, and latency analysis.
 
 ## Keep three evidence classes independent
 
@@ -89,6 +96,108 @@ required only by a generic library ABI identify possible contractions. The cut
 remains stable while its implementation changes. It may use one fused kernel,
 several kernels, or a command program; physical dispatch count is not part of
 the mathematical contract.
+
+## Establish the oracle and data reuse policy
+
+The performance oracle establishes three prerequisites before kernel,
+pipeline, or schedule optimization starts:
+
+| Prerequisite | Evidence retained |
+| --- | --- |
+| Actual instruction mix | Pinned source and executable; native disassembly of the selected path; compute instructions, loads and stores, independent accumulators, overlap, conversions, emulation, spills, and idle issue slots. |
+| Performance on the machine | Controlled execution on the intended measurement machine with matched semantic endpoints, numerical requirements, workload, timing boundary, device allocation, and warm or cold policy. Published numbers identify a target but do not replace this measurement. |
+| Data reuse policy | M/N/K geometry, paneling, batch and prefill chunk sizes, resident operands and lifetimes, buffering, multicast or cache sharing, traversal, and dispatch boundaries; useful work and external traffic over the complete request. |
+
+Traffic accounting includes repeated operand reads, padding, packing, temporary
+outputs, and host or cross-device work. Logical transfers and static instruction
+counts remain distinct from measured external traffic and executed cycles.
+Reuse policy spans the whole machine and request: a locally efficient tile can
+still reload each panel for every worker or launch.
+
+All three prerequisites are required. Missing artifacts, unqualified machine
+measurements, or an unknown reuse policy keep the work in evidence gathering
+and baseline reproduction. The first performance candidate adopts the oracle's
+demonstrated strategy or an evidence-backed alternative with the same workload
+and numerical requirements. A naive numerical reference establishes truth; it
+does not establish an architecture worth optimizing.
+
+## Admit only optimization that can close the gap
+
+Before each tuning task, the experiment record states the absolute end-to-end
+target, current oracle gap, measured contribution of the proposed target cost,
+maximum recoverable benefit, and rejection condition. The bound accounts for
+overlap and the critical path rather than summing unrelated dispatch medians.
+A resource change may qualify by removing a measured capacity constraint that
+prevents the competitive schedule; a tidier resource report is insufficient.
+
+For example, suppose a complete request takes 90 ms against a 7 ms oracle. A
+2 ms bookkeeping cost has an optimistic elimination bound of 88 ms for the
+request. Polishing that cost cannot repair the execution shape. The work
+returns to the algorithm, data reuse, and full-device schedule. Repeated 1% or
+2% improvements over 90 ms do not satisfy the admission gate.
+
+An unexplained large gap stops local tuning. The current design must have a
+credible path to the external target before another local optimization begins.
+When evidence invalidates that path, the design decision and dependent work
+reopen; accumulated implementation and passing tests confer no authority to
+continue. Correctness fixes remain correctness work, with no implied
+performance qualification.
+
+## Bound the performance regime before hill climbing
+
+Tile and provider searches become useful only after the experiment has a
+performance envelope. For throughput, the existing oracle is a proven
+achievable floor and a relevant compute or memory roofline is an upper bound.
+For latency, the inequalities reverse: the roofline supplies an idealized lower
+bound and the oracle is a concrete point to beat. State the unit and direction
+instead of saying only that a candidate is “between the bounds.”
+
+The envelope is measured for the exact semantic cut and physical request shape:
+
+| Bound or probe | Question answered |
+| --- | --- |
+| Selected oracle | What has already been achieved for this production boundary? |
+| Traffic accounting plus sustainable bandwidth | What latency floor follows from the minimum required bytes under this access pattern? |
+| Operation accounting plus relevant compute throughput | What latency floor follows from the required matrix, dot, vector, or scalar work? |
+| Load-only proxy | How much of the current schedule remains when the same addresses and publication path perform only enough observable arithmetic to keep the traffic live? |
+| Cache-resident proxy | How much remains when the same compute and schedule reuse operands from the intended cache level instead of streaming them from the production memory tier? |
+| Dispatch-only or publication proxy | How much command-processor, launch, synchronization, and output-publication cost exists without the main body? |
+
+The proxy's native artifact must prove that it retained the mechanism it claims
+to isolate. A load-only source that the compiler deletes, a cache-resident case
+whose working set spills from cache, or an empty kernel that omits the real
+publication barrier establishes no bound. Hardware counters and measured
+sustainable rates are stronger than a device data-sheet peak whose instruction
+type, request form, or residency differs from the kernel.
+
+These probes classify the regime before broad search. If a load-only proxy is
+already near the candidate, compute rewrites cannot recover much. If the
+cache-resident proxy remains slow, blaming external bandwidth is unsupported.
+If the candidate is far behind the known oracle and far from every relevant
+roofline, local tuning stops until the structural gap is explained. The
+execution shape must pass the opportunity gate before tile search resumes.
+
+Within an admitted optimization, resource and issue changes have two coupled
+phases:
+
+1. **Create headroom.** Shorten live ranges, reduce VGPR or LDS allocation,
+   remove spills and unnecessary barriers, or reduce unavoidable traffic until
+   another residency or issue regime becomes possible.
+2. **Fill the headroom.** Add useful independent work, accumulator chains,
+   coalesced vector requests, staged prefetch, or producer-consumer overlap so
+   the newly available waves and issue slots hide latency.
+
+The first phase can make a report look cleaner while making the kernel slower.
+The second can raise pressure while improving throughput. Register count, LDS,
+and occupancy are therefore transition constraints, not standalone objectives.
+
+Many schedule changes form one causal bundle. Changing subgroup size to match
+an oracle also changes lane identity, fragment ownership, collective scope,
+workgroup topology, LDS exchange, and the amount of independent work per wave.
+A mechanical subgroup edit tests an incomplete schedule. The candidate record
+names the complete bundle required to enter the intended regime and uses
+selected partial variants or ablations to expose interactions. “One variable”
+means one causal hypothesis, not necessarily one textual edit.
 
 ## Keep cheap falsifiers beside the source
 
@@ -136,60 +245,53 @@ mathematical result. The focused [correctness](test-correctness.md) and
 [benchmark](benchmark.md) workflows describe case selection, external
 libraries, samples, and sanitizer policy.
 
-## Bound the performance regime before hill climbing
+## Workgroup traversal is a schedule
 
-Tile and provider searches become useful only after the experiment has a
-performance envelope. For throughput, the existing oracle is a proven
-achievable floor and a relevant compute or memory roofline is an upper bound.
-For latency, the inequalities reverse: the roofline supplies an idealized lower
-bound and the oracle is a concrete point to beat. State the unit and direction
-instead of saying only that a candidate is “between the bounds.”
+Memory locality has three distinct scales:
 
-The envelope is measured for the exact semantic cut and physical request shape:
+| Scale | Authoring choice | Evidence |
+| --- | --- | --- |
+| Within a subgroup | Lane-to-address mapping and packet width | Coalescing, unique bytes, gaps, and native requests |
+| Within a workgroup | Tile shape, shared staging, and fragment ownership | Operand reuse, LDS, registers, barriers, and overlap |
+| Between workgroups | Mapping physical workgroup IDs to logical tiles | Repeated operand footprints, cache behavior, and measured traversal variants |
 
-| Bound or probe | Question answered |
-| --- | --- |
-| Selected oracle | What has already been achieved for this production boundary? |
-| Traffic accounting plus sustainable bandwidth | What latency floor follows from the minimum required bytes under this access pattern? |
-| Operation accounting plus relevant compute throughput | What latency floor follows from the required matrix, dot, vector, or scalar work? |
-| Load-only proxy | How much of the current schedule remains when the same addresses and publication path perform only enough observable arithmetic to keep the traffic live? |
-| Cache-resident proxy | How much remains when the same compute and schedule reuse operands from the intended cache level instead of streaming them from the production memory tier? |
-| Dispatch-only or publication proxy | How much command-processor, launch, synchronization, and output-publication cost exists without the main body? |
+A kernel can be coalesced, spill-free, and well pipelined while repeatedly
+evicting the data another workgroup needs next. Changing traversal can improve
+cache reuse without reducing FLOPs, issued load bytes, or workgroup count.
+Aggregate instruction and memory counts therefore cannot rule out a traversal
+win. Higher register use from coordinate arithmetic can also be worthwhile.
 
-The proxy's native artifact must prove that it retained the mechanism it claims
-to isolate. A load-only source that the compiler deletes, a cache-resident case
-whose working set spills from cache, or an empty kernel that omits the real
-publication barrier establishes no bound. Hardware counters and measured
-sustainable rates are stronger than a device data-sheet peak whose instruction
-type, request form, or residency differs from the kernel.
+For independent `BM x BN` output tiles of `C[M,N] = A[M,K] B[N,K]^T`, a group
+of `G` row tiles can sweep output columns while revisiting an input panel of
+roughly `min(G * BM, M) * K * sizeof(A)` bytes. The opposite orientation favors
+reuse of B. These panel sizes generate hypotheses; other operands, concurrent
+work, cache associativity, and actual hardware dispatch order still affect
+residency. Mapping nearby physical IDs to nearby logical tiles does not
+guarantee their execution order and provides no synchronization contract.
 
-These probes classify the regime before broad search. If a load-only proxy is
-already near the candidate, compute rewrites cannot recover much. If the
-cache-resident proxy remains slow, blaming external bandwidth is unsupported.
-If the candidate is below the known oracle and far from every relevant
-roofline, it is probably missing a structural schedule rather than a locally
-better integer tile.
+A bounded experiment compares traversal orientations or group sizes while
+holding tile geometry, arithmetic, bindings, and launch count fixed. The
+mapping remains a bijection, including a final incomplete group and partial
+matrix tiles; padded workgroups and duplicate stores would change the
+experiment. Exact output comparisons suit an arithmetic-preserving mapping.
+Numerical changes retain their separate oracle/error-envelope decision.
 
-Optimization then has two coupled phases:
+Native evidence checks the coordinate transform, tails, register pressure,
+spills, and unchanged inner work. Controlled interleaved timing establishes
+the benefit at each production shape; the complete consumer then establishes
+whether it survives real cache competition. A winning group size on one shape
+does not select it for every shape or target. The [benchmark reuse policy](benchmark.md#control-data-reuse)
+distinguishes hot-input experiments from streaming and integrated workloads.
 
-1. **Create headroom.** Shorten live ranges, reduce VGPR or LDS allocation,
-   remove spills and unnecessary barriers, or reduce unavoidable traffic until
-   another residency or issue regime becomes possible.
-2. **Fill the headroom.** Add useful independent work, accumulator chains,
-   coalesced vector requests, staged prefetch, or producer-consumer overlap so
-   the newly available waves and issue slots hide latency.
+Current subgroup-access reports describe lane geometry, not inter-workgroup
+reuse distance or physical cache misses. A traversal experiment can therefore
+be warranted even when `loom-compile-report suggest` reports no finding and
+issued-byte counts are unchanged.
 
-The first phase can make a report look cleaner while making the kernel slower.
-The second can raise pressure while improving throughput. Register count, LDS,
-and occupancy are therefore transition constraints, not standalone objectives.
-
-Many schedule changes form one causal bundle. Changing subgroup size to match
-an oracle also changes lane identity, fragment ownership, collective scope,
-workgroup topology, LDS exchange, and the amount of independent work per wave.
-A mechanical subgroup edit tests an incomplete schedule. The candidate record
-names the complete bundle required to enter the intended regime and uses
-selected partial variants or ablations to expose interactions. “One variable”
-means one causal hypothesis, not necessarily one textual edit.
+The [Triton matrix-multiplication tutorial](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html#l2-cache-optimizations)
+demonstrates grouped program ordering, and [CUTLASS's efficient GEMM guide](https://github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/efficient_gemm.md)
+discusses threadblock rasterization. They supply algorithmic candidates; their
+chosen parameters and cache-level assumptions are not portable tuning results.
 
 ## Search laterally across dispatch boundaries
 
@@ -228,11 +330,14 @@ An agent's source edit begins with a compact experiment record:
 
 ```text
 Production boundary:  the exact witness and shape
+Oracle evidence:      pinned native artifact, machine result, and reuse policy
+Absolute target:      end-to-end target, current result, and oracle gap
+Opportunity bound:    measured target cost and maximum recoverable benefit
 Independent variable: the one source, config, provider, compiler, or target change
 Hypothesis:           the physical mechanism expected to improve
 Compiler consequence: the report or native delta that must appear first
 Correctness gates:    local, sanitized, captured, and integrated checks
-Discriminator:        the cheapest production shape that executes the new body
+Discriminator:        a production shape preserving the intended reuse regime
 Success and stop:     thresholds selected before observing the result
 ```
 
@@ -286,21 +391,26 @@ shows runtime pitches through selections and loop recurrences.
 
 Streaming reductions, guarded ragged rows, and packed dequantization/dot loops
 are useful candidates. Ordinary loads and pure operations may contain nested
-`scf.if` and `scf.for`; each structured operation stays intact in its stage.
-Read-containing units require every capture, guard, inner bound, and initial
-value to be independent of the outer carried state. Pure inner loops may stay
-in the consumer and use that state. The
+`scf.if` and `scf.for`; each structured operation normally stays intact in its
+stage. A top-level conditional with reads in one branch may instead keep the
+natural guarded recurrence in source: the condition and independent read
+closure become a guarded producer, while the carried update remains the
+consumer. Read addresses and guards must still be independent of outer carried
+state. Pure inner loops may stay in the consumer and use that state. The
 [checked guarded-row motif](tune-loop-schedules.md#keep-guards-and-inner-loops-in-the-source)
-demonstrates independent inner and outer policies. Fixed-bound tiles can also
+demonstrates independent inner and outer policies, while the
+[cooperative paged-attention motif](tune-loop-schedules.md#pipeline-cooperative-paged-attention)
+shows guarded K/V loads, a subgroup reduction, and online-softmax state in one
+authored conditional. Fixed-bound tiles can also
 read global inputs ahead of ordered workgroup stores, shared reads, and
 workgroup-memory barriers. A requested full linear inner unroll can expose
 mixed load/store units; read-only reductions and independent schedules retain
 their existing shape. The [workgroup-staging example](tune-loop-schedules.md#read-ahead-across-workgroup-staging)
 covers publication and reuse of one shared allocation. Global or unknown
 writes, global barriers, source-order fences, `scf.while`, and explicit async
-groups have different scheduling requirements.
-Fixed-bound tiles can pipeline reads into a subgroup or workgroup reduction;
-the collective stays in a memory-pure consumer, separate from guarded loads.
+groups have different scheduling requirements. Fixed-bound tiles can pipeline
+reads into a subgroup or workgroup reduction; the collective stays in the
+memory-pure consumer even when it shares a guarded source branch with the loads.
 See the [participation contract](../guide/functions-and-control.md#pipeline-reads-ahead-of-ordered-computation)
 when the tile contains collectives.
 Unannotated loops receive no read-ahead transformation.
@@ -321,7 +431,8 @@ branch-payload copies. Check whether those blocks are steady backedges before
 changing the schedule. An explicit larger unroll factor with
 `schedule(recurrence)` can expose register reuse that carries pending loads
 across the backedge; confirm the native moves and wait counts as well as the
-source schedule.
+source schedule. The cited outstanding count is block-local; zero can still
+represent a required residual counter-epoch or control-flow hazard.
 
 The [loop-tuning walkthrough](tune-loop-schedules.md) supplies a vector-row motif
 with per-instance policies, checked row-sum and packed-dot experiment harnesses,
@@ -369,6 +480,19 @@ order without memory waits. Compare native waits and register use along with
 AMDGPU and x86 enforce the contract, while intermediate representations reject
 it when they cannot guarantee final instruction order.
 
+Repeated shared-memory reuse has a separate authoring choice. A full
+`kernel.barrier` keeps rendezvous at one source point; a matching
+`kernel.barrier.arrive` and `kernel.barrier.wait` pair can expose independent
+private work after the last shared read and before the next overwrite. Keep the
+portable algorithm behind one template contract, select a split provider only
+for targets with a native realization, and retain a complete-barrier fallback.
+The [checked split-barrier workflow](tune-loop-schedules.md#overlap-private-work-with-shared-tile-release)
+shows the source shape. In `loom-compile-report show`, confirm the complete,
+arrive, and wait plan keys and their dynamic counts. In native output, confirm
+read completion, signal, useful work, wait, and overwrite in that order, then
+compare registers, spills, residency, code size, and measured runtime with the
+full-barrier control.
+
 ## Ask the compiler before asking the GPU
 
 The baseline and candidate compile under the same root, workload,
@@ -403,7 +527,13 @@ Residency is constrained by all tied resources, not whichever scalar limiter
 appears first. Use the per-resource explanation and joint next-tier requirements
 before prioritizing a VGPR or LDS reduction. Unknown counts or launch geometry
 are missing evidence, not an assurance that a resource is nonlimiting. A higher
-modeled tier earns a benchmark experiment rather than proving a performance win.
+modeled tier supplies a hypothesis; the opportunity gate determines whether it
+earns a benchmark experiment.
+
+`suggest` exposes static compiler findings. Their order and confidence do not
+rank runtime cost or optimization value: the tool receives no external oracle
+measurement or reuse policy. Its `guidance` keeps that boundary visible in both
+text and JSON. The oracle and opportunity gates precede acting on any finding.
 
 An empty suggestion list means only that registered target diagnostics found
 no issue. It does not prove that the schedule matches an external oracle or
@@ -421,17 +551,18 @@ before retaining the rewritten form.
 When the expected delta is absent, the candidate returns to source or becomes
 a standalone compiler reproducer. Repeated physical timing cannot make a
 missing compiler mechanism appear. Detailed reports, source-to-Low rows, IR
-snapshots, and native disassembly enter only after `show`, `diff`, or `suggest`
-has narrowed the question. The [compile-report workflow](compile-reports.md)
+snapshots, and deeper candidate disassembly follow the narrowed question;
+the initial oracle instruction audit remains a prerequisite. The
+[compile-report workflow](compile-reports.md)
 owns those evidence paths and the strict comparison identity.
 
 ## Earn physical measurement
 
-A candidate whose correctness and compiler gates pass receives one short pilot
-at the cheapest production shape that executes its changed static body. Wider
-shape sweeps and long locked runs are earned by entering the predeclared parity
-band, proving a substantial traffic reduction, or resolving a noisy boundary
-near the stop threshold.
+A candidate whose opportunity, correctness, and compiler gates pass receives
+one short pilot at a production shape that executes its changed static body
+and preserves the intended reuse regime. Wider shape sweeps and long locked
+runs are earned by entering the predeclared parity band, proving a substantial
+traffic reduction, or resolving a noisy boundary near the stop threshold.
 
 Two candidates in one module can run under an interleaved policy:
 
@@ -454,6 +585,17 @@ rows, and machine-ownership state. Rotating enough independent bindings to
 exceed the relevant cache prevents a small model slice from masquerading as a
 streaming workload. A deliberate cache-hot experiment is valid when it is
 labeled and compared with the same reuse contract.
+
+The candidates may be `check.scenario` benchmarks when a recipe, rather than a
+flat case parameter list, describes the production workload. Select one
+concrete trial with `--sample=N`. The runner gives separately named candidate
+scenarios the baseline entropy namespace, verifies their complete input rings,
+and rejects the experiment unless types, scalar values, buffer contents, views,
+and alias relationships match exactly. It rematerializes that deterministic
+ring outside each timed window so mutable inputs begin from the same state. This
+allows two different target products to retain the same generated ragged,
+routed, or indirected workload without copying fixtures or trusting parallel
+recipes to stay equivalent.
 
 The score's time domain is part of its identity:
 
@@ -478,9 +620,12 @@ Several recurring observations suggest experiments but cannot select a winner:
 
 | Observation | Missing mechanism |
 | --- | --- |
+| Each iteration improves our baseline by 1% or 2%. | The remaining absolute oracle gap and recoverable-cost bound decide whether the execution shape merits more tuning. |
+| Short prefill is adequate for iteration. | The competitive reference may depend on much larger weight-reuse cohorts; a different chunk size can change the entire execution regime. |
 | The reference uses wave64. | Wave ownership, lane cohorts, physical workgroup shape, collectives, fragment layout, LDS exchange, and independent work still need derivation. |
 | The candidate uses fewer registers or has higher modeled occupancy. | Occupancy is a constraint and cliff detector; latency hiding and useful independent work may have fallen with pressure. |
 | The native listing is shorter. | Dynamic requests, waits, dependencies, and cache behavior determine whether removed instructions were limiting. |
+| Tile geometry and issued bytes are unchanged. | A different workgroup traversal can change cross-workgroup cache reuse and physical memory traffic. |
 | One lane issues wider packets. | Neighboring lanes may now touch distant addresses and destroy wave-level coalescing. |
 | The source resembles the oracle's loop. | Address forms, clauses, allocation, waits, and the runtime-selected dispatch can still differ. |
 | A profiler reports precise timestamps. | Precision does not establish replay identity or low perturbation. |
@@ -567,15 +712,17 @@ the numerical, compiler, and physical gates around the answer.
 
 For each candidate:
 
-1. Name the production semantic cut, workload, oracle, and relevant rooflines.
-2. Use mechanism probes to classify the current compute, memory, or control
-   regime.
+1. Name the production semantic cut and workload; establish the oracle's native
+   instructions, controlled machine performance, and complete data reuse policy.
+2. Bound the current compute, memory, and control costs against the oracle and
+   relevant rooflines. Admit tuning only with a credible end-to-end opportunity
+   and rejection condition; otherwise reopen the execution shape.
 3. Run in-source correctness and captured boundary checks.
 4. State one causal hypothesis, including every coupled change required to
    enter the intended regime.
 5. Compile and inspect `show`, `suggest`, strict `diff`, and the expected native
    delta.
-6. Follow evidence into detailed IR or ISA only when the mechanism differs.
+6. Follow candidate evidence into detailed IR or ISA when the mechanism differs.
 7. Benchmark one discriminating production shape.
 8. Search across dispatch boundaries and sweep realistic shapes, tails, and a
    second target only after the pilot wins.

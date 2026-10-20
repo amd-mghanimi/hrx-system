@@ -95,6 +95,7 @@ class CiTest(unittest.TestCase):
                 "Test",
                 ("//suite/...",),
                 test_tag_filters=("focus",),
+                test_language_filters=("-py",),
                 available_resources=("device.a",),
             )
             cmake_step = ci.cmake_test_step(
@@ -110,6 +111,7 @@ class CiTest(unittest.TestCase):
         self.assertEqual(
             bazel_filter, "--test_tag_filters=focus,-iree-run-requirement=device.b"
         )
+        self.assertIn("--test_lang_filters=-py", bazel_step.argv)
         ctest_filter = cmake_step.argv[cmake_step.argv.index("-LE") + 1]
         self.assertIsNotNone(re.search(ctest_filter, "iree-run-requirement=device.b"))
         self.assertIsNotNone(re.search(ctest_filter, "manual"))
@@ -138,6 +140,104 @@ class CiTest(unittest.TestCase):
                     ci.bazel_test_step(
                         "Test", ("//suite:test",), bazel_options=(option,)
                     )
+
+            for option in ("--test_lang_filters", "--test_lang_filters=-py"):
+                with self.assertRaisesRegex(ValueError, "Use test_language_filters"):
+                    ci.bazel_test_step(
+                        "Test", ("//suite:test",), bazel_options=(option,)
+                    )
+
+    def test_bazel_test_builds_only_selected_test_rules(self):
+        test_step = ci.bazel_test_step("Test", ("//suite/...",))
+        build_step = ci.bazel_build_step("Build", ("//suite/...",))
+
+        self.assertIn("--build_tests_only", test_step.argv)
+        self.assertNotIn("--build_tests_only", build_step.argv)
+
+    def test_platform_selection_applies_to_each_build_phase(self):
+        for selection, bazel_list, cmake_list in (
+            (None, "", ""),
+            ("0", "", ""),
+            ("1", "first,second", "first;second"),
+        ):
+            with self.subTest(selection=selection):
+                environment = (
+                    {}
+                    if selection is None
+                    else {"IREE_CI_PLATFORM_COVERAGE": selection}
+                )
+                with (
+                    mock.patch.dict(os.environ, environment, clear=True),
+                    mock.patch.object(
+                        ci_config, "OPTIONAL_IMAGE_CODECS", ("first", "second")
+                    ),
+                    mock.patch.object(ci_config, "OPTIONAL_AUDIO_CODECS", ("voice",)),
+                ):
+                    steps = (
+                        ci.bazel_configure_step(),
+                        ci.bazel_build_step("Build", ("//suite:target",)),
+                        ci.bazel_test_step("Test", ("//suite:target",)),
+                        ci.bazel_run_step("Run", "//suite:target"),
+                    )
+                    cmake_step = ci.cmake_configure_step("example")
+                for step in steps:
+                    for kind, codecs in (
+                        ("image", bazel_list),
+                        ("audio", "voice" if selection == "1" else ""),
+                    ):
+                        prefix = "--//loom/config/serve:" + kind + "_codecs="
+                        self.assertEqual(
+                            [arg for arg in step.argv if arg.startswith(prefix)],
+                            [prefix + codecs],
+                        )
+                self.assertIn(
+                    "-DLOOM_SERVE_IMAGE_CODECS=" + cmake_list, cmake_step.argv
+                )
+                self.assertIn(
+                    "-DLOOM_SERVE_AUDIO_CODECS="
+                    + ("voice" if selection == "1" else ""),
+                    cmake_step.argv,
+                )
+                self.assertEqual(
+                    shlex.split(cmake_step.command_line()), list(cmake_step.argv)
+                )
+
+    def test_platform_selection_owns_compile_coverage_build_steps(self):
+        step = ci.CiStep("Compile coverage", ("tool", "build"))
+        for selection, expected_steps in (("0", []), ("1", [step])):
+            with self.subTest(selection=selection):
+                with mock.patch.dict(
+                    os.environ,
+                    {"IREE_CI_PLATFORM_COVERAGE": selection},
+                    clear=True,
+                ):
+                    self.assertEqual(
+                        ci.platform_coverage_build_steps(step), expected_steps
+                    )
+
+    def test_codec_policy_precedes_explicit_job_overrides(self):
+        with mock.patch.object(ci, "codec_options", return_value=("--choice=default",)):
+            override = ("--choice=job",)
+            steps = (
+                ci.bazel_configure_step(extra_options=override),
+                ci.bazel_build_step(
+                    "Build", ("//suite:target",), bazel_options=override
+                ),
+                ci.bazel_test_step("Test", ("//suite:target",), bazel_options=override),
+                ci.bazel_run_step("Run", "//suite:target", bazel_options=override),
+                ci.cmake_configure_step("example", extra_options=override),
+            )
+        for step in steps:
+            self.assertLess(
+                step.argv.index("--choice=default"), step.argv.index("--choice=job")
+            )
+
+    def test_invalid_platform_selection_fails_loud(self):
+        with mock.patch.dict(os.environ, {"IREE_CI_PLATFORM_COVERAGE": "treu"}):
+            with self.assertRaisesRegex(
+                ValueError, "IREE_CI_PLATFORM_COVERAGE must be 0 or 1"
+            ):
+                ci.bazel_configure_step()
 
     def test_audit_survives_step_options_and_dry_run_has_no_subprocesses(self):
         step = ci.bazel_test_step("Test", ("//suite:test",))
@@ -274,7 +374,7 @@ class CiTest(unittest.TestCase):
         self.assertIsNotNone(match)
         return match.group("body")
 
-    def test_cpu_dry_run_exposes_copyable_commands(self):
+    def test_cpu_dry_run_exposes_copyable_test_closure(self):
         args = ci.parse_arguments(
             [
                 "iree-bazel-cpu",
@@ -298,7 +398,7 @@ class CiTest(unittest.TestCase):
 
         text = output.getvalue()
         self.assertIn("dev.py bazel configure", text)
-        self.assertIn("dev.py bazel build ", text)
+        self.assertNotIn("dev.py bazel build ", text)
         self.assertIn("dev.py bazel test ", text)
         self.assertIn(" -- //runtime/...", text)
         self.assertIn("-//runtime/src/iree/hal/drivers/amdgpu/...", text)
@@ -308,7 +408,7 @@ class CiTest(unittest.TestCase):
             text,
         )
 
-    def test_bazel_profiles_are_named_for_each_build_and_test_phase(self):
+    def test_bazel_profiles_are_named_for_each_selected_phase(self):
         profile_dir = Path("/tmp/iree-bazel-profiles")
         resolved_profile_dir = profile_dir.resolve()
         args = ci.parse_arguments(
@@ -321,20 +421,116 @@ class CiTest(unittest.TestCase):
             ]
         )
 
-        steps = ci.steps_from_args(args)
+        for selection, expected_names in (
+            ("0", ("test-iree.profile.gz",)),
+            ("1", ("build-iree.profile.gz", "test-iree.profile.gz")),
+        ):
+            with self.subTest(selection=selection):
+                with mock.patch.dict(
+                    os.environ,
+                    {"IREE_CI_PLATFORM_COVERAGE": selection},
+                    clear=True,
+                ):
+                    steps = ci.steps_from_args(args)
+                self.assertEqual(
+                    [
+                        arg
+                        for step in steps
+                        for arg in step.argv
+                        if arg.startswith("--profile=")
+                    ],
+                    [
+                        f"--profile={resolved_profile_dir / name}"
+                        for name in expected_names
+                    ],
+                )
 
-        self.assertEqual(
-            [
-                arg
-                for step in steps
-                for arg in step.argv
-                if arg.startswith("--profile=")
-            ],
-            [
-                f"--profile={resolved_profile_dir / 'build-iree.profile.gz'}",
-                f"--profile={resolved_profile_dir / 'test-iree.profile.gz'}",
-            ],
+    def test_bazel_test_results_capture_only_test_phases(self):
+        result_dir = Path("/tmp/iree-bazel-test-results").resolve()
+        steps = [
+            ci.bazel_build_step("Build example", ("//example:all",)),
+            ci.bazel_test_step("Test example", ("//example:all",)),
+        ]
+        args = ci.parse_arguments(
+            ["iree-bazel-cpu", "--bazel-test-results-dir", str(result_dir)]
         )
+
+        with mock.patch.object(ci, "_steps_from_args", return_value=steps):
+            planned = ci.steps_from_args(args)
+
+        self.assertEqual(planned[0], steps[0])
+        event_path = result_dir / ".events" / "test-example.json"
+        self.assertIn(f"--build_event_json_file={event_path}", planned[1].argv)
+        self.assertEqual(
+            planned[1].test_results,
+            ci.bazel_test_results.BazelTestResultsCapture(
+                build_event_path=event_path,
+                output_dir=result_dir / "test-example",
+            ),
+        )
+
+    def test_repeated_test_phases_preserve_each_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result_dir = root / "results"
+            ci.bazel_test_results.prepare_output_directory(result_dir)
+            source = root / "testlogs" / "example" / "test.xml"
+            source.parent.mkdir(parents=True)
+            steps = ci.add_bazel_test_results(
+                [
+                    ci.bazel_test_step("First", ("//example:test",)),
+                    ci.bazel_test_step("Second", ("//example:test",)),
+                ],
+                result_dir,
+            )
+            event = {
+                "testResult": {
+                    "testActionOutput": [{"name": "test.xml", "uri": source.as_uri()}]
+                }
+            }
+            for step, payload in zip(steps, ("first result", "second result")):
+                source.write_text(payload)
+                capture = step.test_results
+                capture.build_event_path.write_text(json.dumps(event) + "\n")
+                self.assertEqual(
+                    ci.bazel_test_results.stage(
+                        capture.build_event_path, capture.output_dir
+                    ),
+                    1,
+                )
+            self.assertEqual(
+                sorted(path.read_text() for path in result_dir.rglob("test.xml")),
+                ["first result", "second result"],
+            )
+
+    def test_native_gpu_ci_requires_explicit_windows_target(self):
+        with mock.patch.object(ci.sys, "platform", "win32"):
+            args = ci.parse_arguments(["iree-bazel-amdgpu-native"])
+            with self.assertRaisesRegex(ValueError, "exact --amdgpu-target"):
+                ci.steps_from_args(args)
+        with mock.patch.object(ci.sys, "platform", "linux"):
+            args = ci.parse_arguments(
+                ["iree-bazel-amdgpu-native", "--amdgpu-target", "gfx1201"]
+            )
+            with self.assertRaisesRegex(ValueError, "requires Windows"):
+                ci.steps_from_args(args)
+
+    def test_native_gpu_ci_forwards_target_override_and_sanitizer(self):
+        args = ci.parse_arguments(
+            [
+                "iree-bazel-amdgpu-native-asan",
+                "--amdgpu-target",
+                "gfx1201",
+                "--target",
+                "//example:custom",
+            ]
+        )
+        with (
+            mock.patch.object(ci.sys, "platform", "win32"),
+            mock.patch.object(ci, "amdgpu_windows_steps", return_value=[]) as plan,
+        ):
+            ci.steps_from_args(args)
+        plan.assert_called_once_with(("//example:custom",), "gfx1201", "asan")
 
     def test_bazel_profile_names_must_be_unique(self):
         duplicate_steps = [
@@ -347,15 +543,17 @@ class CiTest(unittest.TestCase):
 
     def test_non_bazel_commands_reject_bazel_profile_directory(self):
         for command in ("iree-cmake-cpu", "iree-importers-tilelang"):
-            with self.subTest(command=command):
-                args = ci.parse_arguments(
-                    [command, "--bazel-profile-dir", "/tmp/profiles"]
-                )
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "--bazel-profile-dir is only supported for Bazel CI commands",
-                ):
-                    ci.steps_from_args(args)
+            for option, path in (
+                ("--bazel-profile-dir", "/tmp/profiles"),
+                ("--bazel-test-results-dir", "/tmp/results"),
+            ):
+                with self.subTest(command=command, option=option):
+                    args = ci.parse_arguments([command, option, path])
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"{option} is only supported for Bazel CI commands",
+                    ):
+                        ci.steps_from_args(args)
 
     def test_main_creates_bazel_profile_directory_only_when_executing(self):
         with tempfile.TemporaryDirectory() as temporary_dir:
@@ -374,15 +572,27 @@ class CiTest(unittest.TestCase):
                 self.assertEqual(ci.main(argv), 0)
                 self.assertTrue(profile_dir.is_dir())
 
-    def test_bazel_default_targets_include_loom(self):
+    def test_main_creates_fresh_bazel_test_result_directory(self):
+        with tempfile.TemporaryDirectory() as temporary_dir:
+            result_dir = Path(temporary_dir) / "results"
+            argv = [
+                "iree-bazel-cpu",
+                "--bazel-test-results-dir",
+                str(result_dir),
+            ]
+            with mock.patch.object(ci, "run_steps", return_value=0):
+                self.assertEqual(ci.main([*argv, "--dry-run"]), 0)
+                self.assertFalse(result_dir.exists())
+                self.assertEqual(ci.main(argv), 0)
+                self.assertTrue((result_dir / ".events").is_dir())
+
+    def test_bazel_default_test_targets_include_loom(self):
         args = ci.parse_arguments(["iree-bazel-cpu"])
 
         steps = ci.steps_from_args(args)
-        build_step = next(step for step in steps if step.name == "Build IREE")
         test_step = next(step for step in steps if step.name == "Test IREE")
 
-        self.assertIn("//runtime/...", build_step.argv)
-        self.assertIn("//loom/...", build_step.argv)
+        self.assertFalse(any("bazel build" in step.command_line() for step in steps))
         self.assertIn("//runtime/...", test_step.argv)
         self.assertIn("//loom/...", test_step.argv)
 
@@ -441,7 +651,10 @@ class CiTest(unittest.TestCase):
 
         with mock.patch.dict(
             ci.os.environ,
-            {"HRX_ROCM_ROOT": "/tmp/rocm-root"},
+            {
+                "HRX_ROCM_ROOT": "/tmp/rocm-root",
+                "IREE_CI_PLATFORM_COVERAGE": "1",
+            },
             clear=True,
         ):
             steps = ci.steps_from_args(args)
@@ -453,9 +666,9 @@ class CiTest(unittest.TestCase):
                 "Build repository",
                 "Build AMDGPU device toolchain smoke",
                 "Test repository",
-                "Test lock-free Bazel launch",
                 "Run dynamic library environment smoke",
                 "Run executable alias smoke",
+                "Test shared Loom tools",
             ],
         )
         configure_step = steps[0]
@@ -474,21 +687,46 @@ class CiTest(unittest.TestCase):
             integration_test_step.argv,
         )
         self.assertEqual(
-            steps[5].argv[-1],
+            steps[4].argv[-1],
             ci_config.BAZEL_REPOSITORY_INTEGRATION_DYNAMIC_LIBRARY_TARGET,
         )
         self.assertEqual(
-            steps[6].argv[-3:],
+            steps[5].argv[-3:],
             (
                 ci_config.BAZEL_REPOSITORY_INTEGRATION_ALIAS_TARGET,
                 "--",
                 "--help",
             ),
         )
-        self.assertEqual(
-            steps[4].argv[-1],
-            "build_tools/devtools/bazel_launcher_integration_test.py",
+        self.assertIn("--//loom/config:shared_tools", steps[6].argv)
+        self.assertIn("//loom/src/loom/tools/loom-opt:execution_test", steps[6].argv)
+        self.assertIn("//loom/src/loom/tools/loom-format:execution_test", steps[6].argv)
+        self.assertIn("//loom/src/loom/tools/loom-link:execution_test", steps[6].argv)
+        self.assertIn(
+            "//loom/src/loom/import/cxx/tooling:execution_test", steps[6].argv
         )
+        self.assertIn("//loom/src/loom/tooling/target/cpu/serve:all", steps[6].argv)
+        for step in steps[:6]:
+            self.assertNotIn("--//loom/config:shared_tools", step.argv)
+
+    def test_bazel_repository_integration_skips_ordinary_repository_build(self):
+        args = ci.parse_arguments(["iree-bazel-repository-integration"])
+
+        with mock.patch.dict(
+            ci.os.environ,
+            {
+                "HRX_ROCM_ROOT": "/tmp/rocm-root",
+                "IREE_CI_PLATFORM_COVERAGE": "0",
+            },
+            clear=True,
+        ):
+            steps = ci.steps_from_args(args)
+
+        self.assertNotIn("Build repository", [step.name for step in steps])
+        self.assertIn(
+            "Build AMDGPU device toolchain smoke", [step.name for step in steps]
+        )
+        self.assertIn("Test repository", [step.name for step in steps])
 
     def test_bazel_repository_integration_requires_rocm_device_tools(self):
         args = ci.parse_arguments(["iree-bazel-repository-integration"])
@@ -507,6 +745,12 @@ class CiTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(ValueError, "repository-wide"):
+            ci.steps_from_args(args)
+
+    def test_python_test_exclusion_rejects_non_repository_commands(self):
+        args = ci.parse_arguments(["iree-bazel-cpu", "--exclude-python-tests"])
+
+        with self.assertRaisesRegex(ValueError, "repository-integration"):
             ci.steps_from_args(args)
 
     def test_cmake_repository_build_covers_supported_graph_with_prebuilts(self):
@@ -624,6 +868,31 @@ class CiTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "only supported for AMDGPU"):
             ci.steps_from_args(args)
 
+    def test_amdgpu_loom_importers_are_forwarded_to_configuration(self):
+        args = ci.parse_arguments(
+            [
+                "iree-bazel-amdgpu",
+                "--loom-importer",
+                "cxx",
+                "--loom-importer",
+                "mlir",
+            ]
+        )
+
+        steps = ci.steps_from_args(args)
+
+        configure_step = next(step for step in steps if step.name == "Configure Bazel")
+        self.assertIn(
+            "--//loom/config/import:enable=cxx,mlir",
+            configure_step.argv,
+        )
+
+    def test_loom_importer_rejected_by_non_amdgpu_command(self):
+        args = ci.parse_arguments(["iree-bazel-cpu", "--loom-importer", "cxx"])
+
+        with self.assertRaisesRegex(ValueError, "only supported for AMDGPU Bazel"):
+            ci.steps_from_args(args)
+
     def test_amdgpu_bazel_tests_pin_libhsa_from_rocm_root(self):
         args = ci.parse_arguments(
             [
@@ -651,6 +920,47 @@ class CiTest(unittest.TestCase):
             + str(Path("/tmp/rocm-root") / relative_path),
             amdgpu_test.argv,
         )
+        for name in ci.AMDGPU_DEVICE_VISIBILITY_ENV_VARS:
+            self.assertFalse(
+                any(
+                    option.startswith(f"--test_env={name}=")
+                    for option in amdgpu_test.argv
+                )
+            )
+
+    def test_amdgpu_commands_preserve_device_visibility(self):
+        args = ci.parse_arguments(
+            [
+                "iree-bazel-amdgpu",
+                "--target",
+                "//runtime/...",
+            ]
+        )
+
+        device_visibility = {
+            "ROCR_VISIBLE_DEVICES": "GPU-00112233",
+            "HIP_VISIBLE_DEVICES": "0",
+            "CUDA_VISIBLE_DEVICES": "1",
+            "GPU_DEVICE_ORDINAL": "2",
+            "AMDF_CTS_GPU_NATIVE_IDENTITY": "linux_device:226:144",
+        }
+        with mock.patch.dict(ci.os.environ, device_visibility, clear=True):
+            steps = ci.steps_from_args(args)
+            cmake_steps = ci.steps_from_args(ci.parse_arguments(["iree-cmake-amdgpu"]))
+
+        amdgpu_test = next(step for step in steps if step.name == "Test IREE / AMDGPU")
+        for name in ci.AMDGPU_DEVICE_VISIBILITY_ENV_VARS:
+            self.assertIn(
+                f"--test_env={name}={device_visibility[name]}",
+                amdgpu_test.argv,
+            )
+        cmake_tests = [
+            step for step in cmake_steps if step.name.startswith("Test IREE CMake")
+        ]
+        self.assertEqual(len(cmake_tests), 2)
+        for step in cmake_tests:
+            for item in device_visibility.items():
+                self.assertIn(item, step.env)
 
     def test_amdgpu_bazel_device_toolchain_uses_fetched_rocm_root(self):
         args = ci.parse_arguments(["iree-bazel-amdgpu"])
@@ -690,7 +1000,7 @@ class CiTest(unittest.TestCase):
             amdgpu_test.argv,
         )
 
-    def test_amdgpu_loom_target_scope_builds_and_tests_loom(self):
+    def test_amdgpu_loom_target_scope_tests_loom(self):
         args = ci.parse_arguments(
             [
                 "iree-bazel-amdgpu",
@@ -700,11 +1010,9 @@ class CiTest(unittest.TestCase):
         )
 
         steps = ci.steps_from_args(args)
-        build_step = next(step for step in steps if step.name == "Build IREE / AMDGPU")
         test_step = next(step for step in steps if step.name == "Test IREE / AMDGPU")
 
-        self.assertIn("//loom/...", build_step.argv)
-        self.assertNotIn("//runtime/...", build_step.argv)
+        self.assertFalse(any("bazel build" in step.command_line() for step in steps))
         self.assertIn("//loom/...", test_step.argv)
         self.assertNotIn("//runtime/...", test_step.argv)
 
@@ -855,6 +1163,13 @@ class CiTest(unittest.TestCase):
         self.assertFalse(any("--config=ubsan" in line for line in command_lines))
         self.assertFalse(any("--config=tsan" in line for line in command_lines))
         self.assertFalse(any("--config=msan" in line for line in command_lines))
+        shared_step = next(
+            step for step in steps if step.name == "Test shared Loom tools"
+        )
+        self.assertIn("--//loom/config/import:enable=cxx", shared_step.argv)
+        self.assertIn(
+            "//loom/src/loom/tools/loom-import-cxx:execution_test", shared_step.argv
+        )
 
     def test_bazel_cpu_msan_command_builds_without_tests(self):
         args = ci.parse_arguments(
@@ -879,7 +1194,7 @@ class CiTest(unittest.TestCase):
         )
         self.assertFalse(any("bazel test" in line for line in command_lines))
 
-    def test_amdgpu_command_builds_scope_before_one_semantic_test_graph(self):
+    def test_amdgpu_command_tests_one_semantic_graph(self):
         args = ci.parse_arguments(
             [
                 "iree-bazel-amdgpu",
@@ -893,20 +1208,17 @@ class CiTest(unittest.TestCase):
         steps = ci.steps_from_args(args)
         self.assertEqual(
             [step.name for step in steps],
-            ["Configure Bazel", "Build IREE / AMDGPU", "Test IREE / AMDGPU"],
+            ["Configure Bazel", "Test IREE / AMDGPU"],
         )
-        build_step = steps[1]
-        test_step = steps[2]
+        test_step = steps[1]
         for target in ("//runtime/...", "//loom/..."):
-            self.assertIn(target, build_step.argv)
             self.assertIn(target, test_step.argv)
         for target in ci_config.AMDGPU_BAZEL_TARGET_EXCLUDES:
-            self.assertIn(target, build_step.argv)
             self.assertIn(target, test_step.argv)
         self.assertFalse(
             any(
                 arg.startswith("-//runtime/src/iree/hal/drivers/amdgpu")
-                for arg in build_step.argv + test_step.argv
+                for arg in test_step.argv
             )
         )
 
@@ -928,16 +1240,12 @@ class CiTest(unittest.TestCase):
             [step.name for step in steps],
             [
                 "Configure Bazel",
-                "Build IREE / AMDGPU / TSAN",
                 "Test IREE / AMDGPU / TSAN",
             ],
         )
-        tsan_build = steps[1]
-        tsan_test = steps[2]
-        self.assertIn("--config=tsan", tsan_build.argv)
+        tsan_test = steps[1]
         self.assertIn("--config=tsan", tsan_test.argv)
         for target in ("//runtime/...", "//loom/..."):
-            self.assertIn(target, tsan_build.argv)
             self.assertIn(target, tsan_test.argv)
         self.assertTrue(
             any(
@@ -980,27 +1288,24 @@ class CiTest(unittest.TestCase):
                     )
                 )
 
-    def test_vulkan_command_builds_scope_before_one_semantic_test_graph(self):
+    def test_vulkan_command_tests_one_semantic_graph(self):
         args = ci.parse_arguments(["iree-bazel-vulkan"])
 
         steps = ci.steps_from_args(args)
 
         self.assertEqual(
             [step.name for step in steps],
-            ["Configure Bazel", "Build IREE / Vulkan", "Test IREE / Vulkan"],
+            ["Configure Bazel", "Test IREE / Vulkan"],
         )
-        build_step = steps[1]
-        test_step = steps[2]
+        test_step = steps[1]
         for target in ("//runtime/...", "//loom/..."):
-            self.assertIn(target, build_step.argv)
             self.assertIn(target, test_step.argv)
         for target in ci_config.VULKAN_BAZEL_TARGET_EXCLUDES:
-            self.assertIn(target, build_step.argv)
             self.assertIn(target, test_step.argv)
         self.assertFalse(
             any(
                 arg.startswith("-//runtime/src/iree/hal/drivers/vulkan")
-                for arg in build_step.argv + test_step.argv
+                for arg in test_step.argv
             )
         )
         for xfail_target in ci_config.VULKAN_XFAIL_TARGETS:
@@ -1020,21 +1325,27 @@ class CiTest(unittest.TestCase):
                     )
 
     def test_vulkan_commands_preserve_explicit_mesa_device_selection(self):
-        with mock.patch.dict(os.environ, {"DRI_PRIME": "1!"}):
+        selection = {
+            "DRI_PRIME": "1!",
+            "AMDF_CTS_GPU_NATIVE_IDENTITY": "linux_device:226:144",
+        }
+        with mock.patch.dict(os.environ, selection):
             bazel_steps = ci.steps_from_args(ci.parse_arguments(["iree-bazel-vulkan"]))
             cmake_steps = ci.steps_from_args(ci.parse_arguments(["iree-cmake-vulkan"]))
 
         bazel_test_step = next(
             step for step in bazel_steps if step.name == "Test IREE / Vulkan"
         )
-        self.assertIn("--test_env=DRI_PRIME=1!", bazel_test_step.argv)
+        for name, value in selection.items():
+            self.assertIn(f"--test_env={name}={value}", bazel_test_step.argv)
 
         cmake_test_steps = [
             step for step in cmake_steps if step.name.startswith("Test IREE CMake")
         ]
         self.assertGreater(len(cmake_test_steps), 0)
         for step in cmake_test_steps:
-            self.assertIn(("DRI_PRIME", "1!"), step.env)
+            for item in selection.items():
+                self.assertIn(item, step.env)
 
     def test_bazel_gpu_command_surface_omits_nonexecuting_lanes(self):
         for command in (
@@ -1058,51 +1369,10 @@ class CiTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, ci.BAZEL_COMMANDS)
 
-    def test_bazel_cpu_sanitizer_workflow_is_split_by_configuration(self):
-        block = self.workflow_job_block(
-            ".github/workflows/ci_iree_bazel.yml", "linux_bazel_cpu"
-        )
-        self.assertIn("name: Linux / CPU", block)
-        for sanitizer in ("ASAN", "TSAN", "UBSAN"):
-            self.assertIn(f"name: Linux / CPU / {sanitizer}", block)
-            self.assertIn(f"command: iree-bazel-cpu-{sanitizer.lower()}", block)
-        self.assertNotIn("command: iree-bazel-cpu-msan", block)
-        self.assertNotIn("command: iree-bazel-cpu-sanitizers", block)
-
-    def test_cmake_workflow_uses_sanitizer_smoke(self):
-        block = self.workflow_job_block(
-            ".github/workflows/ci_iree_cmake.yml", "linux_cmake_cpu"
-        )
-        self.assertIn("name: Linux / CPU", block)
-        self.assertIn("name: Linux / CPU / Sanitizer Smoke", block)
-        self.assertIn("command: iree-cmake-sanitizer-smoke", block)
-        for sanitizer in ("asan", "msan", "tsan", "ubsan"):
-            self.assertNotIn(f"command: iree-cmake-cpu-{sanitizer}", block)
-        self.assertNotIn("command: iree-cmake-cpu-sanitizers", block)
-
-        for job_name in ("linux_cmake_amdgpu", "linux_cmake_vulkan"):
-            with self.subTest(job=job_name):
-                block = self.workflow_job_block(
-                    ".github/workflows/ci_iree_cmake.yml", job_name
-                )
-                self.assertNotIn("/ Sanitizers", block)
-                self.assertNotIn("-sanitizers", block)
-
-    def test_bazel_amdgpu_sanitizer_workflow_is_split_by_configuration(self):
-        block = self.workflow_job_block(
-            ".github/workflows/ci_iree_bazel.yml", "linux_bazel_amdgpu"
-        )
-        for sanitizer in ("ASAN", "TSAN", "UBSAN"):
-            self.assertIn(f"name: Linux / AMDGPU / gfx942 / {sanitizer}", block)
-            self.assertIn(f"command: iree-bazel-amdgpu-{sanitizer.lower()}", block)
-        self.assertNotIn("/ Sanitizers", block)
-        self.assertNotIn("iree-bazel-amdgpu-msan", block)
-        self.assertNotIn("iree-bazel-amdgpu-sanitizers", block)
-
     def test_amdgpu_container_jobs_initialize_git_home(self):
         for path, job_name in (
-            (".github/workflows/ci_iree_bazel.yml", "linux_bazel_amdgpu"),
-            (".github/workflows/ci_iree_cmake.yml", "linux_cmake_amdgpu"),
+            (".github/workflows/ci_iree.yml", "bazel_linux"),
+            (".github/workflows/ci_iree.yml", "cmake_linux"),
             (
                 ".github/workflows/test_core_linux_gpu_source.yml",
                 "test_core_linux_gpu_source",
@@ -1118,19 +1388,28 @@ class CiTest(unittest.TestCase):
                     block.index(mkdir_command), block.index(git_config_command)
                 )
 
-    def test_bazel_vulkan_workflow_has_no_nonexecuting_sanitizer_lane(self):
-        block = self.workflow_job_block(
-            ".github/workflows/ci_iree_bazel.yml", "linux_bazel_vulkan"
-        )
-        self.assertIn("name: Linux / Vulkan", block)
-        self.assertIn(
-            "python3 build_tools/devtools/ci.py iree-bazel-vulkan",
-            block,
-        )
-        self.assertNotIn("matrix.", block)
-        self.assertNotIn("strategy:", block)
-        self.assertNotIn("/ Sanitizers", block)
-        self.assertNotRegex(block, r"iree-bazel-vulkan-(asan|msan|tsan|ubsan)")
+    def test_amdgpu_container_jobs_preserve_runner_device_selection(self):
+        for path, job_name in (
+            (".github/workflows/ci_iree.yml", "bazel_linux"),
+            (".github/workflows/ci_iree.yml", "cmake_linux"),
+            (".github/workflows/ci_libhrx.yml", "cmake_linux_gfx942"),
+            (
+                ".github/workflows/test_core_linux_gpu_source.yml",
+                "test_core_linux_gpu_source",
+            ),
+        ):
+            with self.subTest(path=path, job_name=job_name):
+                block = self.workflow_job_block(path, job_name)
+                self.assertIn(
+                    "--env-file /etc/podinfo/gha-gpu-isolation-settings", block
+                )
+                for variable_name in (
+                    "ROCR_VISIBLE_DEVICES",
+                    "HIP_VISIBLE_DEVICES",
+                    "CUDA_VISIBLE_DEVICES",
+                    "GPU_DEVICE_ORDINAL",
+                ):
+                    self.assertNotIn(f"{variable_name}:", block)
 
     def test_fetch_toolchain_uses_owned_ci_entry_point(self):
         script = Path(".github/scripts/fetch_rocm_toolchain.sh").read_text()
@@ -1222,291 +1501,6 @@ fi
                 str(versioned_rocm_root / "lib/libhsa-runtime64.so.1"),
             )
 
-    def test_core_gpu_workflow_routes_exact_gpu_labels(self):
-        gfx942_block = self.workflow_job_block(
-            ".github/workflows/ci_core_linux.yml", "gpu_linux_gfx942"
-        )
-        self.assertIn("name: Linux / CMake / GPU gfx942", gfx942_block)
-        self.assertIn(
-            "uses: ./.github/workflows/test_core_linux_gpu_source.yml",
-            gfx942_block,
-        )
-        self.assertIn(
-            "runner_labels: '[\"linux-gfx942-1gpu-ccs-csp-ossci-rocm\"]'",
-            gfx942_block,
-        )
-        self.assertIn("amdgpu_targets: gfx942", gfx942_block)
-        self.assertIn("expect_stream_value_waits: false", gfx942_block)
-        self.assertNotIn("artifact_run_id", gfx942_block)
-        self.assertNotIn("gfx1201", gfx942_block)
-
-        gfx1201_block = self.workflow_job_block(
-            ".github/workflows/ci_core_linux.yml", "gpu_linux_gfx1201"
-        )
-        self.assertIn("name: Linux / CMake / GPU gfx1201", gfx1201_block)
-        self.assertIn(
-            "uses: ./.github/workflows/test_core_linux_gpu.yml", gfx1201_block
-        )
-        self.assertIn(
-            'runner_labels: \'["self-hosted", "Linux", "X64", "gpu_navi4x"]\'',
-            gfx1201_block,
-        )
-        self.assertIn("artifact_run_id: ${{ github.run_id }}", gfx1201_block)
-        self.assertIn("expect_stream_value_waits: true", gfx1201_block)
-
-        summary_block = self.workflow_job_block(
-            ".github/workflows/ci_core_linux.yml", "summary"
-        )
-        for job in ("cmake_linux", "gpu_linux_gfx942", "gpu_linux_gfx1201"):
-            self.assertIn(f"- {job}", summary_block)
-            self.assertIn("needs." + job + ".result", summary_block)
-
-        for path, job_name in (
-            (".github/workflows/test_core_linux_gpu.yml", "test_core_linux_gpu"),
-            (
-                ".github/workflows/test_core_linux_gpu_source.yml",
-                "test_core_linux_gpu_source",
-            ),
-        ):
-            with self.subTest(path=path):
-                reusable_workflow = Path(path).read_text()
-                # Both workflows declare runner_labels once per trigger, so
-                # asserting one match would let either declaration satisfy the
-                # test for the other.
-                declarations = re.findall(
-                    r"^ +runner_labels:$", reusable_workflow, re.MULTILINE
-                )
-                required_declarations = re.findall(
-                    r"runner_labels:\n\s+type: string\n\s+description: "
-                    r'"JSON array of labels that must all match the GPU runner\."\n'
-                    r"\s+required: true",
-                    reusable_workflow,
-                )
-                self.assertEqual(len(declarations), 2)
-                self.assertEqual(len(required_declarations), len(declarations))
-                reusable_block = self.workflow_job_block(path, job_name)
-                self.assertRegex(
-                    reusable_block,
-                    r"(?m)^\s+runs-on: \$\{\{ fromJSON\(inputs\.runner_labels\) \}\}$",
-                )
-                self.assertIn("HRX_TEST_EXPECT_STREAM_VALUE_WAITS:", reusable_block)
-
-    def test_core_gpu_source_workflow_builds_instead_of_downloading(self):
-        block = self.workflow_job_block(
-            ".github/workflows/test_core_linux_gpu_source.yml",
-            "test_core_linux_gpu_source",
-        )
-
-        self.assertNotIn("actions/download-artifact", block)
-        self.assertNotIn("ci_core_linux.py extract-packages", block)
-        self.assertIn("bash .github/scripts/fetch_rocm_toolchain.sh", block)
-        self.assertIn('"${HRX_PYTHON}" build_tools/ci/ci_core_linux.py build', block)
-        self.assertIn('"${HRX_PYTHON}" build_tools/ci/ci_core_linux.py test', block)
-
-        # prepare_public_deps_root() synthesizes the runtime dependency overlay
-        # from the fetched ROCm root because no dependency package is unpacked.
-        self.assertIn('HRX_PREPARE_PUBLIC_DEPS: "true"', block)
-        self.assertIn('HRX_PACKAGE_SMOKE: "false"', block)
-        self.assertIn('HRX_TEST_GPU: "true"', block)
-        self.assertIn(
-            "HRX_CMAKE_OPTIONS: "
-            '"-DIREE_HAL_AMDGPU_TARGETS=${{ inputs.amdgpu_targets }}"',
-            block,
-        )
-
-    def test_core_windows_workflow_uses_generic_windows_runner(self):
-        build_block = self.workflow_job_block(
-            ".github/workflows/build_core_windows.yml", "build_core_windows"
-        )
-        self.assertIn("runs-on: azure-windows-scale-rocm", build_block)
-        self.assertIn(
-            "python build_tools/ci/ci_core_windows.py fetch-rocm", build_block
-        )
-        self.assertIn("python build_tools/ci/ci_core_windows.py build", build_block)
-        self.assertIn("python build_tools/ci/ci_core_windows.py test", build_block)
-        self.assertIn("python build_tools/ci/ci_core_windows.py package", build_block)
-        self.assertIn(
-            "python build_tools/ci/ci_core_windows.py extract-packages", build_block
-        )
-        self.assertIn(
-            "HRX_ROCM_ROOT: ${{ github.workspace }}/build/windows/${{ inputs.windows_toolchain }}/rocm-root",
-            build_block,
-        )
-        self.assertIn(
-            "HRX_DOWNLOAD_CACHE_DIR: ${{ github.workspace }}/build/windows/${{ inputs.windows_toolchain }}/downloads",
-            build_block,
-        )
-        self.assertIn(
-            "PIP_CACHE_DIR: ${{ github.workspace }}/build/windows/${{ inputs.windows_toolchain }}/caches/pip",
-            build_block,
-        )
-        self.assertIn('python -m venv "$relocated/python-venv"', build_block)
-        self.assertIn(
-            '$env:HRX_TEST_PYTHON = "$relocated/python-venv/Scripts/python.exe"',
-            build_block,
-        )
-        self.assertIn("--no-prepare-public-deps", build_block)
-        self.assertIn('Move-Item -LiteralPath "$env:HRX_BUILD_DIR"', build_block)
-        self.assertIn(
-            "hrx-public-windows-${{ inputs.windows_toolchain }}-x86_64", build_block
-        )
-        self.assertIn(
-            "hrx-public-deps-windows-${{ inputs.windows_toolchain }}-x86_64",
-            build_block,
-        )
-        self.assertIn(
-            "hrx-tests-windows-${{ inputs.windows_toolchain }}-x86_64", build_block
-        )
-        self.assertNotIn("windows-gfx1151-gpu-rocm", build_block)
-        self.assertNotIn("runtime-resource=amd-npu", build_block)
-
-        ci_block = self.workflow_job_block(
-            ".github/workflows/ci_core_windows.yml", "cmake_windows"
-        )
-        self.assertIn("name: Windows / CMake / ${{ matrix.toolchain }}", ci_block)
-        self.assertIn("variant: windows-msvc", ci_block)
-        self.assertIn("toolchain: msvc", ci_block)
-        self.assertRegex(
-            ci_block,
-            r"variant: windows-msvc\n\s+toolchain: msvc\n"
-            r"\s+assertions: false\n\s+run_tests: true\n"
-            r"\s+ctest_exclude_regex: \"\"\n\s+package: true",
-        )
-        self.assertIn("variant: windows-clang-cl", ci_block)
-        self.assertIn("toolchain: clang-cl", ci_block)
-        self.assertRegex(
-            ci_block,
-            r"variant: windows-clang-cl\n\s+toolchain: clang-cl\n"
-            r"\s+assertions: true\n\s+run_tests: true\n"
-            r"\s+ctest_exclude_regex: \"\"\n\s+package: false",
-        )
-        self.assertIn("windows_toolchain: ${{ matrix.toolchain }}", ci_block)
-        self.assertIn("uses: ./.github/workflows/build_core_windows.yml", ci_block)
-        self.assertIn('ctest_label_exclude_regex: "runtime-resource=|manual"', ci_block)
-
-    def test_iree_cmake_windows_workflow_separates_build_and_test_roles(self):
-        block = self.workflow_job_block(
-            ".github/workflows/ci_iree_cmake.yml", "windows_cmake"
-        )
-
-        self.assertIn("runs-on: azure-windows-scale-rocm", block)
-        self.assertRegex(
-            block,
-            r"name: Windows / Repository / MSVC Build\n"
-            r"\s+command: iree-cmake-repository-build\n"
-            r"\s+host_toolchain: msvc\n"
-            r"\s+fetch_rocm: false",
-        )
-        self.assertRegex(
-            block,
-            r"name: Windows / CPU\n"
-            r"\s+command: iree-cmake-cpu\n"
-            r"\s+host_toolchain: clang-cl\n"
-            r"\s+fetch_rocm: true",
-        )
-        self.assertIn("if: matrix.fetch_rocm", block)
-        self.assertIn("python build_tools/ci/ci_core_windows.py fetch-rocm", block)
-        self.assertNotRegex(
-            block,
-            r"ci/ci_core_windows\.py (build|test|package|extract-packages)",
-        )
-        self.assertNotIn("uses: ./.github/workflows/build_core_windows.yml", block)
-        self.assertIn("VsDevCmd.bat", block)
-        self.assertIn('if "${{ matrix.host_toolchain }}"=="msvc"', block)
-        self.assertIn("build_tools/devtools/ci.py ${{ matrix.command }}", block)
-
-    def test_iree_bazel_windows_workflow_is_enabled_and_separates_toolchains(self):
-        block = self.workflow_job_block(
-            ".github/workflows/ci_iree_bazel.yml", "windows_bazel"
-        )
-
-        self.assertIn("name: ${{ matrix.name }}", block)
-        self.assertRegex(
-            block,
-            r"name: Windows / Repository / clang-cl \+ ROCm\n"
-            r"\s+host_toolchain: clang-cl",
-        )
-        self.assertRegex(
-            block,
-            r"name: Windows / Repository / MSVC \+ ROCm\n"
-            r"\s+host_toolchain: msvc",
-        )
-        self.assertNotIn("if: ${{ false }}", block)
-        self.assertIn("runs-on: azure-windows-scale-rocm", block)
-        self.assertIn(
-            "BAZEL_LLVM: ${{ github.workspace }}\\build\\iree-bazel-windows\\rocm-root\\lib\\llvm",
-            block,
-        )
-        self.assertIn("python build_tools/ci/ci_core_windows.py fetch-rocm", block)
-        self.assertIn("python dev.py bazel setup --venv", block)
-        self.assertIn('Join-Path $env:SystemDrive "b"', block)
-        self.assertNotIn('Join-Path $env:RUNNER_TEMP "bazel"', block)
-        self.assertIn("startup --output_user_root=$bazelOutputRoot", block)
-        self.assertNotIn("output_user_root=C:", block)
-        self.assertIn('if ("${{ matrix.host_toolchain }}" -eq "msvc")', block)
-        self.assertIn('"build --config=windows-msvc"', block)
-        self.assertIn("VsDevCmd.bat", block)
-        self.assertIn('if "${{ matrix.host_toolchain }}"=="msvc"', block)
-        self.assertIn('set "CC=cl.exe"', block)
-        self.assertIn('set "CXX=cl.exe"', block)
-        self.assertIn('set "AR=lib.exe"', block)
-        self.assertIn('set "CC=%BAZEL_LLVM%\\bin\\clang-cl.exe"', block)
-        self.assertIn('set "CXX=%BAZEL_LLVM%\\bin\\clang-cl.exe"', block)
-        self.assertIn('set "AR=%BAZEL_LLVM%\\bin\\llvm-lib.exe"', block)
-        self.assertIn(
-            "build_tools/devtools/ci.py iree-bazel-repository-integration",
-            block,
-        )
-        self.assertIn("--amdgpu-target gfx11-generic", block)
-        self.assertIn(
-            "bazel-profiles-iree-bazel-repository-integration-${{ matrix.host_toolchain }}",
-            block,
-        )
-
-    def test_iree_workflows_do_not_trigger_on_libhrx_only_paths(self):
-        for path in (
-            ".github/workflows/ci_iree_bazel.yml",
-            ".github/workflows/ci_iree_cmake.yml",
-        ):
-            with self.subTest(path=path):
-                text = Path(path).read_text()
-                self.assertIn('- "runtime/**"', text)
-                self.assertIn('- "loom/**"', text)
-                self.assertNotIn('- "libhrx/**"', text)
-
-    def test_importer_workflow_covers_loom_changes_and_uses_locked_cache_key(self):
-        text = Path(".github/workflows/ci_importers.yml").read_text()
-
-        self.assertIn("name: CI Importers", text)
-        self.assertIn('- "requirements-importers-*.lock.txt"', text)
-        self.assertIn('- "requirements-importers-*.in"', text)
-        self.assertIn('- "build_tools/devtools/**"', text)
-        self.assertIn('- "loom/**"', text)
-        self.assertNotIn('- "loom/config/**"', text)
-        self.assertNotIn('- "loom/py/loom/importers/**"', text)
-        self.assertNotIn('- "runtime/**"', text)
-        self.assertNotIn('- "libhrx/**"', text)
-
-        block = self.workflow_job_block(
-            ".github/workflows/ci_importers.yml", "linux_importer"
-        )
-        self.assertIn("profile: tilelang", block)
-        self.assertIn("command: iree-importers-tilelang", block)
-        self.assertIn("lock_file: requirements-importers-tilelang.lock.txt", block)
-        self.assertIn("RUNNER_OS", block)
-        self.assertIn("RUNNER_ARCH", block)
-        self.assertIn("IMPORTER_LOCK_FILE", block)
-        self.assertIn("requirements-dev.lock.txt", block)
-        self.assertIn("requirements-analysis.lock.txt", block)
-        self.assertIn("actions/cache@", block)
-        self.assertIn("PIP_CACHE_DIR", block)
-        self.assertIn("python3 dev.py bazel setup --venv", block)
-        self.assertIn("python3 dev.py cmake setup --venv", block)
-        self.assertIn(
-            'python3 build_tools/devtools/ci.py "${IMPORTER_COMMAND}" --keep-going',
-            block,
-        )
-
     def test_loom_docs_workflow_reviews_every_change_and_deploys_only_main(self):
         text = Path(".github/workflows/docs.yml").read_text()
         build_block = self.workflow_job_block(
@@ -1589,6 +1583,7 @@ fi
             )
         )
         self.assertTrue(any("-DIREE_ENABLE_UBSAN=ON" in line for line in command_lines))
+        self.assertFalse(any(" cmake build " in line for line in command_lines))
         test_steps = [step for step in steps if step.name.startswith("Test IREE")]
         self.assertTrue(
             any(
@@ -1625,6 +1620,38 @@ fi
                 for step in test_steps
             )
         )
+
+    def test_cmake_cpu_qualifies_static_then_shared_in_the_same_tree(self):
+        steps = ci.steps_from_args(ci.parse_arguments(["iree-cmake-cpu"]))
+        configure_index = next(
+            index
+            for index, step in enumerate(steps)
+            if step.name == "Configure shared Loom tools"
+        )
+        self.assertTrue(
+            any(step.name == "Test IREE CMake" for step in steps[:configure_index])
+        )
+        for step in steps[:configure_index]:
+            self.assertNotIn("-DLOOM_LINK_SHARED_TOOLS=ON", step.argv)
+        for step in steps[configure_index:]:
+            self.assertTrue(self.uses_cmake_build_dir(step, "iree-cmake-cpu"))
+        self.assertNotIn("--fresh", steps[configure_index].argv)
+        self.assertIn("-DLOOM_LINK_SHARED_TOOLS=ON", steps[configure_index].argv)
+        self.assertIn("-DLOOM_IMPORT_CXX=ON", steps[configure_index].argv)
+        self.assertIn("loom-import-cxx", steps[configure_index + 1].argv)
+        self.assertIn("loom-format", steps[configure_index + 1].argv)
+        self.assertIn("loom-link", steps[configure_index + 1].argv)
+        self.assertIn(
+            "loom_import_cxx_tooling_execution_test_test_deps",
+            steps[configure_index + 1].argv,
+        )
+        self.assertIn("loom-link", steps[-1].argv[steps[-1].argv.index("-R") + 1])
+        self.assertIn("loom-format", steps[-1].argv[steps[-1].argv.index("-R") + 1])
+        self.assertIn(
+            "loom_tooling_target_cpu_serve_loom-serve-test-tool",
+            steps[configure_index + 1].argv,
+        )
+        self.assertEqual(steps[-1].name, "Test shared Loom tools")
 
     def test_cmake_cpu_sanitizers_command_runs_each_configuration(self):
         args = ci.parse_arguments(["iree-cmake-cpu-sanitizers"])
@@ -1690,7 +1717,7 @@ fi
             )
         )
 
-    def test_cmake_amdgpu_command_scopes_build_and_tests_to_amdgpu(self):
+    def test_cmake_amdgpu_command_scopes_tests_to_amdgpu(self):
         args = ci.parse_arguments(["iree-cmake-amdgpu", "--amdgpu-target", "gfx1150"])
 
         steps = ci.steps_from_args(args)
@@ -1724,13 +1751,7 @@ fi
             )
         )
         build_steps = [step for step in steps if step.name.startswith("Build IREE")]
-        self.assertFalse(
-            any(
-                "loom_tools_iree-test-loom_amdgpu_execution_test" in arg
-                for step in build_steps
-                for arg in step.argv
-            )
-        )
+        self.assertEqual(build_steps, [])
         self.assertTrue(
             any(
                 ci_config.AMDGPU_CTEST_RESOURCE_LABEL_REGEX in step.argv
@@ -1776,7 +1797,7 @@ fi
             clear=True,
         ):
             steps = ci.steps_from_args(args)
-            expected_env = ci.amdgpu_libhsa_test_env()
+            expected_env = ci.amdgpu_test_env()
 
         test_steps = [
             step for step in steps if step.name.startswith("Test IREE CMake AMDGPU")
@@ -1796,6 +1817,7 @@ fi
         self.assertTrue(
             any("-DIREE_BUILD_BENCHMARKS=OFF" in line for line in command_lines)
         )
+        self.assertTrue(any(" cmake build " in line for line in command_lines))
         self.assertFalse(any("Test IREE CMake AMDGPU" in step.name for step in steps))
 
     def test_cmake_loom_amdgpu_command_runs_compile_coverage_without_driver(self):
@@ -1824,7 +1846,7 @@ fi
         for regex in ci_config.LOOM_AMDGPU_CMAKE_COMPILE_CTEST_REGEXES:
             self.assertTrue(any(regex in arg for arg in test_step.argv))
 
-    def test_cmake_vulkan_command_scopes_build_and_tests_to_vulkan(self):
+    def test_cmake_vulkan_command_scopes_tests_to_vulkan(self):
         args = ci.parse_arguments(["iree-cmake-vulkan"])
 
         steps = ci.steps_from_args(args)
@@ -1837,14 +1859,7 @@ fi
             any("-DIREE_HAL_DRIVER_AMDGPU=OFF" in line for line in command_lines)
         )
         build_steps = [step for step in steps if step.name.startswith("Build IREE")]
-        for target in ci_config.VULKAN_CMAKE_DRIVER_TARGETS:
-            self.assertTrue(any(target in step.argv for step in build_steps))
-        for target in (
-            "loom/src/loom/tools/iree-test-loom/all",
-            "loom/binding/c/example/all",
-            "loom/binding/c/test/target/spirv/all",
-        ):
-            self.assertFalse(any(target in step.argv for step in build_steps))
+        self.assertEqual(build_steps, [])
         package_test = next(
             step
             for step in steps

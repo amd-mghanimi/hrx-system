@@ -153,7 +153,7 @@ func.def @count_mismatch(%x: index) -> (index, index) {
 // ====
 
 func.def @predicate_value_must_be_assert_operand(%x: index, %y: index) -> (index) {
-  // ERROR@+1: STRUCTURE/032 "predicates[0].arg[1]" "an asserted value operand"
+  // ERROR@+1: STRUCTURE/032 "predicates[0].arg[1]" "an operation operand observed by the predicate"
   %checked = sanitizer.assert.value %x [lt(%x, %y)] : index
   func.return %checked : index
 }
@@ -161,7 +161,7 @@ func.def @predicate_value_must_be_assert_operand(%x: index, %y: index) -> (index
 // ====
 
 func.def @integer_predicate_rejects_float(%x: f32) -> (f32) {
-  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "f32" "integer, index, or offset value"
+  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "f32" "integer, index, or offset scalar"
   %checked = sanitizer.assert.value %x [ge(%x, 0)] : f32
   func.return %checked : f32
 }
@@ -169,15 +169,22 @@ func.def @integer_predicate_rejects_float(%x: f32) -> (f32) {
 // ====
 
 func.def @float_predicate_rejects_integer(%x: index) -> (index) {
-  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "index" "floating-point value"
+  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "index" "floating-point scalar"
   %checked = sanitizer.assert.value %x [finite(%x)] : index
   func.return %checked : index
 }
 
 // ====
 
+func.def @float_equality_predicates_are_executable(%x: f32, %y: f32) {
+  %checked_x, %checked_y = sanitizer.assert.value %x, %y [eq(%x, %y), ne(%x, 0)] : f32, f32
+  func.return
+}
+
+// ====
+
 func.def @predicate_subject_must_be_assert_operand(%x: index) -> (index) {
-  // ERROR@+1: STRUCTURE/032 "predicates[0].arg[0]" "an asserted value operand"
+  // ERROR@+1: STRUCTURE/032 "predicates[0].arg[0]" "an operation operand observed by the predicate"
   %checked = sanitizer.assert.value %x [lt(0, %x)] : index
   func.return %checked : index
 }
@@ -210,7 +217,7 @@ func.def @offset_predicate_literal_must_be_nonnegative(%x: offset) -> (offset) {
 
 func.def @multiple_requires_literal_divisor(%x: i32, %divisor: i32) {
   // ERROR@+1: STRUCTURE/032 "predicates[0].arg[1]" "positive literal divisor"
-  %checked_x, %checked_divisor = sanitizer.assert.value %x, %divisor [mul(%x, %divisor)] : i32, i32
+  %checked_x, %checked_divisor = sanitizer.assert.value %x, %divisor [multiple_of(%x, %divisor)] : i32, i32
   func.return
 }
 
@@ -218,7 +225,7 @@ func.def @multiple_requires_literal_divisor(%x: i32, %divisor: i32) {
 
 func.def @multiple_requires_positive_divisor(%x: i32) -> (i32) {
   // ERROR@+1: STRUCTURE/014 "predicates[0].arg[1]" "0" "positive divisor"
-  %checked = sanitizer.assert.value %x [mul(%x, 0)] : i32
+  %checked = sanitizer.assert.value %x [multiple_of(%x, 0)] : i32
   func.return %checked : i32
 }
 
@@ -240,7 +247,7 @@ func.def @dynamic_relations_and_bounds_are_executable(%x: i32, %lo: i32, %hi: i3
 // ====
 
 func.def @op_predicate_value_must_be_assert_operand(%x: index, %y: index) {
-  // ERROR@+1: STRUCTURE/032 "predicates[0].arg[1]" "an assertion operand"
+  // ERROR@+1: STRUCTURE/032 "predicates[0].arg[1]" "an operation operand observed by the predicate"
   sanitizer.assert.op %x [lt(%x, %y)] : index
   func.return
 }
@@ -248,7 +255,7 @@ func.def @op_predicate_value_must_be_assert_operand(%x: index, %y: index) {
 // ====
 
 func.def @op_integer_predicate_rejects_float(%x: f32) {
-  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "f32" "integer, index, or offset value"
+  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "f32" "integer, index, or offset scalar"
   sanitizer.assert.op %x [ge(%x, 0)] : f32
   func.return
 }
@@ -256,7 +263,7 @@ func.def @op_integer_predicate_rejects_float(%x: f32) {
 // ====
 
 func.def @op_float_predicate_rejects_integer(%x: index) {
-  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "index" "floating-point value"
+  // ERROR@+1: TYPE/003 "predicates[0].arg[0]" "index" "floating-point scalar"
   sanitizer.assert.op %x [finite(%x)] : index
   func.return
 }
@@ -265,7 +272,7 @@ func.def @op_float_predicate_rejects_integer(%x: index) {
 
 func.def @op_multiple_requires_positive_divisor(%x: i32) {
   // ERROR@+1: STRUCTURE/014 "predicates[0].arg[1]" "-4" "positive divisor"
-  sanitizer.assert.op %x [mul(%x, -4)] : i32
+  sanitizer.assert.op %x [multiple_of(%x, -4)] : i32
   func.return
 }
 

@@ -62,6 +62,27 @@ struct loom_target_profile_t {
   loom_target_fact_field_set_t explicit_fields;
 };
 
+// Destroys one allocator-owned target profile.
+typedef void (*loom_target_profile_destroy_fn_t)(loom_target_profile_t* profile,
+                                                 iree_allocator_t allocator);
+
+// A selected target profile and its optional ownership callback.
+//
+// A NULL destroy callback denotes immutable process-lifetime storage. Otherwise
+// the selection owns |profile| until it is released or transferred to another
+// owner with the same allocator.
+typedef struct loom_target_profile_selection_t {
+  // Selected immutable target-family profile, or NULL when no profile matched.
+  loom_target_profile_t* profile;
+
+  // Optional callback used to release |profile|.
+  loom_target_profile_destroy_fn_t destroy;
+} loom_target_profile_selection_t;
+
+// Releases an owned profile selection and resets it to zero.
+void loom_target_profile_selection_release(
+    loom_target_profile_selection_t* selection, iree_allocator_t allocator);
+
 // Returns whether |profile| has the expected target-family representation.
 static inline bool loom_target_profile_has_type(
     const loom_target_profile_t* profile,

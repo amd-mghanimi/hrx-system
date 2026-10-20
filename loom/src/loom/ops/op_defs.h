@@ -27,6 +27,7 @@
 #include "loom/ir/types.h"
 #include "loom/ops/attribute_accessors.h"
 #include "loom/ops/format.h"
+#include "loom/ops/use_list.h"
 #include "loom/util/bstring.h"
 
 // Annotation for parameters that may be NULL or zero. No-op macro that
@@ -105,6 +106,19 @@ static inline loom_named_value_slice_t loom_make_named_value_slice(
   };
   return slice;
 }
+
+// Shared instance flags for fixed-width integer operations whose authored
+// result must not wrap. Scalar and vector declarations use the same semantic
+// values so generic analyses do not depend on either dialect's generated
+// header.
+typedef uint8_t loom_integer_overflow_flags_t;
+
+enum loom_integer_overflow_flag_bits_e {
+  // The mathematical result fits the signed result type.
+  LOOM_INTEGER_OVERFLOW_FLAG_NSW = 1u << 0,
+  // The mathematical result fits the unsigned result type.
+  LOOM_INTEGER_OVERFLOW_FLAG_NUW = 1u << 1,
+};
 
 //===----------------------------------------------------------------------===//
 // Semantic constraints
@@ -241,15 +255,15 @@ enum loom_constraint_relation_e {
   // ConditionForwardedTypesMatchBlockArgs.
   LOOM_RELATION_CONDITION_FORWARD_MATCH,
 
-  // A region's terminator (yield) operand count matches the element
-  // count of a variadic value field. Args: (region field, variadic
-  // value field). Used by YieldCountMatchesResults.
+  // A region's terminator (yield) operand count matches a value field or
+  // region entry tuple. Args: (region field, target value or region field).
+  // Used by YieldCountMatches.
   LOOM_RELATION_YIELD_COUNT,
 
-  // Each region terminator (yield) operand's property matches the
-  // corresponding element of a variadic value field at the same
-  // position. Args: (region field, variadic value field). Used by
-  // YieldTypesMatchResults and YieldElementTypesMatchResults.
+  // Each region terminator (yield) operand's property matches the corresponding
+  // element of a value field or region entry tuple. Args: (region field,
+  // target value or region field). Used by YieldTypesMatch and
+  // YieldElementTypesMatch.
   LOOM_RELATION_YIELD_MATCH,
 
   // Two variadic value fields agree position-by-position. The two
@@ -417,6 +431,9 @@ enum loom_operand_flag_bits_e {
   LOOM_OPERAND_OPTIONAL = 1u << 1,
   LOOM_OPERAND_READS = 1u << 2,
   LOOM_OPERAND_WRITES = 1u << 3,
+  // Observes buffer/view metadata without accessing its payload or exposing
+  // a usable reference/address through a result or side effect.
+  LOOM_OPERAND_OBSERVES_REFERENCE = 1u << 4,
 };
 typedef uint8_t loom_operand_flags_t;
 
@@ -467,6 +484,9 @@ static inline loom_operand_role_mask_t loom_operand_role_mask_bit(
 enum loom_result_flag_bits_e {
   LOOM_RESULT_VARIADIC = 1u << 0,
   LOOM_RESULT_ALLOCATES = 1u << 1,
+  // Result values describe a locally scoped operation signature and are not
+  // visible as SSA definitions after the operation.
+  LOOM_RESULT_SIGNATURE_ONLY = 1u << 2,
 };
 typedef uint8_t loom_result_flags_t;
 
@@ -515,8 +535,9 @@ typedef struct loom_operand_descriptor_t {
   loom_operand_role_t role;
 } loom_operand_descriptor_t;
 
-static_assert(sizeof(loom_operand_descriptor_t) == 16,
-              "loom_operand_descriptor_t must be 16 bytes");
+static_assert(sizeof(loom_operand_descriptor_t) ==
+                  (IREE_PTR_SIZE == 8 ? 16 : 12),
+              "loom_operand_descriptor_t must remain compact");
 
 // Per-result metadata in the op vtable.
 typedef struct loom_result_descriptor_t {
@@ -530,12 +551,17 @@ typedef struct loom_result_descriptor_t {
   loom_result_ownership_effect_t ownership_effect;
   // Source operand field index for aliasing result effects.
   uint8_t ownership_source_operand_index;
+  // One-based operand field index from which this buffer/view derives storage
+  // identity, or zero when not declared. Coordinates and carriers may differ;
+  // this relation neither transfers ownership nor performs a memory access.
+  uint8_t reference_source_operand_index_plus_one;
 } loom_result_descriptor_t;
 
-static_assert(sizeof(loom_result_descriptor_t) == 16,
-              "loom_result_descriptor_t must be 16 bytes");
+static_assert(sizeof(loom_result_descriptor_t) ==
+                  (IREE_PTR_SIZE == 8 ? 16 : 12),
+              "loom_result_descriptor_t must remain compact");
 
-typedef uint16_t loom_symbol_definition_flags_t;
+typedef uint8_t loom_symbol_definition_flags_t;
 
 enum loom_symbol_definition_flag_bits_e {
   // Symbol op declares a contract that a provider definition may satisfy.
@@ -556,6 +582,8 @@ typedef struct loom_symbol_definition_descriptor_t {
   uint8_t name_attr_index;
   // Attribute index plus one for optional public visibility, or 0 if absent.
   uint8_t visibility_attr_index_plus_one;
+  // Attribute index plus one for optional definition linkage, or 0 if absent.
+  uint8_t linkage_attr_index_plus_one;
   // Attribute index plus one for the optional retain marker, or 0 if absent.
   uint8_t retain_attr_index_plus_one;
   // Attribute index plus one for an enum product carrier, or 0 if this symbol
@@ -580,8 +608,9 @@ typedef struct loom_symbol_definition_descriptor_t {
   const loom_symbol_fact_domain_t* fact_domain;
 } loom_symbol_definition_descriptor_t;
 
-static_assert(sizeof(loom_symbol_definition_descriptor_t) == 32,
-              "loom_symbol_definition_descriptor_t must be 32 bytes");
+static_assert(sizeof(loom_symbol_definition_descriptor_t) ==
+                  (IREE_PTR_SIZE == 8 ? 32 : 24),
+              "loom_symbol_definition_descriptor_t must remain compact");
 
 static inline iree_string_view_t loom_symbol_definition_descriptor_name(
     const loom_symbol_definition_descriptor_t* descriptor) {
@@ -619,6 +648,13 @@ static inline uint8_t loom_symbol_definition_visibility_attr_index(
     const loom_symbol_definition_descriptor_t* descriptor) {
   return descriptor && descriptor->visibility_attr_index_plus_one
              ? descriptor->visibility_attr_index_plus_one - 1
+             : LOOM_ATTR_INDEX_NONE;
+}
+
+static inline uint8_t loom_symbol_definition_linkage_attr_index(
+    const loom_symbol_definition_descriptor_t* descriptor) {
+  return descriptor && descriptor->linkage_attr_index_plus_one
+             ? descriptor->linkage_attr_index_plus_one - 1
              : LOOM_ATTR_INDEX_NONE;
 }
 
@@ -687,10 +723,23 @@ static inline loom_symbol_kind_t loom_symbol_bytecode_kind(
   return symbol->definition ? symbol->definition->bytecode_kind : symbol->kind;
 }
 
+// Dynamic execution of a region within one invocation of its owning op.
+enum loom_region_execution_e {
+  // Executes zero or one time, then may continue after the owning op.
+  LOOM_REGION_EXECUTION_ONCE = 0,
+  // May repeat without reentering the owning op. Each entry recreates local
+  // definitions, but captured values retain their original dynamic instance.
+  LOOM_REGION_EXECUTION_REPEATED = 1,
+  // Executing the region never continues after its owning op. For example,
+  // the body of a conditional kernel exit returns from the kernel instead.
+  LOOM_REGION_EXECUTION_EXIT = 2,
+};
+typedef uint8_t loom_region_execution_t;
+
 // Per-region metadata in the op vtable.
 typedef struct loom_region_descriptor_t {
-  // Required explicit terminator kind, or LOOM_OP_KIND_UNKNOWN if any
-  // terminator kind is allowed.
+  // Required explicit terminator kind. The implicit kind below is also valid.
+  // LOOM_OP_KIND_UNKNOWN allows any terminator kind.
   loom_op_kind_t terminator;
 
   // Op kind that the text parser may synthesize and the text printer may elide,
@@ -700,10 +749,29 @@ typedef struct loom_region_descriptor_t {
 
   // Region structure flags such as single-block enforcement.
   loom_region_flags_t flags;
+
+  // Recurrence and continuation contract supplied by the region declaration
+  // or its owning control-flow interface.
+  loom_region_execution_t execution;
+  // Target-symbol attribute index plus one for an independently executing
+  // region. Zero or an absent attribute inherits the enclosing target. An
+  // explicit unresolved target remains independent of that environment.
+  uint8_t execution_target_attr_index_plus_one;
 } loom_region_descriptor_t;
 
-static_assert(sizeof(loom_region_descriptor_t) == 6,
-              "loom_region_descriptor_t must be 6 bytes");
+static_assert(sizeof(loom_region_descriptor_t) == 8,
+              "loom_region_descriptor_t must be 8 bytes");
+
+// Matches a materialized terminator against a region's declared kinds. Whether
+// authored or synthesized, an implicit terminator obeys the same yield tuple
+// constraints as the explicit kind. The caller establishes the Terminator
+// trait.
+static inline bool loom_region_descriptor_matches_terminator(
+    const loom_region_descriptor_t* descriptor, loom_op_kind_t kind) {
+  return descriptor->terminator == LOOM_OP_KIND_UNKNOWN ||
+         kind == descriptor->terminator ||
+         kind == descriptor->implicit_terminator;
+}
 
 // Generated structural placement metadata for an op kind.
 typedef struct loom_op_placement_descriptor_t {
@@ -711,12 +779,19 @@ typedef struct loom_op_placement_descriptor_t {
   const loom_op_kind_t* required_parents;
   // Op kinds that must appear somewhere in the parent-op chain.
   const loom_op_kind_t* required_ancestors;
+  // Alternative op kinds, at least one of which must appear in the parent-op
+  // chain.
+  const loom_op_kind_t* required_any_ancestors;
   // Op kinds that must not appear anywhere in the parent-op chain.
   const loom_op_kind_t* forbidden_ancestors;
+  // Human-readable alternative ancestor names used in diagnostics.
+  const char* required_any_ancestor_names;
   // Number of entries in |required_parents|.
   uint8_t required_parent_count;
   // Number of entries in |required_ancestors|.
   uint8_t required_ancestor_count;
+  // Number of entries in |required_any_ancestors|.
+  uint8_t required_any_ancestor_count;
   // Number of entries in |forbidden_ancestors|.
   uint8_t forbidden_ancestor_count;
 } loom_op_placement_descriptor_t;
@@ -760,6 +835,18 @@ static inline bool loom_op_vtable_has_segmented_operands(
     const loom_op_vtable_t* vtable) {
   return vtable && iree_any_bit_set(vtable->vtable_flags,
                                     LOOM_OP_VTABLE_SEGMENTED_OPERANDS);
+}
+
+// Returns true when the op's result values describe a locally scoped
+// signature instead of defining SSA values in the surrounding block.
+static inline bool loom_op_vtable_has_signature_only_results(
+    const loom_op_vtable_t* vtable) {
+  return vtable && vtable->result_descriptors &&
+         (vtable->fixed_result_count > 0 ||
+          iree_any_bit_set(vtable->vtable_flags,
+                           LOOM_OP_VTABLE_VARIADIC_RESULTS)) &&
+         iree_any_bit_set(vtable->result_descriptors[0].flags,
+                          LOOM_RESULT_SIGNATURE_ONLY);
 }
 
 // Returns the number of operand segment counts stored on an instance of this
@@ -823,14 +910,6 @@ bool loom_op_first_operand_with_role(const loom_module_t* module,
 // Returns true when |op| defines |value_id| as one of its results.
 bool loom_op_defines_value(const loom_op_t* op, loom_value_id_t value_id);
 
-// Binding kind for BindingList format elements.
-typedef enum loom_binding_kind_e {
-  // Block arg has the same type as the operand.
-  LOOM_BINDING_CAPTURE = 0,
-  // Block arg has the element type of the operand.
-  LOOM_BINDING_ELEMENT = 1,
-} loom_binding_kind_t;
-
 //===----------------------------------------------------------------------===//
 // Effect query helpers
 //===----------------------------------------------------------------------===//
@@ -844,10 +923,10 @@ typedef enum loom_binding_kind_e {
 loom_trait_flags_t loom_op_effective_traits(const loom_module_t* module,
                                             const loom_op_t* op);
 
-// Refreshes callback-backed effective traits for |op| after attrs or instance
-// flags have changed. Ops with no effective-traits callback keep their current
-// trait word; descriptor-backed ops are stamped explicitly by target-low
-// construction helpers.
+// Refreshes callback-backed effective traits for |op| after attributes,
+// instance flags, or types have changed. Ops with no effective-traits callback
+// keep their current trait word; descriptor-backed ops are stamped explicitly
+// by target-low construction helpers.
 void loom_op_refresh_effective_traits(const loom_module_t* module,
                                       loom_op_t* op);
 
@@ -862,7 +941,8 @@ bool loom_op_results_unused(const loom_module_t* module, const loom_op_t* op);
 // Returns true if |op| is trivially dead: it has results, does not
 // write to any resource, has no unknown effects, and every result is
 // unused. Read-only and non-deterministic ops without writes are dead
-// when unused — a read with no observer is a no-op.
+// when unused — a read with no observer is a no-op. Symbols and hints are
+// retained independently of their SSA result uses.
 bool loom_op_is_trivially_dead(const loom_module_t* module,
                                const loom_op_t* op);
 
@@ -929,8 +1009,17 @@ uint16_t loom_call_like_operand_offset(loom_call_like_t call);
 // Returns the result offset where call results begin.
 uint16_t loom_call_like_result_offset(loom_call_like_t call);
 
-// Returns the purity attr value (0 = unspecified, nonzero = pure).
-uint8_t loom_call_like_purity(loom_call_like_t call);
+// Returns the callable effect contract, or zero when unspecified.
+loom_callable_effect_contract_t loom_call_like_effect_contract(
+    loom_call_like_t call);
+
+// Sets the callable effect contract on a direct call.
+//
+// The call must expose an effect-contract attribute. This refreshes the
+// operation's effective traits and its containing-region effect summaries.
+void loom_call_like_set_effect_contract(
+    loom_module_t* module, loom_call_like_t call,
+    loom_callable_effect_contract_t effect_contract);
 
 // Returns the temperature attr value (0 = unspecified).
 uint8_t loom_call_like_temperature(loom_call_like_t call);
@@ -1005,8 +1094,17 @@ bool loom_func_like_region_projects_args(const loom_module_t* module,
                                          loom_func_like_t func,
                                          uint8_t region_index);
 
-// Returns the purity attr value (0 = unspecified, nonzero = pure).
-uint8_t loom_func_like_purity(loom_func_like_t func);
+// Returns the callable effect contract, or zero when unspecified.
+loom_callable_effect_contract_t loom_func_like_effect_contract(
+    loom_func_like_t func);
+
+// Sets the callable effect contract on a function-like operation.
+//
+// The operation must expose an effect-contract attribute. This refreshes the
+// operation's effective traits and its containing-region effect summaries.
+void loom_func_like_set_effect_contract(
+    loom_module_t* module, loom_func_like_t func,
+    loom_callable_effect_contract_t effect_contract);
 
 // Returns the temperature attr value (0 = unspecified).
 uint8_t loom_func_like_temperature(loom_func_like_t func);
@@ -1185,6 +1283,11 @@ loom_region_t* loom_loop_like_body(loom_loop_like_t loop);
 // valid. For scf.while this returns the "before" region.
 loom_region_t* loom_loop_like_condition_region(loom_loop_like_t loop);
 
+// Returns the continuation predicate of a verified condition-controlled loop,
+// or LOOM_VALUE_ID_INVALID for counted loops or an invalid interface. The
+// condition region's single-block terminator exposes this as operand zero.
+loom_value_id_t loom_loop_like_condition(loom_loop_like_t loop);
+
 // Returns the induction variable value ID for a loop-like op, or
 // LOOM_VALUE_ID_INVALID for loops without an induction variable
 // (scf.while) or if |loop| is not valid. The IV is a block argument
@@ -1233,6 +1336,11 @@ loom_region_branch_t loom_region_branch_cast(const loom_module_t* module,
 // the i1 condition; for scf.switch this is the index selector.
 loom_value_id_t loom_region_branch_selector(loom_region_branch_t branch);
 
+// Returns the Boolean selector truth established by entering |region_index|.
+// Selector-only branches such as keyed switch tables return UNKNOWN.
+loom_region_branch_truth_t loom_region_branch_region_truth(
+    loom_region_branch_t branch, uint8_t region_index);
+
 // Returns the branch region at |region_index|, or NULL for malformed inputs.
 // Region 0 is the first physical region on the op; dialect-specific accessors
 // define whether that is a default, then, or other semantic branch.
@@ -1277,7 +1385,8 @@ typedef uint8_t loom_memory_access_flags_t;
 // Derives effective traits for a memory-access operation from its instance
 // flags. Volatile accesses carry ObservableEffect in addition to their static
 // read or write effects.
-loom_trait_flags_t loom_memory_access_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_memory_access_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 
 // Returns true if |access| refers to a valid memory-access op. All accessor
 // helpers below tolerate a NULL op vtable and return safe defaults.
@@ -1561,13 +1670,13 @@ typedef struct loom_builder_t {
   iree_arena_allocator_t* arena;
   loom_builder_ip_t ip;
   loom_builder_callback_t on_op_finalized;
-  // Pre-allocated result value_ids for the next op build. When
-  // reserved_result_count > 0, loom_builder_define_value consumes
-  // from this array instead of allocating new value_ids. Cleared
-  // by loom_builder_finalize_op after verifying all were consumed.
-  const loom_value_id_t* reserved_result_ids;
-  iree_host_size_t reserved_result_count;
-  iree_host_size_t reserved_result_next;
+  // Pre-allocated value IDs for the next op build. When
+  // reserved_value_count > 0, loom_builder_define_value consumes from this
+  // array instead of allocating new value IDs. Cleared by
+  // loom_builder_finalize_op after verifying all were consumed.
+  const loom_value_id_t* reserved_value_ids;
+  iree_host_size_t reserved_value_count;
+  iree_host_size_t reserved_value_next;
 } loom_builder_t;
 
 // Initializes a builder that appends to |block|.
@@ -1617,34 +1726,37 @@ loom_builder_ip_t loom_builder_save(const loom_builder_t* builder);
 // Restores a previously saved insertion point.
 void loom_builder_restore(loom_builder_t* builder, loom_builder_ip_t ip);
 
-// Pre-allocates |count| result value_ids in the module's value table.
-// The values are real entries with uninitialized types. The next |count|
-// calls to loom_builder_define_value (typically from a generated builder)
-// will assign types to these values instead of allocating fresh ones.
-// loom_builder_finalize_op verifies all reserved results were consumed.
-// Callable builders consume argument signature identities before result
-// identities. Other region entry arguments are fresh, independent definitions.
+// Pre-allocates |count| value IDs in the module's value table. The values are
+// real entries with uninitialized types. The next |count| calls to
+// loom_builder_define_value (typically from a generated builder) assign types
+// to these values instead of allocating fresh IDs. loom_builder_finalize_op
+// verifies all reserved values were consumed.
+//
+// Generated builders consume identities in declaration order. Function
+// arguments precede function results. Independently typed region bindings
+// precede operation results. Other region entry arguments are fresh
+// definitions and do not consume reservations.
 //
 // This enables constructing result types that reference other results
 // by value_id before the build call:
 //
 //   loom_value_id_t result_ids[2];
-//   loom_builder_reserve_results(&builder, 2, result_ids);
+//   loom_builder_reserve_values(&builder, 2, result_ids);
 //   loom_type_t output_type = loom_type_shaped_1d(
 //       LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_F32,
 //       loom_dim_pack_dynamic(result_ids[1]), 0);
 //   loom_type_t result_types[] = {output_type, index_type};
 //   loom_test_deflate_build(&builder, input, result_types, 2, ...);
 //
-iree_status_t loom_builder_reserve_results(loom_builder_t* builder,
-                                           iree_host_size_t count,
-                                           loom_value_id_t* out_result_ids);
+iree_status_t loom_builder_reserve_values(loom_builder_t* builder,
+                                          iree_host_size_t count,
+                                          loom_value_id_t* out_value_ids);
 
 // Creates a fresh value in the module's value table with the given type.
-// Returns the value ID. The value has no defining op yet (set by the
-// builder when the op is inserted). If results were reserved via
-// loom_builder_reserve_results, consumes the next reserved id and
-// assigns the type to it.
+// Returns the value ID. The value has no defining op yet (set by the builder
+// when the op is inserted). If values were reserved via
+// loom_builder_reserve_values, consumes the next reserved ID and assigns the
+// type to it.
 iree_status_t loom_builder_define_value(loom_builder_t* builder,
                                         loom_type_t type,
                                         loom_value_id_t* out_value_id);
@@ -1679,6 +1791,11 @@ iree_status_t loom_builder_copy_i64_array_attr_storage(loom_builder_t* builder,
                                                        iree_host_size_t count,
                                                        iree_string_view_t label,
                                                        int64_t** out_storage);
+
+// Copies a string-array attribute payload into the builder arena.
+iree_status_t loom_builder_copy_string_array_attr_storage(
+    loom_builder_t* builder, loom_string_id_array_t values,
+    iree_string_view_t label, const loom_string_id_t** out_storage);
 
 // Copies an enum-array attribute payload into the builder arena.
 iree_status_t loom_builder_copy_enum_array_attr_storage(
@@ -1795,10 +1912,20 @@ iree_status_t loom_op_remove_results(loom_module_t* module, loom_op_t* op,
 // Removes operand and attribute use records, drops type-use records carried by
 // results, owned declaration arguments and nested block arguments, then marks
 // the op dead. Result values retain their defining op and result index as
-// immutable producer provenance. Dead ops are skipped by enumeration macros
-// and will not be serialized. The memory is not freed (arena-owned). Returns
+// immutable producer provenance. The remaining operation payload is left
+// unchanged and may be inspected as immutable provenance until module
+// destruction. Dead ops are skipped by enumeration macros and will not be
+// serialized. The memory is not freed (arena-owned). Returns
 // IREE_STATUS_FAILED_PRECONDITION if any result still has uses.
 iree_status_t loom_op_erase(loom_module_t* module, loom_op_t* op);
+
+// Erases a producer-proven closed set of disjoint operation subtrees. Results
+// may reference other members, but no live operation or type outside the set
+// may use a removed value. The consuming rewrite establishes that closure
+// before calling; this path does not repeat its use/def analysis. Unlike
+// repeated single-op erasure, source order need not be reverse topological.
+void loom_op_erase_closed_set(loom_module_t* module, loom_op_t* const* ops,
+                              iree_host_size_t count);
 
 // Removes a closed set of non-entry blocks from |region| and compacts the
 // region block table in place.
@@ -1834,22 +1961,6 @@ iree_status_t loom_region_remove_blocks(loom_module_t* module,
 // path) to maintain the invariant that every operand has a corresponding
 // use entry on the referenced value.
 
-// Adds a use record: |user_op| uses value |value_id| at |operand_index|.
-// Handles inline-to-overflow transition via arena allocation on the module.
-iree_status_t loom_value_add_use(loom_module_t* module,
-                                 loom_value_id_t value_id, loom_op_t* user_op,
-                                 uint16_t operand_index);
-
-// Removes a use record: |user_op| no longer uses |value_id| at
-// |operand_index|. Reads the operand's retained use index, swaps with the last
-// entry, and updates the moved operand's index in O(1). Returns
-// IREE_STATUS_NOT_FOUND if the index does not name the matching entry.
-// No overflow-to-inline transition (arena cannot free the overflow
-// array; loom_module_compute_uses handles repack).
-iree_status_t loom_value_remove_use(loom_module_t* module,
-                                    loom_value_id_t value_id,
-                                    loom_op_t* user_op, uint16_t operand_index);
-
 // Finalizes a newly-built op: registers all operand uses and performs
 // any other per-op bookkeeping. Called as the tail return from every
 // builder: `return loom_builder_finalize_op(builder, *out_op);`
@@ -1868,50 +1979,6 @@ iree_status_t loom_op_set_attr(loom_module_t* module, loom_op_t* op,
 // descriptor, and legacy bytecode kind. Idempotent.
 void loom_module_link_symbol_defining_op(loom_module_t* module, loom_op_t* op,
                                          const loom_op_vtable_t* vtable);
-
-// Changes an operand on an existing op, maintaining use lists. Removes
-// the use from the old value, writes the new value ID, and adds a use
-// to the new value. Skips LOOM_VALUE_ID_INVALID for both old and new.
-iree_status_t loom_op_set_operand(loom_module_t* module, loom_op_t* op,
-                                  uint16_t operand_index,
-                                  loom_value_id_t new_value_id);
-
-// Replaces all uses of |old_id| with |new_id|. Walks old's operand use list,
-// patches each user op's operand slot, bulk-transfers those use entries to
-// new's list, and rewrites SSA references embedded in value types and operation
-// attributes with one shared immutable substitution context. Each embedded
-// reference owner publishes consistently with its index, but an allocation
-// failure can leave earlier owners changed. Ordinary operands are transferred
-// only after all embedded references succeed. No-op if old_id == new_id.
-iree_status_t loom_value_replace_all_uses_with(loom_module_t* module,
-                                               loom_value_id_t old_id,
-                                               loom_value_id_t new_id);
-
-// Same as replace_all_uses_with, but skips uses where the user op is
-// |except_op|. This filtered form only rewrites operand slots; embedded type
-// references have no user op to predicate against. Used during pattern rewrites
-// where the replacement op also references the old value.
-iree_status_t loom_value_replace_all_uses_except(loom_module_t* module,
-                                                 loom_value_id_t old_id,
-                                                 loom_value_id_t new_id,
-                                                 const loom_op_t* except_op);
-
-// Predicate-based RAUW. Replaces operand uses of |old_id| with |new_id| only
-// where |predicate| returns true for the user op. Embedded type references are
-// intentionally not rewritten by this filtered form.
-typedef bool (*loom_use_predicate_fn)(const loom_op_t* user_op,
-                                      void* user_data);
-iree_status_t loom_value_replace_uses_if(loom_module_t* module,
-                                         loom_value_id_t old_id,
-                                         loom_value_id_t new_id,
-                                         loom_use_predicate_fn predicate,
-                                         void* user_data);
-
-// Rebuilds all use lists from scratch by walking every live op in the
-// module. Clears all values' use data, then re-adds uses from operands.
-// Used after parsing (the parser fills operands but not use lists) and
-// as a recovery path after bulk IR mutations.
-iree_status_t loom_module_compute_uses(loom_module_t* module);
 
 #ifdef __cplusplus
 }

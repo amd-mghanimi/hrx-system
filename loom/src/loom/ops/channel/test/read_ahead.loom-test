@@ -1,0 +1,227 @@
+// RUN: pass pipeline-scf-for,unroll-scf-for,scf-to-cfg,ownership-lifetime
+
+// The owned read spans startup, steady state and drain of the scalar read-ahead
+// loop. Loaded scalars enter its queue; the read remains with this helper until
+// the final payload use. The helper also handles an empty or short prefix.
+func.def @sum_record(%read: read<tile<64xf32>>, %length: index, %initial: f32) -> (f32) {
+  %payload = channel.wait %read : read<tile<64xf32>> -> view<64xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 2 : index
+  %sum = scf.for %element = [%begin to %length step %step](%partial = %initial : f32) -> (f32) pipeline(%depth) unroll(%factor) schedule(recurrence) {
+    %value = view.load %payload[%element] : view<64xf32> -> f32
+    %next = scalar.addf %partial, %value : f32
+    scf.yield %next : f32
+  }
+  channel.release %read : read<tile<64xf32>>
+  func.return %sum : f32
+}
+
+// With at least two staging slots, the next transfer can own its destination
+// while the current record is read. Copy owns source retirement and destination
+// publication; accept claims a pending record without making it readable.
+// No record or reservation is taken on the empty-stream path.
+func.def @sum_stream(%source: channel<tile<64xf32>>, %staging: channel<tile<64xf32>>, %count: index, %length: index) -> (f32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %identity = scalar.constant 0.0 : f32
+  %has_records = index.cmp sgt, %count, %begin : index
+  %result = scf.if %has_records -> (f32) {
+    %first_source = channel.accept %source : channel<tile<64xf32>> -> read<tile<64xf32>>
+    %first_write, %first_storage = channel.reserve %staging : channel<tile<64xf32>> -> (write<tile<64xf32>>, view<64xf32>)
+    channel.copy %first_source -> %first_write : read<tile<64xf32>>, write<tile<64xf32>>
+    %first = channel.accept %staging : channel<tile<64xf32>> -> read<tile<64xf32>>
+    %last, %sum = scf.for %record = [%step to %count step %step](%current = %first : read<tile<64xf32>>, %partial = %identity : f32) -> (read<tile<64xf32>>, f32) {
+      %next_source = channel.accept %source : channel<tile<64xf32>> -> read<tile<64xf32>>
+      %next_write, %next_storage = channel.reserve %staging : channel<tile<64xf32>> -> (write<tile<64xf32>>, view<64xf32>)
+      channel.copy %next_source -> %next_write : read<tile<64xf32>>, write<tile<64xf32>>
+      %next = channel.accept %staging : channel<tile<64xf32>> -> read<tile<64xf32>>
+      %next_sum = func.call @sum_record(%current, %length, %partial) : (read<tile<64xf32>>, index, f32) -> (f32)
+      scf.yield %next, %next_sum : read<tile<64xf32>>, f32
+    }
+    %finished = func.call @sum_record(%last, %length, %sum) : (read<tile<64xf32>>, index, f32) -> (f32)
+    scf.yield %finished : f32
+  } else {
+    scf.yield %identity : f32
+  }
+  func.return %result : f32
+}
+
+// ----
+func.def @sum_record(%read: read<tile<64xf32>>, %length: index, %initial: f32) -> (f32) {
+  %payload = channel.wait %read : read<tile<64xf32>> -> view<64xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 2 : index
+  %39 = index.constant 2 : index
+  %40 = index.cmp slt, %39, %length : index
+  cfg.cond_br %40, ^_bb1, ^_bb12
+^_bb1:
+  %value$42 = view.load %payload[%begin] : view<64xf32> -> f32
+  %43 = index.constant 1 : index
+  %44 = index.add %begin, %43 : index
+  %value$45 = view.load %payload[%44] : view<64xf32> -> f32
+  %62 = index.constant 2 : index
+  %63 = index.cmp slt, %39, %length : index
+  %64 = scf.select %63, %39, %length : index
+  %65 = index.cast %64 : index to i64
+  %66 = index.cast %length : index to i64
+  %67 = scalar.subi %66, %65 : i64
+  %68 = scalar.constant 2 : i64
+  %69 = scalar.remui %67, %68 : i64
+  %70 = index.cast %69 : i64 to index
+  %71 = index.constant 1 : index
+  %72 = index.cmp ule, %70, %71 : index
+  %73 = index.constant 0 : index
+  %74 = scf.select %72, %70, %73 : index
+  %75 = index.sub %length, %74 : index
+  %76 = index.assume %75 [ge(%75, %64), le(%75, %length)] : index
+  cfg.br ^_bb2(%39: index, %initial: f32, %value$42: f32, %value$45: f32)
+^_bb2(%151: index, %152: f32, %153: f32, %154: f32):
+  %156 = index.cmp slt, %151, %76 : index
+  cfg.cond_br %156, ^_bb3, ^_bb6
+^_bb3:
+  %155 = index.assume %151 [range(%151, 2, 9223372036854775806), multiple_of(%151, 2), lt(%151, %76)] : index
+  %84 = index.constant 1 : index
+  %85 = index.add %155, %84 : index
+  %86, %87 = index.assume %155, %85 [lt(%155, %length), lt(%85, %length)] : index, index
+  %value$88 = view.load %payload[%86] : view<64xf32> -> f32
+  %value_1$89 = view.load %payload[%87] : view<64xf32> -> f32
+  scf.schedule.fence
+  %next$90 = scalar.addf %152, %153 : f32
+  scf.schedule.fence
+  %next_1$91 = scalar.addf %next$90, %154 : f32
+  %157 = index.sub %76, %155 : index
+  %158 = index.cmp ult, %62, %157 : index
+  cfg.cond_br %158, ^_bb4, ^_bb5
+^_bb4:
+  %159 = index.add %155, %62 : index
+  cfg.br ^_bb2(%159: index, %next_1$91: f32, %value$88: f32, %value_1$89: f32)
+^_bb5:
+  cfg.br ^_bb7(%next_1$91: f32, %value$88: f32, %value_1$89: f32)
+^_bb6:
+  cfg.br ^_bb7(%152: f32, %153: f32, %154: f32)
+^_bb7(%148: f32, %149: f32, %150: f32):
+  cfg.br ^_bb8(%76: index, %148: f32, %149: f32, %150: f32)
+^_bb8(%141: index, %142: f32, %143: f32, %144: f32):
+  %146 = index.cmp slt, %141, %length : index
+  cfg.cond_br %146, ^_bb9, ^_bb10
+^_bb9:
+  %145 = index.assume %141 [range(%141, -9223372036854775808, 9223372036854775806), ge(%141, %76), lt(%141, %length)] : index
+  %value$99 = view.load %payload[%145] : view<64xf32> -> f32
+  %next$100 = scalar.addf %142, %143 : f32
+  %147 = index.add %145, %step : index
+  cfg.br ^_bb8(%147: index, %next$100: f32, %144: f32, %value$99: f32)
+^_bb10:
+  cfg.br ^_bb11(%142: f32, %143: f32, %144: f32)
+^_bb11(%138: f32, %139: f32, %140: f32):
+  %next$55 = scalar.addf %138, %139 : f32
+  %next$56 = scalar.addf %next$55, %140 : f32
+  cfg.br ^_bb21(%next$56: f32)
+^_bb12:
+  %101 = index.constant 2 : index
+  %102 = index.constant 0 : index
+  %103 = index.sub %length, %begin : index
+  %104 = index.max %103, %102 : index
+  %105 = index.constant 2 : index
+  %106 = index.div %104, %105 : index
+  %107 = index.mul %106, %101 : index
+  %108 = index.add %begin, %107 : index
+  cfg.br ^_bb13(%begin: index, %initial: f32)
+^_bb13(%133: index, %134: f32):
+  %136 = index.cmp slt, %133, %108 : index
+  cfg.cond_br %136, ^_bb14, ^_bb15
+^_bb14:
+  %135 = index.assume %133 [range(%133, 0, 9223372036854775806), multiple_of(%133, 2), lt(%133, %108)] : index
+  %112 = index.constant 1 : index
+  %113 = index.add %135, %112 : index
+  %114, %115 = index.assume %135, %113 [lt(%135, %length), lt(%113, %length)] : index, index
+  %value$116 = view.load %payload[%114] : view<64xf32> -> f32
+  %value_1$117 = view.load %payload[%115] : view<64xf32> -> f32
+  scf.schedule.fence
+  %next$118 = scalar.addf %134, %value$116 : f32
+  scf.schedule.fence
+  %next_1$119 = scalar.addf %next$118, %value_1$117 : f32
+  %137 = index.add %135, %101 : index
+  cfg.br ^_bb13(%137: index, %next_1$119: f32)
+^_bb15:
+  cfg.br ^_bb16(%134: f32)
+^_bb16(%132: f32):
+  cfg.br ^_bb17(%108: index, %132: f32)
+^_bb17(%127: index, %128: f32):
+  %130 = index.cmp slt, %127, %length : index
+  cfg.cond_br %130, ^_bb18, ^_bb19
+^_bb18:
+  %129 = index.assume %127 [range(%127, -9223372036854775808, 9223372036854775806), ge(%127, %108), lt(%127, %length)] : index
+  %value$123 = view.load %payload[%129] : view<64xf32> -> f32
+  %next$124 = scalar.addf %128, %value$123 : f32
+  %131 = index.add %129, %step : index
+  cfg.br ^_bb17(%131: index, %next$124: f32)
+^_bb19:
+  cfg.br ^_bb20(%128: f32)
+^_bb20(%126: f32):
+  cfg.br ^_bb21(%126: f32)
+^_bb21(%sum: f32):
+  channel.release %read : read<tile<64xf32>>
+  func.return %sum : f32
+}
+
+func.def @sum_stream(%source: channel<tile<64xf32>>, %staging: channel<tile<64xf32>>, %count: index, %length: index) -> (f32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %identity = scalar.constant 0.0 : f32
+  %has_records = index.cmp sgt, %count, %begin : index
+  cfg.cond_br %has_records, ^_bb1, ^_bb6
+^_bb1:
+  %first_source = channel.accept %source : channel<tile<64xf32>> -> read<tile<64xf32>>
+  %first_write, %first_storage = channel.reserve %staging : channel<tile<64xf32>> -> (write<tile<64xf32>>, view<64xf32>)
+  channel.copy %first_source -> %first_write : read<tile<64xf32>>, write<tile<64xf32>>
+  %first = channel.accept %staging : channel<tile<64xf32>> -> read<tile<64xf32>>
+  cfg.br ^_bb2(%step: index, %first: read<tile<64xf32>>, %identity: f32)
+^_bb2(%163: index, %current: read<tile<64xf32>>, %partial: f32):
+  %167 = index.cmp slt, %163, %count : index
+  cfg.cond_br %167, ^_bb3, ^_bb4
+^_bb3:
+  %record = index.assume %163 [range(%163, 1, 9223372036854775806), lt(%163, %count)] : index
+  %next_source = channel.accept %source : channel<tile<64xf32>> -> read<tile<64xf32>>
+  %next_write, %next_storage = channel.reserve %staging : channel<tile<64xf32>> -> (write<tile<64xf32>>, view<64xf32>)
+  channel.copy %next_source -> %next_write : read<tile<64xf32>>, write<tile<64xf32>>
+  %next = channel.accept %staging : channel<tile<64xf32>> -> read<tile<64xf32>>
+  %next_sum = func.call @sum_record(%current, %length, %partial) : (read<tile<64xf32>>, index, f32) -> (f32)
+  %168 = index.add %record, %step : index
+  cfg.br ^_bb2(%168: index, %next: read<tile<64xf32>>, %next_sum: f32)
+^_bb4:
+  cfg.br ^_bb5(%current: read<tile<64xf32>>, %partial: f32)
+^_bb5(%last: read<tile<64xf32>>, %sum: f32):
+  %finished = func.call @sum_record(%last, %length, %sum) : (read<tile<64xf32>>, index, f32) -> (f32)
+  cfg.br ^_bb7(%finished: f32)
+^_bb6:
+  cfg.br ^_bb7(%identity: f32)
+^_bb7(%result: f32):
+  func.return %result : f32
+}
+
+// ====
+
+// RUN: pass pipeline-scf-for
+
+// Advancing ordinary reads does not authorize advancing channel admission or
+// retirement. An explicit outer transfer schedule keeps those obligations out
+// of the scalar read-ahead loop, as in sum_stream above.
+func.def @rejects_implicit_admission(%source: channel<tile<64xf32>>, %initial: f32) -> (f32) {
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %depth = index.constant 2 : index
+  %sum = scf.for %record = [%begin to %end step %step](%partial = %initial : f32) -> (f32) pipeline(%depth) {
+    // ERROR@+1: STRUCTURE/014 {expected_constraint="workgroup-only stores and barriers in the ordered consumer"}
+    %read, %payload = channel.acquire %source : channel<tile<64xf32>> -> (read<tile<64xf32>>, view<64xf32>)
+    %value = view.load %payload[0] : view<64xf32> -> f32
+    %next = scalar.addf %partial, %value : f32
+    channel.release %read : read<tile<64xf32>>
+    scf.yield %next : f32
+  }
+  func.return %sum : f32
+}

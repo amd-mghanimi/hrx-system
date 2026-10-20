@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from loom.dialect.buffer import ALL_BUFFER_OPS
 from loom.dialect.buffer import defs as buffer
+from loom.dialect.cfg import ALL_CFG_OPS, cfg_cond_br
 from loom.dialect.index import ALL_INDEX_OPS
 from loom.dialect.index import defs as index
 from loom.dialect.scalar import ALL_SCALAR_OPS
@@ -30,6 +31,7 @@ from loom.target.contracts import (
     EmitDescriptorOp,
     EmitRegisterConcat,
     EmitRegisterCopy,
+    EmitRegisterMove,
     EmitRegisterSlice,
     Guard,
     GuardDiagnostic,
@@ -70,6 +72,7 @@ from loom.target.test.descriptors import (
     TEST_LOW_MUL_ADD_I32_DESCRIPTOR,
     TEST_LOW_MUL_F32_DESCRIPTOR,
     TEST_LOW_MUL_I32_DESCRIPTOR,
+    TEST_LOW_NATIVE_COND_BR_I32_DESCRIPTOR,
     TEST_LOW_SELECT_I32_DESCRIPTOR,
     TEST_LOW_SHUFFLE_V4I32_DESCRIPTOR,
     TEST_LOW_STORE_INDEX_V4F32_DESCRIPTOR,
@@ -158,6 +161,7 @@ _V4F32 = Vector("f32", lanes=4)
 
 TEST_LOW_CORE_CONTRACT_DIALECT_OPS = {
     "buffer": ALL_BUFFER_OPS,
+    "cfg": ALL_CFG_OPS,
     "index": ALL_INDEX_OPS,
     "scalar": ALL_SCALAR_OPS,
     "vector": ALL_VECTOR_OPS,
@@ -228,7 +232,7 @@ def _source_memory_constraint(
 ) -> SourceMemoryConstraint:
     return SourceMemoryConstraint(
         operation=operation,
-        memory_spaces=("unknown", "generic", "global"),
+        memory_spaces=("unknown", "generic", "global", "private", "workgroup"),
         element_byte_count=4,
         vector_lane_count=4,
         vector_lane_byte_stride=4,
@@ -330,6 +334,39 @@ TEST_LOW_CORE_CONTRACT_FRAGMENT = ContractFragment(
     descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
     public_header="loom/target/test/contracts/core.h",
     cases=[
+        DescriptorRule(
+            source_op=cfg_cond_br,
+            descriptor=TEST_LOW_NATIVE_COND_BR_I32_DESCRIPTOR,
+            source_nodes=(
+                SourceNode.exclusive_definition(
+                    "compare",
+                    source_op=index.index_cmp,
+                    parent_operand=ValueRef.operand("condition"),
+                    node_result=ValueRef.result("result"),
+                    guards=(
+                        Guard.value_type("lhs", _INDEX),
+                        Guard.value_type("rhs", _INDEX),
+                        Guard.value_type("result", Scalar("i1")),
+                    ),
+                ),
+            ),
+            emit=(
+                EmitDescriptorOp(
+                    descriptor=TEST_LOW_NATIVE_COND_BR_I32_DESCRIPTOR,
+                    form=DescriptorEmitForm.COND_BR,
+                    operands={
+                        "lhs": ValueRef.operand("lhs", source_node="compare"),
+                        "rhs": ValueRef.operand("rhs", source_node="compare"),
+                    },
+                    immediates={
+                        "predicate": AttrProject.enum_ordinal(
+                            "predicate"
+                        ).in_source_node("compare")
+                    },
+                ),
+            ),
+            target_query=False,
+        ),
         ValueAliasRule(
             source_op=buffer.buffer_view,
             source=ValueRef.operand("buffer"),
@@ -455,7 +492,18 @@ TEST_LOW_CORE_CONTRACT_FRAGMENT = ContractFragment(
             emit=(
                 EmitRegisterCopy(
                     source=ValueRef.operand("input"),
+                    result=ValueRef.temporary("reclassified"),
+                    result_type=_F32,
+                ),
+                EmitRegisterMove(
+                    source=ValueRef.temporary("reclassified"),
+                    result=ValueRef.temporary("moved"),
+                    result_type=ValueRef.temporary("reclassified"),
+                ),
+                EmitRegisterMove(
+                    source=ValueRef.temporary("moved"),
                     result=ValueRef.result("result"),
+                    result_type=ValueRef.temporary("moved"),
                 ),
             ),
         ),
@@ -627,6 +675,7 @@ TEST_LOW_CORE_CONTRACT_FRAGMENT = ContractFragment(
         _const_i32_rule(index.index_constant, _INDEX),
         _const_i32_rule(index.index_constant, _OFFSET),
         _binary_rule(index.index_add, TEST_LOW_ADD_I32_DESCRIPTOR, _INDEX),
+        _binary_rule(index.index_add, TEST_LOW_ADD_I32_DESCRIPTOR, _OFFSET),
         _compare_rule(
             index.index_cmp,
             TEST_LOW_CMP_SLT_I32_DESCRIPTOR,
@@ -695,8 +744,14 @@ TEST_LOW_CORE_CONTRACT_FRAGMENT = ContractFragment(
                 emit=(
                     EmitRegisterSlice(
                         source=ValueRef.operand("source"),
-                        result=ValueRef.result("result"),
+                        result=ValueRef.temporary("slice"),
                         unit_offset=unit_offset,
+                        unit_count=1,
+                    ),
+                    EmitRegisterMove(
+                        source=ValueRef.temporary("slice"),
+                        result=ValueRef.result("result"),
+                        result_type=ValueRef.temporary("slice"),
                     ),
                 ),
             )

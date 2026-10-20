@@ -2,9 +2,11 @@
 
 `iree-benchmark-loom` measures workloads selected by
 [`check.benchmark`](../reference/dialects/check/ops/benchmark.md). Each benchmark
-row names a [`check.case`](../reference/dialects/check/ops/case.md) and may bind
-its runtime parameters. The tool owns measurement policy, compilation,
-correctness gating, device-buffer materialization, and structured results.
+row names a [`check.case`](../reference/dialects/check/ops/case.md) or
+`check.scenario`. Case benchmarks may bind runtime parameters; scenario
+benchmarks select from the scenario's finite sample domain. The tool owns
+measurement policy, compilation, device-buffer materialization, and structured
+results.
 
 This separation is deliberate: source describes *what* workload to measure;
 the invocation describes *how* to measure it.
@@ -35,8 +37,8 @@ execution, candidate compilation, allocation, or timing.
 
 ## Measure the complete case
 
-The default `case_end_to_end` mode measures the executable `check.case` program
-as one operation:
+The default `auto` policy resolves a `check.case` benchmark to
+`case_end_to_end` and measures the executable case program as one operation:
 
 ```shell
 iree-benchmark-loom program.loom \
@@ -91,6 +93,13 @@ multi-dispatch batch amortizes submission overhead and is the stronger primary
 shape for sub-microsecond GPU kernels. The batch size is part of the experiment
 and remains visible in the result policy.
 
+A `check.scenario` benchmark resolves `auto` to `dispatch_complete`. Its target
+product and target-local inputs are prepared before timing. A comparison trial
+is benchmarked as a target-only invocation: the oracle, output comparison, and
+readback do not execute in the measured path. The exact configuration, trial,
+and ordinal remain in the result so the corresponding correctness trial can be
+replayed.
+
 ## Understand benchmark assignments
 
 A benchmark declaration binds case parameters, not compiler or timing policy:
@@ -130,9 +139,14 @@ jq '.work_items[] | {benchmark, case, launches}' results.json
 
 ## Control data reuse
 
-Dispatch measurements rotate through physical device-buffer binding sets. The
-default ring targets at least 32 MiB and at least one binding set per dispatch
-in the batch, reducing accidental hot-cache results.
+Dispatch measurements rotate through physical device-buffer storage sets. The
+default ring approaches 32 MiB without using more distinct sets than input uses
+in one batch, reducing accidental hot-cache results. The byte target unions
+reachable binding ranges within each authored allocation, so repeated,
+overlapping, and producer/consumer bindings count the same bytes once. Summed
+binding-reference bytes and complete retained authored-input allocations remain
+separate report evidence. Scenario-generated result buffers contribute their
+owned reachable ranges without being reported as authored input storage.
 `--input-ring-min-bytes=BYTES` changes the byte target without fixing the ring
 count. A deliberate hot-reuse experiment states that choice directly:
 
@@ -145,9 +159,10 @@ iree-benchmark-loom program.loom \
   --output=hot-reuse.json
 ```
 
-The result records the effective ring count and bytes under
-`benchmark_result.data_cache`. Comparisons are meaningful when candidates use
-the same data-reuse policy.
+The result records the effective ring count, binding-reference bytes, unique
+reachable bytes, and complete retained-input-storage bytes under
+`benchmark_result.data_cache`.
+Comparisons are meaningful when candidates use the same data-reuse policy.
 
 ## Collect instrumented device timing outside the score
 
@@ -204,9 +219,33 @@ iree-benchmark-loom program.loom \
 ```
 
 ABABA supports a baseline and one candidate. Round-robin interleaving supports
-larger candidate sets. Comparison candidates must select the same concrete
-parameter layout and values; a parameterized case therefore uses `--sample=N`
-when more than one sample remains.
+larger candidate sets. All candidates must benchmark cases, or all must
+benchmark scenarios. Case candidates must select the same concrete parameter
+layout and values; a parameterized case therefore uses `--sample=N` when more
+than one sample remains.
+
+Scenario comparisons likewise select one concrete configuration and trial per
+candidate:
+
+```shell
+iree-benchmark-loom program.loom \
+  --device=amdgpu \
+  --compare=@baseline_scenario,@variant_scenario \
+  --sample=3 \
+  --interleave=ABABA \
+  --output=scenario-comparison.json
+```
+
+Separately named scenarios ordinarily have independent entropy namespaces. In
+comparison mode, every candidate uses the baseline scenario's entropy namespace
+so equivalent recipes produce equivalent inputs. Before timing, the tool checks
+the complete retained input ring: invocation types, scalar payloads, tensor
+shape and encoding, buffer bytes and ranges, and alias relationships must match.
+Compilation and target-product preparation finish before the interleaved
+schedule. The same deterministic input ring is rematerialized outside each
+timed window, restoring inputs that a previous dispatch may have mutated. Each
+repetition records the benchmark sample index and exact scenario configuration,
+trial domain, and trial ordinal.
 
 Final profiling is suppressed during interleaved windows so profile collection
 cannot bias one candidate. The event stream records every repetition and the

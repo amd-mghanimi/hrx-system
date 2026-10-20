@@ -45,6 +45,7 @@ loom_cc_test(
     loom::codegen::low::allocation::assignment
     loom::codegen::low::frame
     loom::codegen::low::placement
+    loom::target::test::descriptors
 )
 
 loom_cc_library(
@@ -112,11 +113,13 @@ loom_cc_library(
     ::source_workload
     iree::base
     iree::base::internal::arena
+    loom::analysis::storage_access
     loom::codegen::low::frame
     loom::codegen::low::function
     loom::codegen::low::lower
     loom::codegen::low::lower::source_selection
     loom::codegen::low::pipeline
+    loom::codegen::low::representation_binding
     loom::codegen::low::verify
     loom::codegen::pass_environment
     loom::ir
@@ -143,24 +146,6 @@ loom_cc_library(
     iree::base
     loom::ir
     loom::ops::low
-  TESTONLY
-  PUBLIC
-)
-
-loom_cc_library(
-  NAME
-    text_asm_test_util
-  HDRS
-    "text_asm_test_util.h"
-  SRCS
-    "text_asm_test_util.cc"
-  DEPS
-    iree::base
-    iree::base::internal::arena
-    loom::codegen::low::descriptors
-    loom::codegen::low::text_asm
-    loom::format::text::low_asm
-    loom::ir
   TESTONLY
   PUBLIC
 )

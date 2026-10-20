@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "loom/codegen/low/schedule/pressure.h"
+#include "loom/codegen/low/schedule/required_pressure.h"
 
 #define LOOM_LOW_SCHEDULE_PRESSURE_ALIAS_SOURCE_OWNS_BIT (UINT32_C(1) << 31)
 #define LOOM_LOW_SCHEDULE_PRESSURE_ALIAS_EPOCH_MASK \
@@ -166,7 +167,7 @@ void loom_low_schedule_pressure_alias_deactivate_result(
                         LOOM_LOW_SCHEDULE_VALUE_FLAG_ACTIVE_PRESSURE_ALIAS)) {
     return;
   }
-  const uint32_t producer_node = result->producer_node;
+  const uint32_t producer_node = state->value_producer_nodes[result_ordinal];
   if (producer_node == LOOM_LOW_SCHEDULE_NODE_NONE) {
     return;
   }
@@ -228,6 +229,8 @@ uint32_t loom_low_schedule_pressure_alias_transfer_from_source(
                             result->unit_count - record->unit_count,
                     "alias units must fit result pressure units");
         result->live_unit_count += record->unit_count;
+        loom_low_schedule_required_pressure_adjust_live(
+            state, pressure_state, result, record->unit_count);
         record->epoch_and_flags &=
             ~LOOM_LOW_SCHEDULE_PRESSURE_ALIAS_SOURCE_OWNS_BIT;
         transfer_units += record->unit_count;
@@ -264,6 +267,8 @@ uint32_t loom_low_schedule_pressure_alias_transfer_to_source(
       if (iree_any_bit_set(result->flags, LOOM_LOW_SCHEDULE_VALUE_FLAG_LIVE)) {
         IREE_ASSERT_LE(record->unit_count, result->live_unit_count);
         result->live_unit_count -= record->unit_count;
+        loom_low_schedule_required_pressure_adjust_live(
+            state, pressure_state, result, -(int64_t)record->unit_count);
         record->epoch_and_flags |=
             LOOM_LOW_SCHEDULE_PRESSURE_ALIAS_SOURCE_OWNS_BIT;
         transfer_units += record->unit_count;
@@ -283,7 +288,7 @@ uint32_t loom_low_schedule_pressure_alias_append_source_baseline_result(
   if (alias_state->records == NULL) {
     return 0;
   }
-  const uint32_t producer_node = state->values[result_ordinal].producer_node;
+  const uint32_t producer_node = state->value_producer_nodes[result_ordinal];
   if (producer_node == LOOM_LOW_SCHEDULE_NODE_NONE ||
       state->nodes[producer_node].block_index != block_index ||
       state->nodes[producer_node].storage_relation_count == 0) {
@@ -354,7 +359,8 @@ static bool loom_low_schedule_relation_source_is_available_after_candidate(
     loom_value_ordinal_t source_ordinal) {
   const loom_low_schedule_value_record_t* source =
       &state->values[source_ordinal];
-  return source->live_unit_count == source->unit_count &&
+  return source->live_unit_count + source->candidate_transferred_units ==
+             source->unit_count &&
          loom_low_schedule_value_lives_after_scored_candidate(
              source, pressure_state, source_ordinal);
 }
@@ -371,7 +377,7 @@ void loom_low_schedule_pressure_alias_note_candidate_result_releases(
   }
   loom_low_schedule_pressure_alias_state_t* alias_state =
       &pressure_state->storage_aliases;
-  const uint32_t producer_node = result->producer_node;
+  const uint32_t producer_node = state->value_producer_nodes[result_ordinal];
   const uint32_t relation_begin =
       loom_low_schedule_storage_relation_index_begin(&state->storage_relations,
                                                      producer_node);
@@ -394,7 +400,8 @@ void loom_low_schedule_pressure_alias_note_candidate_result_releases(
     uint32_t* released_units =
         &pressure_state->candidate_scratch_counts[source_ordinal];
     if (pressure_state->candidate_operand_use_counts[source_ordinal] == 0 &&
-        *released_units == 0) {
+        *released_units == 0 &&
+        state->values[source_ordinal].candidate_transferred_units == 0) {
       pressure_state->candidate_operand_ordinals
           [pressure_state->candidate_operand_count++] = source_ordinal;
     }
@@ -473,16 +480,17 @@ uint32_t loom_low_schedule_pressure_alias_candidate_result_units(
   return alias_units;
 }
 
-uint32_t loom_low_schedule_pressure_alias_candidate_transfer_from_source(
+loom_low_schedule_pressure_alias_transfer_t
+loom_low_schedule_pressure_alias_candidate_transfer_from_source(
     const loom_low_schedule_build_state_t* state,
-    const loom_low_schedule_pressure_state_t* pressure_state,
+    loom_low_schedule_pressure_state_t* pressure_state,
     loom_value_ordinal_t source_ordinal) {
   const loom_low_schedule_pressure_alias_state_t* alias_state =
       &pressure_state->storage_aliases;
+  loom_low_schedule_pressure_alias_transfer_t transfer = {0};
   if (alias_state->source_heads == NULL) {
-    return 0;
+    return transfer;
   }
-  uint32_t transfer_units = 0;
   for (uint32_t relation_index = alias_state->source_heads[source_ordinal];
        relation_index != LOOM_LOW_SCHEDULE_NODE_NONE;) {
     const loom_low_schedule_pressure_alias_record_t* record =
@@ -494,7 +502,7 @@ uint32_t loom_low_schedule_pressure_alias_candidate_transfer_from_source(
           loom_low_schedule_storage_relation_index_at(&state->storage_relations,
                                                       relation_index);
       IREE_ASSERT_EQ(relation->source_ordinal, source_ordinal);
-      const loom_low_schedule_value_record_t* result =
+      loom_low_schedule_value_record_t* result =
           &state->values[relation->destination_ordinal];
       if (loom_low_schedule_value_lives_after_scored_candidate(
               result, pressure_state, relation->destination_ordinal)) {
@@ -502,12 +510,46 @@ uint32_t loom_low_schedule_pressure_alias_candidate_transfer_from_source(
                         result->live_unit_count <=
                             result->unit_count - record->unit_count,
                     "alias units must fit result pressure units");
-        transfer_units += record->unit_count;
+        transfer.live_units += record->unit_count;
+        loom_low_schedule_required_pressure_adjust_candidate(
+            state, pressure_state, result, record->unit_count,
+            iree_any_bit_set(state->values[source_ordinal].flags,
+                             LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_LATE_READ));
+        if (!iree_any_bit_set(
+                state->values[source_ordinal].flags,
+                LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_LATE_READ)) {
+          const loom_value_ordinal_t result_ordinal =
+              relation->destination_ordinal;
+          if (result->candidate_transferred_units == 0 &&
+              pressure_state->candidate_operand_use_counts[result_ordinal] ==
+                  0 &&
+              pressure_state->candidate_scratch_counts[result_ordinal] == 0) {
+            pressure_state->candidate_operand_ordinals
+                [pressure_state->candidate_operand_count++] = result_ordinal;
+          }
+          result->candidate_transferred_units += record->unit_count;
+        }
+      } else if (iree_any_bit_set(
+                     result->flags,
+                     LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_LATE_READ)) {
+        transfer.late_units += record->unit_count;
+        // A dying late alias can inherit required ownership after the source
+        // read and retain it through writes, without changing final pressure.
+        if (!iree_any_bit_set(
+                state->values[source_ordinal].flags,
+                LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_LATE_READ)) {
+          loom_low_schedule_required_pressure_t* required =
+              loom_low_schedule_required_pressure_for_value(
+                  state, pressure_state, result);
+          if (required != NULL) {
+            required->candidate_write_delta_units += record->unit_count;
+          }
+        }
       }
     }
     relation_index = next_relation_index;
   }
-  return transfer_units;
+  return transfer;
 }
 
 uint32_t loom_low_schedule_pressure_alias_append_scheduled_result(

@@ -6,36 +6,25 @@
 
 // Generated source-to-Low rule emission.
 //
-// Emission consumes one rule selected during planning and its pre-resolved Low
-// descriptors. It interprets the rule's emit program into target-Low operands,
-// attributes, packets, result bindings, aliases, and elisions.
+// Emission consumes one rule selected during planning and its resolved Low
+// descriptors, attributes, source origins, and result carriers. It interprets
+// the retained emit program into target-Low operands, packets, result bindings,
+// aliases, and elisions. Source-origin and result-carrier selection are
+// complete before this interpreter runs; target materializers have their own
+// contracts.
 
 #ifndef LOOM_CODEGEN_LOW_LOWER_RULE_EMIT_H_
 #define LOOM_CODEGEN_LOW_LOWER_RULE_EMIT_H_
 
 #include "iree/base/api.h"
-#include "loom/codegen/low/lower/rules.h"
+#include "loom/codegen/low/lower/rule_plan.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct loom_low_lower_resolved_emit_t {
-  // Static emit-program row selected by planning.
-  const loom_low_lower_emit_t* emit;
-  // Descriptor row referenced by |emit| and resolved during planning.
-  loom_low_lower_resolved_descriptor_t descriptor;
-  // Source access semantics for this memory packet; zero for address setup.
-  loom_memory_access_flags_t access_flags;
-} loom_low_lower_resolved_emit_t;
-
-// Resolves descriptor-backed emit rows after selection. Returned rows are
-// function-arena-owned and remain valid for the current lowering run.
-iree_status_t loom_low_lower_rule_set_resolve_emit_program(
-    loom_low_lower_context_t* context, uint16_t rule_set_index,
-    const loom_low_lower_rule_set_t* rule_set,
-    const loom_low_lower_rule_t* rule, loom_memory_access_flags_t access_flags,
-    const loom_low_lower_resolved_emit_t** out_resolved_emits);
+typedef struct loom_low_lower_selected_source_memory_t
+    loom_low_lower_selected_source_memory_t;
 
 // Emits target-Low packets for |source_op| using a previously selected rule.
 // Multi-node rules provide the retained source graph with the root at index
@@ -45,7 +34,7 @@ iree_status_t loom_low_lower_rule_set_emit_rule(
     const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
     const loom_low_lower_rule_t* rule,
     const loom_low_lower_resolved_emit_t* resolved_emits,
-    const loom_low_source_memory_access_plan_t* source_memory_access,
+    const loom_low_lower_selected_source_memory_t* source_memory,
     const loom_op_t* const* source_nodes, uint8_t source_node_count);
 
 #ifdef __cplusplus

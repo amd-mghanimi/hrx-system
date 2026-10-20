@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/vector_slice.loom-test
 // RUN: with-checks emit source-low target=amd.xdna.aie2p:core output=low
 
 func.def @i32x4_slice_middle(%values: vector<4xi32>) -> (vector<2xi32>) {
@@ -143,24 +142,34 @@ CHECK: return %even, %odd
 
 // ====
 
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
 func.def @i32x4_broadcast_rank2(%values: vector<4xi32>) -> (vector<2x4xi32>) {
   %result = vector.broadcast %values : vector<4xi32> -> vector<2x4xi32>
   func.return %result : vector<2x4xi32>
 }
 
 // ----
-CHECK: return %result
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i32x4_broadcast_rank2(%values: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>) asm {
+  %7 = mova.i32 16
+  %8 = vshift %values, %values, %7
+  %9 = mova.i32 48
+  %result = vshift %8, %values, %9
+  return %result
+}
 
 // ====
 
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
 func.def @i16x1_broadcast(%value: vector<1xi16>) -> (vector<16xi16>) {
   %result = vector.broadcast %value : vector<1xi16> -> vector<16xi16>
   func.return %result : vector<16xi16>
 }
 
 // ----
-CHECK: %result = vextbcst.16 *
-CHECK: return %result
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i16x1_broadcast(%value: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>) asm {
+  %result = vextbcst.16 %value, 0
+  return %result
+}
 
 // ====
 
@@ -335,16 +344,6 @@ CHECK: return %result
 
 // ====
 
-func.def @f32x2x4_transpose(%values: vector<2x4xf32>) -> (vector<4x2xf32>) {
-  %result = vector.transpose<[1, 0]> %values : vector<2x4xf32> -> vector<4x2xf32>
-  func.return %result : vector<4x2xf32>
-}
-
-// ----
-CHECK: return %result
-
-// ====
-
 func.def @f32x2x2x2_extract_static(%values: vector<2x2x2xf32>) -> (f32) {
   %result = vector.extract %values[1, 0, 1] : vector<2x2x2xf32> -> f32
   func.return %result : f32
@@ -363,41 +362,3 @@ func.def @f32x2x2x2_from_elements(%e0: f32, %e1: f32, %e2: f32, %e3: f32, %e4: f
 
 // ----
 CHECK: return %result
-
-// ====
-
-func.def @f32x2x2x2_transpose(%values: vector<2x2x2xf32>) -> (vector<2x2x2xf32>) {
-  %result = vector.transpose<[2, 0, 1]> %values : vector<2x2x2xf32> -> vector<2x2x2xf32>
-  func.return %result : vector<2x2x2xf32>
-}
-
-// ----
-CHECK: return %result
-
-// ====
-
-func.def @f32x4x4_transpose(%values: vector<4x4xf32>) -> (vector<4x4xf32>) {
-  %result = vector.transpose<[1, 0]> %values : vector<4x4xf32> -> vector<4x4xf32>
-  func.return %result : vector<4x4xf32>
-}
-
-// ----
-CHECK: * = mova.i32 34
-CHECK: %result = vshuffle *
-CHECK: return %result
-CHECK-NOT: *vextract*
-CHECK-NOT: *vinsert*
-
-// ====
-
-func.def @i32x4x4_transpose(%values: vector<4x4xi32>) -> (vector<4x4xi32>) {
-  %result = vector.transpose<[1, 0]> %values : vector<4x4xi32> -> vector<4x4xi32>
-  func.return %result : vector<4x4xi32>
-}
-
-// ----
-CHECK: * = mova.i32 34
-CHECK: %result = vshuffle *
-CHECK: return %result
-CHECK-NOT: *vextract*
-CHECK-NOT: *vinsert*

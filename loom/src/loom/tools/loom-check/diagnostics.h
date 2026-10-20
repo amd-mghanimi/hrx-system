@@ -14,7 +14,7 @@
 #include "loom/codegen/low/text_asm.h"
 #include "loom/error/diagnostic.h"
 #include "loom/error/emitter.h"
-#include "loom/error/error_defs.h"
+#include "loom/error/parameter.h"
 #include "loom/error/source.h"
 #include "loom/ir/module.h"
 #include "loom/testing/test_diagnostic.h"
@@ -84,6 +84,11 @@ typedef struct loom_check_diagnostic_emitter_capture_t {
 // Returns whether the collector contains an error, ignoring notes and warnings.
 bool loom_check_diagnostic_collector_has_error(
     const loom_check_diagnostic_collector_t* collector);
+
+// Appends one fully materialized diagnostic and updates severity counts.
+iree_status_t loom_check_diagnostic_collector_append(
+    loom_check_diagnostic_collector_t* collector,
+    const loom_check_collected_diagnostic_t* diagnostic);
 
 // Diagnostic sink callback. Renders, stores, and JSON-captures one diagnostic.
 iree_status_t loom_check_diagnostic_collector_sink(

@@ -12,16 +12,21 @@
 iree_status_t loom_tooling_context_register_tool_dialects(
     loom_context_t* context) {
   IREE_RETURN_IF_ERROR(loom_op_registry_register_all_dialects(context));
-  return loom_test_dialect_register(context);
+  return loom_context_is_dialect_registered(context, LOOM_DIALECT_TEST)
+             ? iree_ok_status()
+             : loom_test_dialect_register(context);
 }
 
 iree_status_t
 loom_tooling_context_register_tool_dialects_with_target_environment(
     const loom_target_environment_t* target_environment,
     loom_context_t* context) {
-  IREE_RETURN_IF_ERROR(loom_tooling_context_register_tool_dialects(context));
-  if (target_environment == NULL) {
-    return iree_ok_status();
+  IREE_RETURN_IF_ERROR(loom_op_registry_register_all_dialects(context));
+  if (target_environment != NULL) {
+    IREE_RETURN_IF_ERROR(
+        loom_target_environment_register_context(target_environment, context));
   }
-  return loom_target_environment_register_context(target_environment, context);
+  return loom_context_is_dialect_registered(context, LOOM_DIALECT_TEST)
+             ? iree_ok_status()
+             : loom_test_dialect_register(context);
 }

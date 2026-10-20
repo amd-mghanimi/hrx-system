@@ -1,0 +1,142 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//libamdf/build_tools/bazel:cc.bzl", "amdf_cc_library")
+load("//libamdf/build_tools/bazel:cts.bzl", "amdf_cts_test_suite")
+load("//libamdf/build_tools/bazel:cts_gpu_targets.bzl", "AMDF_CTS_GPU_DUAL_WAVE_CONFIGS")
+
+package(
+    default_visibility = ["//libamdf/cts:__subpackages__"],
+    features = ["layering_check"],
+    licenses = ["notice"],
+)
+
+_PM4_TEST_COMPATIBILITY = ["@platforms//cpu:x86_64"] + select({
+    "@platforms//os:linux": [],
+    "@platforms//os:windows": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
+amdf_cc_library(
+    name = "command_fixture",
+    testonly = True,
+    hdrs = ["command_fixture.h"],
+    deps = [
+        "//libamdf/cts/gpu/pm4/encoding:commands",
+        "//libamdf/cts/gpu/util:command_fixture",
+    ],
+)
+
+amdf_cc_library(
+    name = "dispatch_fixture",
+    testonly = True,
+    hdrs = ["dispatch_fixture.h"],
+    deps = [
+        ":command_fixture",
+        "//libamdf/cts/gpu/kernels:image",
+        "//libamdf/cts/gpu/pm4/encoding:commands",
+    ],
+)
+
+amdf_cc_library(
+    name = "mapping_fixture",
+    testonly = True,
+    srcs = ["mapping_fixture.cc"],
+    hdrs = ["mapping_fixture.h"],
+    target_compatible_with = _PM4_TEST_COMPATIBILITY,
+    deps = [
+        ":dispatch_fixture",
+        "//libamdf/cts/gpu/kernels:byte_copy_unaligned",
+        "//libamdf/cts/gpu/kernels:byte_copy_unaligned_kernels",
+        "//libamdf/cts/gpu/util:sparse_mapping_layout",
+    ],
+)
+
+amdf_cc_library(
+    name = "wave_mode_cases",
+    testonly = True,
+    srcs = ["wave_mode_test.cc"],
+    target_compatible_with = select({
+        config: []
+        for config in AMDF_CTS_GPU_DUAL_WAVE_CONFIGS
+    } | {"//conditions:default": ["@platforms//:incompatible"]}),
+    deps = [
+        ":dispatch_fixture",
+        "//libamdf/cts/gpu/kernels:lds_exchange",
+        "//libamdf/cts/gpu/kernels:lds_exchange_kernels",
+        "//libamdf/cts/gpu/kernels:lds_exchange_wave64_kernels",
+        "//third_party:google_test",
+    ],
+    alwayslink = True,
+)
+
+amdf_cts_test_suite(
+    name = "pm4",
+    srcs = [
+        "atomic_store_test.cc",
+        "branch_test.cc",
+        "command_buffer_test.cc",
+        "conditional_test.cc",
+        "copy_test.cc",
+        "dispatch_test.cc",
+        "dma_test.cc",
+        "event_test.cc",
+        "handoff_test.cc",
+        "host_mapping_test.cc",
+        "indirect_test.cc",
+        "lds_test.cc",
+        "mapping_test.cc",
+        "observation_stream_test.cc",
+        "program_atomic_test.cc",
+        "queued_mapping_test.cc",
+        "resource_test.cc",
+        "retirement_test.cc",
+        "shader_event_test.cc",
+        "timestamp_test.cc",
+        "wait_test.cc",
+        "write_test.cc",
+    ],
+    target_compatible_with = _PM4_TEST_COMPATIBILITY,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":command_fixture",
+        ":dispatch_fixture",
+        ":mapping_fixture",
+        "//libamdf/cts/gpu/kernels:byte_copy_unaligned",
+        "//libamdf/cts/gpu/kernels:byte_copy_unaligned_kernels",
+        "//libamdf/cts/gpu/kernels:lds_exchange",
+        "//libamdf/cts/gpu/kernels:lds_exchange_kernels",
+        "//libamdf/cts/gpu/kernels:shader_event",
+        "//libamdf/cts/gpu/kernels:shader_event_kernels",
+        "//libamdf/cts/gpu/kernels:transform",
+        "//libamdf/cts/gpu/kernels:transform_kernels",
+        "//libamdf/cts/gpu/pm4/encoding:commands",
+        "//libamdf/cts/gpu/util:command_fixture",
+        "//libamdf/cts/gpu/util:program_atomic_fixture",
+        "//libamdf/cts/gpu/util:shader_event_fixture",
+        "//libamdf/cts/gpu/util:sparse_mapping_layout",
+        "//libamdf/cts/util:wait",
+        "//third_party:google_test",
+    ] + select({
+        config: [":wave_mode_cases"]
+        for config in AMDF_CTS_GPU_DUAL_WAVE_CONFIGS
+    } | {"//conditions:default": []}),
+)
+
+amdf_cts_test_suite(
+    name = "pm4_stress",
+    srcs = ["mapping_stress_test.cc"],
+    tags = [
+        "manual",
+        "stress",
+    ],
+    target_compatible_with = _PM4_TEST_COMPATIBILITY,
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mapping_fixture",
+        "//third_party:google_test",
+    ],
+)

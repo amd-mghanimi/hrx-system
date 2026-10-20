@@ -1,5 +1,13 @@
 // RUN: format bytecode
 
+func.def @float_conversion_policy(%half: f16, %single: f32) -> (f32, bf16) {
+  %wide = scalar.extf<daz> %half : f16 to f32
+  %narrow = scalar.fptrunc<daz|ftz> %single : f32 to bf16
+  func.return %wide, %narrow : f32, bf16
+}
+
+// ====
+
 // Semantic activation ops carry their fastmath flags and GELU variant/scale
 // through bytecode without lowering to formula fragments.
 func.def @activation_math(%x: f32) -> (f32, f32, f32, f32, f32) {
@@ -21,8 +29,35 @@ func.def @turn_trig_math(%x: f32) -> (f32, f32) {
 
 // ====
 
+func.def @preserved_trig_math(%x: f32) -> (f32, f32, f32, f32) {
+  %sine = scalar.sinf<afn|preserve> %x : f32
+  %cosine = scalar.cosf<afn|preserve> %x : f32
+  %turn_sine = scalar.sinturnsf<fast|preserve> %x : f32
+  %turn_cosine = scalar.costurnsf<afn|preserve> %x : f32
+  func.return %sine, %cosine, %turn_sine, %turn_cosine : f32, f32, f32, f32
+}
+
+// ----
+func.def @preserved_trig_math(%x: f32) -> (f32, f32, f32, f32) {
+  %sine = scalar.sinf<afn|preserve> %x : f32
+  %cosine = scalar.cosf<afn|preserve> %x : f32
+  %turn_sine = scalar.sinturnsf<reassoc|nnan|ninf|nsz|arcp|contract|afn|preserve> %x : f32
+  %turn_cosine = scalar.costurnsf<afn|preserve> %x : f32
+  func.return %sine, %cosine, %turn_sine, %turn_cosine : f32, f32, f32, f32
+}
+
+// ====
+
 func.def @bitfield_extract(%word: i32) -> (i32, i32) {
   %unsigned = scalar.bitfield.extractu %word {offset = 8, width = 8} : i32 -> i32
   %signed = scalar.bitfield.extracts %word {offset = 24, width = 8} : i32 -> i32
   func.return %unsigned, %signed : i32, i32
+}
+
+// ====
+
+func.def @constexpr_contracts(%scalar: f32, %coordinate: index) -> (f32, index) {
+  %required_scalar = scalar.constexpr %scalar : f32
+  %required_coordinate = index.constexpr %coordinate : index
+  func.return %required_scalar, %required_coordinate : f32, index
 }

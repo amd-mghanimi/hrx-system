@@ -15,21 +15,21 @@
 #define __host__
 #define __shared__ LOOM_WORKGROUP
 #define __forceinline__ LOOM_FORCE_INLINE
-#define threadIdx ::loom::workitem_id
-#define blockIdx ::loom::workgroup_id
-#define blockDim ::loom::workgroup_size
-#define gridDim ::loom::workgroup_count
-#define warpSize (::loom::subgroup_size())
-#define __syncthreads() ::loom::workgroup_barrier()
+#define threadIdx ::loom::kernel::workitem::id
+#define blockIdx ::loom::kernel::workgroup::id
+#define blockDim ::loom::kernel::workgroup::size
+#define gridDim ::loom::kernel::workgroup::count
+#define warpSize (::loom::kernel::subgroup::size())
+#define __syncthreads() ::loom::kernel::workgroup::barrier()
 #define __builtin_assume(condition) ::loom::assume(condition)
 #define __builtin_inff() ::loom::infinity()
 #define __builtin_amdgcn_rcpf(value) ::loom::reciprocal(value)
 
-using uint3 = loom::uint3;
+using uint3 = loom::kernel::uint3;
 
 [[loom::device, loom::force_inline]] static inline float __shfl_xor(
     float value, int mask, int width = warpSize) {
-  return loom::shuffle_xor(value, mask, width);
+  return loom::kernel::subgroup::shuffle_xor(value, mask, width);
 }
 
 [[loom::device, loom::force_inline]] static inline float __expf(float value) {

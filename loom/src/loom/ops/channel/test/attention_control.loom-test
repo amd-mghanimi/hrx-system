@@ -1,0 +1,80 @@
+// RUN: pass scf-to-cfg,ownership-lifetime
+
+// The state holds sixteen rows of a 256-element output accumulator and two
+// online normalization statistics. Arithmetic helpers borrow ready payloads;
+// ownership and readiness remain explicit in the surrounding worker.
+func.decl @initialize_state(%state: view<16x258xf32>)
+
+func.decl @query_key(%query: view<16x256xbf16>, %key: view<64x256xbf16>, %scores: view<16x64xf32>)
+
+func.decl @update_state(%state: view<16x258xf32>, %scores: view<16x64xf32>, %value: view<64x256xbf16>)
+
+// K storage becomes reusable before the V wait. Query, scores and unpublished
+// state remain live across that wait without retaining K's owned read.
+func.def noinline @attention_step(%query: view<16x256xbf16>, %keys: channel<tile<64x256xbf16>>, %values: channel<tile<64x256xbf16>>, %state_write: write<tile<16x258xf32>>, %state: view<16x258xf32>, %scores: view<16x64xf32>) -> (write<tile<16x258xf32>>) {
+  %key_read, %key = channel.acquire %keys : channel<tile<64x256xbf16>> -> (read<tile<64x256xbf16>>, view<64x256xbf16>)
+  func.call @query_key(%query, %key, %scores) : (view<16x256xbf16>, view<64x256xbf16>, view<16x64xf32>)
+  channel.release %key_read : read<tile<64x256xbf16>>
+  %value_read, %value = channel.acquire %values : channel<tile<64x256xbf16>> -> (read<tile<64x256xbf16>>, view<64x256xbf16>)
+  func.call @update_state(%state, %scores, %value) : (view<16x258xf32>, view<16x64xf32>, view<64x256xbf16>)
+  channel.release %value_read : read<tile<64x256xbf16>>
+  func.return %state_write : write<tile<16x258xf32>>
+}
+
+// One query window folds a runtime number of K/V blocks into one result.
+// The zero-block path publishes initialized empty state. A later normalization
+// or partial-state reduction consumes the same channel interface.
+func.def @attention_scan(%queries: channel<tile<16x256xbf16>>, %keys: channel<tile<64x256xbf16>>, %values: channel<tile<64x256xbf16>>, %states: channel<tile<16x258xf32>>, %scores: view<16x64xf32>, %blocks: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %query_read, %query = channel.acquire %queries : channel<tile<16x256xbf16>> -> (read<tile<16x256xbf16>>, view<16x256xbf16>)
+  %write, %state = channel.reserve %states : channel<tile<16x258xf32>> -> (write<tile<16x258xf32>>, view<16x258xf32>)
+  func.call @initialize_state(%state) : (view<16x258xf32>)
+  %finished = scf.for %block = [%c0 to %blocks step %c1](%partial = %write : write<tile<16x258xf32>>) -> (write<tile<16x258xf32>>) {
+    %next = func.call @attention_step(%query, %keys, %values, %partial, %state, %scores) : (view<16x256xbf16>, channel<tile<64x256xbf16>>, channel<tile<64x256xbf16>>, write<tile<16x258xf32>>, view<16x258xf32>, view<16x64xf32>) -> (write<tile<16x258xf32>>)
+    scf.yield %next : write<tile<16x258xf32>>
+  }
+  channel.release %query_read : read<tile<16x256xbf16>>
+  channel.publish %finished : write<tile<16x258xf32>>
+  func.return
+}
+
+// ----
+func.decl @initialize_state(%state: view<16x258xf32>)
+
+func.decl @query_key(%query: view<16x256xbf16>, %key: view<64x256xbf16>, %scores: view<16x64xf32>)
+
+func.decl @update_state(%state: view<16x258xf32>, %scores: view<16x64xf32>, %value: view<64x256xbf16>)
+
+func.def noinline @attention_step(%query: view<16x256xbf16>, %keys: channel<tile<64x256xbf16>>, %values: channel<tile<64x256xbf16>>, %state_write: write<tile<16x258xf32>>, %state: view<16x258xf32>, %scores: view<16x64xf32>) -> (write<tile<16x258xf32>>) {
+  %key_read, %key = channel.acquire %keys : channel<tile<64x256xbf16>> -> (read<tile<64x256xbf16>>, view<64x256xbf16>)
+  func.call @query_key(%query, %key, %scores) : (view<16x256xbf16>, view<64x256xbf16>, view<16x64xf32>)
+  channel.release %key_read : read<tile<64x256xbf16>>
+  %value_read, %value = channel.acquire %values : channel<tile<64x256xbf16>> -> (read<tile<64x256xbf16>>, view<64x256xbf16>)
+  func.call @update_state(%state, %scores, %value) : (view<16x258xf32>, view<16x64xf32>, view<64x256xbf16>)
+  channel.release %value_read : read<tile<64x256xbf16>>
+  func.return %state_write : write<tile<16x258xf32>>
+}
+
+func.def @attention_scan(%queries: channel<tile<16x256xbf16>>, %keys: channel<tile<64x256xbf16>>, %values: channel<tile<64x256xbf16>>, %states: channel<tile<16x258xf32>>, %scores: view<16x64xf32>, %blocks: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %query_read, %query = channel.acquire %queries : channel<tile<16x256xbf16>> -> (read<tile<16x256xbf16>>, view<16x256xbf16>)
+  %write, %state = channel.reserve %states : channel<tile<16x258xf32>> -> (write<tile<16x258xf32>>, view<16x258xf32>)
+  func.call @initialize_state(%state) : (view<16x258xf32>)
+  cfg.br ^_bb1(%c0: index, %write: write<tile<16x258xf32>>)
+^_bb1(%35: index, %partial: write<tile<16x258xf32>>):
+  %38 = index.cmp slt, %35, %blocks : index
+  cfg.cond_br %38, ^_bb2, ^_bb3
+^_bb2:
+  %block = index.assume %35 [range(%35, 0, 9223372036854775806), lt(%35, %blocks)] : index
+  %next = func.call @attention_step(%query, %keys, %values, %partial, %state, %scores) : (view<16x256xbf16>, channel<tile<64x256xbf16>>, channel<tile<64x256xbf16>>, write<tile<16x258xf32>>, view<16x258xf32>, view<16x64xf32>) -> (write<tile<16x258xf32>>)
+  %39 = index.add %block, %c1 : index
+  cfg.br ^_bb1(%39: index, %next: write<tile<16x258xf32>>)
+^_bb3:
+  cfg.br ^_bb4(%partial: write<tile<16x258xf32>>)
+^_bb4(%finished: write<tile<16x258xf32>>):
+  channel.release %query_read : read<tile<16x256xbf16>>
+  channel.publish %finished : write<tile<16x258xf32>>
+  func.return
+}

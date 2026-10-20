@@ -123,7 +123,6 @@ void iree_hal_amdgpu_profile_event_streams_deinitialize(
   }
   iree_hal_amdgpu_profile_event_stream_deinitialize(&streams->memory.stream,
                                                     host_allocator);
-  streams->memory.next_allocation_id = 0;
   iree_hal_amdgpu_profile_event_stream_deinitialize(&streams->queue.stream,
                                                     host_allocator);
 }
@@ -157,23 +156,11 @@ iree_status_t iree_hal_amdgpu_profile_event_streams_ensure_queue_storage(
 void iree_hal_amdgpu_profile_event_streams_clear_memory(
     iree_hal_amdgpu_profile_event_streams_t* streams) {
   iree_hal_amdgpu_profile_event_stream_clear(&streams->memory.stream);
-  streams->memory.next_allocation_id = 1;
 }
 
 void iree_hal_amdgpu_profile_event_streams_clear_queue(
     iree_hal_amdgpu_profile_event_streams_t* streams) {
   iree_hal_amdgpu_profile_event_stream_clear(&streams->queue.stream);
-}
-
-uint64_t iree_hal_amdgpu_profile_event_streams_allocate_memory_allocation_id(
-    iree_hal_amdgpu_profile_event_streams_t* streams,
-    uint64_t active_session_id, uint64_t* out_session_id) {
-  *out_session_id = 0;
-  iree_slim_mutex_lock(&streams->memory.stream.mutex);
-  *out_session_id = active_session_id;
-  const uint64_t allocation_id = streams->memory.next_allocation_id++;
-  iree_slim_mutex_unlock(&streams->memory.stream.mutex);
-  return allocation_id;
 }
 
 bool iree_hal_amdgpu_profile_event_streams_record_memory_event(

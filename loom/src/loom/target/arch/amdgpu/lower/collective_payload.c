@@ -6,11 +6,28 @@
 
 #include "loom/target/arch/amdgpu/lower/collective_payload.h"
 
+#include "loom/ops/kernel/ops.h"
 #include "loom/target/arch/amdgpu/lower/emit.h"
 #include "loom/target/arch/amdgpu/lower/legality.h"
 #include "loom/target/arch/amdgpu/lower/sync.h"
 #include "loom/target/arch/amdgpu/lower/topology.h"
 #include "loom/target/arch/amdgpu/lower/types.h"
+
+uint32_t loom_amdgpu_collective_transport_register_count(loom_type_t type) {
+  const loom_scalar_type_t element_type = loom_type_element_type(type);
+  if (!loom_scalar_type_set_contains(
+          LOOM_SCALAR_TYPE_SET_INTEGER_PAYLOAD | LOOM_SCALAR_TYPE_SET_FLOAT,
+          element_type)) {
+    return 0;
+  }
+  if (loom_type_is_scalar(type)) {
+    return (loom_scalar_type_bitwidth(element_type) + 31u) / 32u;
+  }
+  loom_amdgpu_vector_storage_t storage;
+  return loom_amdgpu_type_vector_storage(type, &storage)
+             ? storage.register_count
+             : 0;
+}
 
 static loom_amdgpu_subgroup_payload_kind_t loom_amdgpu_collective_payload_kind(
     loom_type_t type, uint32_t* out_register_count) {
@@ -36,7 +53,7 @@ static loom_amdgpu_subgroup_payload_kind_t loom_amdgpu_collective_payload_kind(
   return LOOM_AMDGPU_SUBGROUP_PAYLOAD_NONE;
 }
 
-bool loom_amdgpu_collective_payload_is_supported(
+bool loom_amdgpu_collective_arithmetic_payload_is_supported(
     const loom_module_t* module, loom_value_id_t value_id,
     loom_amdgpu_subgroup_payload_kind_t* out_kind,
     uint32_t* out_register_count) {
@@ -89,14 +106,6 @@ bool loom_amdgpu_collective_resolve_workgroup_shape(
     return false;
   }
 
-  const uint64_t scratch_byte_length =
-      (uint64_t)wave_count * register_count * 4u;
-  if (scratch_byte_length > UINT32_MAX) {
-    *out_failure =
-        LOOM_AMDGPU_WORKGROUP_COLLECTIVE_SHAPE_FAILURE_SCRATCH_BYTE_LENGTH;
-    return false;
-  }
-
   loom_amdgpu_workgroup_collective_shape_flags_t flags = 0;
   if (flat_workgroup_size > partition_lane_count) {
     flags |= LOOM_AMDGPU_WORKGROUP_COLLECTIVE_SHAPE_MULTI_WAVE;
@@ -104,27 +113,92 @@ bool loom_amdgpu_collective_resolve_workgroup_shape(
       flags |= LOOM_AMDGPU_WORKGROUP_COLLECTIVE_SHAPE_PARTIAL_TAIL;
     }
   }
+  const uint64_t scratch_byte_length =
+      iree_all_bits_set(flags,
+                        LOOM_AMDGPU_WORKGROUP_COLLECTIVE_SHAPE_MULTI_WAVE)
+          ? (uint64_t)wave_count * register_count * 4u
+          : 0;
+  if (scratch_byte_length > UINT32_MAX) {
+    *out_failure =
+        LOOM_AMDGPU_WORKGROUP_COLLECTIVE_SHAPE_FAILURE_SCRATCH_BYTE_LENGTH;
+    return false;
+  }
 
   *out_shape = (loom_amdgpu_workgroup_collective_shape_t){
       .flat_workgroup_size = flat_workgroup_size,
       .wave_count = wave_count,
+      .scratch_byte_length = (uint32_t)scratch_byte_length,
       .flags = flags,
   };
   return true;
 }
 
+iree_status_t loom_amdgpu_finalize_collective_payload(
+    loom_low_lower_context_t* context, loom_low_lower_plan_t plan) {
+  loom_value_id_t value = LOOM_VALUE_ID_INVALID;
+  loom_amdgpu_subgroup_payload_kind_t payload_kind;
+  const void** materialization = NULL;
+  switch (plan.id) {
+    case LOOM_OP_KERNEL_SUBGROUP_REDUCE: {
+      loom_amdgpu_subgroup_reduce_plan_t* reduce =
+          (loom_amdgpu_subgroup_reduce_plan_t*)plan.target_data;
+      value = reduce->value;
+      payload_kind = reduce->payload_kind;
+      materialization = &reduce->payload_materialization;
+      break;
+    }
+    case LOOM_OP_KERNEL_WORKGROUP_REDUCE: {
+      loom_amdgpu_workgroup_reduce_plan_t* reduce =
+          (loom_amdgpu_workgroup_reduce_plan_t*)plan.target_data;
+      iree_status_t status = iree_ok_status();
+      for (uint32_t i = 0;
+           i < reduce->payload_count && iree_status_is_ok(status); ++i) {
+        loom_amdgpu_workgroup_reduce_payload_t* payload = &reduce->payloads[i];
+        if (payload->kind == LOOM_AMDGPU_SUBGROUP_PAYLOAD_I32_SCALAR) {
+          status = loom_amdgpu_prepare_vgpr_literal(
+              context, payload->value, &payload->payload_materialization);
+        }
+      }
+      return status;
+    }
+    case LOOM_OP_KERNEL_SUBGROUP_SCAN: {
+      loom_amdgpu_subgroup_scan_plan_t* scan =
+          (loom_amdgpu_subgroup_scan_plan_t*)plan.target_data;
+      value = scan->value;
+      payload_kind = scan->payload_kind;
+      materialization = &scan->payload_materialization;
+      break;
+    }
+    case LOOM_OP_KERNEL_WORKGROUP_SCAN: {
+      loom_amdgpu_workgroup_scan_plan_t* scan =
+          (loom_amdgpu_workgroup_scan_plan_t*)plan.target_data;
+      value = scan->value;
+      payload_kind = scan->payload_kind;
+      materialization = &scan->payload_materialization;
+      break;
+    }
+    default:
+      IREE_ASSERT_UNREACHABLE("expected an arithmetic collective plan");
+      IREE_BUILTIN_UNREACHABLE();
+  }
+  return payload_kind == LOOM_AMDGPU_SUBGROUP_PAYLOAD_I32_SCALAR
+             ? loom_amdgpu_prepare_vgpr_literal(context, value, materialization)
+             : iree_ok_status();
+}
+
 iree_status_t loom_amdgpu_collective_lookup_payload(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_value_id_t value, loom_amdgpu_subgroup_payload_kind_t payload_kind,
-    loom_value_id_t* out_low_value) {
+    const void* materialization, loom_value_id_t* out_low_value) {
   switch (payload_kind) {
     case LOOM_AMDGPU_SUBGROUP_PAYLOAD_I32_SCALAR:
-      return loom_amdgpu_lookup_or_materialize_vgpr_i32(context, source_op,
-                                                        value, out_low_value);
+      return loom_amdgpu_emit_prepared_vgpr_value(
+          context, source_op, value, materialization, out_low_value);
     case LOOM_AMDGPU_SUBGROUP_PAYLOAD_F32_SCALAR:
     case LOOM_AMDGPU_SUBGROUP_PAYLOAD_I32_VECTOR:
     case LOOM_AMDGPU_SUBGROUP_PAYLOAD_F32_VECTOR:
-      return loom_low_lower_lookup_value(context, value, out_low_value);
+      *out_low_value = loom_low_lower_lookup_value(context, value);
+      return iree_ok_status();
     case LOOM_AMDGPU_SUBGROUP_PAYLOAD_NONE:
       break;
   }
@@ -136,9 +210,12 @@ iree_status_t loom_amdgpu_collective_payload_register(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     uint32_t register_count, loom_value_id_t low_value, uint32_t register_index,
     loom_type_t lane_type, loom_value_id_t* out_register) {
-  return loom_amdgpu_extract_low_register_unit(context, source_op, low_value,
-                                               register_count, register_index,
-                                               lane_type, out_register);
+  loom_value_id_t low_register = LOOM_VALUE_ID_INVALID;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_extract_low_register_unit(
+      context, source_op, low_value, register_count, register_index, lane_type,
+      &low_register));
+  return loom_amdgpu_materialize_full_low_vgpr_b32(context, source_op,
+                                                   low_register, out_register);
 }
 
 iree_status_t loom_amdgpu_collective_bind_payload_result(

@@ -21,8 +21,9 @@ TEST(AmdgpuAtomicOrderingTest, SystemAdmissionRequiresCoherenceRecipe) {
     GTEST_SKIP() << "RDNA 3.5 descriptors are not linked.";
   }
 
-  loom_low_source_memory_access_plan_t source = {};
-  source.memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL;
+  loom_low_source_memory_access_plan_t source = {
+      .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL,
+  };
   source.atomic.scope = LOOM_ATOMIC_SCOPE_SYSTEM;
   EXPECT_TRUE(loom_amdgpu_atomic_scope_supported(
       descriptor_set, &source, loom_type_scalar(LOOM_SCALAR_TYPE_I32)));
@@ -30,9 +31,17 @@ TEST(AmdgpuAtomicOrderingTest, SystemAdmissionRequiresCoherenceRecipe) {
       descriptor_set, &source, loom_type_scalar(LOOM_SCALAR_TYPE_I64)));
   EXPECT_TRUE(loom_amdgpu_atomic_scope_supported(
       descriptor_set, &source, loom_type_scalar(LOOM_SCALAR_TYPE_F32)));
+  EXPECT_TRUE(loom_amdgpu_atomic_scope_supported(
+      descriptor_set, &source, loom_type_scalar(LOOM_SCALAR_TYPE_F64)));
+  EXPECT_FALSE(loom_amdgpu_atomic_scope_supported(
+      descriptor_set, &source, loom_type_scalar(LOOM_SCALAR_TYPE_F16)));
+
+  source.memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GENERIC;
+  EXPECT_TRUE(loom_amdgpu_atomic_scope_supported(
+      descriptor_set, &source, loom_type_scalar(LOOM_SCALAR_TYPE_F64)));
 
   source.memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP;
-  EXPECT_FALSE(loom_amdgpu_atomic_scope_supported(
+  EXPECT_TRUE(loom_amdgpu_atomic_scope_supported(
       descriptor_set, &source, loom_type_scalar(LOOM_SCALAR_TYPE_I32)));
   source.atomic.scope = LOOM_ATOMIC_SCOPE_WORKGROUP;
   EXPECT_TRUE(loom_amdgpu_atomic_scope_supported(

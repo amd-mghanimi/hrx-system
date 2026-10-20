@@ -222,7 +222,8 @@ TEST_F(IoUringRegistrationOwnerTest, SlabLifecycleFromCallerTask) {
   ASSERT_GE(raw_file_fd_, 0) << strerror(errno);
   ASSERT_EQ(ftruncate(raw_file_fd_, 4096), 0) << strerror(errno);
   IREE_ASSERT_OK(iree_async_file_import(
-      proactor_, iree_async_primitive_from_fd(raw_file_fd_), &file_));
+      proactor_, iree_async_primitive_from_fd(raw_file_fd_),
+      IREE_ASYNC_FILE_FLAG_NONE, &file_));
   raw_file_fd_ = -1;
 
   iree_async_slab_options_t slab_options = {0};
@@ -502,7 +503,8 @@ TEST(IoUringCrossThreadTest,
     for (auto* source : retirement->sources) {
       iree_async_proactor_unregister_event_source(
           retirement->proactor, source,
-          {+[](void* user_data) {
+          {+[](void* user_data, iree_status_t status) {
+             IREE_EXPECT_OK(status);
              auto* retirement = static_cast<Retirement*>(user_data);
              retirement->completed.fetch_add(1, std::memory_order_release);
              iree_notification_post(&retirement->callback_state->notification,
@@ -812,7 +814,10 @@ TEST_F(ProactorLifetimeTest,
   bool unregistered = false;
   iree_async_proactor_unregister_event_source(
       proactor_, event_source,
-      {+[](void* context) { *static_cast<bool*>(context) = true; },
+      {+[](void* context, iree_status_t status) {
+         IREE_EXPECT_OK(status);
+         *static_cast<bool*>(context) = true;
+       },
        &unregistered});
 
   while (!unregistered || timer_state_.count < submitted_count_) {

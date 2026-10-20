@@ -16,9 +16,10 @@ loom_test_module(
     "testdata/buffer_bulk_hal_actual.loom"
     "testdata/dynamic_workgroup_hal_actual.loom"
     "testdata/launch_schedule_hal_actual.loom"
+    "testdata/scenario_batch_hal_actual.loom"
 )
 
-if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_EMIT_AMDGPU AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_AMDGPU)
+if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_BUILD AND LOOM_EMIT_AMDGPU AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_AMDGPU)
 loom_execution_test(
   NAME
     hardware_test_execute_amdgpu_hardware_test
@@ -67,30 +68,135 @@ loom_execution_test(
 )
 endif()
 
+loom_test_module(
+  NAME
+    scenario_compare_test_module
+  SRCS
+    "testdata/scenario_compare_hal_vm.loom"
+)
+
+if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_BUILD AND LOOM_EMIT_AMDGPU AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_AMDGPU)
+loom_execution_test(
+  NAME
+    scenario_compare_test_execute_amdgpu_hardware_test
+  MODULE
+    "::scenario_compare_test_module"
+  RUNNER_ARGS
+    "--device=amdgpu"
+  LABELS
+    "iree-build-requirement=loom.target.arch.amdgpu"
+    "iree-build-requirement=loom.emit.amdgpu"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+    "loom-execution-profile=amdgpu_hardware"
+    "loom-target-family=amdgpu"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+loom_execution_test(
+  NAME
+    scenario_compare_test_execute_spirv_vulkan_hardware_test
+  MODULE
+    "::scenario_compare_test_module"
+  RUNNER_ARGS
+    "--device=vulkan"
+    "--vulkan_validation_layers=false"
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
+    "iree-build-requirement=loom.execute.iree_hal"
+    "iree-build-requirement=runtime.hal.vulkan"
+    "iree-run-requirement=vulkan.resource.device"
+    "runtime-resource=vulkan-device"
+    "loom-execution-profile=spirv_vulkan_hardware"
+    "loom-target-family=spirv"
+    "loom-target-class=gpu"
+    "loom-executor=hardware"
+  RESOURCE_GROUP
+    "gpu-device"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_EMIT_AMDGPU AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_AMDGPU)
+iree_native_test(
+  NAME
+    "scenario_benchmark_test"
+  ARGS
+    "{{${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/execution/hal/testdata/scenario_compare_hal_vm.loom}}"
+    "--device=amdgpu"
+    "--case=@scenario_scalar_results"
+    "--benchmark=@scenario_scalar_results_throughput"
+    "--sample=2"
+    "--batch-size=2"
+    "--input-ring-count=1"
+    "--iterations=1"
+    "--warmup-iterations=0"
+    "--min-time-ms=0"
+    "--warmup-time-ms=0"
+    "--max-batches=1"
+    "--profile-final-batch=true"
+    "--profile-data=dispatch-events"
+  SRC
+    loom::tools::iree-benchmark-loom
+  DATA
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/execution/hal/testdata/scenario_compare_hal_vm.loom"
+  LABELS
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "requires-gpu-amd"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_EMIT_AMDGPU AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_AMDGPU)
+iree_native_test(
+  NAME
+    "scenario_benchmark_comparison_test"
+  ARGS
+    "{{${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/execution/hal/testdata/scenario_compare_hal_vm.loom}}"
+    "--device=amdgpu"
+    "--compare=@scenario_benchmark_baseline_throughput,@scenario_benchmark_candidate_throughput"
+    "--sample=2"
+    "--repetitions=1"
+    "--interleave=ABABA"
+    "--batch-size=1"
+    "--input-ring-count=2"
+    "--iterations=1"
+    "--warmup-iterations=0"
+    "--min-time-ms=0"
+    "--warmup-time-ms=0"
+    "--max-batches=1"
+    "--profile-final-batch=true"
+    "--profile-data=dispatch-events"
+  SRC
+    loom::tools::iree-benchmark-loom
+  DATA
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tooling/execution/hal/testdata/scenario_compare_hal_vm.loom"
+  LABELS
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "requires-gpu-amd"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
 loom_cc_library(
   NAME
     artifact
   HDRS
     "artifact.h"
   DEPS
-    iree::hal
-    loom::tooling::compile::artifact
-  PUBLIC
-)
-
-loom_cc_library(
-  NAME
-    device_provider
-  HDRS
-    "device_provider.h"
-  SRCS
-    "device_provider.c"
-  DEPS
-    ::runtime
     iree::base
     iree::hal
-    loom::target::profile
-    loom::tooling::compile::artifact
   PUBLIC
 )
 
@@ -107,26 +213,8 @@ loom_cc_library(
     iree::base
     iree::base::threading
     iree::hal
+    iree::hal::memory::tlsf_pool
     iree::tooling::device_util
-    loom::ir
-    loom::sanitizer::options
-    loom::sanitizer::runtime_requirements
-  PUBLIC
-)
-
-loom_cc_library(
-  NAME
-    candidate
-  HDRS
-    "candidate.h"
-  SRCS
-    "candidate.c"
-  DEPS
-    ::device_provider
-    iree::base
-    loom::tooling::compile::artifact
-    loom::tooling::compile::options
-    loom::tooling::execution::session
   PUBLIC
 )
 
@@ -143,8 +231,6 @@ loom_cc_library(
     iree::base
     iree::hal
     iree::tooling::value_io
-    loom::target::launch
-    loom::target::types
   PUBLIC
 )
 
@@ -171,41 +257,54 @@ loom_cc_library(
     "testbench_actual.c"
   DEPS
     ::artifact
-    ::candidate
-    ::device_provider
     ::invocation
     ::runtime
     ::testbench_staging
     iree::base
     iree::hal
     iree::tooling::device_util
-    loom::analysis::kernel_launch_config
-    loom::analysis::symbol_facts
-    loom::error::diagnostic
+    loom::binding::c::interop
+    loom::binding::c::loomc
+    loom::binding::c::target::iree_hal
     loom::ir
-    loom::ir::facts
-    loom::link::linker
-    loom::ops::func_symbol_facts
+    loom::target::profile
+    loom::target::types
+    loom::tooling::testbench::api
+    loom::tooling::testbench::compiled_provider
+    loom::tooling::testbench::invocation
+    loom::tooling::testbench::value_materializer
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    scenario_profile
+  HDRS
+    "scenario_profile.h"
+  SRCS
+    "scenario_profile.c"
+  DEPS
+    ::benchmark
+    ::invocation
+    ::testbench_actual
+    ::testbench_staging
+    iree::base
+    iree::hal
+    loom::binding::c::interop
+    loom::binding::c::loomc
+    loom::error::diagnostic
+    loom::error::error_defs
+    loom::error::source
+    loom::ir
+    loom::ops::buffer
+    loom::ops::func
+    loom::ops::index
     loom::ops::kernel
     loom::ops::op_defs
-    loom::ops::special_values
-    loom::ops::target
-    loom::sanitizer::options
-    loom::target::function_version
-    loom::target::provider
-    loom::target::types
-    loom::tooling::compile::options
-    loom::tooling::compile::pipeline
-    loom::tooling::compile::report_capture
-    loom::tooling::config
-    loom::tooling::execution::execution_backend
-    loom::tooling::execution::session
-    loom::tooling::io::source
-    loom::tooling::testbench
-    loom::tooling::testbench::invocation
-    loom::tooling::testbench::requirements
-    loom::tooling::testbench::value_materializer
-    loom::util::fact_table
+    loom::ops::scalar
+    loom::ops::view
+    loom::tooling::execution::benchmark
+    loom::tooling::testbench::scenario::executor
   PUBLIC
 )
 
@@ -228,87 +327,23 @@ loom_cc_library(
   PUBLIC
 )
 
-loom_cc_library(
-  NAME
-    execution_backend
-  HDRS
-    "execution_backend.h"
-  SRCS
-    "execution_backend.c"
-  DEPS
-    ::artifact
-    ::candidate
-    ::device_provider
-    ::invocation
-    ::runtime
-    iree::base
-    iree::base::core_headers
-    iree::base::internal::arena
-    loom::target::entry_selection
-    loom::tooling::compile::pipeline
-    loom::tooling::compile::report_capture
-    loom::tooling::execution::execution_backend
-    loom::tooling::execution::one_shot
-    loom::tooling::io::file
-  PUBLIC
-)
-
 if(IREE_HAL_DRIVER_TASK)
 loom_cc_test(
   NAME
-    execution_backend_test
+    runtime_test
   SRCS
-    "execution_backend_test.cc"
+    "runtime_test.cc"
   DEPS
-    ::execution_backend
     ::runtime
+    iree::async
+    iree::async::platform
     iree::base
     iree::hal
+    iree::hal::utils::host_semaphore
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::ops::op_registry
-    loom::ops::test
-    loom::target::low_descriptor_registry_core_test
-    loom::target::provider
-    loom::target::test::target_record_table
-    loom::tooling::compile::options
-    loom::tooling::execution::session
 )
 endif()
-
-loom_cc_test(
-  NAME
-    device_provider_test
-  SRCS
-    "device_provider_test.cc"
-  DEPS
-    ::device_provider
-    ::runtime
-    iree::base
-    iree::hal
-    iree::testing::gtest
-    iree::testing::gtest_main
-    loom::target::profile
-    loom::tooling::compile::artifact
-)
-
-loom_cc_test(
-  NAME
-    candidate_test
-  SRCS
-    "candidate_test.cc"
-  DEPS
-    ::candidate
-    iree::base
-    iree::testing::gtest
-    iree::testing::gtest_main
-    loom::ops::func
-    loom::target::low_descriptor_registry_core_test
-    loom::target::profile
-    loom::target::types
-    loom::testing::byte_sequence
-    loom::tooling::execution::session
-)
 
 loom_cc_test(
   NAME
@@ -331,9 +366,9 @@ loom_cc_test(
     ::invocation
     ::runtime
     iree::base
+    iree::hal::memory::heap_pool
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::target::types
 )
 
 loom_cc_test(
@@ -342,30 +377,16 @@ loom_cc_test(
   SRCS
     "testbench_actual_test.cc"
   DEPS
-    ::invocation
     ::testbench_actual
     iree::base
     iree::base::internal::arena
     iree::hal::testing::mock_device
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::format::text::parser
-    loom::ir
-    loom::link::linker
-    loom::ops::check
-    loom::ops::func
-    loom::ops::index
-    loom::ops::kernel
-    loom::ops::pass
-    loom::ops::test
-    loom::target::facts
-    loom::target::low_descriptor_registry_core_test
-    loom::target::profile
-    loom::target::provider
-    loom::testing::module_ptr
-    loom::tooling::execution::session
+    loom::binding::c::interop
+    loom::binding::c::loomc
     loom::tooling::testbench
-    loom::transforms::cleanup::configured
+    loom::tooling::testbench::api
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

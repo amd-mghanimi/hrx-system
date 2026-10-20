@@ -110,14 +110,12 @@ TEST_F(BlockBuilderTest, SingleDispatch) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  // Record one DISPATCH with 2 constants and 3 bindings.
-  const uint8_t constant_count = 2;
+  // Record one DISPATCH with 2 constant bytes and 3 bindings.
+  const uint16_t constant_byte_length = 2;
   const uint8_t binding_count = 3;
   const uint32_t tile_count = 24;
-  const iree_host_size_t cmd_size =
-      iree_host_align(offsetof(iree_hal_cmd_dispatch_t, constants) +
-                          constant_count * sizeof(uint32_t),
-                      8);
+  const iree_host_size_t cmd_size = iree_host_align(
+      offsetof(iree_hal_cmd_dispatch_t, constants) + constant_byte_length, 8);
 
   iree_hal_cmd_dispatch_t* dispatch = NULL;
   iree_hal_cmd_fixup_t* fixups = NULL;
@@ -135,7 +133,7 @@ TEST_F(BlockBuilderTest, SingleDispatch) {
 
   // Fill in dispatch fields.
   ASSERT_NE(dispatch, nullptr);
-  dispatch->constant_count = constant_count;
+  dispatch->constant_byte_length = constant_byte_length;
   dispatch->binding_count = binding_count;
   dispatch->binding_data_base = 0;
   dispatch->workgroup_size[0] = 64;
@@ -178,7 +176,7 @@ TEST_F(BlockBuilderTest, SingleDispatch) {
       reinterpret_cast<const iree_hal_cmd_dispatch_t*>(stream);
   EXPECT_EQ(dispatch_cmd->header.opcode, IREE_HAL_CMD_DISPATCH);
   EXPECT_EQ(dispatch_cmd->header.dispatch_index, 0);
-  EXPECT_EQ(dispatch_cmd->constant_count, 2);
+  EXPECT_EQ(dispatch_cmd->constant_byte_length, 2);
   EXPECT_EQ(dispatch_cmd->binding_count, 3);
   EXPECT_EQ(dispatch_cmd->constants[0], 42);
   EXPECT_EQ(dispatch_cmd->constants[1], 99);
@@ -214,15 +212,17 @@ TEST_F(BlockBuilderTest, CommandOpSplitKeepsBindingIndicesBlockLocal) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  iree_hal_executable_dispatch_attrs_v0_t dispatch_attrs = {};
-  dispatch_attrs.binding_count = 12;
-  iree_hal_task_executable_t executable = {};
-  executable.dispatch_attrs = &dispatch_attrs;
-  executable.export_count = 1;
+  iree_hal_executable_dispatch_attrs_v0_t dispatch_attrs = {
+      .binding_count = 12,
+  };
+  iree_hal_task_executable_t executable = {
+      .dispatch_attrs = &dispatch_attrs,
+      .export_count = 1,
+  };
 
   iree_hal_dispatch_config_t config = {
-      /*.workgroup_size=*/{1, 1, 1},
-      /*.workgroup_count=*/{1, 1, 1},
+      .workgroup_size = {1, 1, 1},
+      .workgroup_count = {1, 1, 1},
   };
   for (int i = 0; i < 100; ++i) {
     iree_hal_cmd_fixup_t* fixups = NULL;
@@ -278,7 +278,7 @@ TEST_F(BlockBuilderTest, BarrierCreatesRegions) {
     IREE_ASSERT_OK(iree_hal_cmd_block_builder_append_cmd(
         &builder, IREE_HAL_CMD_DISPATCH, IREE_HAL_CMD_FLAG_NONE,
         sizeof(iree_hal_cmd_dispatch_t), 0, 0, 10, (void**)&cmd, NULL));
-    cmd->constant_count = 0;
+    cmd->constant_byte_length = 0;
     cmd->binding_count = 0;
     cmd->tile_count = 10;
   }
@@ -301,7 +301,7 @@ TEST_F(BlockBuilderTest, BarrierCreatesRegions) {
     IREE_ASSERT_OK(iree_hal_cmd_block_builder_append_cmd(
         &builder, IREE_HAL_CMD_DISPATCH, IREE_HAL_CMD_FLAG_NONE,
         sizeof(iree_hal_cmd_dispatch_t), 0, 0, 5, (void**)&cmd, NULL));
-    cmd->constant_count = 0;
+    cmd->constant_byte_length = 0;
     cmd->binding_count = 0;
     cmd->tile_count = 5;
   }
@@ -411,7 +411,7 @@ TEST_F(BlockBuilderTest, BlockSplitOnCapacity) {
     IREE_ASSERT_OK(iree_hal_cmd_block_builder_append_cmd(
         &builder, IREE_HAL_CMD_DISPATCH, IREE_HAL_CMD_FLAG_NONE,
         sizeof(iree_hal_cmd_dispatch_t), 0, 0, 1, (void**)&cmd, NULL));
-    cmd->constant_count = 0;
+    cmd->constant_byte_length = 0;
     cmd->binding_count = 0;
     cmd->tile_count = 1;
     ++dispatch_count;
@@ -545,7 +545,7 @@ TEST_F(BlockBuilderTest, FixupsWithMultipleRegions) {
   fixups_r0[1].data_index = 1;
   fixups_r0[1].offset = 64;
   fixups_r0[1].span = (const iree_async_span_t*)(uintptr_t)0x2000;
-  d0->constant_count = 0;
+  d0->constant_byte_length = 0;
   d0->binding_count = 2;
   d0->binding_data_base = 0;
   d0->tile_count = 10;
@@ -562,7 +562,7 @@ TEST_F(BlockBuilderTest, FixupsWithMultipleRegions) {
   fixups_r1[0].data_index = 2;
   fixups_r1[0].offset = 128;
   fixups_r1[0].span = (const iree_async_span_t*)(uintptr_t)0x3000;
-  d1->constant_count = 0;
+  d1->constant_byte_length = 0;
   d1->binding_count = 1;
   d1->binding_data_base = 2;
   d1->tile_count = 5;
@@ -720,7 +720,7 @@ TEST_F(BlockBuilderTest, MixedCommandTypes) {
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_append_cmd(
       &builder, IREE_HAL_CMD_DISPATCH, IREE_HAL_CMD_FLAG_NONE,
       sizeof(iree_hal_cmd_dispatch_t), 0, 0, 8, (void**)&dispatch, NULL));
-  dispatch->constant_count = 0;
+  dispatch->constant_byte_length = 0;
   dispatch->binding_count = 0;
   dispatch->tile_count = 8;
 

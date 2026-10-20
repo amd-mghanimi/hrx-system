@@ -30,26 +30,78 @@ using TargetProfilePtr =
 struct MockVulkanDevice {
   VkPhysicalDevice handle =
       reinterpret_cast<VkPhysicalDevice>(static_cast<uintptr_t>(0x1234));
+  uint32_t vendor_id = 0x10DE;
   uint32_t api_version = VK_API_VERSION_1_3;
   uint32_t max_workgroup_size[3] = {1024, 512, 64};
   uint32_t max_flat_workgroup_size = 1024;
   uint32_t max_workgroup_storage_bytes = 49152;
   uint32_t max_workgroup_count[3] = {65535, 32768, 16384};
   uint32_t subgroup_size = 32;
+  // Whether subgroup sizes can be requested on supported stages.
+  VkBool32 subgroup_size_control = VK_FALSE;
+  // Smallest requestable subgroup width.
+  uint32_t minimum_subgroup_size = 32;
+  // Largest requestable subgroup width.
+  uint32_t maximum_subgroup_size = 64;
+  // Workgroup subgroup limit when specifying a width.
+  uint32_t maximum_workgroup_subgroup_count = 32;
+  // Stages supporting explicit subgroup widths.
+  VkShaderStageFlags required_subgroup_size_stages =
+      VK_SHADER_STAGE_COMPUTE_BIT;
+  // Extension route for subgroup-size control before Vulkan 1.3.
+  bool reports_subgroup_size_control_extension = false;
   VkSubgroupFeatureFlags subgroup_operations = VK_SUBGROUP_FEATURE_BASIC_BIT;
+  VkShaderFloatControlsIndependence denorm_behavior_independence =
+      VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+  VkShaderFloatControlsIndependence rounding_mode_independence =
+      VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE;
+  VkBool32 shader_denorm_preserve_float16 = VK_FALSE;
+  VkBool32 shader_denorm_preserve_float32 = VK_FALSE;
+  VkBool32 shader_denorm_preserve_float64 = VK_FALSE;
+  VkBool32 shader_signed_zero_inf_nan_preserve_float16 = VK_FALSE;
+  VkBool32 shader_signed_zero_inf_nan_preserve_float32 = VK_FALSE;
+  VkBool32 shader_signed_zero_inf_nan_preserve_float64 = VK_FALSE;
+  VkBool32 shader_rounding_mode_rte_float16 = VK_FALSE;
+  VkBool32 shader_rounding_mode_rte_float32 = VK_FALSE;
+  VkBool32 shader_rounding_mode_rte_float64 = VK_FALSE;
   VkBool32 shader_float64 = VK_TRUE;
   VkBool32 shader_int16 = VK_TRUE;
   VkBool32 shader_int64 = VK_FALSE;
   VkBool32 shader_float16 = VK_TRUE;
   VkBool32 shader_int8 = VK_TRUE;
+  // Whether subgroup instructions accept narrow and 64-bit integer types.
+  VkBool32 shader_subgroup_extended_types = VK_FALSE;
   VkBool32 storage_buffer_8bit_access = VK_TRUE;
   VkBool32 storage_buffer_16bit_access = VK_TRUE;
   VkBool32 buffer_device_address = VK_TRUE;
+  VkBool32 vulkan_memory_model = VK_FALSE;
+  VkBool32 vulkan_memory_model_device_scope = VK_FALSE;
+  VkBool32 shader_buffer_int64_atomics = VK_FALSE;
+  VkBool32 shader_shared_int64_atomics = VK_FALSE;
+  VkBool32 shader_buffer_float16_atomics = VK_FALSE;
+  VkBool32 shader_shared_float16_atomics = VK_FALSE;
+  VkBool32 shader_buffer_float16_atomic_add = VK_FALSE;
+  VkBool32 shader_shared_float16_atomic_add = VK_FALSE;
+  VkBool32 shader_buffer_float32_atomics = VK_FALSE;
+  VkBool32 shader_shared_float32_atomics = VK_FALSE;
+  VkBool32 shader_buffer_float32_atomic_add = VK_FALSE;
+  VkBool32 shader_shared_float32_atomic_add = VK_FALSE;
+  VkBool32 shader_buffer_float64_atomics = VK_FALSE;
+  VkBool32 shader_shared_float64_atomics = VK_FALSE;
+  VkBool32 shader_buffer_float64_atomic_add = VK_FALSE;
+  VkBool32 shader_shared_float64_atomic_add = VK_FALSE;
   VkBool32 cooperative_matrix = VK_TRUE;
   bool reports_shader_float16_int8_extension = false;
+  // Whether the pre-Vulkan-1.2 extended subgroup type feature is advertised.
+  bool reports_subgroup_extended_types_extension = false;
   bool reports_storage_8bit_extension = false;
   bool reports_storage_16bit_extension = false;
   bool reports_buffer_device_address_extension = false;
+  bool reports_shader_atomic_int64_extension = false;
+  bool reports_shader_float_controls_extension = false;
+  bool reports_vulkan_memory_model_extension = false;
+  bool reports_shader_atomic_float_extension = false;
+  bool reports_shader_atomic_float2_extension = false;
   bool reports_cooperative_matrix_extension = true;
 };
 
@@ -61,6 +113,7 @@ void VKAPI_PTR MockGetPhysicalDeviceProperties2(
   ASSERT_EQ(physical_device, g_mock_vulkan_device->handle);
   ASSERT_NE(properties, nullptr);
   properties->properties.apiVersion = g_mock_vulkan_device->api_version;
+  properties->properties.vendorID = g_mock_vulkan_device->vendor_id;
   properties->properties.limits.maxComputeWorkGroupSize[0] =
       g_mock_vulkan_device->max_workgroup_size[0];
   properties->properties.limits.maxComputeWorkGroupSize[1] =
@@ -81,12 +134,78 @@ void VKAPI_PTR MockGetPhysicalDeviceProperties2(
            reinterpret_cast<VkBaseOutStructure*>(properties->pNext);
        out != nullptr; out = out->pNext) {
     switch (out->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES: {
+        auto* control =
+            reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlProperties*>(
+                out);
+        control->minSubgroupSize = g_mock_vulkan_device->minimum_subgroup_size;
+        control->maxSubgroupSize = g_mock_vulkan_device->maximum_subgroup_size;
+        control->maxComputeWorkgroupSubgroups =
+            g_mock_vulkan_device->maximum_workgroup_subgroup_count;
+        control->requiredSubgroupSizeStages =
+            g_mock_vulkan_device->required_subgroup_size_stages;
+        break;
+      }
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES: {
         auto* subgroup_properties =
             reinterpret_cast<VkPhysicalDeviceSubgroupProperties*>(out);
         subgroup_properties->subgroupSize = g_mock_vulkan_device->subgroup_size;
         subgroup_properties->supportedOperations =
             g_mock_vulkan_device->subgroup_operations;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES: {
+        auto* vulkan12 =
+            reinterpret_cast<VkPhysicalDeviceVulkan12Properties*>(out);
+        vulkan12->denormBehaviorIndependence =
+            g_mock_vulkan_device->denorm_behavior_independence;
+        vulkan12->roundingModeIndependence =
+            g_mock_vulkan_device->rounding_mode_independence;
+        vulkan12->shaderDenormPreserveFloat16 =
+            g_mock_vulkan_device->shader_denorm_preserve_float16;
+        vulkan12->shaderDenormPreserveFloat32 =
+            g_mock_vulkan_device->shader_denorm_preserve_float32;
+        vulkan12->shaderDenormPreserveFloat64 =
+            g_mock_vulkan_device->shader_denorm_preserve_float64;
+        vulkan12->shaderSignedZeroInfNanPreserveFloat16 =
+            g_mock_vulkan_device->shader_signed_zero_inf_nan_preserve_float16;
+        vulkan12->shaderSignedZeroInfNanPreserveFloat32 =
+            g_mock_vulkan_device->shader_signed_zero_inf_nan_preserve_float32;
+        vulkan12->shaderSignedZeroInfNanPreserveFloat64 =
+            g_mock_vulkan_device->shader_signed_zero_inf_nan_preserve_float64;
+        vulkan12->shaderRoundingModeRTEFloat16 =
+            g_mock_vulkan_device->shader_rounding_mode_rte_float16;
+        vulkan12->shaderRoundingModeRTEFloat32 =
+            g_mock_vulkan_device->shader_rounding_mode_rte_float32;
+        vulkan12->shaderRoundingModeRTEFloat64 =
+            g_mock_vulkan_device->shader_rounding_mode_rte_float64;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES: {
+        auto* float_controls =
+            reinterpret_cast<VkPhysicalDeviceFloatControlsProperties*>(out);
+        float_controls->denormBehaviorIndependence =
+            g_mock_vulkan_device->denorm_behavior_independence;
+        float_controls->roundingModeIndependence =
+            g_mock_vulkan_device->rounding_mode_independence;
+        float_controls->shaderDenormPreserveFloat16 =
+            g_mock_vulkan_device->shader_denorm_preserve_float16;
+        float_controls->shaderDenormPreserveFloat32 =
+            g_mock_vulkan_device->shader_denorm_preserve_float32;
+        float_controls->shaderDenormPreserveFloat64 =
+            g_mock_vulkan_device->shader_denorm_preserve_float64;
+        float_controls->shaderSignedZeroInfNanPreserveFloat16 =
+            g_mock_vulkan_device->shader_signed_zero_inf_nan_preserve_float16;
+        float_controls->shaderSignedZeroInfNanPreserveFloat32 =
+            g_mock_vulkan_device->shader_signed_zero_inf_nan_preserve_float32;
+        float_controls->shaderSignedZeroInfNanPreserveFloat64 =
+            g_mock_vulkan_device->shader_signed_zero_inf_nan_preserve_float64;
+        float_controls->shaderRoundingModeRTEFloat16 =
+            g_mock_vulkan_device->shader_rounding_mode_rte_float16;
+        float_controls->shaderRoundingModeRTEFloat32 =
+            g_mock_vulkan_device->shader_rounding_mode_rte_float32;
+        float_controls->shaderRoundingModeRTEFloat64 =
+            g_mock_vulkan_device->shader_rounding_mode_rte_float64;
         break;
       }
       default:
@@ -107,15 +226,28 @@ void VKAPI_PTR MockGetPhysicalDeviceFeatures2(
            reinterpret_cast<VkBaseOutStructure*>(features->pNext);
        out != nullptr; out = out->pNext) {
     switch (out->sType) {
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES:
+        reinterpret_cast<VkPhysicalDeviceSubgroupSizeControlFeatures*>(out)
+            ->subgroupSizeControl = g_mock_vulkan_device->subgroup_size_control;
+        break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES: {
         auto* vulkan12 =
             reinterpret_cast<VkPhysicalDeviceVulkan12Features*>(out);
         vulkan12->shaderFloat16 = g_mock_vulkan_device->shader_float16;
         vulkan12->shaderInt8 = g_mock_vulkan_device->shader_int8;
+        vulkan12->shaderSubgroupExtendedTypes =
+            g_mock_vulkan_device->shader_subgroup_extended_types;
         vulkan12->storageBuffer8BitAccess =
             g_mock_vulkan_device->storage_buffer_8bit_access;
         vulkan12->bufferDeviceAddress =
             g_mock_vulkan_device->buffer_device_address;
+        vulkan12->vulkanMemoryModel = g_mock_vulkan_device->vulkan_memory_model;
+        vulkan12->vulkanMemoryModelDeviceScope =
+            g_mock_vulkan_device->vulkan_memory_model_device_scope;
+        vulkan12->shaderBufferInt64Atomics =
+            g_mock_vulkan_device->shader_buffer_int64_atomics;
+        vulkan12->shaderSharedInt64Atomics =
+            g_mock_vulkan_device->shader_shared_int64_atomics;
         break;
       }
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES:
@@ -135,6 +267,12 @@ void VKAPI_PTR MockGetPhysicalDeviceFeatures2(
             ->storageBuffer8BitAccess =
             g_mock_vulkan_device->storage_buffer_8bit_access;
         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES:
+        reinterpret_cast<VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures*>(
+            out)
+            ->shaderSubgroupExtendedTypes =
+            g_mock_vulkan_device->shader_subgroup_extended_types;
+        break;
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES:
         reinterpret_cast<VkPhysicalDevice16BitStorageFeatures*>(out)
             ->storageBuffer16BitAccess =
@@ -144,6 +282,60 @@ void VKAPI_PTR MockGetPhysicalDeviceFeatures2(
         reinterpret_cast<VkPhysicalDeviceBufferDeviceAddressFeatures*>(out)
             ->bufferDeviceAddress = g_mock_vulkan_device->buffer_device_address;
         break;
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES: {
+        auto* atomic_int64 =
+            reinterpret_cast<VkPhysicalDeviceShaderAtomicInt64Features*>(out);
+        atomic_int64->shaderBufferInt64Atomics =
+            g_mock_vulkan_device->shader_buffer_int64_atomics;
+        atomic_int64->shaderSharedInt64Atomics =
+            g_mock_vulkan_device->shader_shared_int64_atomics;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES: {
+        auto* memory_model =
+            reinterpret_cast<VkPhysicalDeviceVulkanMemoryModelFeatures*>(out);
+        memory_model->vulkanMemoryModel =
+            g_mock_vulkan_device->vulkan_memory_model;
+        memory_model->vulkanMemoryModelDeviceScope =
+            g_mock_vulkan_device->vulkan_memory_model_device_scope;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT: {
+        auto* atomic_float =
+            reinterpret_cast<VkPhysicalDeviceShaderAtomicFloatFeaturesEXT*>(
+                out);
+        atomic_float->shaderBufferFloat32Atomics =
+            g_mock_vulkan_device->shader_buffer_float32_atomics;
+        atomic_float->shaderSharedFloat32Atomics =
+            g_mock_vulkan_device->shader_shared_float32_atomics;
+        atomic_float->shaderBufferFloat32AtomicAdd =
+            g_mock_vulkan_device->shader_buffer_float32_atomic_add;
+        atomic_float->shaderSharedFloat32AtomicAdd =
+            g_mock_vulkan_device->shader_shared_float32_atomic_add;
+        atomic_float->shaderBufferFloat64Atomics =
+            g_mock_vulkan_device->shader_buffer_float64_atomics;
+        atomic_float->shaderSharedFloat64Atomics =
+            g_mock_vulkan_device->shader_shared_float64_atomics;
+        atomic_float->shaderBufferFloat64AtomicAdd =
+            g_mock_vulkan_device->shader_buffer_float64_atomic_add;
+        atomic_float->shaderSharedFloat64AtomicAdd =
+            g_mock_vulkan_device->shader_shared_float64_atomic_add;
+        break;
+      }
+      case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT: {
+        auto* atomic_float2 =
+            reinterpret_cast<VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT*>(
+                out);
+        atomic_float2->shaderBufferFloat16Atomics =
+            g_mock_vulkan_device->shader_buffer_float16_atomics;
+        atomic_float2->shaderSharedFloat16Atomics =
+            g_mock_vulkan_device->shader_shared_float16_atomics;
+        atomic_float2->shaderBufferFloat16AtomicAdd =
+            g_mock_vulkan_device->shader_buffer_float16_atomic_add;
+        atomic_float2->shaderSharedFloat16AtomicAdd =
+            g_mock_vulkan_device->shader_shared_float16_atomic_add;
+        break;
+      }
 #if defined(VK_KHR_cooperative_matrix)
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR:
         reinterpret_cast<VkPhysicalDeviceCooperativeMatrixFeaturesKHR*>(out)
@@ -158,6 +350,12 @@ void VKAPI_PTR MockGetPhysicalDeviceFeatures2(
 
 uint32_t MockDeviceExtensionCount(const MockVulkanDevice& device) {
   uint32_t extension_count = 0;
+  if (device.reports_subgroup_size_control_extension) {
+    ++extension_count;
+  }
+  if (device.reports_subgroup_extended_types_extension) {
+    ++extension_count;
+  }
   if (device.reports_shader_float16_int8_extension) {
     ++extension_count;
   }
@@ -168,6 +366,21 @@ uint32_t MockDeviceExtensionCount(const MockVulkanDevice& device) {
     ++extension_count;
   }
   if (device.reports_buffer_device_address_extension) {
+    ++extension_count;
+  }
+  if (device.reports_shader_atomic_int64_extension) {
+    ++extension_count;
+  }
+  if (device.reports_shader_float_controls_extension) {
+    ++extension_count;
+  }
+  if (device.reports_vulkan_memory_model_extension) {
+    ++extension_count;
+  }
+  if (device.reports_shader_atomic_float_extension) {
+    ++extension_count;
+  }
+  if (device.reports_shader_atomic_float2_extension) {
     ++extension_count;
   }
 #if defined(VK_KHR_cooperative_matrix)
@@ -218,6 +431,17 @@ VkResult VKAPI_PTR MockEnumerateDeviceExtensionProperties(
 
   const uint32_t capacity = *property_count;
   uint32_t written_count = 0;
+  if (device.reports_subgroup_size_control_extension) {
+    MaybeWriteExtensionProperty(properties, capacity, &written_count,
+                                VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME,
+                                VK_EXT_SUBGROUP_SIZE_CONTROL_SPEC_VERSION);
+  }
+  if (device.reports_subgroup_extended_types_extension) {
+    MaybeWriteExtensionProperty(
+        properties, capacity, &written_count,
+        VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_EXTENSION_NAME,
+        VK_KHR_SHADER_SUBGROUP_EXTENDED_TYPES_SPEC_VERSION);
+  }
   if (device.reports_shader_float16_int8_extension) {
     MaybeWriteExtensionProperty(properties, capacity, &written_count,
                                 VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME,
@@ -237,6 +461,31 @@ VkResult VKAPI_PTR MockEnumerateDeviceExtensionProperties(
     MaybeWriteExtensionProperty(properties, capacity, &written_count,
                                 VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
                                 VK_KHR_BUFFER_DEVICE_ADDRESS_SPEC_VERSION);
+  }
+  if (device.reports_shader_atomic_int64_extension) {
+    MaybeWriteExtensionProperty(properties, capacity, &written_count,
+                                VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME,
+                                VK_KHR_SHADER_ATOMIC_INT64_SPEC_VERSION);
+  }
+  if (device.reports_shader_float_controls_extension) {
+    MaybeWriteExtensionProperty(properties, capacity, &written_count,
+                                VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
+                                VK_KHR_SHADER_FLOAT_CONTROLS_SPEC_VERSION);
+  }
+  if (device.reports_vulkan_memory_model_extension) {
+    MaybeWriteExtensionProperty(properties, capacity, &written_count,
+                                VK_KHR_VULKAN_MEMORY_MODEL_EXTENSION_NAME,
+                                VK_KHR_VULKAN_MEMORY_MODEL_SPEC_VERSION);
+  }
+  if (device.reports_shader_atomic_float_extension) {
+    MaybeWriteExtensionProperty(properties, capacity, &written_count,
+                                VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,
+                                VK_EXT_SHADER_ATOMIC_FLOAT_SPEC_VERSION);
+  }
+  if (device.reports_shader_atomic_float2_extension) {
+    MaybeWriteExtensionProperty(properties, capacity, &written_count,
+                                VK_EXT_SHADER_ATOMIC_FLOAT_2_EXTENSION_NAME,
+                                VK_EXT_SHADER_ATOMIC_FLOAT_2_SPEC_VERSION);
   }
 #if defined(VK_KHR_cooperative_matrix)
   if (device.reports_cooperative_matrix_extension) {
@@ -290,23 +539,23 @@ TargetProfilePtr CreateVulkanProfile(
         ExtensionEnumeration::kEnabled) {
   g_mock_vulkan_device = const_cast<MockVulkanDevice*>(&device);
   loomc_spirv_vulkan_function_table_t functions = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_FUNCTION_TABLE,
-      /*.structure_size=*/sizeof(functions),
-      /*.next=*/nullptr,
-      /*.get_physical_device_properties2=*/MockGetPhysicalDeviceProperties2,
-      /*.get_physical_device_features2=*/MockGetPhysicalDeviceFeatures2,
-      /*.enumerate_device_extension_properties=*/
-      extension_enumeration == ExtensionEnumeration::kEnabled
-          ? MockEnumerateDeviceExtensionProperties
-          : nullptr,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_FUNCTION_TABLE,
+      .structure_size = sizeof(functions),
+      .next = nullptr,
+      .get_physical_device_properties2 = MockGetPhysicalDeviceProperties2,
+      .get_physical_device_features2 = MockGetPhysicalDeviceFeatures2,
+      .enumerate_device_extension_properties =
+          extension_enumeration == ExtensionEnumeration::kEnabled
+              ? MockEnumerateDeviceExtensionProperties
+              : nullptr,
   };
   loomc_spirv_vulkan_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("mock-vulkan-device"),
-      /*.physical_device=*/device.handle,
-      /*.functions=*/&functions,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("mock-vulkan-device"),
+      .physical_device = device.handle,
+      .functions = &functions,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -338,6 +587,52 @@ void ExpectLimitValue(const loomc_target_profile_t* profile,
   EXPECT_EQ(value.value, expected_value);
 }
 
+TEST(TargetSpirvVulkanTest, ImportsSelectableComputeSubgroups) {
+  TargetEnvironmentPtr environment = CreateSpirvTargetEnvironment();
+  enum class ControlRoute { Core, Extension, Absent };
+  for (ControlRoute route :
+       {ControlRoute::Core, ControlRoute::Extension, ControlRoute::Absent}) {
+    for (bool control : {false, true}) {
+      for (bool compute : {false, true}) {
+        SCOPED_TRACE(static_cast<int>(route));
+        SCOPED_TRACE(control);
+        SCOPED_TRACE(compute);
+        MockVulkanDevice device;
+        device.api_version = route == ControlRoute::Core ? VK_API_VERSION_1_3
+                                                         : VK_API_VERSION_1_2;
+        device.reports_subgroup_size_control_extension =
+            route == ControlRoute::Extension;
+        device.subgroup_size = 64;
+        device.subgroup_size_control = control;
+        device.required_subgroup_size_stages =
+            compute ? VK_SHADER_STAGE_COMPUTE_BIT
+                    : VK_SHADER_STAGE_FRAGMENT_BIT;
+        const bool selectable =
+            route != ControlRoute::Absent && control && compute;
+        TargetProfilePtr profile =
+            CreateVulkanProfile(environment.get(), device);
+        ASSERT_NE(profile.get(), nullptr);
+        ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE,
+                         64);
+        ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MIN_SUBGROUP_SIZE,
+                         selectable ? 32 : 64);
+        ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_SUBGROUP_SIZE,
+                         64);
+        loomc_spirv_limit_value_t value = {};
+        LOOMC_EXPECT_OK(loomc_spirv_target_profile_query_limit(
+            profile.get(), LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE, &value));
+        EXPECT_EQ(value.state, LOOMC_TARGET_FACT_STATE_UNKNOWN);
+        LOOMC_EXPECT_OK(loomc_spirv_target_profile_query_limit(
+            profile.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SUBGROUP_COUNT,
+            &value));
+        EXPECT_EQ(value.state, selectable ? LOOMC_TARGET_FACT_STATE_TRUE
+                                          : LOOMC_TARGET_FACT_STATE_UNKNOWN);
+        EXPECT_EQ(value.value, selectable ? 32u : 0u);
+      }
+    }
+  }
+}
+
 TEST(TargetSpirvVulkanTest, CreatesProfileFromRawVulkanDevice) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   MockVulkanDevice device;
@@ -355,6 +650,9 @@ TEST(TargetSpirvVulkanTest, CreatesProfileFromRawVulkanDevice) {
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_INT64,
                      LOOMC_TARGET_FACT_STATE_FALSE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_FLOAT64_TO_FLOAT16_CONVERSION,
                      LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(),
                      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_8BIT_ACCESS,
@@ -377,7 +675,7 @@ TEST(TargetSpirvVulkanTest, CreatesProfileFromRawVulkanDevice) {
                    device.max_flat_workgroup_size);
   ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
                    device.max_workgroup_storage_bytes);
-  ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+  ExpectLimitValue(profile.get(), LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE,
                    device.subgroup_size);
 
   loomc_spirv_environment_value_t environment = {};
@@ -387,17 +685,54 @@ TEST(TargetSpirvVulkanTest, CreatesProfileFromRawVulkanDevice) {
   EXPECT_EQ(environment.value, LOOMC_SPIRV_VERSION_1_6);
 }
 
+TEST(TargetSpirvVulkanTest, DisablesBrokenAmdFloat64ToFloat16Conversion) {
+  TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
+  MockVulkanDevice device;
+  device.vendor_id = 0x1002;
+  TargetProfilePtr profile =
+      CreateVulkanProfile(target_environment.get(), device);
+
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_FLOAT64_TO_FLOAT16_CONVERSION,
+                     LOOMC_TARGET_FACT_STATE_FALSE);
+}
+
 TEST(TargetSpirvVulkanTest, UsesExtensionFeatureStructsBeforeCorePromotion) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   MockVulkanDevice device;
   device.api_version = VK_API_VERSION_1_1;
   device.reports_shader_float16_int8_extension = true;
+  device.reports_subgroup_extended_types_extension = true;
+  device.shader_subgroup_extended_types = VK_TRUE;
   device.reports_storage_8bit_extension = true;
   device.reports_buffer_device_address_extension = true;
+  device.reports_shader_atomic_int64_extension = true;
+  device.reports_shader_float_controls_extension = true;
+  device.reports_vulkan_memory_model_extension = true;
   device.reports_cooperative_matrix_extension = false;
+  device.shader_int64 = VK_TRUE;
+  device.shader_buffer_int64_atomics = VK_TRUE;
+  device.shader_shared_int64_atomics = VK_TRUE;
+  device.vulkan_memory_model = VK_TRUE;
+  device.vulkan_memory_model_device_scope = VK_TRUE;
+  device.denorm_behavior_independence =
+      VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY;
+  device.rounding_mode_independence =
+      VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY;
+  device.shader_denorm_preserve_float16 = VK_TRUE;
+  device.shader_denorm_preserve_float32 = VK_TRUE;
+  device.shader_denorm_preserve_float64 = VK_TRUE;
+  device.shader_signed_zero_inf_nan_preserve_float16 = VK_TRUE;
+  device.shader_signed_zero_inf_nan_preserve_float32 = VK_TRUE;
+  device.shader_signed_zero_inf_nan_preserve_float64 = VK_TRUE;
+  device.shader_rounding_mode_rte_float16 = VK_TRUE;
+  device.shader_rounding_mode_rte_float32 = VK_TRUE;
+  device.shader_rounding_mode_rte_float64 = VK_TRUE;
   TargetProfilePtr profile =
       CreateVulkanProfile(target_environment.get(), device);
 
+  ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_SUBGROUP_EXTENDED_TYPES,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_PHYSICAL_STORAGE_BUFFER,
                      LOOMC_TARGET_FACT_STATE_TRUE);
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_FLOAT16,
@@ -410,6 +745,32 @@ TEST(TargetSpirvVulkanTest, UsesExtensionFeatureStructsBeforeCorePromotion) {
   ExpectFeatureState(profile.get(),
                      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_16BIT_ACCESS,
                      LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_VULKAN_MEMORY_MODEL_DEVICE_SCOPE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_INT64_ATOMICS,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_WORKGROUP_INT64_ATOMICS,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_FLOAT16_64_DENORM_PRESERVE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_FLOAT16_64_ROUNDING_RTE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_FLOAT32_ROUNDING_RTE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
+  ExpectFeatureState(profile.get(),
+                     LOOMC_SPIRV_FEATURE_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE,
+                     LOOMC_TARGET_FACT_STATE_TRUE);
 #if defined(VK_KHR_cooperative_matrix)
   ExpectFeatureState(profile.get(), LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
                      LOOMC_TARGET_FACT_STATE_UNKNOWN);
@@ -420,6 +781,86 @@ TEST(TargetSpirvVulkanTest, UsesExtensionFeatureStructsBeforeCorePromotion) {
       profile.get(), LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION, &environment));
   EXPECT_EQ(environment.state, LOOMC_TARGET_FACT_STATE_TRUE);
   EXPECT_EQ(environment.value, LOOMC_SPIRV_VERSION_1_3);
+}
+
+TEST(TargetSpirvVulkanTest, PreservesExtendedCompilerFeatureFamily) {
+  TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
+  MockVulkanDevice device;
+  device.subgroup_operations |=
+      VK_SUBGROUP_FEATURE_BALLOT_BIT | VK_SUBGROUP_FEATURE_VOTE_BIT |
+      VK_SUBGROUP_FEATURE_ARITHMETIC_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT |
+      VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT |
+      VK_SUBGROUP_FEATURE_CLUSTERED_BIT;
+  device.shader_subgroup_extended_types = VK_TRUE;
+  device.denorm_behavior_independence =
+      VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY;
+  device.rounding_mode_independence =
+      VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY;
+  device.shader_denorm_preserve_float16 = VK_TRUE;
+  device.shader_denorm_preserve_float32 = VK_TRUE;
+  device.shader_denorm_preserve_float64 = VK_TRUE;
+  device.shader_signed_zero_inf_nan_preserve_float16 = VK_TRUE;
+  device.shader_signed_zero_inf_nan_preserve_float32 = VK_TRUE;
+  device.shader_signed_zero_inf_nan_preserve_float64 = VK_TRUE;
+  device.shader_rounding_mode_rte_float16 = VK_TRUE;
+  device.shader_rounding_mode_rte_float32 = VK_TRUE;
+  device.shader_rounding_mode_rte_float64 = VK_TRUE;
+  device.shader_int64 = VK_TRUE;
+  device.vulkan_memory_model = VK_TRUE;
+  device.vulkan_memory_model_device_scope = VK_TRUE;
+  device.shader_buffer_int64_atomics = VK_TRUE;
+  device.shader_shared_int64_atomics = VK_TRUE;
+  device.shader_buffer_float16_atomics = VK_TRUE;
+  device.shader_shared_float16_atomics = VK_TRUE;
+  device.shader_buffer_float16_atomic_add = VK_TRUE;
+  device.shader_shared_float16_atomic_add = VK_TRUE;
+  device.shader_buffer_float32_atomics = VK_TRUE;
+  device.shader_shared_float32_atomics = VK_TRUE;
+  device.shader_buffer_float32_atomic_add = VK_TRUE;
+  device.shader_shared_float32_atomic_add = VK_TRUE;
+  device.shader_buffer_float64_atomics = VK_TRUE;
+  device.shader_shared_float64_atomics = VK_TRUE;
+  device.shader_buffer_float64_atomic_add = VK_TRUE;
+  device.shader_shared_float64_atomic_add = VK_TRUE;
+  device.reports_shader_atomic_float_extension = true;
+  device.reports_shader_atomic_float2_extension = true;
+
+  TargetProfilePtr profile =
+      CreateVulkanProfile(target_environment.get(), device);
+  const loomc_spirv_feature_t expected_features[] = {
+      LOOMC_SPIRV_FEATURE_VULKAN_MEMORY_MODEL_DEVICE_SCOPE,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_INT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_INT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_BALLOT,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_VOTE,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_ARITHMETIC,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_CLUSTERED,
+      LOOMC_SPIRV_FEATURE_SUBGROUP_EXTENDED_TYPES,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_SHUFFLE_RELATIVE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_64_DENORM_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_64_ROUNDING_RTE,
+      LOOMC_SPIRV_FEATURE_FLOAT32_ROUNDING_RTE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE,
+  };
+  for (loomc_spirv_feature_t feature : expected_features) {
+    ExpectFeatureState(profile.get(), feature, LOOMC_TARGET_FACT_STATE_TRUE);
+  }
 }
 
 TEST(TargetSpirvVulkanTest,
@@ -455,20 +896,20 @@ TEST(TargetSpirvVulkanTest, RejectsMissingFunctionPointers) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   MockVulkanDevice device;
   loomc_spirv_vulkan_function_table_t functions = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_FUNCTION_TABLE,
-      /*.structure_size=*/sizeof(functions),
-      /*.next=*/nullptr,
-      /*.get_physical_device_properties2=*/nullptr,
-      /*.get_physical_device_features2=*/MockGetPhysicalDeviceFeatures2,
-      /*.enumerate_device_extension_properties=*/nullptr,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_FUNCTION_TABLE,
+      .structure_size = sizeof(functions),
+      .next = nullptr,
+      .get_physical_device_properties2 = nullptr,
+      .get_physical_device_features2 = MockGetPhysicalDeviceFeatures2,
+      .enumerate_device_extension_properties = nullptr,
   };
   loomc_spirv_vulkan_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("bad-vulkan-device"),
-      /*.physical_device=*/device.handle,
-      /*.functions=*/&functions,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("bad-vulkan-device"),
+      .physical_device = device.handle,
+      .functions = &functions,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;

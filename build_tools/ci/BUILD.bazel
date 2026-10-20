@@ -11,11 +11,16 @@ load("@rules_python//python:defs.bzl", "py_library", "py_test")
 
 py_test(
     name = "change_scope_test",
-    size = "small",
+    # This process-heavy integration test must still complete within one minute.
+    size = "medium",
+    timeout = "short",
     srcs = [
         "change_scope.py",
         "change_scope_test.py",
     ],
+    # The changed-path-aware Linux presubmit owns this Git integration test.
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
 )
 
 py_library(
@@ -45,6 +50,15 @@ py_test(
 )
 
 py_test(
+    name = "windows_stl_asan_test",
+    size = "small",
+    srcs = [
+        "windows_stl_asan.py",
+        "windows_stl_asan_test.py",
+    ],
+)
+
+py_test(
     name = "rocm_environment_test",
     size = "small",
     srcs = [
@@ -55,6 +69,7 @@ py_test(
     # The changed-path-aware Linux presubmit owns these hardware-free checks.
     tags = ["manual"],
     target_compatible_with = ["@platforms//os:linux"],
+    deps = ["//build_tools/amdgpu:target_map"],
 )
 
 py_test(

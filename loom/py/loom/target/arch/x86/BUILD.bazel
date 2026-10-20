@@ -18,12 +18,29 @@ iree_py_library(
 )
 
 iree_py_library(
+    name = "compile_report_suggestions",
+    srcs = ["compile_report_suggestions.py"],
+    deps = [
+        ":package_init",
+        "//loom/py/loom/reporting",
+    ],
+)
+
+iree_py_library(
+    name = "feature_catalog",
+    srcs = ["feature_catalog.py"],
+    deps = [":package_init"],
+)
+
+iree_py_library(
     name = "target_info",
     srcs = [
+        "feature_bits.py",
         "packed_dot_data.py",
         "target_info.py",
     ],
     deps = [
+        ":feature_catalog",
         ":package_init",
         "//loom/py/loom/target:native_contraction_layout",
         "//loom/py/loom/target:native_layout_facts",
@@ -31,9 +48,36 @@ iree_py_library(
 )
 
 iree_py_library(
+    name = "vector_families",
+    srcs = ["vector_families.py"],
+    deps = [":package_init"],
+)
+
+iree_py_library(
+    name = "scalar_families",
+    srcs = ["scalar_families.py"],
+    deps = [":package_init"],
+)
+
+iree_py_library(
+    name = "native_vector",
+    srcs = [
+        "native_conversion.py",
+        "native_vector.py",
+        "vector_encoding.py",
+    ],
+    deps = [
+        ":package_init",
+        ":scalar_families",
+        "//loom/py/loom/target:low_descriptors",
+    ],
+)
+
+iree_py_library(
     name = "dialect",
     srcs = ["dialect.py"],
     deps = [
+        ":feature_catalog",
         ":package_init",
         "//loom/py/loom:core",
         "//loom/py/loom/dialect/target",
@@ -46,15 +90,28 @@ iree_py_library(
         "descriptors/__init__.py",
         "descriptors/avx2.py",
         "descriptors/avx512.py",
+        "descriptors/avx512_bf16.py",
+        "descriptors/avx512_fp16.py",
+        "descriptors/avx_ne_convert.py",
         "descriptors/common.py",
         "descriptors/composite.py",
+        "descriptors/encoding.py",
+        "descriptors/f16c.py",
+        "descriptors/float_conversion.py",
+        "descriptors/float_integer.py",
+        "descriptors/half_conversion.py",
+        "descriptors/integer_bits.py",
+        "descriptors/integer_float.py",
+        "descriptors/integer_rotation.py",
         "descriptors/memory.py",
         "descriptors/packed_dot.py",
         "descriptors/scalar.py",
-        "descriptors/simd128.py",
     ],
     deps = [
+        ":native_vector",
+        ":scalar_families",
         ":target_info",
+        ":vector_families",
         "//loom/py/loom/target:low_descriptors",
         "//loom/py/loom/target/arch:package",
     ],
@@ -86,5 +143,63 @@ iree_py_test(
         "//loom/py/loom/target:native_contraction_layout",
         "//loom/py/loom/target:native_coordinate_projection",
         "//loom/py/loom/target:native_layout_facts",
+    ],
+)
+
+iree_py_test(
+    name = "vector_families_test",
+    srcs = [
+        "vector_families_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.vector_families_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":descriptors",
+        ":vector_families",
+    ],
+)
+
+iree_py_test(
+    name = "avx512_fp16_test",
+    srcs = [
+        "avx512_fp16_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.avx512_fp16_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":descriptors",
+        ":vector_families",
+    ],
+)
+
+iree_py_test(
+    name = "avx512_bf16_test",
+    srcs = [
+        "avx512_bf16_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.avx512_bf16_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":descriptors",
+        ":target_info",
+        "//loom/py/loom/target:low_descriptors",
+    ],
+)
+
+iree_py_test(
+    name = "avx_ne_convert_test",
+    srcs = [
+        "avx_ne_convert_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.target.arch.x86.avx_ne_convert_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":descriptors",
+        ":target_info",
+        "//loom/py/loom/target:low_descriptors",
     ],
 )

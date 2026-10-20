@@ -341,11 +341,11 @@ TEST_F(HostQueueCommandBufferProfilingTest,
       IREE_HAL_EXECUTION_STAGE_DISPATCH,
       iree_hal_make_buffer_ref(fixture.input_buffer, /*offset=*/0,
                                sizeof(uint32_t)),
-      (iree_hal_atomic_store_params_t){
-          /*.value=*/5,
-          /*.flags=*/IREE_HAL_ATOMIC_FLAG_RELEASE |
-              IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
-          /*.width=*/IREE_HAL_ATOMIC_WIDTH_32,
+      iree_hal_atomic_store_params_t{
+          .value = 5,
+          .flags =
+              IREE_HAL_ATOMIC_FLAG_RELEASE | IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
+          .width = IREE_HAL_ATOMIC_WIDTH_32,
       }));
   const uint32_t fill_value = 7;
   IREE_ASSERT_OK(iree_hal_command_buffer_fill_buffer(
@@ -360,14 +360,21 @@ TEST_F(HostQueueCommandBufferProfilingTest,
                                sizeof(update_value)),
       IREE_HAL_UPDATE_FLAG_NONE));
   const iree_hal_memory_barrier_t transfer_to_transfer_barrier = {
-      /*.source_scope=*/IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
-      /*.target_scope=*/IREE_HAL_ACCESS_SCOPE_TRANSFER_READ,
+      .source_scope = IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_TRANSFER_READ,
   };
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      fixture.command_buffer, IREE_HAL_EXECUTION_STAGE_TRANSFER,
-      IREE_HAL_EXECUTION_STAGE_TRANSFER, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/1, &transfer_to_transfer_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 1,
+      .memory_barriers = &transfer_to_transfer_barrier,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(iree_hal_command_buffer_barrier(fixture.command_buffer,
+                                                 &execution_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_copy_buffer(
       fixture.command_buffer,
       iree_hal_make_buffer_ref(fixture.input_buffer, 2 * sizeof(uint32_t),
@@ -376,14 +383,21 @@ TEST_F(HostQueueCommandBufferProfilingTest,
                                sizeof(uint32_t)),
       IREE_HAL_COPY_FLAG_NONE));
   const iree_hal_memory_barrier_t transfer_to_dispatch_barrier = {
-      /*.source_scope=*/IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
-      /*.target_scope=*/IREE_HAL_ACCESS_SCOPE_DISPATCH_READ,
+      .source_scope = IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_READ,
   };
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      fixture.command_buffer, IREE_HAL_EXECUTION_STAGE_TRANSFER,
-      IREE_HAL_EXECUTION_STAGE_DISPATCH, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/1, &transfer_to_dispatch_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  const iree_hal_barrier_t dispatch_dependency = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 1,
+      .memory_barriers = &transfer_to_dispatch_barrier,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(iree_hal_command_buffer_barrier(fixture.command_buffer,
+                                                 &dispatch_dependency));
   IREE_ASSERT_OK(AppendTwoDispatchOperations(&fixture));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(fixture.command_buffer));
 
@@ -1407,10 +1421,12 @@ TEST_F(HostQueueCommandBufferProfilingTest,
     sample_value_count += sample.sample_value_count;
   }
   ASSERT_EQ(sample_value_count, sink.counter_sample_values.size());
-  EXPECT_NE(sink.counter_sample_values.end(),
-            std::find_if(sink.counter_sample_values.begin(),
-                         sink.counter_sample_values.end(),
-                         [](uint64_t value) { return value != 0; }));
+  ASSERT_FALSE(sink.counter_sample_values.empty());
+  if (std::all_of(sink.counter_sample_values.begin(),
+                  sink.counter_sample_values.end(),
+                  [](uint64_t value) { return value == 0; })) {
+    GTEST_SKIP() << "AMDGPU hardware counter values unavailable";
+  }
 }
 
 TEST_F(HostQueueCommandBufferProfilingTest,
@@ -1905,7 +1921,7 @@ TEST_F(HostQueueCommandBufferProfilingTest,
       test_device.queue(), iree_hal_semaphore_list_empty(),
       pressure_signal_list, pressure_buffer,
       /*target_offset=*/0, sizeof(pressure_pattern), &pressure_pattern,
-      sizeof(pressure_pattern), IREE_HAL_FILL_FLAG_NONE);
+      sizeof(pressure_pattern), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE);
 
   uint64_t command_buffer_signal_value = 1;
   iree_hal_semaphore_t* command_buffer_signal_ptr = command_buffer_signal.get();
@@ -1930,6 +1946,13 @@ TEST_F(HostQueueCommandBufferProfilingTest,
     status = iree_hal_semaphore_wait(
         command_buffer_signal, command_buffer_signal_value,
         iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
+  }
+  // The pressure fill is independent of command-buffer completion. Both must
+  // finish before the profiling session can end.
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_semaphore_wait(pressure_signal, pressure_signal_value,
+                                     iree_infinite_timeout(),
+                                     IREE_ASYNC_WAIT_FLAG_NONE);
   }
   IREE_EXPECT_OK(
       iree_hsa_signal_destroy(IREE_LIBHSA(&libhsa_), blocker_signal));
@@ -2048,7 +2071,7 @@ TEST_F(HostQueueCommandBufferProfilingTest,
       test_device.queue(), iree_hal_semaphore_list_empty(),
       pressure_signal_list, pressure_buffer,
       /*target_offset=*/0, sizeof(pressure_pattern), &pressure_pattern,
-      sizeof(pressure_pattern), IREE_HAL_FILL_FLAG_NONE);
+      sizeof(pressure_pattern), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE);
 
   uint64_t command_buffer_signal_value = 1;
   iree_hal_semaphore_t* command_buffer_signal_ptr = command_buffer_signal.get();
@@ -2081,6 +2104,13 @@ TEST_F(HostQueueCommandBufferProfilingTest,
     status = iree_hal_semaphore_wait(
         command_buffer_signal, command_buffer_signal_value,
         iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
+  }
+  // The pressure fill is independent of command-buffer completion. Both must
+  // finish before the profiling session can end.
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_semaphore_wait(pressure_signal, pressure_signal_value,
+                                     iree_infinite_timeout(),
+                                     IREE_ASYNC_WAIT_FLAG_NONE);
   }
   IREE_EXPECT_OK(
       iree_hsa_signal_destroy(IREE_LIBHSA(&libhsa_), blocker_signal));

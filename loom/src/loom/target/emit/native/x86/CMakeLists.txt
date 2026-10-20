@@ -12,27 +12,190 @@ iree_add_all_subdirs()
 if(LOOM_TARGET_ARCH_X86)
 loom_cc_library(
   NAME
-    assembly
+    encoding
   HDRS
-    "assembly.h"
+    "encoding.h"
   SRCS
-    "assembly.c"
+    "encoding.c"
+  DEPS
+    iree::base
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_test(
+  NAME
+    encoding_test
+  SRCS
+    "encoding_test.cc"
+  DEPS
+    ::encoding
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    transport
+  HDRS
+    "transport.h"
+  SRCS
+    "transport.c"
+  DEPS
+    ::encoding
+    iree::base
+    loom::target::arch::x86::register_classes
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_test(
+  NAME
+    transport_test
+  SRCS
+    "transport_test.cc"
+  DEPS
+    ::encoding
+    ::transport
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::target::arch::x86::register_classes
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    function
+  HDRS
+    "function.h"
+  SRCS
+    "function.c"
+  DEPS
+    ::abi
+    ::encoding
+    ::transport
+    iree::base
+    iree::base::internal
+    iree::io::stream
+    loom::codegen::low::allocation::unit_location
+    loom::codegen::low::frame
+    loom::codegen::low::packet
+    loom::codegen::low::storage_layout
+    loom::error::parameter
+    loom::error::x86_error_defs
+    loom::ir
+    loom::ops::low
+    loom::target::arch::x86::register_classes
+    loom::target::emit::native::object
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_test(
+  NAME
+    function_test
+  SRCS
+    "function_test.cc"
+  DEPS
+    ::encoding
+    ::function
+    iree::base::internal::arena
+    iree::io::stream
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    abi
+  HDRS
+    "abi.h"
+  SRCS
+    "abi.c"
   DEPS
     iree::base
     iree::base::internal::arena
-    loom::codegen::low::allocation
-    loom::codegen::low::packet
-    loom::codegen::low::schedule
+    loom::codegen::low::allocation::call
+    loom::codegen::low::target_binding
     loom::ir
     loom::ops::low
-    loom::target::arch::x86::descriptors::avx2_descriptors_ids
-    loom::target::arch::x86::descriptors::avx512_descriptors_ids
-    loom::target::arch::x86::descriptors::avx512_packed_dot_descriptors_ids
-    loom::target::arch::x86::descriptors::packed_dot_descriptors_ids
-    loom::target::arch::x86::descriptors::scalar_descriptors_ids
-    loom::target::arch::x86::descriptors::simd128_descriptors_ids
+    loom::target::arch::x86::call_abi
     loom::target::arch::x86::register_classes
-    loom::target::emit::native::assembly
+    loom::target::registers
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_test(
+  NAME
+    abi_test
+  SRCS
+    "abi_test.cc"
+  DEPS
+    ::abi
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::low::text_asm
+    loom::format::text::parser
+    loom::ir
+    loom::ops::low
+    loom::ops::target
+    loom::target::arch::x86::descriptors::avx10_2_descriptors
+    loom::target::arch::x86::descriptors::avx2_descriptors
+    loom::target::arch::x86::descriptors::avx2_features_descriptors
+    loom::target::arch::x86::descriptors::avx512_bf16_descriptors
+    loom::target::arch::x86::descriptors::avx512_descriptors
+    loom::target::arch::x86::descriptors::avx512_features_descriptors
+    loom::target::arch::x86::descriptors::avx512_vnni_descriptors
+    loom::target::arch::x86::descriptors::avx_vnni_descriptors
+    loom::target::arch::x86::descriptors::avx_vnni_int16_descriptors
+    loom::target::arch::x86::descriptors::avx_vnni_int8_descriptors
+    loom::target::arch::x86::descriptors::packed_dot_descriptors
+    loom::target::arch::x86::descriptors::scalar_descriptors
+    loom::target::arch::x86::register_classes
+    loom::testing::module_ptr
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    module
+  HDRS
+    "module.h"
+  SRCS
+    "module.c"
+  DEPS
+    ::abi
+    ::function
+    iree::base
+    iree::base::internal::arena
+    iree::io::stream
+    loom::analysis::symbol_facts
+    loom::codegen::low::frame
+    loom::codegen::low::target_binding
+    loom::error::error_defs
+    loom::target::emit::native::module
+    loom::target::reporting::low
+    loom::target::reporting::report
   PUBLIC
 )
 endif()
@@ -46,8 +209,13 @@ loom_cc_library(
   SRCS
     "check/loom_check.c"
   DEPS
-    ::assembly
+    ::abi
+    ::function
     iree::base
+    iree::io::stream
+    loom::analysis::symbol_facts
+    loom::codegen::low::target_binding
+    loom::ops::low
     loom::tools::loom-check::execute
   PUBLIC
 )
@@ -58,15 +226,269 @@ loom_check_test_suite(
   NAME
     loom_check_file_test
   SRCS
-    "test/assembly.loom-test"
-    "test/buffer_selection.loom-test"
-    "test/copies.loom-test"
-    "test/high_product.loom-test"
-    "test/lanes.loom-test"
-    "test/memory.loom-test"
-    "test/schedule_scopes.loom-test"
-    "test/selects.loom-test"
-    "test/shifts.loom-test"
+    "test/float_integer_native_bytes.loom-test"
+    "test/function.loom-test"
+    "test/operand_ties.loom-test"
+    "test/root_native_bytes.loom-test"
+    "test/spill_pressure.loom-test"
+    "test/unused_abi_inputs.loom-test"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+iree_native_test(
+  NAME
+    "native_diagnostics_test"
+  WORKING_DIRECTORY "${IREE_ROOT_DIR}"
+  ARGS
+    "--target=x86:scalar"
+    "{{${CMAKE_CURRENT_SOURCE_DIR}/test/native_diagnostics.loom-test}}"
+  SRC
+    loom::tools::loom-check::loom-check
+  LABELS
+    "loom-check"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+iree_py_test(
+  NAME
+    report_test
+  MAIN
+    "report_test.py"
+  SRCS
+    "report_test.py"
+  ARGS
+    "{{$<TARGET_FILE:loom::tools::loom-compile::loom-compile>}}"
+    "{{${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/callable.loom}}"
+    "{{${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/hal_dispatch.loom}}"
+  DATA
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/callable.loom"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/hal_dispatch.loom"
+    "loom::tools::loom-compile::loom-compile"
+  DEPS
+    loom::py::loom::reporting::reporting
+    loom::py::loom::tools::compile_report
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_generated_file(
+  NAME
+    callable_object
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "callable.o"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/callable.loom"
+    "--target=x86:scalar"
+  INPUTS
+    "test/callable.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_generated_file(
+  NAME
+    vector_callable_object
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "vector_callable.o"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/vector_callable.loom"
+    "--target=x86:avx2"
+  INPUTS
+    "test/vector_callable.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_generated_file(
+  NAME
+    runtime_division_object
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "runtime_division.o"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/runtime_division.loom"
+    "--target=x86:avx2"
+  INPUTS
+    "test/runtime_division.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_generated_file(
+  NAME
+    avx512_callable_object
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "avx512_callable.o"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/avx512_callable.loom"
+    "--target=x86:avx512"
+  INPUTS
+    "test/avx512_callable.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_generated_file(
+  NAME
+    avx512_bf16_callable_object
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "avx512_bf16_callable.o"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/avx512_bf16_callable.loom"
+    "--target=x86:avx512_packed_dot"
+  INPUTS
+    "test/avx512_bf16_callable.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_generated_file(
+  NAME
+    packed_dot_callable_object
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "packed_dot_callable.o"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/packed_dot_callable.loom"
+    "--target=x86:packed_dot"
+  INPUTS
+    "test/packed_dot_callable.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_cc_test(
+  NAME
+    callable_link_test
+  SRCS
+    "avx512_bf16_callable.o"
+    "avx512_callable.o"
+    "callable.o"
+    "callable_link_test.cc"
+    "packed_dot_callable.o"
+    "vector_callable.o"
+  COPTS
+    "-mavx2"
+  DEPS
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_ARCH STREQUAL "x86_64" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+loom_cc_test(
+  NAME
+    runtime_division_link_test
+  SRCS
+    "runtime_division.o"
+    "runtime_division_link_test.cc"
+  COPTS
+    "-mavx2"
+  DEPS
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_generated_file(
+  NAME
+    hal_dispatch_image
+  GENERATOR
+    loom::tools::loom-compile::loom-compile
+  OUTPUT
+    "hal_dispatch.so"
+  OUTPUT_FLAG
+    "--output="
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/hal_dispatch.loom"
+    "--target=x86:avx2"
+  INPUTS
+    "test/hal_dispatch.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_HAL_DRIVER_TASK AND IREE_HAL_EXECUTABLE_LOADER_EMBEDDED_ELF AND IREE_ARCH STREQUAL "x86_64")
+iree_native_test(
+  NAME
+    "hal_dispatch_test"
+  ARGS
+    "--executable_file={{${CMAKE_CURRENT_BINARY_DIR}/hal_dispatch.so}}"
+  SRC
+    loom::target::abi::task::dispatch_test_runner
+  DATA
+    "${CMAKE_CURRENT_BINARY_DIR}/hal_dispatch.so"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_generated_file(
+  NAME
+    hal_dispatch_c_api_image
+  GENERATOR
+    loom::binding::c::example::compile_artifact
+  OUTPUT
+    "hal_dispatch_c_api.so"
+  OUTPUT_FLAG
+    "{path}"
+  ARGS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/target/emit/native/x86/test/hal_dispatch.loom"
+    "x86:avx2"
+  INPUTS
+    "test/hal_dispatch.loom"
+  TESTONLY
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86 AND IREE_HAL_DRIVER_TASK AND IREE_HAL_EXECUTABLE_LOADER_EMBEDDED_ELF AND IREE_ARCH STREQUAL "x86_64")
+iree_native_test(
+  NAME
+    "hal_dispatch_c_api_test"
+  ARGS
+    "--executable_file={{${CMAKE_CURRENT_BINARY_DIR}/hal_dispatch_c_api.so}}"
+  SRC
+    loom::target::abi::task::dispatch_test_runner
+  DATA
+    "${CMAKE_CURRENT_BINARY_DIR}/hal_dispatch_c_api.so"
 )
 endif()
 

@@ -1,0 +1,94 @@
+// One workitem owns an SDMA v1 byte-indexed ring. Each generation chooses a
+// source page, destination slot and 1..64-word length from the preceding
+// copied result. Eight source pages and four destination slots have 512-byte
+// strides and payloads at byte 64. Scalar addresses name the same owned
+// allocations as their buffer bindings; they are packet operands, not loads.
+//
+// The caller supplies the family's COPY control and FENCE header. Cache flags
+// select USER_GCR acquire (bit 0) and release (bit 1) from memory-pair queries.
+// Ring capacity is a power of two in [4096, 2^32] bytes. RPTR acquisition retires
+// command bytes; a separate SDMA FENCE generation and system acquire retire
+// the copy. Each 72-word transcript row holds page, slot, length, next state,
+// frontier low/high, prior state, generation, and all 64 destination words.
+// All buffers stay live through producer completion and queue retirement.
+
+template.decl @sdma_copy(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %source: i64, %target: i64, %completion_address: i64, %capacity: offset, %frontier: i64, %generation: i32, %word_count: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) -> (i64)
+
+kernel.def export("device_sdma") @device_sdma() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %destinations: buffer, %completion: buffer, %records: buffer, %source_address: i64, %destination_address: i64, %completion_address: i64, %capacity: offset, %round_count: i32, %seed: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) {
+  %destinations_aligned = buffer.assume.alignment %destinations {minimum_alignment = 64} : buffer
+  %records_aligned = buffer.assume.alignment %records {minimum_alignment = 64} : buffer
+  %first = index.constant 0 : index
+  %step = index.constant 1 : index
+  %payload_words = index.constant 64 : index
+  %record_header_words = index.constant 8 : index
+  %record_stride = index.constant 288 : offset
+  %zero = scalar.constant 0 : i32
+  %one = scalar.constant 1 : i32
+  %three = scalar.constant 3 : i32
+  %seven = scalar.constant 7 : i32
+  %eight = scalar.constant 8 : i32
+  %six_bits = scalar.constant 63 : i32
+  %mix = scalar.constant -1640531535 : i32
+  %zero64 = scalar.constant 0 : i64
+  %payload_offset = scalar.constant 64 : i64
+  %slot_stride = scalar.constant 512 : i64
+  %high_shift = scalar.constant 32 : i64
+
+  %completed, %final_state, %final_frontier = scf.while(%round = %zero : i32, %state = %seed : i32, %frontier = %zero64 : i64) -> (i32, i32, i64) {
+    %remaining = scalar.cmpi ult, %round, %round_count : i32
+    scf.condition %remaining, %round, %state, %frontier : i1, i32, i32, i64
+  } do(%round: i32, %state: i32, %frontier: i64) {
+    %generation = scalar.addi %round, %one : i32
+    %page = scalar.andi %state, %seven : i32
+    %slot_bits = scalar.shrui %state, %three : i32
+    %slot = scalar.andi %slot_bits, %three : i32
+    %length_bits = scalar.shrui %state, %eight : i32
+    %length_minus_one = scalar.andi %length_bits, %six_bits : i32
+    %word_count = scalar.addi %length_minus_one, %one : i32
+    %page64 = scalar.extui %page : i32 to i64
+    %slot64 = scalar.extui %slot : i32 to i64
+    %page_base = scalar.muli %page64, %slot_stride : i64
+    %slot_base = scalar.muli %slot64, %slot_stride : i64
+    %source_offset = scalar.addi %page_base, %payload_offset : i64
+    %target_offset = scalar.addi %slot_base, %payload_offset : i64
+    %source = scalar.addi %source_address, %source_offset : i64
+    %target = scalar.addi %destination_address, %target_offset : i64
+    %next_frontier = template.apply<@sdma_copy>(%ring, %read_index, %write_index, %notification, %completion, %source, %target, %completion_address, %capacity, %frontier, %generation, %word_count, %copy_control, %fence_header, %cache_flags) : (buffer, buffer, buffer, buffer, buffer, i64, i64, i64, offset, i64, i32, i32, i32, i32, i32) -> (i64)
+    %target_byte_offset = index.cast %target_offset : i64 to offset
+    %payload = buffer.view %destinations_aligned[%target_byte_offset] : buffer -> view<64xi32>
+    %last_index = index.cast %length_minus_one : i32 to index
+    %first_value = view.load %payload[0] : view<64xi32> -> i32
+    %last_value = view.load %payload[%last_index] : view<64xi32> -> i32
+    %salt = scalar.muli %generation, %mix : i32
+    %salted = scalar.addi %last_value, %salt : i32
+    %next_state = scalar.xori %first_value, %salted : i32
+    %unsigned_round = index.cast %round : i32 to offset
+    %round_index = index.cast %unsigned_round : offset to index
+    %record_offset = index.scale %round_index, %record_stride : index, offset -> offset
+    %record = buffer.view %records_aligned[%record_offset] : buffer -> view<72xi32>
+    %frontier_low = scalar.trunci %next_frontier : i64 to i32
+    %frontier_high64 = scalar.shrui %next_frontier, %high_shift : i64
+    %frontier_high = scalar.trunci %frontier_high64 : i64 to i32
+    view.store %page, %record[0] : i32, view<72xi32>
+    view.store %slot, %record[1] : i32, view<72xi32>
+    view.store %word_count, %record[2] : i32, view<72xi32>
+    view.store %next_state, %record[3] : i32, view<72xi32>
+    view.store %frontier_low, %record[4] : i32, view<72xi32>
+    view.store %frontier_high, %record[5] : i32, view<72xi32>
+    view.store %state, %record[6] : i32, view<72xi32>
+    view.store %generation, %record[7] : i32, view<72xi32>
+    scf.for %position = [%first to %payload_words step %step] {
+      %value = view.load %payload[%position] : view<64xi32> -> i32
+      %record_position = index.add %position, %record_header_words : index
+      view.store %value, %record[%record_position] : i32, view<72xi32>
+    }
+    // The next publication releases these transcript stores, and therefore
+    // the payload reads feeding them, before SDMA can reuse the destination.
+    scf.yield %generation, %next_state, %next_frontier : i32, i32, i64
+  }
+  buffer.fence scope(system) ordering(release)
+  kernel.return
+}

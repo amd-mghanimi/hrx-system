@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/packed_integer_arithmetic.loom-test
 // RUN: emit source-low target=amd.xdna.aie2p:core output=low
 
 func.def @i8x8_bitwise_storage_tuple(%lhs: vector<8xi8>, %rhs: vector<8xi8>) -> (vector<8xi8>, vector<8xi8>, vector<8xi8>) {
@@ -86,71 +85,84 @@ func.def @i16x4_shift_storage_tuple(%value: vector<4xi16>, %shift: vector<4xi16>
 
 // ----
 low.func.def target<amd.xdna.aie2p.core> abi(object_function) @i16x4_shift_storage_tuple(%value: reg<aie2p.vec256 x2>, %shift: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) asm {
-  %64 = vextract.16.imm %value, 0
-  %65 = vextract.16.imm %shift, 0
-  %66 = extend.u16 %65
-  %67 = lshl %64, %66
-  %68 = vextract.16.imm %value, 1
-  %69 = vextract.16.imm %shift, 1
-  %70 = extend.u16 %69
-  %71 = lshl %68, %70
-  %72 = vextract.16.imm %value, 2
-  %73 = vextract.16.imm %shift, 2
-  %74 = extend.u16 %73
-  %75 = lshl %72, %74
-  %76 = vextract.16.imm %value, 3
-  %77 = vextract.16.imm %shift, 3
-  %78 = extend.u16 %77
-  %79 = lshl %76, %78
-  %80 = vbcst.16 %67
-  %81 = mov.short 1
-  %82 = copy %81 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %83 = vinsert.16.reg %80, %82, %71
-  %84 = mov.short 2
-  %85 = copy %84 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %86 = vinsert.16.reg %83, %85, %75
-  %87 = mov.short 3
-  %88 = copy %87 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %left = vinsert.16.reg %86, %88, %79
-  %90 = extend.s16 %64
-  %92 = mov.short 0
-  %93 = sub %92, %66
-  %94 = ashl %90, %93
-  %95 = extend.s16 %68
-  %98 = sub %92, %70
-  %99 = ashl %95, %98
-  %100 = extend.s16 %72
-  %103 = sub %92, %74
-  %104 = ashl %100, %103
-  %105 = extend.s16 %76
-  %108 = sub %92, %78
-  %109 = ashl %105, %108
-  %110 = vbcst.16 %94
-  %112 = copy %81 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %113 = vinsert.16.reg %110, %112, %99
-  %115 = copy %84 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %116 = vinsert.16.reg %113, %115, %104
-  %118 = copy %87 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %signed_right = vinsert.16.reg %116, %118, %109
-  %120 = extend.u16 %64
-  %123 = sub %92, %66
-  %124 = lshl %120, %123
-  %125 = extend.u16 %68
-  %128 = sub %92, %70
-  %129 = lshl %125, %128
-  %130 = extend.u16 %72
-  %133 = sub %92, %74
-  %134 = lshl %130, %133
-  %135 = extend.u16 %76
-  %138 = sub %92, %78
-  %139 = lshl %135, %138
-  %140 = vbcst.16 %124
-  %142 = copy %81 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %143 = vinsert.16.reg %140, %142, %129
-  %145 = copy %84 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %146 = vinsert.16.reg %143, %145, %134
-  %148 = copy %87 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %unsigned_right = vinsert.16.reg %146, %148, %139
+  %13 = mov.short 1
+  %14 = vbcst.16 %13
+  set.saturation 0
+  set.ups-mode 0
+  set.srs-mode 0
+  set.rounding 0
+  %15 = mov.shift 1
+  %16 = vups.2x.x-to-c.unsigned %value, %15
+  %17 = mov.shift 0
+  %18 = vsrs.2x.c-to-x.unsigned %16, %17
+  %19 = vband %shift, %14
+  %20 = veqz.16.el.low32 %19
+  %21 = predicate.complete.zero.high32 %20, 0
+  %22 = vsel.16.mask64 %18, %value, %21
+  %23 = vadd.16 %14, %14
+  %24 = mov.shift 2
+  %25 = vups.2x.x-to-c.unsigned %22, %24
+  %26 = vsrs.2x.c-to-x.unsigned %25, %17
+  %27 = vband %shift, %23
+  %28 = veqz.16.el.low32 %27
+  %29 = predicate.complete.zero.high32 %28, 0
+  %30 = vsel.16.mask64 %26, %22, %29
+  %31 = vadd.16 %23, %23
+  %32 = mov.shift 4
+  %33 = vups.2x.x-to-c.unsigned %30, %32
+  %34 = vsrs.2x.c-to-x.unsigned %33, %17
+  %35 = vband %shift, %31
+  %36 = veqz.16.el.low32 %35
+  %37 = predicate.complete.zero.high32 %36, 0
+  %38 = vsel.16.mask64 %34, %30, %37
+  %39 = vadd.16 %31, %31
+  %40 = mov.shift 8
+  %41 = vups.2x.x-to-c.unsigned %38, %40
+  %42 = vsrs.2x.c-to-x.unsigned %41, %17
+  %43 = vband %shift, %39
+  %44 = veqz.16.el.low32 %43
+  %45 = predicate.complete.zero.high32 %44, 0
+  %left = vsel.16.mask64 %42, %38, %45
+  %50 = vups.2x.x-to-c.signed %value, %17
+  %52 = vsrs.2x.c-to-x.signed %50, %15
+  %54 = veqz.16.el.low32 %19
+  %55 = predicate.complete.zero.high32 %54, 0
+  %56 = vsel.16.mask64 %52, %value, %55
+  %58 = vups.2x.x-to-c.signed %56, %17
+  %60 = vsrs.2x.c-to-x.signed %58, %24
+  %62 = veqz.16.el.low32 %27
+  %63 = predicate.complete.zero.high32 %62, 0
+  %64 = vsel.16.mask64 %60, %56, %63
+  %66 = vups.2x.x-to-c.signed %64, %17
+  %68 = vsrs.2x.c-to-x.signed %66, %32
+  %70 = veqz.16.el.low32 %35
+  %71 = predicate.complete.zero.high32 %70, 0
+  %72 = vsel.16.mask64 %68, %64, %71
+  %74 = vups.2x.x-to-c.signed %72, %17
+  %76 = vsrs.2x.c-to-x.signed %74, %40
+  %78 = veqz.16.el.low32 %43
+  %79 = predicate.complete.zero.high32 %78, 0
+  %signed_right = vsel.16.mask64 %76, %72, %79
+  %84 = vups.2x.x-to-c.unsigned %value, %17
+  %86 = vsrs.2x.c-to-x.unsigned %84, %15
+  %88 = veqz.16.el.low32 %19
+  %89 = predicate.complete.zero.high32 %88, 0
+  %90 = vsel.16.mask64 %86, %value, %89
+  %92 = vups.2x.x-to-c.unsigned %90, %17
+  %94 = vsrs.2x.c-to-x.unsigned %92, %24
+  %96 = veqz.16.el.low32 %27
+  %97 = predicate.complete.zero.high32 %96, 0
+  %98 = vsel.16.mask64 %94, %90, %97
+  %100 = vups.2x.x-to-c.unsigned %98, %17
+  %102 = vsrs.2x.c-to-x.unsigned %100, %32
+  %104 = veqz.16.el.low32 %35
+  %105 = predicate.complete.zero.high32 %104, 0
+  %106 = vsel.16.mask64 %102, %98, %105
+  %108 = vups.2x.x-to-c.unsigned %106, %17
+  %110 = vsrs.2x.c-to-x.unsigned %108, %40
+  %112 = veqz.16.el.low32 %43
+  %113 = predicate.complete.zero.high32 %112, 0
+  %unsigned_right = vsel.16.mask64 %110, %106, %113
   return %left, %signed_right, %unsigned_right
 }
 

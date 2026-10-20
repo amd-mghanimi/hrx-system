@@ -73,22 +73,26 @@ enum loom_predicate_kind_e {
   LOOM_PREDICATE_GT = 4,
   // ge(a, b)
   LOOM_PREDICATE_GE = 5,
-  // mul(a, n): a is a multiple of positive n.
-  LOOM_PREDICATE_MUL = 6,
-  // min(a, n): a >= n.
-  LOOM_PREDICATE_MIN = 7,
-  // max(a, n): a <= n.
-  LOOM_PREDICATE_MAX = 8,
-  // pow2(a): a is power of 2.
-  LOOM_PREDICATE_POW2 = 9,
+  // multiple_of(a, n): a is a multiple of positive n.
+  LOOM_PREDICATE_MULTIPLE_OF = 6,
+  // power_of_two(a): a is a power of 2.
+  LOOM_PREDICATE_POWER_OF_TWO = 7,
   // range(a, lo, hi): lo <= a <= hi.
-  LOOM_PREDICATE_RANGE = 10,
+  LOOM_PREDICATE_RANGE = 8,
   // not_nan(a): a is not NaN.
-  LOOM_PREDICATE_NOT_NAN = 11,
+  LOOM_PREDICATE_NOT_NAN = 9,
   // not_inf(a): a is not positive or negative infinity.
-  LOOM_PREDICATE_NOT_INF = 12,
+  LOOM_PREDICATE_NOT_INF = 10,
   // finite(a): a is not NaN or infinity.
-  LOOM_PREDICATE_FINITE = 13,
+  LOOM_PREDICATE_FINITE = 11,
+  // ult(a, b): sign-extended 64-bit carrier of a is unsigned less than b.
+  LOOM_PREDICATE_ULT = 12,
+  // ule(a, b): sign-extended 64-bit carrier of a is unsigned <= b.
+  LOOM_PREDICATE_ULE = 13,
+  // ugt(a, b): sign-extended 64-bit carrier of a is unsigned greater than b.
+  LOOM_PREDICATE_UGT = 14,
+  // uge(a, b): sign-extended 64-bit carrier of a is unsigned >= b.
+  LOOM_PREDICATE_UGE = 15,
   // Number of predicate kinds.
   LOOM_PREDICATE_COUNT_,
 };
@@ -109,10 +113,9 @@ enum loom_predicate_arg_tag_e {
 
 // A single predicate constraint. 32 bytes, arena-allocated.
 //
-// Predicates constrain dynamic dimension values in where clauses and
-// assume ops. Each predicate has a kind (eq, mul, range, etc.)
-// and 1-3 arguments. Arguments are tagged: SSA value references or
-// integer constants.
+// Predicates constrain dynamic dimension values in where clauses and assume
+// ops. Each predicate has a kind (eq, multiple_of, range, etc.) and 1-3
+// arguments. Arguments are tagged: SSA value references or integer constants.
 typedef struct loom_predicate_t {
   // Predicate kind.
   loom_predicate_kind_t kind;
@@ -133,14 +136,20 @@ static_assert(sizeof(loom_predicate_t) == 32,
 // the predicate vocabulary.
 const char* loom_predicate_kind_name(uint8_t kind);
 
+// Parses a canonical predicate spelling into its kind. Returns false when
+// |name| is outside the predicate vocabulary.
+bool loom_predicate_kind_parse(iree_string_view_t name,
+                               loom_predicate_kind_t* out_kind);
+
 // Returns the exact arity for |kind| or UINT8_MAX if |kind| is outside the
 // predicate vocabulary.
 uint8_t loom_predicate_kind_argument_count(uint8_t kind);
 
-// Returns true when |kind| may constrain a value of |type|. Integer relation
-// predicates accept integer, index, and offset scalars. Floating-point
-// classification predicates accept floating-point scalars. Typed target
-// registers are classified by their carried semantic value type.
+// Returns true when |kind| may constrain a value of |type|. Equality accepts
+// numeric scalars. General integer predicates accept integer, index, and offset
+// scalars. Unsigned ordered relations accept fixed-width integer scalars.
+// Floating-point classification predicates accept floating-point scalars.
+// Typed target registers are classified by their carried semantic value type.
 bool loom_predicate_kind_accepts_value_type(uint8_t kind, loom_type_t type);
 
 //===----------------------------------------------------------------------===//
@@ -279,6 +288,30 @@ static inline loom_i64_array_t loom_i64_array_empty(void) {
   return array;
 }
 
+// A borrowed ordered array of module-local interned string IDs.
+//
+// Ordering and duplicate strings are preserved.
+typedef struct loom_string_id_array_t {
+  // Borrowed module-local interned string IDs in authored order.
+  const loom_string_id_t* values;
+  // Number of entries in |values|.
+  iree_host_size_t count;
+} loom_string_id_array_t;
+
+static inline loom_string_id_array_t loom_string_id_array_empty(void) {
+  loom_string_id_array_t array = {0};
+  return array;
+}
+
+static inline loom_string_id_array_t loom_make_string_id_array(
+    const loom_string_id_t* values, iree_host_size_t count) {
+  loom_string_id_array_t array = {
+      /*.values=*/count > 0 ? values : NULL,
+      /*.count=*/count,
+  };
+  return array;
+}
+
 static inline loom_i64_array_t loom_make_i64_array(const int64_t* values,
                                                    iree_host_size_t count) {
   loom_i64_array_t array = {
@@ -405,6 +438,9 @@ typedef enum loom_attr_kind_e {
   // duplicates. The operation field descriptor supplies the symbol interface
   // and reference role; generic dictionaries cannot carry this kind.
   LOOM_ATTR_SYMBOL_SET = 20,
+  // Arena-allocated ordered module-local interned string IDs. Ordering and
+  // duplicate strings are preserved.
+  LOOM_ATTR_STRING_ARRAY = 21,
   LOOM_ATTR_COUNT_,
 } loom_attr_kind_t;
 
@@ -417,12 +453,12 @@ typedef enum loom_attr_kind_e {
 // parameters, and anywhere a typed scalar/aggregate is needed.
 //
 // The kind tag (byte 0) determines which union member is active.
-// For I64_ARRAY, ENUM_ARRAY, SYMBOL_ARRAY, SYMBOL_SET, PREDICATE_LIST,
-// PARAMETERIZED, PARAMETERIZED_ARRAY, and SIGNED_ENUM_SET, the count field
-// holds the element, parameter, or per-polarity word count and the payload
-// holds a pointer to arena-allocated storage. PARAMETERIZED uses reserved_1 for
-// its family kind. BYTES uses reserved_1 for its byte length and points to
-// immutable bytes.
+// For I64_ARRAY, STRING_ARRAY, ENUM_ARRAY, SYMBOL_ARRAY, SYMBOL_SET,
+// PREDICATE_LIST, PARAMETERIZED, PARAMETERIZED_ARRAY, and SIGNED_ENUM_SET, the
+// count field holds the element, parameter, or per-polarity word count and the
+// payload holds a pointer to arena-allocated storage. PARAMETERIZED uses
+// reserved_1 for its family kind. BYTES uses reserved_1 for its byte length and
+// points to immutable bytes.
 typedef struct loom_attribute_t {
   uint8_t kind;
   uint8_t reserved_0;
@@ -433,6 +469,8 @@ typedef struct loom_attribute_t {
     double f64;
     loom_string_id_t string_id;
     loom_symbol_ref_t symbol;
+    // Arena-owned payload for LOOM_ATTR_STRING_ARRAY.
+    const loom_string_id_t* string_ids;
     // Arena-owned payload for LOOM_ATTR_SYMBOL_ARRAY and LOOM_ATTR_SYMBOL_SET.
     const loom_symbol_ref_t* symbol_refs;
     int64_t* i64_array;
@@ -515,6 +553,18 @@ static inline loom_attribute_t loom_attr_f64(double value) {
 static inline loom_attribute_t loom_attr_string(loom_string_id_t string_id) {
   loom_attribute_t attr = loom_attr_make_present(LOOM_ATTR_STRING);
   attr.string_id = string_id;
+  return attr;
+}
+
+// Constructs a string array attribute. The string IDs must be arena-allocated
+// and outlive the attribute. A zero-length array is present and canonicalized
+// to a NULL payload, unlike the all-zero absent sentinel.
+static inline loom_attribute_t loom_attr_string_array(
+    const loom_string_id_t* values, iree_host_size_t count) {
+  IREE_ASSERT(count <= UINT16_MAX);
+  loom_attribute_t attr = loom_attr_make_present(LOOM_ATTR_STRING_ARRAY);
+  attr.count = (uint16_t)count;
+  attr.string_ids = count > 0 ? values : NULL;
   return attr;
 }
 
@@ -784,6 +834,19 @@ static inline double loom_attr_as_f64(loom_attribute_t attr) {
 // Returns the string ID of a STRING attribute.
 static inline loom_string_id_t loom_attr_as_string_id(loom_attribute_t attr) {
   return attr.string_id;
+}
+
+// Returns the ordered string IDs of a STRING_ARRAY attribute.
+//
+// An absent optional attribute reads as an empty array. Call
+// loom_attr_is_absent when presence matters.
+static inline loom_string_id_array_t loom_attr_as_string_array(
+    loom_attribute_t attr) {
+  if (loom_attr_is_absent(attr)) {
+    return loom_string_id_array_empty();
+  }
+  IREE_ASSERT(attr.kind == LOOM_ATTR_STRING_ARRAY);
+  return loom_make_string_id_array(attr.string_ids, attr.count);
 }
 
 // Returns the boolean value of a BOOL attribute.

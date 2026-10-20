@@ -10,7 +10,7 @@
 iree_add_all_subdirs()
 
 if(LOOM_IMPORT_CXX)
-loom_cc_binary(
+loomc_cc_binary(
   NAME
     loom-import-cxx
   SRCS
@@ -18,26 +18,17 @@ loom_cc_binary(
   DEPS
     iree::base
     iree::base::tooling::flags
-    iree::io::stream
-    loom::codegen::low::text_asm
-    loom::format::bytecode::writer
-    loom::format::text::printer
-    loom::import::cxx
-    loom::pass::builtin_registry
-    loom::pass::tooling
-    loom::target::configured::provider_set
-    loom::target::provider
+    loom::binding::c::import::cxx
+    loom::binding::c::loomc
+    loom::binding::c::target::configured::ir
     loom::tooling::cli::help
-    loom::tooling::context
+    loom::tooling::cli::loomc_result
     loom::tooling::io::file
-    loom::transforms::cleanup::configured
-    loom::transforms::cleanup::pass_environment
-    loom::transforms::cleanup::patterns
-    loom::verify
 )
 endif()
 
 file(GLOB _GLOB_TESTDATA_X LIST_DIRECTORIES false RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} CONFIGURE_DEPENDS testdata/*)
+list(TRANSFORM _GLOB_TESTDATA_X PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/" OUTPUT_VARIABLE _GLOB_TESTDATA_X_ABSOLUTE)
 if(LOOM_IMPORT_CXX)
 iree_execution_test_suite(
   NAME
@@ -51,11 +42,32 @@ iree_execution_test_suite(
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/hip/hip_fp16.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/hip/hip_runtime.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/atomic.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/buffer.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/cache.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/encoding_type.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/index.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/kernel.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/math.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/scalar.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/shape.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/view.h"
-    "${_GLOB_TESTDATA_X}"
+    "${_GLOB_TESTDATA_X_ABSOLUTE}"
+  LABELS
+    "hostonly"
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+iree_execution_test_suite(
+  NAME
+    export_roundtrip_test
+  MANIFESTS
+    "export_roundtrip.test.json"
+  TOOLS
+    "loom-export-cxx=loom::py::loom::tools::loom-export-cxx"
+    "loom-import-cxx=::loom-import-cxx"
+  DATA
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/tools/loom-import-cxx/testdata/readable_projection.loom"
   LABELS
     "hostonly"
 )

@@ -11,7 +11,7 @@
 #include "loomc/target/iree_hal.h"
 
 /// @file
-/// AMDGPU target profiles from IREE HAL devices.
+/// AMDGPU compiler-and-loader targets from IREE HAL devices.
 ///
 /// This optional leaf projects the canonical exact AMDGPU executable target
 /// advertised by an IREE HAL device into Loom's structured AMDGPU target
@@ -27,10 +27,10 @@
 extern "C" {
 #endif
 
-/// AMDGPU profile options for an IREE HAL device.
-typedef struct loomc_amdgpu_iree_hal_profile_options_t {
+/// AMDGPU target options for an IREE HAL device.
+typedef struct loomc_amdgpu_iree_hal_target_options_t {
   /// Structure type. Must be
-  /// `LOOMC_STRUCTURE_TYPE_AMDGPU_IREE_HAL_PROFILE_OPTIONS` when nonzero.
+  /// `LOOMC_STRUCTURE_TYPE_AMDGPU_IREE_HAL_TARGET_OPTIONS` when nonzero.
   loomc_structure_type_t type;
 
   /// Size of this structure in bytes.
@@ -47,49 +47,56 @@ typedef struct loomc_amdgpu_iree_hal_profile_options_t {
   /// IREE HAL device borrowed for the duration of the call.
   iree_hal_device_t* device;
 
-  /// Optional physical-device set the exact target must fully cover.
+  /// Optional physical-device set the selected target must fully cover.
   iree_hal_physical_device_affinity_t physical_device_affinity;
-} loomc_amdgpu_iree_hal_profile_options_t;
 
-/// Creates an exact AMDGPU target profile from an IREE HAL device.
+  /// Optional caller-selected AMDGPU profile the device must load exactly.
+  loomc_target_profile_t* target_profile;
+} loomc_amdgpu_iree_hal_target_options_t;
+
+/// Selects an AMDGPU compiler-and-loader target from an IREE HAL device.
 ///
-/// The adapter selects one exact `amdgpu` executable target from the device
-/// specification, parses its canonical target key into target identity and
-/// AMDHSA feature states, and creates an ordinary AMDGPU profile.
+/// Without a caller-selected profile, the adapter selects one exact `amdgpu`
+/// executable target from the device specification, parses its canonical
+/// target key into target identity and AMDHSA feature states, and creates an
+/// ordinary AMDGPU profile. A caller-selected profile instead requires a HAL
+/// target with the same canonical key and exact or generic kind.
 ///
 /// @param target_environment AMDGPU target environment that will own the
 /// profile.
-/// @param options AMDGPU IREE HAL profile options.
+/// @param options AMDGPU IREE HAL target options.
 /// @param allocator Host allocator used for result and profile storage.
-/// @param out_profile Receives one retained profile when the result succeeds.
-/// Receives `NULL` on failed result.
+/// @param out_selection Receives one complete target selection when the result
+/// succeeds. Receives zero on failed result.
 /// @param out_result Receives a retained result containing adapter diagnostics.
-/// @return OK when profile creation completed far enough to report a result.
+/// @return OK when target selection completed far enough to report a result.
 /// Non-OK statuses represent API misuse or infrastructure failures before a
 /// result could be produced.
 ///
 /// @ownership
 /// The caller owns `out_result` on an OK return and releases it with
 /// `loomc_result_release`. When a profile is produced, the caller owns the
-/// returned reference and releases it with `loomc_target_profile_release`.
+/// returned profile reference with `loomc_target_profile_release`. The
+/// executable target remains borrowed from the device.
 ///
 /// @thread_safety
 /// The adapter holds no mutable process-global state. It may be called
 /// concurrently for different invocations. The supplied HAL device must
 /// satisfy its own thread-safety contract.
-LOOMC_API_EXPORT loomc_status_t loomc_target_profile_create_amdgpu_iree_hal(
+LOOMC_API_EXPORT loomc_status_t loomc_target_select_amdgpu_iree_hal(
     loomc_target_environment_t* target_environment,
-    const loomc_amdgpu_iree_hal_profile_options_t* options,
-    loomc_allocator_t allocator, loomc_target_profile_t** out_profile,
+    const loomc_amdgpu_iree_hal_target_options_t* options,
+    loomc_allocator_t allocator,
+    loomc_iree_hal_target_selection_t* out_selection,
     loomc_result_t** out_result);
 
 /// Returns the generic IREE HAL router provider for AMDGPU devices.
 ///
 /// @return Process-lifetime provider descriptor. The returned pointer is
 /// immutable and may be placed directly in a
-/// `loomc_iree_hal_profile_options_t::providers` array.
-LOOMC_API_EXPORT const loomc_iree_hal_profile_provider_t*
-loomc_amdgpu_iree_hal_profile_provider(void);
+/// `loomc_iree_hal_target_options_t::providers` array.
+LOOMC_API_EXPORT const loomc_iree_hal_target_provider_t*
+loomc_amdgpu_iree_hal_target_provider(void);
 
 #ifdef __cplusplus
 }  // extern "C"

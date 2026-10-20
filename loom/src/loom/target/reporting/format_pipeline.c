@@ -24,17 +24,19 @@ typedef struct loom_target_compile_report_pipeline_numeric_field_t {
   uint8_t name_length;
   // loom_target_compile_report_pipeline_numeric_kind_e value.
   uint8_t kind;
+  // Required fact family, or zero for universally available physical facts.
+  loom_target_compile_report_pipeline_facts_t facts;
 } loom_target_compile_report_pipeline_numeric_field_t;
 
-#define LOOM_PIPELINE_NUMERIC_FIELD(struct_type, member, field_kind) \
-  {#member, (uint16_t)offsetof(struct_type, member),                 \
-   (uint8_t)(sizeof(#member) - 1), field_kind}
+#define LOOM_PIPELINE_NUMERIC_FIELD(struct_type, member, field_kind, facts) \
+  {#member, (uint16_t)offsetof(struct_type, member),                        \
+   (uint8_t)(sizeof(#member) - 1), field_kind, facts}
 #define LOOM_PIPELINE_U32_FIELD(struct_type, member) \
-  LOOM_PIPELINE_NUMERIC_FIELD(struct_type, member,   \
-                              LOOM_TARGET_COMPILE_REPORT_PIPELINE_NUMERIC_U32)
+  LOOM_PIPELINE_NUMERIC_FIELD(                       \
+      struct_type, member, LOOM_TARGET_COMPILE_REPORT_PIPELINE_NUMERIC_U32, 0)
 #define LOOM_PIPELINE_U64_FIELD(struct_type, member) \
-  LOOM_PIPELINE_NUMERIC_FIELD(struct_type, member,   \
-                              LOOM_TARGET_COMPILE_REPORT_PIPELINE_NUMERIC_U64)
+  LOOM_PIPELINE_NUMERIC_FIELD(                       \
+      struct_type, member, LOOM_TARGET_COMPILE_REPORT_PIPELINE_NUMERIC_U64, 0)
 #define STORAGE_U32(member) \
   LOOM_PIPELINE_U32_FIELD(loom_target_compile_report_pipeline_storage_t, member)
 #define STORAGE_U64(member) \
@@ -61,6 +63,24 @@ typedef struct loom_target_compile_report_pipeline_numeric_field_t {
   LOOM_PIPELINE_U64_FIELD(loom_target_compile_report_pipeline_plan_summary_t, \
                           member)
 
+#define LOGICAL_FIELD(type, member, kind)                               \
+  LOOM_PIPELINE_NUMERIC_FIELD(                                          \
+      type, member, LOOM_TARGET_COMPILE_REPORT_PIPELINE_NUMERIC_##kind, \
+      LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_CHANNELS)
+#define WORKER_LOGICAL(member) \
+  LOGICAL_FIELD(loom_target_compile_report_pipeline_worker_row_t, member, U32)
+#define SUMMARY_LOGICAL(member, kind)                                       \
+  LOGICAL_FIELD(loom_target_compile_report_pipeline_plan_summary_t, member, \
+                kind)
+#define SUMMARY_INVENTORY(member, kind, family)                   \
+  LOOM_PIPELINE_NUMERIC_FIELD(                                    \
+      loom_target_compile_report_pipeline_plan_summary_t, member, \
+      LOOM_TARGET_COMPILE_REPORT_PIPELINE_NUMERIC_##kind,         \
+      LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_##family)
+#define MEMORY_U32(member)                                                  \
+  LOOM_PIPELINE_U32_FIELD(loom_target_compile_report_pipeline_memory_row_t, \
+                          member)
+
 static const loom_target_compile_report_pipeline_numeric_field_t
     loom_target_compile_report_pipeline_storage_fields[] = {
         STORAGE_U32(schema_logical_element_count),
@@ -85,22 +105,22 @@ static const loom_target_compile_report_pipeline_numeric_field_t
 static const loom_target_compile_report_pipeline_numeric_field_t
     loom_target_compile_report_pipeline_worker_identity_fields[] = {
         WORKER_U32(worker_index),
-        WORKER_U32(group_index),
-        WORKER_U32(lane),
+        WORKER_LOGICAL(group_index),
+        WORKER_LOGICAL(lane),
 };
 
 static const loom_target_compile_report_pipeline_numeric_field_t
     loom_target_compile_report_pipeline_worker_metric_fields[] = {
-        WORKER_U32(input_channel_count),
-        WORKER_U32(output_channel_count),
-        WORKER_U32(ring_state_count),
-        WORKER_U32(input_record_count),
-        WORKER_U32(output_record_count),
-        WORKER_U32(finite_loop_trip_count),
+        WORKER_LOGICAL(input_channel_count),
+        WORKER_LOGICAL(output_channel_count),
+        WORKER_LOGICAL(ring_state_count),
+        WORKER_LOGICAL(input_record_count),
+        WORKER_LOGICAL(output_record_count),
+        WORKER_LOGICAL(finite_loop_trip_count),
         WORKER_U32(code_byte_count),
         WORKER_U32(code_capacity_byte_count),
         WORKER_U32(worker_storage_byte_count),
-        WORKER_U32(channel_storage_byte_count),
+        WORKER_LOGICAL(channel_storage_byte_count),
         WORKER_U32(local_memory_byte_count),
         WORKER_U32(local_memory_capacity_byte_count),
         WORKER_U32(maximum_bank_storage_byte_count),
@@ -122,26 +142,47 @@ static const loom_target_compile_report_pipeline_numeric_field_t
 
 static const loom_target_compile_report_pipeline_numeric_field_t
     loom_target_compile_report_pipeline_summary_fields[] = {
-        SUMMARY_U32(group_count),
+        SUMMARY_LOGICAL(group_count, U32),
         SUMMARY_U32(binding_count),
-        SUMMARY_U32(channel_slot_count),
-        SUMMARY_U32(hardware_lock_count),
-        SUMMARY_U32(dma_channel_count),
-        SUMMARY_U32(dma_buffer_descriptor_count),
-        SUMMARY_U32(route_count),
+        SUMMARY_INVENTORY(program_count, U32, PROGRAMS),
+        SUMMARY_INVENTORY(program_code_byte_count, U64, PROGRAMS),
+        SUMMARY_INVENTORY(memory_count, U32, MEMORY),
+        SUMMARY_INVENTORY(reserved_storage_byte_count, U64, MEMORY),
+        SUMMARY_LOGICAL(channel_slot_count, U32),
+        SUMMARY_LOGICAL(hardware_lock_count, U32),
+        SUMMARY_LOGICAL(dma_channel_count, U32),
+        SUMMARY_LOGICAL(dma_buffer_descriptor_count, U32),
+        SUMMARY_LOGICAL(route_count, U32),
         SUMMARY_U64(worker_code_byte_count),
         SUMMARY_U32(maximum_worker_code_byte_count),
         SUMMARY_U32(minimum_worker_code_headroom_byte_count),
         SUMMARY_U64(worker_storage_byte_count),
-        SUMMARY_U64(channel_storage_byte_count),
+        SUMMARY_LOGICAL(channel_storage_byte_count, U64),
         SUMMARY_U32(maximum_tile_local_memory_byte_count),
         SUMMARY_U32(minimum_tile_local_memory_headroom_byte_count),
         SUMMARY_U32(maximum_bank_storage_byte_count),
         SUMMARY_U32(bank_storage_capacity_byte_count),
-        SUMMARY_U64(external_dma_byte_count),
-        SUMMARY_U64(routed_dma_byte_count),
+        SUMMARY_LOGICAL(external_dma_byte_count, U64),
+        SUMMARY_LOGICAL(routed_dma_byte_count, U64),
 };
 
+static const loom_target_compile_report_pipeline_numeric_field_t
+    loom_target_compile_report_pipeline_memory_fields[] = {
+        MEMORY_U32(memory_index),
+        MEMORY_U32(reserved_byte_count),
+        MEMORY_U32(program_data_byte_count),
+        MEMORY_U32(occupied_byte_count),
+        MEMORY_U32(high_water_byte_count),
+        MEMORY_U32(capacity_byte_count),
+        MEMORY_U32(maximum_bank_storage_byte_count),
+        MEMORY_U32(bank_storage_capacity_byte_count),
+};
+
+#undef MEMORY_U32
+#undef SUMMARY_INVENTORY
+#undef SUMMARY_LOGICAL
+#undef WORKER_LOGICAL
+#undef LOGICAL_FIELD
 #undef SUMMARY_U64
 #undef SUMMARY_U32
 #undef CHANNEL_U64
@@ -158,11 +199,16 @@ static const loom_target_compile_report_pipeline_numeric_field_t
 static iree_status_t loom_target_compile_report_format_pipeline_numeric_json(
     const void* value,
     const loom_target_compile_report_pipeline_numeric_field_t* fields,
-    iree_host_size_t field_count, loom_json_object_writer_t* object) {
+    iree_host_size_t field_count,
+    loom_target_compile_report_pipeline_facts_t available_facts,
+    loom_json_object_writer_t* object) {
   const uint8_t* bytes = value;
   for (iree_host_size_t i = 0; i < field_count; ++i) {
     const loom_target_compile_report_pipeline_numeric_field_t* field =
         &fields[i];
+    if (field->facts && !iree_any_bit_set(available_facts, field->facts)) {
+      continue;
+    }
     const iree_string_view_t name =
         iree_make_string_view(field->name, field->name_length);
     const void* field_value = bytes + field->offset;
@@ -206,7 +252,7 @@ static iree_status_t loom_target_compile_report_format_pipeline_storage_json(
       &object, IREE_SV("transform"), storage->transform));
   IREE_RETURN_IF_ERROR(loom_target_compile_report_format_pipeline_numeric_json(
       storage, loom_target_compile_report_pipeline_storage_fields,
-      IREE_ARRAYSIZE(loom_target_compile_report_pipeline_storage_fields),
+      IREE_ARRAYSIZE(loom_target_compile_report_pipeline_storage_fields), 0,
       &object));
   return loom_json_object_end(&object);
 }
@@ -218,13 +264,51 @@ static iree_status_t loom_target_compile_report_format_pipeline_transfer_json(
   IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &object));
   IREE_RETURN_IF_ERROR(loom_target_compile_report_format_pipeline_numeric_json(
       transfer, loom_target_compile_report_pipeline_transfer_fields,
-      IREE_ARRAYSIZE(loom_target_compile_report_pipeline_transfer_fields),
+      IREE_ARRAYSIZE(loom_target_compile_report_pipeline_transfer_fields), 0,
+      &object));
+  return loom_json_object_end(&object);
+}
+
+static iree_status_t loom_target_compile_report_format_pipeline_placement_json(
+    const loom_target_compile_report_pipeline_placement_t* value,
+    loom_json_object_writer_t* object) {
+  loom_output_stream_t* stream = object->stream;
+  IREE_RETURN_IF_ERROR(
+      loom_json_object_begin_field(object, IREE_SV("placement")));
+  loom_json_object_writer_t placement;
+  IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &placement));
+  IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
+      &placement, IREE_SV("rank"), value->rank));
+  IREE_RETURN_IF_ERROR(
+      loom_json_object_write_uint32_field(&placement, IREE_SV("x"), value->x));
+  IREE_RETURN_IF_ERROR(
+      loom_json_object_write_uint32_field(&placement, IREE_SV("y"), value->y));
+  if (value->rank >= 3) {
+    IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
+        &placement, IREE_SV("z"), value->z));
+  }
+  IREE_RETURN_IF_ERROR(loom_json_object_end(&placement));
+  return iree_ok_status();
+}
+
+static iree_status_t loom_target_compile_report_format_pipeline_memory_json(
+    const loom_target_compile_report_pipeline_memory_row_t* row,
+    loom_output_stream_t* stream) {
+  loom_json_object_writer_t object;
+  IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &object));
+  IREE_RETURN_IF_ERROR(
+      loom_target_compile_report_format_pipeline_placement_json(&row->placement,
+                                                                &object));
+  IREE_RETURN_IF_ERROR(loom_target_compile_report_format_pipeline_numeric_json(
+      row, loom_target_compile_report_pipeline_memory_fields,
+      IREE_ARRAYSIZE(loom_target_compile_report_pipeline_memory_fields), 0,
       &object));
   return loom_json_object_end(&object);
 }
 
 static iree_status_t loom_target_compile_report_format_pipeline_worker_json(
     const loom_target_compile_report_pipeline_worker_row_t* row,
+    loom_target_compile_report_pipeline_facts_t available_facts,
     loom_output_stream_t* stream) {
   loom_json_object_writer_t object;
   IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &object));
@@ -232,34 +316,25 @@ static iree_status_t loom_target_compile_report_format_pipeline_worker_json(
       row, loom_target_compile_report_pipeline_worker_identity_fields,
       IREE_ARRAYSIZE(
           loom_target_compile_report_pipeline_worker_identity_fields),
-      &object));
+      available_facts, &object));
   IREE_RETURN_IF_ERROR(loom_json_object_write_string_field(
       &object, IREE_SV("entry"), row->entry_name));
-  IREE_RETURN_IF_ERROR(loom_json_object_write_bool_field(
-      &object, IREE_SV("resident"),
-      iree_any_bit_set(row->flags,
-                       LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_RESIDENT)));
-  IREE_RETURN_IF_ERROR(loom_json_object_write_bool_field(
-      &object, IREE_SV("folded"),
-      iree_any_bit_set(row->flags,
-                       LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_FOLDED)));
+  if (iree_any_bit_set(available_facts,
+                       LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_CHANNELS)) {
+    IREE_RETURN_IF_ERROR(loom_json_object_write_bool_field(
+        &object, IREE_SV("resident"),
+        iree_any_bit_set(row->flags,
+                         LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_RESIDENT)));
+    IREE_RETURN_IF_ERROR(loom_json_object_write_bool_field(
+        &object, IREE_SV("folded"),
+        iree_any_bit_set(row->flags,
+                         LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_FOLDED)));
+  }
   if (iree_any_bit_set(row->flags,
                        LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_PLACED)) {
     IREE_RETURN_IF_ERROR(
-        loom_json_object_begin_field(&object, IREE_SV("placement")));
-    loom_json_object_writer_t placement;
-    IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &placement));
-    IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
-        &placement, IREE_SV("rank"), row->placement.rank));
-    IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
-        &placement, IREE_SV("x"), row->placement.x));
-    IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
-        &placement, IREE_SV("y"), row->placement.y));
-    if (row->placement.rank >= 3) {
-      IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
-          &placement, IREE_SV("z"), row->placement.z));
-    }
-    IREE_RETURN_IF_ERROR(loom_json_object_end(&placement));
+        loom_target_compile_report_format_pipeline_placement_json(
+            &row->placement, &object));
   }
   if (!iree_string_view_is_empty(row->fold_kind)) {
     IREE_RETURN_IF_ERROR(loom_json_object_write_string_field(
@@ -268,7 +343,7 @@ static iree_status_t loom_target_compile_report_format_pipeline_worker_json(
   IREE_RETURN_IF_ERROR(loom_target_compile_report_format_pipeline_numeric_json(
       row, loom_target_compile_report_pipeline_worker_metric_fields,
       IREE_ARRAYSIZE(loom_target_compile_report_pipeline_worker_metric_fields),
-      &object));
+      available_facts, &object));
   return loom_json_object_end(&object);
 }
 
@@ -292,7 +367,7 @@ static iree_status_t loom_target_compile_report_format_pipeline_channel_json(
   IREE_RETURN_IF_ERROR(loom_target_compile_report_format_pipeline_numeric_json(
       row, loom_target_compile_report_pipeline_channel_metric_fields,
       IREE_ARRAYSIZE(loom_target_compile_report_pipeline_channel_metric_fields),
-      &object));
+      0, &object));
   if (!iree_string_view_is_empty(row->storage.schema_name)) {
     IREE_RETURN_IF_ERROR(
         loom_json_object_begin_field(&object, IREE_SV("storage")));
@@ -325,7 +400,7 @@ iree_status_t loom_target_compile_report_format_pipeline_plan_json(
   IREE_RETURN_IF_ERROR(loom_target_compile_report_format_pipeline_numeric_json(
       summary, loom_target_compile_report_pipeline_summary_fields,
       IREE_ARRAYSIZE(loom_target_compile_report_pipeline_summary_fields),
-      &object));
+      summary->available_facts, &object));
 
   IREE_RETURN_IF_ERROR(
       loom_json_object_begin_field(&object, IREE_SV("workers")));
@@ -343,39 +418,90 @@ iree_status_t loom_target_compile_report_format_pipeline_plan_json(
       IREE_RETURN_IF_ERROR(loom_json_array_begin_element(&rows));
       IREE_RETURN_IF_ERROR(
           loom_target_compile_report_format_pipeline_worker_json(
-              &plan->worker_rows[i], stream));
+              &plan->worker_rows[i], summary->available_facts, stream));
     }
     IREE_RETURN_IF_ERROR(loom_json_array_end(&rows));
   }
   IREE_RETURN_IF_ERROR(loom_json_object_end(&workers));
 
-  IREE_RETURN_IF_ERROR(
-      loom_json_object_begin_field(&object, IREE_SV("channels")));
-  loom_json_object_writer_t channels;
-  IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &channels));
-  IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
-      &channels, IREE_SV("count"), summary->channel_count));
-  if (mode == LOOM_TARGET_COMPILE_REPORT_FORMAT_MODE_DETAILS &&
-      plan->channel_row_count != 0) {
+  if (iree_any_bit_set(summary->available_facts,
+                       LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_CHANNELS)) {
     IREE_RETURN_IF_ERROR(
-        loom_json_object_begin_field(&channels, IREE_SV("rows")));
-    loom_json_array_writer_t rows;
-    IREE_RETURN_IF_ERROR(loom_json_array_begin(stream, &rows));
-    for (iree_host_size_t i = 0; i < plan->channel_row_count; ++i) {
-      IREE_RETURN_IF_ERROR(loom_json_array_begin_element(&rows));
+        loom_json_object_begin_field(&object, IREE_SV("channels")));
+    loom_json_object_writer_t channels;
+    IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &channels));
+    IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
+        &channels, IREE_SV("count"), summary->channel_count));
+    if (mode == LOOM_TARGET_COMPILE_REPORT_FORMAT_MODE_DETAILS &&
+        plan->channel_row_count != 0) {
       IREE_RETURN_IF_ERROR(
-          loom_target_compile_report_format_pipeline_channel_json(
-              &plan->channel_rows[i], stream));
+          loom_json_object_begin_field(&channels, IREE_SV("rows")));
+      loom_json_array_writer_t rows;
+      IREE_RETURN_IF_ERROR(loom_json_array_begin(stream, &rows));
+      for (iree_host_size_t i = 0; i < plan->channel_row_count; ++i) {
+        IREE_RETURN_IF_ERROR(loom_json_array_begin_element(&rows));
+        IREE_RETURN_IF_ERROR(
+            loom_target_compile_report_format_pipeline_channel_json(
+                &plan->channel_rows[i], stream));
+      }
+      IREE_RETURN_IF_ERROR(loom_json_array_end(&rows));
     }
-    IREE_RETURN_IF_ERROR(loom_json_array_end(&rows));
+    IREE_RETURN_IF_ERROR(loom_json_object_end(&channels));
   }
-  IREE_RETURN_IF_ERROR(loom_json_object_end(&channels));
+  if (iree_any_bit_set(summary->available_facts,
+                       LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_MEMORY)) {
+    IREE_RETURN_IF_ERROR(
+        loom_json_object_begin_field(&object, IREE_SV("memories")));
+    loom_json_object_writer_t memories;
+    IREE_RETURN_IF_ERROR(loom_json_object_begin(stream, &memories));
+    IREE_RETURN_IF_ERROR(loom_json_object_write_uint32_field(
+        &memories, IREE_SV("count"), summary->memory_count));
+    if (mode == LOOM_TARGET_COMPILE_REPORT_FORMAT_MODE_DETAILS &&
+        plan->memory_row_count != 0) {
+      IREE_RETURN_IF_ERROR(
+          loom_json_object_begin_field(&memories, IREE_SV("rows")));
+      loom_json_array_writer_t rows;
+      IREE_RETURN_IF_ERROR(loom_json_array_begin(stream, &rows));
+      for (iree_host_size_t i = 0; i < plan->memory_row_count; ++i) {
+        IREE_RETURN_IF_ERROR(loom_json_array_begin_element(&rows));
+        IREE_RETURN_IF_ERROR(
+            loom_target_compile_report_format_pipeline_memory_json(
+                &plan->memory_rows[i], stream));
+      }
+      IREE_RETURN_IF_ERROR(loom_json_array_end(&rows));
+    }
+    IREE_RETURN_IF_ERROR(loom_json_object_end(&memories));
+  }
   return loom_json_object_end(&object);
 }
 
 static iree_string_view_t loom_target_compile_report_pipeline_text_value(
     iree_string_view_t value) {
   return iree_string_view_is_empty(value) ? IREE_SV("-") : value;
+}
+
+static iree_status_t loom_target_compile_report_format_pipeline_numeric_text(
+    const void* value,
+    const loom_target_compile_report_pipeline_numeric_field_t* fields,
+    iree_host_size_t field_count,
+    loom_target_compile_report_pipeline_facts_t available_facts,
+    iree_string_builder_t* builder) {
+  const uint8_t* bytes = value;
+  for (iree_host_size_t i = 0; i < field_count; ++i) {
+    const loom_target_compile_report_pipeline_numeric_field_t* field =
+        &fields[i];
+    if (field->facts && !iree_any_bit_set(available_facts, field->facts)) {
+      continue;
+    }
+    const void* field_value = bytes + field->offset;
+    const uint64_t number =
+        field->kind == LOOM_TARGET_COMPILE_REPORT_PIPELINE_NUMERIC_U32
+            ? *(const uint32_t*)field_value
+            : *(const uint64_t*)field_value;
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, " %s=%" PRIu64, field->name, number));
+  }
+  return iree_ok_status();
 }
 
 iree_status_t loom_target_compile_report_format_pipeline_plan_text(
@@ -389,29 +515,19 @@ iree_status_t loom_target_compile_report_format_pipeline_plan_text(
   const iree_string_view_t realization =
       loom_target_compile_report_pipeline_text_value(summary->realization);
   IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
-      builder,
-      "COMPILE-REPORT: pipeline root=%.*s realization=%.*s groups=%" PRIu32
-      " workers=%" PRIu32 " bindings=%" PRIu32 " channels=%" PRIu32
-      " slots=%" PRIu32 " locks=%" PRIu32 " dma_channels=%" PRIu32
-      " dma_bds=%" PRIu32 " routes=%" PRIu32 " code_bytes=%" PRIu64
-      " max_worker_code_bytes=%" PRIu32 " min_code_headroom_bytes=%" PRIu32
-      " worker_storage_bytes=%" PRIu64 " channel_storage_bytes=%" PRIu64
-      " max_tile_local_bytes=%" PRIu32 " min_local_headroom_bytes=%" PRIu32
-      " max_bank_storage_bytes=%" PRIu32 " bank_capacity_bytes=%" PRIu32
-      " external_dma_bytes=%" PRIu64 " routed_dma_bytes=%" PRIu64 "\n",
+      builder, "COMPILE-REPORT: pipeline root=%.*s realization=%.*s workers=%u",
       (int)root.size, root.data, (int)realization.size, realization.data,
-      summary->group_count, summary->worker_count, summary->binding_count,
-      summary->channel_count, summary->channel_slot_count,
-      summary->hardware_lock_count, summary->dma_channel_count,
-      summary->dma_buffer_descriptor_count, summary->route_count,
-      summary->worker_code_byte_count, summary->maximum_worker_code_byte_count,
-      summary->minimum_worker_code_headroom_byte_count,
-      summary->worker_storage_byte_count, summary->channel_storage_byte_count,
-      summary->maximum_tile_local_memory_byte_count,
-      summary->minimum_tile_local_memory_headroom_byte_count,
-      summary->maximum_bank_storage_byte_count,
-      summary->bank_storage_capacity_byte_count,
-      summary->external_dma_byte_count, summary->routed_dma_byte_count));
+      summary->worker_count));
+  IREE_RETURN_IF_ERROR(loom_target_compile_report_format_pipeline_numeric_text(
+      summary, loom_target_compile_report_pipeline_summary_fields,
+      IREE_ARRAYSIZE(loom_target_compile_report_pipeline_summary_fields),
+      summary->available_facts, builder));
+  if (iree_any_bit_set(summary->available_facts,
+                       LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_CHANNELS)) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, " channels=%u", summary->channel_count));
+  }
+  IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, "\n"));
   if (mode != LOOM_TARGET_COMPILE_REPORT_FORMAT_MODE_DETAILS) {
     return iree_ok_status();
   }
@@ -425,30 +541,40 @@ iree_status_t loom_target_compile_report_format_pipeline_plan_text(
         loom_target_compile_report_pipeline_text_value(row->fold_kind);
     IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
         builder,
-        "COMPILE-REPORT: pipeline.worker[%" PRIhsz "] entry=%.*s group=%" PRIu32
-        " lane=%" PRIu32
-        " resident=%u folded=%u placement=%u,%u input_channels=%" PRIu32
-        " output_channels=%" PRIu32 " ring_states=%" PRIu32
-        " input_records=%" PRIu32 " output_records=%" PRIu32
-        " finite_loop_trips=%" PRIu32 " fold=%.*s code_bytes=%" PRIu32
-        " code_capacity_bytes=%" PRIu32 " worker_storage_bytes=%" PRIu32
-        " channel_storage_bytes=%" PRIu32 " local_bytes=%" PRIu32
-        " local_capacity_bytes=%" PRIu32 " max_bank_storage_bytes=%" PRIu32
-        " bank_capacity_bytes=%" PRIu32 "\n",
-        i, (int)entry.size, entry.data, row->group_index, row->lane,
-        iree_any_bit_set(row->flags,
-                         LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_RESIDENT),
-        iree_any_bit_set(row->flags,
-                         LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_FOLDED),
-        row->placement.x, row->placement.y, row->input_channel_count,
-        row->output_channel_count, row->ring_state_count,
-        row->input_record_count, row->output_record_count,
-        row->finite_loop_trip_count, (int)fold.size, fold.data,
-        row->code_byte_count, row->code_capacity_byte_count,
-        row->worker_storage_byte_count, row->channel_storage_byte_count,
-        row->local_memory_byte_count, row->local_memory_capacity_byte_count,
-        row->maximum_bank_storage_byte_count,
-        row->bank_storage_capacity_byte_count));
+        "COMPILE-REPORT: pipeline.worker[%" PRIhsz
+        "] entry=%.*s placement=%u,%u",
+        i, (int)entry.size, entry.data, row->placement.x, row->placement.y));
+    if (iree_any_bit_set(summary->available_facts,
+                         LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_CHANNELS)) {
+      IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+          builder, " group=%u lane=%u resident=%u folded=%u fold=%.*s",
+          row->group_index, row->lane,
+          iree_any_bit_set(row->flags,
+                           LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_RESIDENT),
+          iree_any_bit_set(row->flags,
+                           LOOM_TARGET_COMPILE_REPORT_PIPELINE_WORKER_FOLDED),
+          (int)fold.size, fold.data));
+    }
+    IREE_RETURN_IF_ERROR(
+        loom_target_compile_report_format_pipeline_numeric_text(
+            row, loom_target_compile_report_pipeline_worker_metric_fields,
+            IREE_ARRAYSIZE(
+                loom_target_compile_report_pipeline_worker_metric_fields),
+            summary->available_facts, builder));
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, "\n"));
+  }
+  for (iree_host_size_t i = 0; i < plan->memory_row_count; ++i) {
+    const loom_target_compile_report_pipeline_memory_row_t* row =
+        &plan->memory_rows[i];
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, "COMPILE-REPORT: pipeline.memory[%" PRIhsz "] placement=%u,%u",
+        i, row->placement.x, row->placement.y));
+    IREE_RETURN_IF_ERROR(
+        loom_target_compile_report_format_pipeline_numeric_text(
+            row, loom_target_compile_report_pipeline_memory_fields,
+            IREE_ARRAYSIZE(loom_target_compile_report_pipeline_memory_fields),
+            0, builder));
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, "\n"));
   }
 
   for (iree_host_size_t i = 0; i < plan->channel_row_count; ++i) {

@@ -65,10 +65,10 @@ static iree_status_t CountingProfileSinkEndSession(
 }
 
 static const iree_hal_profile_sink_vtable_t kCountingProfileSinkVTable = {
-    /*.destroy=*/CountingProfileSinkDestroy,
-    /*.begin_session=*/CountingProfileSinkBeginSession,
-    /*.write=*/CountingProfileSinkWrite,
-    /*.end_session=*/CountingProfileSinkEndSession,
+    .destroy = CountingProfileSinkDestroy,
+    .begin_session = CountingProfileSinkBeginSession,
+    .write = CountingProfileSinkWrite,
+    .end_session = CountingProfileSinkEndSession,
 };
 
 static void CountingProfileSinkInitialize(CountingProfileSink* sink) {
@@ -115,9 +115,9 @@ TEST(DeviceSpecTest, MockDeviceAdvertisesEnabledExecutableTarget) {
                                              iree_allocator_system(), &device));
 
   const iree_hal_executable_target_selection_t selection = {
-      /*.family=*/IREE_SV(IREE_HAL_MOCK_EXECUTABLE_TARGET_FAMILY),
-      /*.target_key=*/IREE_SV(IREE_HAL_MOCK_EXECUTABLE_TARGET_KEY),
-      /*.kind_flags=*/IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_VIRTUAL,
+      .family = IREE_SV(IREE_HAL_MOCK_EXECUTABLE_TARGET_FAMILY),
+      .target_key = IREE_SV(IREE_HAL_MOCK_EXECUTABLE_TARGET_KEY),
+      .kind_flags = IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_VIRTUAL,
   };
   const iree_hal_executable_target_selection_result_t result =
       iree_hal_device_spec_select_executable_target(
@@ -202,6 +202,27 @@ TEST(DeviceCreateParamsTest, VerifyRejectsZeroedParams) {
   iree_hal_device_create_params_t params = {0};
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
                         iree_hal_device_create_params_verify(&params));
+}
+
+TEST(DeviceCreateParamsTest, VerifyRuntimeFeaturesAgainstBackendSupport) {
+  iree_hal_device_create_params_t params =
+      iree_hal_device_create_params_default();
+  params.proactor_pool = reinterpret_cast<iree_async_proactor_pool_t*>(1);
+  params.runtime_features = IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_FEEDBACK |
+                            IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_TSAN;
+  IREE_EXPECT_OK(iree_hal_device_create_params_verify_runtime_features(
+      &params, IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_FEEDBACK |
+                   IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_TSAN));
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_UNIMPLEMENTED,
+      iree_hal_device_create_params_verify_runtime_features(
+          &params, IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAG_FEEDBACK));
+
+  params.runtime_features = 1ull << 63;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_device_create_params_verify_runtime_features(
+          &params, IREE_HAL_DEVICE_RUNTIME_FEATURE_FLAGS_KNOWN));
 }
 
 class DeviceProfilingTest : public ::testing::Test {

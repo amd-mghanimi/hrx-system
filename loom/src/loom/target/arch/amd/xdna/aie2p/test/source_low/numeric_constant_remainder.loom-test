@@ -1,5 +1,4 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/numeric_constant_remainder.loom-test
-// RUN: with-checks emit source-low target=amd.xdna.aie2p:core output=low
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
 
 func.def @constant_remainder_uniform(%value: i32) -> (i32) {
   %divisor = scalar.constant 3 : i32
@@ -8,11 +7,32 @@ func.def @constant_remainder_uniform(%value: i32) -> (i32) {
 }
 
 // ----
-CHECK: %* = mov.i32 -1431655765
-CHECK: %* = mac *
-CHECK: %remainder = sub %value, %*
-CHECK-NOT: * = divs *
-CHECK: return %remainder
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @constant_remainder_uniform(%value: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %divisor = mov.short 3
+  %7 = mov.i32 -1431655765
+  %8 = mov.i32 65535
+  %9 = mov.short -16
+  %10 = and %value, %8
+  %11 = lshl %value, %9
+  %12 = and %7, %8
+  %13 = lshl %7, %9
+  %14 = mul %10, %12
+  %15 = lshl %14, %9
+  %16 = mac %15, %11, %12
+  %17 = and %16, %8
+  %18 = mac %17, %10, %13
+  %19 = lshl %16, %9
+  %20 = mac %19, %11, %13
+  %21 = lshl %18, %9
+  %22 = add.rr %20, %21
+  %23 = mov.short 1
+  %24 = mov.short 0
+  %25 = sub %24, %23
+  %26 = lshl %22, %25
+  %27 = mul %26, %divisor
+  %remainder = sub %value, %27
+  return %remainder
+}
 
 // ====
 
@@ -32,17 +52,56 @@ func.def @constant_remainder_loaded(%input: buffer) -> (i32, index) {
 }
 
 // ----
-CHECK: %value = lda *
-CHECK: %* = mov.i32 -1431655765
-CHECK: %* = mac *
-CHECK: %remainder = sub %value, %*
-CHECK: %index_remainder = sub *
-CHECK-NOT: * = divs *
-CHECK: return %remainder, %index_remainder
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @constant_remainder_loaded() -> (reg<aie2p.er>, reg<aie2p.er>) asm {
+  %input_view = resource<native_pointer> {index = 0, source_type = buffer} : reg<aie2p.ep>
+  %value = lda %input_view, 0
+  %divisor = mov.short 3
+  %19 = mov.i32 -1431655765
+  %20 = mov.i32 65535
+  %21 = mov.short -16
+  %22 = and %value, %20
+  %23 = lshl %value, %21
+  %24 = and %19, %20
+  %25 = lshl %19, %21
+  %26 = mul %22, %24
+  %27 = lshl %26, %21
+  %28 = mac %27, %23, %24
+  %29 = and %28, %20
+  %30 = mac %29, %22, %25
+  %31 = lshl %28, %21
+  %32 = mac %31, %23, %25
+  %33 = lshl %30, %21
+  %34 = add.rr %32, %33
+  %35 = mov.short 1
+  %36 = mov.short 0
+  %37 = sub %36, %35
+  %38 = lshl %34, %37
+  %39 = mul %38, %divisor
+  %remainder = sub %value, %39
+  %mask = mov.i32 2147483647
+  %position = and %value, %mask
+  %44 = mov.i32 1431655766
+  %47 = and %position, %20
+  %48 = lshl %position, %21
+  %49 = and %44, %20
+  %50 = lshl %44, %21
+  %51 = mul %47, %49
+  %52 = lshl %51, %21
+  %53 = mac %52, %48, %49
+  %54 = and %53, %20
+  %55 = mac %54, %47, %50
+  %56 = lshl %53, %21
+  %57 = mac %56, %48, %50
+  %58 = lshl %55, %21
+  %59 = add.rr %57, %58
+  %60 = mul %59, %divisor
+  %index_remainder = sub %position, %60
+  return %remainder, %index_remainder
+}
 
 // ====
 
-func.def @constant_remainder_factors(%word: i32, %position: index) -> (i32, i32, index, index) {
+func.def @constant_remainder_factors(%word: i32, %position: index) -> (i32, i32, index, index) where [range(%position, 0, 4294967295)] {
   %bounded = index.assume %position [range(%position, 0, 4294967295)] : index
   %c5 = scalar.constant 5 : i32
   %c9 = scalar.constant 9 : i32
@@ -56,15 +115,82 @@ func.def @constant_remainder_factors(%word: i32, %position: index) -> (i32, i32,
 }
 
 // ----
-CHECK: %word_five = sub *
-CHECK: %word_nine = sub *
-CHECK: %position_five = sub *
-CHECK: %position_nine = sub *
-CHECK: return %word_five, %word_nine, %position_five, %position_nine
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @constant_remainder_factors(%word: reg<aie2p.er>, %bounded: reg<aie2p.er>) -> (reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>) where [range(%bounded, 0, 4294967295)] asm {
+  %c5 = mov.short 5
+  %c9 = mov.short 9
+  %25 = mov.i32 -858993459
+  %26 = mov.i32 65535
+  %27 = mov.short -16
+  %28 = and %word, %26
+  %29 = lshl %word, %27
+  %30 = and %25, %26
+  %31 = lshl %25, %27
+  %32 = mul %28, %30
+  %33 = lshl %32, %27
+  %34 = mac %33, %29, %30
+  %35 = and %34, %26
+  %36 = mac %35, %28, %31
+  %37 = lshl %34, %27
+  %38 = mac %37, %29, %31
+  %39 = lshl %36, %27
+  %40 = add.rr %38, %39
+  %41 = mov.short 2
+  %42 = mov.short 0
+  %43 = sub %42, %41
+  %44 = lshl %40, %43
+  %45 = mul %44, %c5
+  %word_five = sub %word, %45
+  %47 = mov.i32 954437177
+  %52 = and %47, %26
+  %53 = lshl %47, %27
+  %54 = mul %28, %52
+  %55 = lshl %54, %27
+  %56 = mac %55, %29, %52
+  %57 = and %56, %26
+  %58 = mac %57, %28, %53
+  %59 = lshl %56, %27
+  %60 = mac %59, %29, %53
+  %61 = lshl %58, %27
+  %62 = add.rr %60, %61
+  %63 = mov.short 1
+  %65 = sub %42, %63
+  %66 = lshl %62, %65
+  %67 = mul %66, %c9
+  %word_nine = sub %word, %67
+  %72 = and %bounded, %26
+  %73 = lshl %bounded, %27
+  %76 = mul %72, %30
+  %77 = lshl %76, %27
+  %78 = mac %77, %73, %30
+  %79 = and %78, %26
+  %80 = mac %79, %72, %31
+  %81 = lshl %78, %27
+  %82 = mac %81, %73, %31
+  %83 = lshl %80, %27
+  %84 = add.rr %82, %83
+  %87 = sub %42, %41
+  %88 = lshl %84, %87
+  %89 = mul %88, %c5
+  %position_five = sub %bounded, %89
+  %98 = mul %72, %52
+  %99 = lshl %98, %27
+  %100 = mac %99, %73, %52
+  %101 = and %100, %26
+  %102 = mac %101, %72, %53
+  %103 = lshl %100, %27
+  %104 = mac %103, %73, %53
+  %105 = lshl %102, %27
+  %106 = add.rr %104, %105
+  %109 = sub %42, %63
+  %110 = lshl %106, %109
+  %111 = mul %110, %c9
+  %position_nine = sub %bounded, %111
+  return %word_five, %word_nine, %position_five, %position_nine
+}
 
 // ====
 
-func.def @constant_remainder_by_seven(%word: i32, %position: index) -> (i32, index, i32, index) {
+func.def @constant_remainder_by_seven(%word: i32, %position: index) -> (i32, index, i32, index) where [range(%position, 0, 4294967295)] {
   %bounded = index.assume %position [range(%position, 0, 4294967295)] : index
   %word_divisor = scalar.constant 7 : i32
   %index_divisor = index.constant 7 : index
@@ -74,6 +200,106 @@ func.def @constant_remainder_by_seven(%word: i32, %position: index) -> (i32, ind
 }
 
 // ----
-CHECK: %word_remainder = sub *
-CHECK: %index_remainder = sub *
-CHECK: return %word_remainder, %index_remainder, %word, %bounded
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @constant_remainder_by_seven(%word: reg<aie2p.er>, %bounded: reg<aie2p.er>) -> (reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>) where [range(%bounded, 0, 4294967295)] asm {
+  %word_divisor = mov.short 7
+  %19 = mov.i32 613566757
+  %20 = mov.i32 65535
+  %21 = mov.short -16
+  %22 = and %word, %20
+  %23 = lshl %word, %21
+  %24 = and %19, %20
+  %25 = lshl %19, %21
+  %26 = mul %22, %24
+  %27 = lshl %26, %21
+  %28 = mac %27, %23, %24
+  %29 = and %28, %20
+  %30 = mac %29, %22, %25
+  %31 = lshl %28, %21
+  %32 = mac %31, %23, %25
+  %33 = lshl %30, %21
+  %34 = add.rr %32, %33
+  %35 = mov.short -1
+  %36 = sub %word, %34
+  %37 = lshl %36, %35
+  %38 = add.rr %37, %34
+  %39 = mov.short 2
+  %40 = mov.short 0
+  %41 = sub %40, %39
+  %42 = lshl %38, %41
+  %43 = mul %42, %word_divisor
+  %word_remainder = sub %word, %43
+  %48 = and %bounded, %20
+  %49 = lshl %bounded, %21
+  %52 = mul %48, %24
+  %53 = lshl %52, %21
+  %54 = mac %53, %49, %24
+  %55 = and %54, %20
+  %56 = mac %55, %48, %25
+  %57 = lshl %54, %21
+  %58 = mac %57, %49, %25
+  %59 = lshl %56, %21
+  %60 = add.rr %58, %59
+  %62 = sub %bounded, %60
+  %63 = lshl %62, %35
+  %64 = add.rr %63, %60
+  %67 = sub %40, %39
+  %68 = lshl %64, %67
+  %69 = mul %68, %word_divisor
+  %index_remainder = sub %bounded, %69
+  return %word_remainder, %index_remainder, %word, %bounded
+}
+
+// ====
+
+// Bounds reach both the corrected-reciprocal and quotient-product recipes.
+func.def @bounded_constant_remainders(%byte: i8, %position: index) -> (i32, index) {
+  %word = scalar.extui %byte : i8 to i32
+  %bounded = index.assume %position [range(%position, 0, 65535)] : index
+  %c3 = scalar.constant 3 : i32
+  %c7 = index.constant 7 : index
+  %third = scalar.remui %word, %c3 : i32
+  %seventh = index.rem %bounded, %c7 : index
+  func.return %third, %seventh : i32, index
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @bounded_constant_remainders(%byte: reg<aie2p.er>, %bounded: reg<aie2p.er>) -> (reg<aie2p.er>, reg<aie2p.er>) asm {
+  %word = extend.u8 %byte
+  %c3 = mov.short 3
+  %c7 = mov.short 7
+  %17 = mov.i32 1431655766
+  %18 = mov.i32 65535
+  %19 = mov.short -16
+  %20 = and %word, %18
+  %21 = lshl %word, %19
+  %22 = and %17, %18
+  %23 = lshl %17, %19
+  %24 = mul %20, %22
+  %25 = lshl %24, %19
+  %26 = mac %25, %21, %22
+  %27 = and %26, %18
+  %28 = mac %27, %20, %23
+  %29 = lshl %26, %19
+  %30 = mac %29, %21, %23
+  %31 = lshl %28, %19
+  %32 = add.rr %30, %31
+  %33 = mul %32, %c3
+  %third = sub %word, %33
+  %35 = mov.i32 613566757
+  %38 = and %bounded, %18
+  %39 = lshl %bounded, %19
+  %40 = and %35, %18
+  %41 = lshl %35, %19
+  %42 = mul %38, %40
+  %43 = lshl %42, %19
+  %44 = mac %43, %39, %40
+  %45 = and %44, %18
+  %46 = mac %45, %38, %41
+  %47 = lshl %44, %19
+  %48 = mac %47, %39, %41
+  %49 = lshl %46, %19
+  %50 = add.rr %48, %49
+  %51 = mul %50, %c7
+  %seventh = sub %bounded, %51
+  return %third, %seventh
+}

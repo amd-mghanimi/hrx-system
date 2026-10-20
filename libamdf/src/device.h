@@ -15,7 +15,13 @@
 extern "C" {
 #endif  // __cplusplus
 
+struct amdf_memory_reservation_profile_t;
+
 typedef struct amdf_device_vtable_t {
+  // Reads live-domain reservation limits without native work or allocation.
+  amdf_status_t (*query_memory_reservation_profile)(
+      amdf_device_t* device, uint32_t address_domain_ordinal,
+      struct amdf_memory_reservation_profile_t* out_profile);
   // Copies one immutable memory profile into caller-private result storage.
   amdf_status_t (*query_memory_profile)(
       amdf_device_t* device, uint32_t memory_profile_ordinal,
@@ -50,8 +56,8 @@ struct amdf_device_t {
   amdf_instance_t* provider_instance;
   // Exact engine family implementing this device.
   amdf_engine_kind_t engine_kind;
-  // Number of live queues, programs, and contexts borrowing this device.
-  // Memory dependencies are caller preconditions and are not counted.
+  // Number of queues, queue mappings, events, and contexts borrowing this
+  // device. Memory dependencies are caller preconditions and are not counted.
   amdf_child_tracker_t children;
 };
 

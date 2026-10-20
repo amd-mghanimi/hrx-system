@@ -43,6 +43,8 @@ loom_cc_library(
     loom::ops::cfg
     loom::ops::op_defs
     loom::pass::types
+    loom::rewrite::materialize
+    loom::rewrite::remap
     loom::rewrite::rewriter
   PUBLIC
 )
@@ -73,6 +75,7 @@ loom_cc_library(
     iree::base
     iree::base::internal::arena
     loom::ops::cfg
+    loom::ops::low
     loom::ops::op_defs
     loom::rewrite::rewriter
     loom::util::cfg_graph
@@ -136,6 +139,7 @@ loom_cc_library(
     loom::analysis::condition_facts
     loom::ir
     loom::ops::cfg
+    loom::ops::low
     loom::rewrite::rewriter
     loom::util::fact_table
   PUBLIC
@@ -172,6 +176,25 @@ loom_cc_library(
     loom::util::dominance
     loom::util::fact_table
   PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    cfg_simplify_test
+  SRCS
+    "cfg_simplify_test.cc"
+  DEPS
+    ::cfg_simplify
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::format::text::parser
+    loom::ir
+    loom::ops::cfg
+    loom::ops::scalar
+    loom::ops::test
+    loom::pass::value_facts
+    loom::util::fact_table
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

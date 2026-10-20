@@ -11,6 +11,30 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    index_set
+  HDRS
+    "index_set.h"
+  SRCS
+    "index_set.c"
+  DEPS
+    iree::base
+    iree::base::internal
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    index_set_test
+  SRCS
+    "index_set_test.cc"
+  DEPS
+    ::index_set
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_library(
+  NAME
     bstring
   HDRS
     "bstring.h"
@@ -108,6 +132,7 @@ loom_cc_library(
     ::stream
     iree::base
     iree::base::internal::unicode
+  LINKABLE_MORE_THAN_ONCE
   PUBLIC
 )
 
@@ -174,6 +199,20 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_library(
+  NAME
+    segmented_storage_test_util
+  HDRS
+    "segmented_storage_test_util.h"
+  SRCS
+    "segmented_storage_test_util.cc"
+  DEPS
+    ::segmented_storage
+    iree::testing::gtest
+  TESTONLY
+  PUBLIC
+)
+
 loom_cc_test(
   NAME
     segmented_storage_test
@@ -181,8 +220,23 @@ loom_cc_test(
     "segmented_storage_test.cc"
   DEPS
     ::segmented_storage
+    ::segmented_storage_test_util
     iree::testing::gtest
     iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
+    segmented_storage_stress_test
+  SRCS
+    "segmented_storage_stress.cc"
+  DEPS
+    ::segmented_storage_test_util
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "manual"
+    "stress"
 )
 
 loom_cc_test(
@@ -234,23 +288,63 @@ loom_cc_test(
 
 loom_cc_library(
   NAME
+    fact_table_api
+  HDRS
+    "fact_extensions.h"
+    "fact_identity.h"
+    "fact_layout.h"
+    "fact_table.h"
+  DEPS
+    ::numeric_format
+    ::reference_facts
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ir::facts
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    fact_ordinal_map
+  HDRS
+    "fact_ordinal_map.h"
+  SRCS
+    "fact_ordinal_map.c"
+  DEPS
+    ::fact_table_api
+    iree::base
+    iree::base::internal::arena
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     fact_table
   HDRS
     "fact_cfg.h"
     "fact_extensions.h"
+    "fact_identity.h"
     "fact_induction.h"
     "fact_layout.h"
     "fact_loop.h"
+    "fact_recurrence.h"
+    "fact_relation.h"
     "fact_table.h"
+    "fact_vector_partition.h"
     "reference_transfer.h"
   SRCS
     "fact_cfg.c"
     "fact_extensions.c"
+    "fact_identity.c"
     "fact_induction.c"
     "fact_layout.c"
     "fact_loop.c"
+    "fact_recurrence.c"
+    "fact_relation.c"
     "fact_table.c"
     "fact_table_compute.c"
+    "fact_vector_partition.c"
     "reference_transfer.c"
   DEPS
     ::cfg_control
@@ -259,19 +353,27 @@ loom_cc_library(
     ::cfg_loop_nest
     ::cfg_regions
     ::fact_control
+    ::fact_ordinal_map
+    ::fact_table_api
     ::numeric_format
     ::reference_facts
     iree::base
     iree::base::internal
     iree::base::internal::arena
+    loom::analysis::condition_edge_projection
+    loom::analysis::condition_facts
+    loom::analysis::integer_relation
     loom::analysis::loop_domain
     loom::analysis::scc
     loom::ir
     loom::ir::facts
     loom::ops::cfg::op_defs
+    loom::ops::index::comparison
     loom::ops::index::op_defs
     loom::ops::op_defs
+    loom::ops::scalar::op_defs
     loom::target::facts
+    loom::target::facts_builder
   PUBLIC
 )
 
@@ -289,6 +391,31 @@ loom_cc_test(
 
 loom_cc_test(
   NAME
+    fact_vector_partition_test
+  SRCS
+    "fact_vector_partition_test.cc"
+  DEPS
+    ::fact_table
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
+    fact_extensions_test
+  SRCS
+    "fact_extensions_test.cc"
+  DEPS
+    ::fact_table
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir::facts
+)
+
+loom_cc_test(
+  NAME
     fact_table_test
   SRCS
     "fact_table_test.cc"
@@ -302,6 +429,34 @@ loom_cc_test(
 
 loom_cc_test(
   NAME
+    fact_identity_test
+  SRCS
+    "fact_identity_test.cc"
+  DEPS
+    ::fact_table
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
+    fact_relation_test
+  SRCS
+    "fact_relation_test.cc"
+  DEPS
+    ::fact_table
+    ::predicate_facts
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::index
+    loom::ops::scalar
+)
+
+loom_cc_test(
+  NAME
     fact_table_compute_test
   SRCS
     "fact_table_compute_test.cc"
@@ -310,8 +465,12 @@ loom_cc_test(
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::analysis::condition_edge_projection
+    loom::analysis::condition_facts
     loom::ir
+    loom::ops::cfg
     loom::ops::index
+    loom::ops::scalar
     loom::ops::scf
     loom::ops::test
 )
@@ -324,9 +483,13 @@ loom_cc_library(
   SRCS
     "predicate_facts.c"
   DEPS
+    ::fact_ordinal_map
     ::fact_table
     iree::base::internal
     iree::base::internal::arena
+    loom::analysis::integer_relation
+    loom::decision::predicate
+    loom::ir
     loom::ir::facts
   PUBLIC
 )
@@ -352,6 +515,7 @@ loom_cc_library(
     "stream.c"
   DEPS
     iree::base
+  LINKABLE_MORE_THAN_ONCE
   PUBLIC
 )
 
@@ -418,6 +582,35 @@ loom_cc_test(
 
 loom_cc_library(
   NAME
+    cfg_dataflow
+  HDRS
+    "cfg_dataflow.h"
+  SRCS
+    "cfg_dataflow.c"
+  DEPS
+    ::cfg_graph
+    iree::base
+    iree::base::internal::arena
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    cfg_dataflow_test
+  SRCS
+    "cfg_dataflow_test.cc"
+  DEPS
+    ::cfg_dataflow
+    ::cfg_graph
+    ::cfg_graph_test_util
+    iree::base
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_library(
+  NAME
     cfg_loop
   HDRS
     "cfg_loop.h"
@@ -475,18 +668,46 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_library(
+  NAME
+    cfg_regions_test_util
+  HDRS
+    "cfg_regions_test_util.h"
+  SRCS
+    "cfg_regions_test_util.cc"
+  DEPS
+    ::cfg_dominance
+    ::cfg_graph_test_util
+    ::cfg_regions
+    iree::base::internal::arena
+  TESTONLY
+  PUBLIC
+)
+
 loom_cc_test(
   NAME
     cfg_regions_test
   SRCS
     "cfg_regions_test.cc"
   DEPS
-    ::cfg_dominance
     ::cfg_graph_test_util
-    ::cfg_regions
-    iree::base::internal::arena
+    ::cfg_regions_test_util
     iree::testing::gtest
     iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
+    cfg_regions_stress_test
+  SRCS
+    "cfg_regions_stress_test.cc"
+  DEPS
+    ::cfg_regions_test_util
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "manual"
+    "stress"
 )
 
 loom_cc_library(
@@ -569,6 +790,20 @@ loom_cc_library(
 
 loom_cc_library(
   NAME
+    cfg_execution
+  HDRS
+    "cfg_execution.h"
+  SRCS
+    "cfg_execution.c"
+  DEPS
+    ::cfg_control
+    iree::base
+    iree::base::internal::arena
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     cfg_graph_test_util
   HDRS
     "cfg_graph_test_util.h"
@@ -596,6 +831,25 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_library(
+  NAME
+    cfg_control_test_harness
+  HDRS
+    "cfg_control_test_harness.h"
+  SRCS
+    "cfg_control_test_harness.cc"
+  DEPS
+    ::cfg_control
+    ::cfg_control_test_util
+    ::cfg_graph_test_util
+    ::cfg_postdominance
+    ::fact_control
+    iree::base
+    iree::base::internal::arena
+  TESTONLY
+  PUBLIC
+)
+
 loom_cc_test(
   NAME
     cfg_control_test
@@ -603,8 +857,36 @@ loom_cc_test(
     "cfg_control_test.cc"
   DEPS
     ::cfg_control
-    ::cfg_control_test_util
+    ::cfg_control_test_harness
     ::cfg_graph_test_util
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
+    cfg_control_stress_test
+  SRCS
+    "cfg_control_stress_test.cc"
+  DEPS
+    ::cfg_control_test_harness
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "manual"
+    "stress"
+)
+
+loom_cc_test(
+  NAME
+    cfg_execution_test
+  SRCS
+    "cfg_execution_test.cc"
+  DEPS
+    ::cfg_control
+    ::cfg_execution
+    ::cfg_graph_test_util
+    iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
 )
@@ -632,6 +914,7 @@ loom_cc_test(
     "fact_control_test.cc"
   DEPS
     ::cfg_control
+    ::cfg_control_test_harness
     ::cfg_control_test_util
     ::cfg_graph_test_util
     ::fact_control
@@ -672,7 +955,7 @@ loom_cc_test(
   SRCS
     "cfg_postdominance_test.cc"
   DEPS
-    ::cfg_control_test_util
+    ::cfg_control_test_harness
     ::cfg_graph
     ::cfg_graph_test_util
     ::cfg_postdominance

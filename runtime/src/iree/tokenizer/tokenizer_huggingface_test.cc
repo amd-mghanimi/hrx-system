@@ -91,7 +91,8 @@ static StatusOr<std::vector<iree_tokenizer_token_id_t>> EncodeStreaming(
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
       iree_tokenizer_offset_run_list_empty(),
-      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &state));
+      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+      &state));
 
   std::vector<iree_tokenizer_token_id_t> all_ids;
   std::vector<iree_tokenizer_token_id_t> batch_ids(256);
@@ -721,7 +722,8 @@ class GroundTruthTest : public ::testing::TestWithParam<iree_host_size_t> {
         iree_make_byte_span(state_storage.data(), state_storage.size()),
         iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
         iree_tokenizer_offset_run_list_empty(),
-        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &state));
+        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+        &state));
 
     std::vector<iree_tokenizer_token_id_t> tokens(1024);
     iree_host_size_t total_tokens = 0;
@@ -767,7 +769,8 @@ class GroundTruthTest : public ::testing::TestWithParam<iree_host_size_t> {
         iree_make_byte_span(state_storage.data(), state_storage.size()),
         iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
         iree_tokenizer_offset_run_list_empty(),
-        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &state));
+        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+        &state));
 
     std::vector<iree_tokenizer_token_id_t> tokens(1024);
     iree_host_size_t total_tokens = 0;
@@ -977,7 +980,8 @@ TEST(GroundTruthInvarianceTest, AllBufferSizesProduceIdenticalOutput) {
           iree_make_byte_span(state_storage.data(), state_storage.size()),
           iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
           iree_tokenizer_offset_run_list_empty(),
-          IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &state));
+          IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+          &state));
 
       std::vector<iree_tokenizer_token_id_t> tokens(1024);
       iree_host_size_t total_tokens = 0;
@@ -1051,19 +1055,20 @@ static StatusOr<PairEncodeResult> EncodePair(iree_tokenizer_t* tokenizer,
   std::vector<iree_tokenizer_token_id_t> token_ids(256);
   std::vector<uint8_t> type_ids(256, 0xFF);
 
-  iree_tokenizer_encode_batch_item_t item = {};
-  item.text = text;
-  item.text_pair = text_pair;
-  item.flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR;
-  item.output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
-                                                 type_ids.data(), 256);
-  item.out_token_count = 0;
+  iree_tokenizer_encode_batch_item_t item = {
+      .text = text,
+      .text_pair = text_pair,
+      .flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR,
+      .output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
+                                                 type_ids.data(), 256),
+      .out_token_count = 0,
+  };
 
   IREE_RETURN_IF_ERROR(iree_tokenizer_encode_batch(
       tokenizer, &item, 1, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty()));
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system()));
 
   token_ids.resize(item.out_token_count);
   type_ids.resize(item.out_token_count);
@@ -1086,24 +1091,25 @@ static StatusOr<PairEncodeDetailedResult> EncodePairDetailed(
   std::vector<uint8_t> type_ids(storage_capacity, 0xFF);
   std::vector<iree_tokenizer_offset_t> token_offsets(storage_capacity);
 
-  iree_tokenizer_encode_batch_item_t item = {};
-  item.text = text;
-  item.text_pair = text_pair;
-  item.flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR;
-  item.output = iree_tokenizer_make_token_output(
-      token_ids.data(), track_offsets ? token_offsets.data() : nullptr,
-      type_ids.data(), output_capacity);
+  iree_tokenizer_encode_batch_item_t item = {
+      .text = text,
+      .text_pair = text_pair,
+      .flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR,
+      .output = iree_tokenizer_make_token_output(
+          token_ids.data(), track_offsets ? token_offsets.data() : nullptr,
+          type_ids.data(), output_capacity),
+  };
 
   iree_tokenizer_offset_run_list_t offset_run_list = {
-      /*.capacity=*/offset_runs.size(),
-      /*.values=*/offset_runs.data(),
+      .capacity = offset_runs.size(),
+      .values = offset_runs.data(),
   };
   IREE_RETURN_IF_ERROR(iree_tokenizer_encode_batch(
       tokenizer, &item, 1, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      track_offsets ? offset_run_list
-                    : iree_tokenizer_offset_run_list_empty()));
+      track_offsets ? offset_run_list : iree_tokenizer_offset_run_list_empty(),
+      iree_allocator_system()));
 
   token_ids.resize(item.out_token_count);
   type_ids.resize(item.out_token_count);
@@ -1123,17 +1129,18 @@ static StatusOr<std::vector<iree_tokenizer_token_id_t>> EncodeSingle(
 
   std::vector<iree_tokenizer_token_id_t> token_ids(256);
 
-  iree_tokenizer_encode_batch_item_t item = {};
-  item.text = text;
-  item.output =
-      iree_tokenizer_make_token_output(token_ids.data(), nullptr, nullptr, 256);
-  item.out_token_count = 0;
+  iree_tokenizer_encode_batch_item_t item = {
+      .text = text,
+      .output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
+                                                 nullptr, 256),
+      .out_token_count = 0,
+  };
 
   IREE_RETURN_IF_ERROR(iree_tokenizer_encode_batch(
       tokenizer, &item, 1, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty()));
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system()));
 
   token_ids.resize(item.out_token_count);
   return token_ids;
@@ -1265,7 +1272,7 @@ TEST(PairEncode, BatchMixedSingleAndPair) {
       tokenizer.get(), items, 2, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty()));
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system()));
 
   // Item 0: [CLS] hello [SEP]
   ASSERT_EQ(items[0].out_token_count, 3u);
@@ -1319,7 +1326,7 @@ TEST(PairEncode, BatchPairThenSingleResetsPostprocessor) {
       tokenizer.get(), items, 2, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty()));
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system()));
 
   ASSERT_EQ(items[0].out_token_count, 5u);
   EXPECT_EQ(ids0[0], 101);
@@ -1354,18 +1361,19 @@ TEST(PairEncode, PairWithoutAddSpecialTokens) {
   std::vector<iree_tokenizer_token_id_t> token_ids(256);
   std::vector<uint8_t> type_ids(256, 0xFF);
 
-  iree_tokenizer_encode_batch_item_t item = {};
-  item.text = IREE_SV("hello");
-  item.text_pair = IREE_SV("world");
-  item.flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR;
-  item.output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
-                                                 type_ids.data(), 256);
+  iree_tokenizer_encode_batch_item_t item = {
+      .text = IREE_SV("hello"),
+      .text_pair = IREE_SV("world"),
+      .flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR,
+      .output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
+                                                 type_ids.data(), 256),
+  };
 
   IREE_ASSERT_OK(iree_tokenizer_encode_batch(
       tokenizer.get(), &item, 1, IREE_TOKENIZER_ENCODE_FLAG_NONE,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty()));
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system()));
 
   // Without special tokens: just "hello" + "world" (no [CLS]/[SEP]).
   // Type IDs should all be 0xFF (untouched) since the postprocessor is IDLE.
@@ -1387,17 +1395,18 @@ TEST(PairEncode, TextPairRequiresFlag) {
   std::vector<uint8_t> transform_buffer(4096);
   std::vector<iree_tokenizer_token_id_t> token_ids(16);
 
-  iree_tokenizer_encode_batch_item_t item = {};
-  item.text = IREE_SV("hello");
-  item.text_pair = IREE_SV("world");
-  item.output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
-                                                 nullptr, token_ids.size());
+  iree_tokenizer_encode_batch_item_t item = {
+      .text = IREE_SV("hello"),
+      .text_pair = IREE_SV("world"),
+      .output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
+                                                 nullptr, token_ids.size()),
+  };
 
   iree_status_t status = iree_tokenizer_encode_batch(
       tokenizer.get(), &item, 1, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty());
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system());
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT, status);
 }
 
@@ -1412,17 +1421,18 @@ TEST(PairEncode, UnknownItemFlagsRejected) {
   std::vector<uint8_t> transform_buffer(4096);
   std::vector<iree_tokenizer_token_id_t> token_ids(16);
 
-  iree_tokenizer_encode_batch_item_t item = {};
-  item.text = IREE_SV("hello");
-  item.flags = 0x80000000u;
-  item.output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
-                                                 nullptr, token_ids.size());
+  iree_tokenizer_encode_batch_item_t item = {
+      .text = IREE_SV("hello"),
+      .flags = 0x80000000u,
+      .output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
+                                                 nullptr, token_ids.size()),
+  };
 
   iree_status_t status = iree_tokenizer_encode_batch(
       tokenizer.get(), &item, 1, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty());
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system());
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT, status);
 }
 
@@ -1434,18 +1444,19 @@ TEST(PairEncode, InvalidStateStorageReturnsStatus) {
   std::vector<uint8_t> transform_buffer(4096);
   std::vector<iree_tokenizer_token_id_t> token_ids(16);
 
-  iree_tokenizer_encode_batch_item_t item = {};
-  item.text = IREE_SV("hello");
-  item.text_pair = IREE_SV("world");
-  item.flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR;
-  item.output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
-                                                 nullptr, token_ids.size());
+  iree_tokenizer_encode_batch_item_t item = {
+      .text = IREE_SV("hello"),
+      .text_pair = IREE_SV("world"),
+      .flags = IREE_TOKENIZER_ENCODE_BATCH_ITEM_FLAG_HAS_TEXT_PAIR,
+      .output = iree_tokenizer_make_token_output(token_ids.data(), nullptr,
+                                                 nullptr, token_ids.size()),
+  };
 
   iree_status_t status = iree_tokenizer_encode_batch(
       tokenizer.get(), &item, 1, IREE_TOKENIZER_ENCODE_FLAG_ADD_SPECIAL_TOKENS,
       iree_make_byte_span(&state_storage, 1),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty());
+      iree_tokenizer_offset_run_list_empty(), iree_allocator_system());
   IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT, status);
 }
 

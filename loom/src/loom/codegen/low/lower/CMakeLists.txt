@@ -13,54 +13,93 @@ loom_cc_library(
   NAME
     lower
   HDRS
+    "bindings.h"
     "call_predicates.h"
     "context.h"
     "contract_query.h"
+    "contract_selection.h"
+    "control_plan.h"
     "execution.h"
     "function_boundary.h"
+    "function_storage.h"
     "lower.h"
+    "memory_effects.h"
     "module_state.h"
+    "participation.h"
+    "realization.h"
     "report.h"
     "representation_projection.h"
     "rule_descriptor.h"
     "rule_emit.h"
     "rule_match.h"
+    "rule_plan.h"
     "rule_source_memory.h"
+    "rule_source_memory_plan.h"
     "rule_value.h"
     "rules.h"
     "source_call.h"
+    "source_graph_nodes.h"
+    "source_graph_placement.h"
+    "source_graph_plan.h"
+    "source_memory.h"
     "source_plan.h"
     "source_query.h"
+    "source_value_storage.h"
+    "structural_plan.h"
     "visibility.h"
   SRCS
+    "bindings.c"
     "call_predicates.c"
     "context.c"
     "contract_query.c"
+    "contract_selection.c"
+    "control_plan.c"
     "execution.c"
     "function_boundary.c"
+    "function_storage.c"
     "lower.c"
+    "memory_effects.c"
     "module_state.c"
+    "participation.c"
     "policy.c"
+    "realization.c"
     "report.c"
     "representation_projection.c"
     "rule_descriptor.c"
     "rule_emit.c"
     "rule_match.c"
+    "rule_plan.c"
     "rule_source_memory_match.c"
     "rule_source_memory_materialize.c"
+    "rule_source_memory_plan.c"
     "rule_value.c"
     "source_call.c"
+    "source_graph_nodes.c"
+    "source_graph_placement.c"
+    "source_graph_plan.c"
+    "source_memory.c"
     "source_plan.c"
     "source_query.c"
+    "source_value_storage.c"
+    "structural_plan.c"
     "visibility.c"
   DEPS
     iree::base
     iree::base::internal
     iree::base::internal::arena
+    loom::analysis::cfg_value_identity
     loom::analysis::condition_facts
+    loom::analysis::consumption
     loom::analysis::contract_vector
-    loom::analysis::kernel_async_legality
+    loom::analysis::control_participants
+    loom::analysis::control_uniformity
+    loom::analysis::integer_relation
+    loom::analysis::kernel_barrier_lifetime
+    loom::analysis::kernel_synchronization_legality
+    loom::analysis::motion
     loom::analysis::native_layout
+    loom::analysis::storage_access
+    loom::analysis::storage_interference
     loom::analysis::symbol_facts
     loom::analysis::symbolic_expr
     loom::analysis::vector_memory_footprint
@@ -69,20 +108,26 @@ loom_cc_library(
     loom::codegen::low::descriptor_traits
     loom::codegen::low::descriptors
     loom::codegen::low::diagnostics
+    loom::codegen::low::loop_execution
     loom::codegen::low::memory_access
+    loom::codegen::low::representation_binding
+    loom::codegen::low::representation_plan
     loom::codegen::low::source_memory_plan
     loom::codegen::low::target_binding
     loom::decision::predicate
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
+    loom::ir::symbol_map
     loom::ops::atomic
     loom::ops::buffer
     loom::ops::callable_effects
     loom::ops::cfg
     loom::ops::encoding
     loom::ops::func_symbol_facts
+    loom::ops::global
     loom::ops::index
     loom::ops::kernel
     loom::ops::low
@@ -101,10 +146,13 @@ loom_cc_library(
     loom::target::low_legality
     loom::target::registers
     loom::target::types
+    loom::util::cfg_execution
     loom::util::cfg_graph
     loom::util::cfg_loop_nest
+    loom::util::dominance
     loom::util::fact_table
     loom::util::string_pool
+    loom::util::walk
   PUBLIC
 )
 
@@ -127,6 +175,7 @@ loom_cc_library(
     loom::ops::func
     loom::ops::func_symbol_facts
     loom::ops::kernel
+    loom::ops::low
     loom::ops::target
     loom::target::facts_builder
     loom::target::function_contract
@@ -162,6 +211,10 @@ loom_cc_test(
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::ir
+    loom::ops::global
+    loom::target::test::alt_descriptors
+    loom::target::test::descriptors
 )
 
 loom_cc_test(
@@ -191,6 +244,7 @@ loom_cc_test(
     loom::ir::facts
     loom::ops::func
     loom::ops::scalar
+    loom::ops::vector
     loom::util::fact_table
 )
 
@@ -204,10 +258,14 @@ loom_cc_test(
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::analysis::consumption
     loom::codegen::low::testing::source_workload
     loom::ir
+    loom::ir::facts
     loom::ops::index
     loom::ops::scalar
+    loom::ops::test
+    loom::ops::vector
     loom::util::fact_table
 )
 
@@ -235,6 +293,18 @@ loom_cc_test(
 
 loom_cc_test(
   NAME
+    source_graph_plan_test
+  SRCS
+    "source_graph_plan_test.cc"
+  DEPS
+    ::lower
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_test(
+  NAME
     source_query_test
   SRCS
     "source_query_test.cc"
@@ -242,6 +312,8 @@ loom_cc_test(
     ::lower
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::analysis::cfg_value_identity
+    loom::analysis::control_participants
     loom::ir
     loom::ops::scalar
     loom::ops::test
@@ -255,6 +327,23 @@ loom_cc_test(
 
 loom_cc_test(
   NAME
+    memory_effects_test
+  SRCS
+    "memory_effects_test.cc"
+  DEPS
+    ::lower
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::analysis::symbolic_expr
+    loom::analysis::symbolic_expr_test_fixture
+    loom::codegen::low::memory_access
+    loom::codegen::low::source_memory_plan
+    loom::ir::facts
+)
+
+loom_cc_test(
+  NAME
     source_plan_test
   SRCS
     "source_plan_test.cc"
@@ -263,12 +352,17 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::codegen::low::testing::source_workload
+    loom::error::error_defs
     loom::ir
+    loom::ops::cfg
     loom::ops::func
     loom::ops::low
     loom::ops::scalar
     loom::ops::test
+    loom::ops::vector
     loom::target::low_descriptor_registry
+    loom::target::registers
+    loom::target::test::descriptors
     loom::target::test::low_registry
     loom::target::test::lower
     loom::target::test::target_record_table
@@ -367,6 +461,21 @@ loom_cc_test(
 
 loom_cc_test(
   NAME
+    contract_selection_test
+  SRCS
+    "contract_selection_test.cc"
+  DEPS
+    ::lower
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::scalar
+    loom::ops::vector
+)
+
+loom_cc_test(
+  NAME
     policy_registry_test
   SRCS
     "policy_registry_test.cc"
@@ -376,6 +485,23 @@ loom_cc_test(
     iree::testing::gtest_main
     loom::ops::scalar
     loom::target::test::lower
+)
+
+loom_cc_library(
+  NAME
+    task_abi
+  HDRS
+    "task_abi.h"
+  SRCS
+    "task_abi.c"
+  DEPS
+    ::lower
+    iree::base
+    loom::ir
+    loom::ops::kernel
+    loom::ops::low
+    loom::target::abi::task::state_layout
+  PUBLIC
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

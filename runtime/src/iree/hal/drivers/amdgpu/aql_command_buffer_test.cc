@@ -21,14 +21,15 @@ namespace {
 static constexpr iree_hal_queue_priority_t kQueuePriority =
     IREE_HAL_QUEUE_PRIORITY_NORMAL;
 static const iree_hal_queue_family_spec_t kQueueFamilySpec = [] {
-  iree_hal_queue_family_spec_t spec = {};
-  spec.name = IREE_SV("test");
-  spec.priority_count = 1;
-  spec.priorities = &kQueuePriority;
-  spec.physical_device_affinity = 1;
-  spec.role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_DISPATCH |
+  iree_hal_queue_family_spec_t spec = {
+      .name = IREE_SV("test"),
+      .priority_count = 1,
+      .priorities = &kQueuePriority,
+      .physical_device_affinity = 1,
+      .role_flags = IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_DISPATCH |
                     IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_TRANSFER |
-                    IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_ATOMIC;
+                    IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_ATOMIC,
+  };
   return spec;
 }();
 
@@ -44,18 +45,17 @@ using CommandBufferPtr =
 class AqlCommandBufferTest : public ::testing::Test {
  protected:
   void SetUp() override {
-    IREE_ASSERT_OK(iree_hal_allocator_create_heap(
-        iree_make_cstring_view("aql_command_buffer_test"),
-        iree_allocator_system(), iree_allocator_system(), &device_allocator_));
+    IREE_ASSERT_OK(iree_hal_allocator_create_heap(iree_allocator_system(),
+                                                  &device_allocator_));
     iree_hal_amdgpu_profile_metadata_initialize(iree_allocator_system(),
                                                 &profile_metadata_);
     IREE_ASSERT_OK(iree_hal_amdgpu_aql_program_block_pool_initialize(
         block_size_, iree_allocator_system(), &block_pool_));
-    iree_hal_device_queue_spec_t queues = {};
-    queues.family_count = 1;
-    queues.families = &kQueueFamilySpec;
-    iree_hal_device_spec_params_t spec_params = {};
-    spec_params.queues = &queues;
+    iree_hal_device_queue_spec_t queues = {
+        .family_count = 1,
+        .families = &kQueueFamilySpec,
+    };
+    iree_hal_device_spec_params_t spec_params = {.queues = &queues};
     iree_hal_device_spec_t* device_spec = nullptr;
     IREE_ASSERT_OK(iree_hal_device_spec_create(
         &spec_params, iree_allocator_system(), &device_spec));
@@ -93,7 +93,6 @@ class AqlCommandBufferTest : public ::testing::Test {
         binding_capacity, /*device_ordinal=*/0,
         /*queue_count_per_physical_device=*/1,
         IREE_HAL_AMDGPU_GRID_SYNC_STRATEGY_MEMORY,
-        /*tsan_shadow_slot_count=*/16,
         iree_hal_amdgpu_aql_prepublished_kernarg_storage_disabled(),
         /*hostcall_buffer=*/nullptr, profile_metadata, &block_pool_,
         &block_pool_, iree_allocator_system(), &command_buffer));
@@ -229,12 +228,18 @@ TEST_F(AqlCommandBufferTest, BarrierOnlyRecordingHasBarrierAndReturn) {
   ASSERT_NE(command_buffer, nullptr);
 
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer.get(), IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE,
-      IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-      IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/0, /*memory_barriers=*/nullptr,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 0,
+      .memory_barriers = nullptr,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(iree_hal_command_buffer_barrier(command_buffer.get(),
+                                                 &execution_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
 
   const iree_hal_amdgpu_aql_program_t* program =
@@ -263,15 +268,22 @@ TEST_F(AqlCommandBufferTest, MemoryBarrierRecordingPreservesFenceScopes) {
   ASSERT_NE(command_buffer, nullptr);
 
   const iree_hal_memory_barrier_t memory_barrier = {
-      /*.source_scope=*/IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE,
-      /*.target_scope=*/IREE_HAL_ACCESS_SCOPE_DISPATCH_READ,
+      .source_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_READ,
   };
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer.get(), IREE_HAL_EXECUTION_STAGE_DISPATCH,
-      IREE_HAL_EXECUTION_STAGE_DISPATCH, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/1, &memory_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 1,
+      .memory_barriers = &memory_barrier,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(iree_hal_command_buffer_barrier(command_buffer.get(),
+                                                 &execution_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
 
   const iree_hal_amdgpu_aql_program_t* program =
@@ -293,16 +305,22 @@ TEST_F(AqlCommandBufferTest, SystemScopeBarrierWidensSelectedFence) {
   ASSERT_NE(command_buffer, nullptr);
 
   const iree_hal_memory_barrier_t memory_barrier = {
-      /*.source_scope=*/IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE,
-      /*.target_scope=*/IREE_HAL_ACCESS_SCOPE_MEMORY_READ,
+      .source_scope = IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_MEMORY_READ,
   };
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer.get(), IREE_HAL_EXECUTION_STAGE_DISPATCH,
-      IREE_HAL_EXECUTION_STAGE_DISPATCH,
-      IREE_HAL_EXECUTION_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE,
-      /*memory_barrier_count=*/1, &memory_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .flags = IREE_HAL_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE,
+      .effects = {},
+      .memory_barrier_count = 1,
+      .memory_barriers = &memory_barrier,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(iree_hal_command_buffer_barrier(command_buffer.get(),
+                                                 &execution_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
 
   const iree_hal_amdgpu_aql_program_t* program =
@@ -319,6 +337,173 @@ TEST_F(AqlCommandBufferTest, SystemScopeBarrierWidensSelectedFence) {
   EXPECT_EQ(barrier->release_scope, IREE_HSA_FENCE_SCOPE_AGENT);
 }
 
+TEST_F(AqlCommandBufferTest, RangedRecipeWidensNativeFence) {
+  CommandBufferPtr command_buffer =
+      CreateCommandBufferWithMode(IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED);
+  ASSERT_NE(command_buffer, nullptr);
+
+  const iree_hal_memory_transition_recipe_info_t operation = {
+      .kind = IREE_HAL_MEMORY_TRANSITION_KIND_RANGE,
+      .executor = IREE_HAL_MEMORY_TRANSITION_EXECUTOR_QUEUE,
+      .operation = IREE_HAL_MEMORY_TRANSITION_OPERATION_RELEASE_TO_SYSTEM,
+      .range_granularity = 64,
+  };
+  const iree_hal_memory_transition_recipe_t recipe = {
+      .effects = {IREE_HAL_MEMORY_EFFECT_RANGE_RELEASE_TO_SYSTEM},
+      .operation_count = 1,
+      .operations = &operation,
+  };
+  const iree_hal_buffer_barrier_t buffer_barrier = {
+      .source_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE,
+      .target_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_READ,
+      .buffer_ref = {},
+      .recipe = &recipe,
+  };
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = recipe.effects,
+      .memory_barrier_count = 0,
+      .memory_barriers = nullptr,
+      .buffer_barrier_count = 1,
+      .buffer_barriers = &buffer_barrier,
+  };
+  IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
+  IREE_ASSERT_OK(iree_hal_command_buffer_barrier(command_buffer.get(),
+                                                 &execution_barrier));
+  IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
+
+  const iree_hal_amdgpu_aql_program_t* program =
+      iree_hal_amdgpu_aql_command_buffer_program(command_buffer.get());
+  ASSERT_NE(program->first_block, nullptr);
+  const auto* command =
+      iree_hal_amdgpu_command_buffer_block_commands_const(program->first_block);
+  ASSERT_EQ(command->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BARRIER);
+  const auto* barrier =
+      reinterpret_cast<const iree_hal_amdgpu_command_buffer_barrier_command_t*>(
+          command);
+  EXPECT_EQ(barrier->acquire_scope, IREE_HSA_FENCE_SCOPE_AGENT);
+  EXPECT_EQ(barrier->release_scope, IREE_HSA_FENCE_SCOPE_SYSTEM);
+}
+
+TEST_F(AqlCommandBufferTest, PreparedActionsBecomeSelfContainedNativeBarriers) {
+  const iree_hal_buffer_binding_layout_t layout = {};
+  iree_hal_memory_contract_t* contract = nullptr;
+  IREE_ASSERT_OK(iree_hal_memory_contract_create(
+      this, 6, &layout, iree_allocator_system(), &contract));
+  std::unique_ptr<iree_hal_memory_contract_t,
+                  decltype(&iree_hal_memory_contract_release)>
+      contract_owner(contract, iree_hal_memory_contract_release);
+  for (uint32_t id : {2u, 4u}) {
+    contract->scopes[id].interfaces =
+        1u << IREE_HAL_BUFFER_INTERFACE_DEVICE_ADDRESS;
+    contract->scopes[id].usage = IREE_HAL_BUFFER_USAGE_STORAGE;
+  }
+  IREE_ASSERT_OK(iree_hal_memory_contract_initialize_transitions(
+      contract,
+      [](void*, uint32_t producer, uint32_t consumer,
+         iree_hal_memory_pair_info_t* info) -> iree_status_t {
+        info->flags = IREE_HAL_MEMORY_PAIR_SHARED_BACKING_REACHABLE;
+        info->release.kind = IREE_HAL_MEMORY_TRANSITION_KIND_NONE;
+        info->acquire.kind = IREE_HAL_MEMORY_TRANSITION_KIND_NONE;
+        if (producer == 2 && consumer == 4) {
+          info->release.kind = IREE_HAL_MEMORY_TRANSITION_KIND_GLOBAL;
+          info->release.executor = IREE_HAL_MEMORY_TRANSITION_EXECUTOR_QUEUE;
+          info->release.operation =
+              IREE_HAL_MEMORY_TRANSITION_OPERATION_RELEASE_TO_SYSTEM;
+        } else if (producer == 4 && consumer == 2) {
+          info->acquire.kind = IREE_HAL_MEMORY_TRANSITION_KIND_GLOBAL;
+          info->acquire.executor = IREE_HAL_MEMORY_TRANSITION_EXECUTOR_QUEUE;
+          info->acquire.operation =
+              IREE_HAL_MEMORY_TRANSITION_OPERATION_ACQUIRE_FROM_SYSTEM;
+        }
+        return iree_ok_status();
+      },
+      nullptr));
+  const iree_hal_memory_transition_table_t table = {contract};
+  iree_hal_memory_transition_pair_t outbound;
+  IREE_ASSERT_OK(iree_hal_memory_transition_prepare_pair(
+      table, {this, 2}, {this, 4}, IREE_HAL_MEMORY_TRANSITION_RELEASE,
+      &outbound));
+  iree_hal_memory_transition_pair_t inbound;
+  IREE_ASSERT_OK(iree_hal_memory_transition_prepare_pair(
+      table, {this, 4}, {this, 2}, IREE_HAL_MEMORY_TRANSITION_ACQUIRE,
+      &inbound));
+  const auto release =
+      iree_hal_memory_transition_query(table, outbound).release;
+  const auto acquire = iree_hal_memory_transition_query(table, inbound).acquire;
+
+  std::array<CommandBufferPtr, 4> command_buffers;
+  for (uint32_t actions = 0; actions < command_buffers.size(); ++actions) {
+    auto& command_buffer = command_buffers[actions];
+    command_buffer = CreateCommandBuffer();
+    IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
+    iree_hal_barrier_t barrier = {};
+    if (actions & 1) {
+      barrier.effects = release;
+    }
+    if (actions & 2) {
+      barrier.effects =
+          iree_hal_memory_effects_combine(barrier.effects, acquire);
+    }
+    IREE_ASSERT_OK(
+        iree_hal_command_buffer_barrier(command_buffer.get(), &barrier));
+    IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
+  }
+  // Only chosen cache actions survive recording. Neither the scalar pair
+  // query nor the native command program retains the borrowed contract.
+  contract_owner.reset();
+  for (uint32_t actions = 0; actions < command_buffers.size(); ++actions) {
+    const auto* program = iree_hal_amdgpu_aql_command_buffer_program(
+        command_buffers[actions].get());
+    const auto* first = iree_hal_amdgpu_command_buffer_block_commands_const(
+        program->first_block);
+    if (!actions) {
+      EXPECT_EQ(program->command_count, 1u);
+      EXPECT_EQ(first->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_RETURN);
+      continue;
+    }
+    ASSERT_EQ(first->opcode, IREE_HAL_AMDGPU_COMMAND_BUFFER_OPCODE_BARRIER);
+    const auto* barrier = reinterpret_cast<
+        const iree_hal_amdgpu_command_buffer_barrier_command_t*>(first);
+    EXPECT_EQ(barrier->release_scope, actions & 1 ? IREE_HSA_FENCE_SCOPE_SYSTEM
+                                                  : IREE_HSA_FENCE_SCOPE_NONE);
+    EXPECT_EQ(barrier->acquire_scope, actions & 2 ? IREE_HSA_FENCE_SCOPE_SYSTEM
+                                                  : IREE_HSA_FENCE_SCOPE_NONE);
+  }
+}
+
+TEST_F(AqlCommandBufferTest,
+       RejectsUnqualifiedOrNonQueueEffectsBeforeRecording) {
+  auto command_buffer =
+      CreateCommandBufferWithMode(IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED);
+  IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer.get()));
+  iree_hal_barrier_t barrier = {};
+  barrier.effects.bits = IREE_HAL_MEMORY_EFFECT_UNSUPPORTED;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_UNAVAILABLE,
+      iree_hal_command_buffer_barrier(command_buffer.get(), &barrier));
+  for (uint32_t bits :
+       {uint32_t{IREE_HAL_MEMORY_EFFECT_PROGRAM_EXECUTOR |
+                 IREE_HAL_MEMORY_EFFECT_GLOBAL_RELEASE_TO_SYSTEM},
+        uint32_t{IREE_HAL_MEMORY_EFFECT_HOST_FLUSH}}) {
+    barrier.effects.bits = bits;
+    IREE_EXPECT_STATUS_IS(
+        IREE_STATUS_UNIMPLEMENTED,
+        iree_hal_command_buffer_barrier(command_buffer.get(), &barrier));
+  }
+  barrier.effects.bits = 0;
+  barrier.flags = UINT64_C(1) << 63;
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_command_buffer_barrier(command_buffer.get(), &barrier));
+  IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
+  const auto* program =
+      iree_hal_amdgpu_aql_command_buffer_program(command_buffer.get());
+  EXPECT_EQ(program->command_count, 1u);
+}
+
 TEST_F(AqlCommandBufferTest, AtomicCommandsPreserveTargetsAndDependencies) {
   CommandBufferPtr command_buffer = CreateCommandBufferWithMode(
       IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
@@ -332,41 +517,38 @@ TEST_F(AqlCommandBufferTest, AtomicCommandsPreserveTargetsAndDependencies) {
       IREE_HAL_EXECUTION_STAGE_ATOMIC,
       iree_hal_make_indirect_buffer_ref(/*buffer_slot=*/0, /*offset=*/8,
                                         /*length=*/8),
-      (iree_hal_atomic_wait_params_t){
-          /*.value=*/42,
-          /*.mask=*/UINT64_MAX,
-          /*.flags=*/IREE_HAL_ATOMIC_FLAG_ACQUIRE,
-          /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
-          /*.condition=*/IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
-          /*.target_error_mode=*/
-          IREE_HAL_ATOMIC_TARGET_ERROR_MODE_INCOMPATIBLE,
+      iree_hal_atomic_wait_params_t{
+          .value = 42,
+          .mask = UINT64_MAX,
+          .flags = IREE_HAL_ATOMIC_FLAG_ACQUIRE,
+          .width = IREE_HAL_ATOMIC_WIDTH_64,
+          .condition = IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
+          .target_error_mode = IREE_HAL_ATOMIC_TARGET_ERROR_MODE_INCOMPATIBLE,
       }));
   IREE_ASSERT_OK(iree_hal_command_buffer_atomic_store(
       command_buffer.get(), IREE_HAL_EXECUTION_STAGE_ATOMIC,
       IREE_HAL_EXECUTION_STAGE_ATOMIC,
       iree_hal_make_indirect_buffer_ref(/*buffer_slot=*/0, /*offset=*/16,
                                         /*length=*/4),
-      (iree_hal_atomic_store_params_t){
-          /*.value=*/7,
-          /*.flags=*/
-          IREE_HAL_ATOMIC_FLAG_RELEASE | IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
-          /*.width=*/IREE_HAL_ATOMIC_WIDTH_32,
-          /*.target_error_mode=*/
-          IREE_HAL_ATOMIC_TARGET_ERROR_MODE_INCOMPATIBLE,
+      iree_hal_atomic_store_params_t{
+          .value = 7,
+          .flags =
+              IREE_HAL_ATOMIC_FLAG_RELEASE | IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
+          .width = IREE_HAL_ATOMIC_WIDTH_32,
+          .target_error_mode = IREE_HAL_ATOMIC_TARGET_ERROR_MODE_INCOMPATIBLE,
       }));
   IREE_ASSERT_OK(iree_hal_command_buffer_atomic_rmw(
       command_buffer.get(), IREE_HAL_EXECUTION_STAGE_ATOMIC,
       IREE_HAL_EXECUTION_STAGE_HOST,
       iree_hal_make_indirect_buffer_ref(/*buffer_slot=*/0, /*offset=*/24,
                                         /*length=*/8),
-      (iree_hal_atomic_rmw_params_t){
-          /*.operand=*/3,
-          /*.flags=*/IREE_HAL_ATOMIC_FLAG_ACQUIRE |
-              IREE_HAL_ATOMIC_FLAG_RELEASE | IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
-          /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
-          /*.operation=*/IREE_HAL_ATOMIC_RMW_OPERATION_ADD,
-          /*.target_error_mode=*/
-          IREE_HAL_ATOMIC_TARGET_ERROR_MODE_INCOMPATIBLE,
+      iree_hal_atomic_rmw_params_t{
+          .operand = 3,
+          .flags = IREE_HAL_ATOMIC_FLAG_ACQUIRE | IREE_HAL_ATOMIC_FLAG_RELEASE |
+                   IREE_HAL_ATOMIC_FLAG_SYSTEM_SCOPE,
+          .width = IREE_HAL_ATOMIC_WIDTH_64,
+          .operation = IREE_HAL_ATOMIC_RMW_OPERATION_ADD,
+          .target_error_mode = IREE_HAL_ATOMIC_TARGET_ERROR_MODE_INCOMPATIBLE,
       }));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer.get()));
 

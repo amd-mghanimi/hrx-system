@@ -16,15 +16,12 @@ loom_cc_library(
   HDRS
     "${PROJECT_SOURCE_DIR}/loom/binding/c/include/loomc/target/amdgpu.h"
     "${PROJECT_SOURCE_DIR}/loom/binding/c/include/loomc/target/amdgpu/base.h"
-    "${PROJECT_SOURCE_DIR}/loom/binding/c/include/loomc/target/amdgpu/emit.h"
     "${PROJECT_SOURCE_DIR}/loom/binding/c/include/loomc/target/amdgpu/profile.h"
   SRCS
     "amdgpu.c"
   DEPS
     iree::base
-    iree::base::internal::arena
     loom::binding::c::loomc
-    loom::error::emitter
     loom::ir
     loom::ops::kernel
     loom::ops::op_defs
@@ -33,7 +30,6 @@ loom_cc_library(
     loom::target::arch::amdgpu::artifact_key
     loom::target::arch::amdgpu::ops
     loom::target::arch::amdgpu::profile
-    loom::target::arch::amdgpu::provider
     loom::target::arch::amdgpu::records::target_records
     loom::target::arch::amdgpu::target_info
     loom::target::emit::native::amdgpu::hal_kernel_library
@@ -58,6 +54,7 @@ loom_cc_library(
     loom::binding::c::loomc
     loom::binding::c::target::iree_hal
     loom::target::arch::amdgpu::artifact_key
+    loom::target::arch::amdgpu::profile
     loom::target::arch::amdgpu::target_info
   ALWAYSLINK
   PUBLIC

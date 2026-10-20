@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "filtered IR dump can resume target compilation",
+      "steps": [
+        {
+          "run": {
+            "tool": "loom-opt",
+            "args": [
+              "{srcdir}/resident_publication.loom",
+              "--pipeline=source-low",
+              "--dump-ir-after=aie2p-lower-pipeline",
+              "--dump-ir-format=jsonl",
+              "--dump-ir-output={tmp}/trace/",
+              "--output={tmp}/direct.loom"
+            ]
+          }
+        },
+        {
+          "run": {
+            "tool": "loom-opt",
+            "args": [
+              "{tmp}/direct.loom",
+              "--pipeline=prepared-low",
+              "--output={tmp}/direct-resumed.loom"
+            ]
+          }
+        },
+        {
+          "run": {
+            "tool": "loom-opt",
+            "args": [
+              "{tmp}/trace/ir/000000-after-aie2p-lower-pipeline.loom",
+              "--pass=symbol-dce",
+              "--output={tmp}/live.loom"
+            ]
+          }
+        },
+        {
+          "run": {
+            "tool": "loom-opt",
+            "args": [
+              "{tmp}/live.loom",
+              "--pipeline=prepared-low",
+              "--output={tmp}/resumed.loom"
+            ]
+          },
+          "files": [
+            {"path": "{tmp}/resumed.loom", "non_empty": true}
+          ]
+        }
+      ]
+    }
+  ]
+}

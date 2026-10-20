@@ -9,6 +9,7 @@
 #include <cstring>
 #include <vector>
 
+#include "iree/base/internal/fpu_state.h"
 #include "iree/base/threading/thread.h"
 #include "iree/hal/drivers/task/command/block_builder.h"
 #include "iree/hal/drivers/task/command/block_command_ops.h"
@@ -38,14 +39,16 @@ struct WorkerArgs {
 static iree_hal_cmd_block_processor_worker_context_t worker_context(
     uint32_t worker_index) {
   return {
-      /*.worker_index=*/worker_index,
-      /*.processor_id=*/worker_index,
-      /*.local_memory=*/iree_byte_span_empty(),
+      .worker_index = worker_index,
+      .processor_id = worker_index,
+      .local_memory = iree_byte_span_empty(),
   };
 }
 
 static int worker_thread_entry(void* arg) {
   WorkerArgs* worker_args = reinterpret_cast<WorkerArgs*>(arg);
+  const iree_fpu_state_t fpu_state =
+      iree_fpu_state_push(IREE_FPU_STATE_FLAG_FLUSH_DENORMALS_TO_ZERO);
   // Drain loop.
   iree_hal_cmd_block_processor_worker_state_t worker_state;
   memset(&worker_state, 0, sizeof(worker_state));
@@ -64,6 +67,7 @@ static int worker_thread_entry(void* arg) {
       iree_thread_yield();
     }
   } while (!result.completed);
+  iree_fpu_state_pop(fpu_state);
   return 0;
 }
 
@@ -97,18 +101,14 @@ static int kernel_write_tile_id(
   return 0;
 }
 
-// Sums all push constants and atomically adds the result to binding[0][0]
-// per tile.
+// Sums the constant bytes and their exact span length into binding[0][0].
 static int kernel_sum_constants(
     const iree_hal_executable_environment_v0_t* environment,
     const iree_hal_executable_dispatch_state_v0_t* dispatch_state,
     const iree_hal_executable_workgroup_state_v0_t* workgroup_state) {
-  uint32_t sum = 0;
-  const uint32_t* constants =
-      reinterpret_cast<const uint32_t*>(dispatch_state->constants.data);
-  for (size_t i = 0;
-       i < dispatch_state->constants.data_length / sizeof(uint32_t); ++i) {
-    sum += constants[i];
+  uint32_t sum = (uint32_t)dispatch_state->constants.data_length;
+  for (size_t i = 0; i < dispatch_state->constants.data_length; ++i) {
+    sum += dispatch_state->constants.data[i];
   }
   iree_atomic_int32_t* output =
       reinterpret_cast<iree_atomic_int32_t*>(dispatch_state->binding_ptrs[0]);
@@ -139,6 +139,23 @@ static int kernel_fail(
   return -1;
 }
 
+#if defined(IREE_ARCH_X86_32) || defined(IREE_ARCH_X86_64)
+// Halves one F32 value per workgroup. Volatile accesses keep the arithmetic in
+// the native entry so the test observes the floating-point mode at invocation.
+static int kernel_halve_f32(
+    const iree_hal_executable_environment_v0_t* environment,
+    const iree_hal_executable_dispatch_state_v0_t* dispatch_state,
+    const iree_hal_executable_workgroup_state_v0_t* workgroup_state) {
+  const volatile float* input =
+      reinterpret_cast<const volatile float*>(dispatch_state->binding_ptrs[0]);
+  volatile float* output =
+      reinterpret_cast<volatile float*>(dispatch_state->binding_ptrs[1]);
+  const uint32_t i = workgroup_state->workgroup_id_x;
+  output[i] = input[i] * 0.5f;
+  return 0;
+}
+#endif  // IREE_ARCH_X86_*
+
 //===----------------------------------------------------------------------===//
 // Test fixture
 //===----------------------------------------------------------------------===//
@@ -164,12 +181,15 @@ class BlockProcessorTest : public ::testing::TestWithParam<uint32_t> {
   // Records a dispatch with the given kernel, workgroup count, and bindings.
   // Uses indirect fixups (binding table) for simplicity.
   struct DispatchDesc {
+    // Native entry called once for each workgroup.
     iree_hal_executable_dispatch_v0_t function;
+    // XYZ dispatch dimensions.
     uint32_t workgroup_count[3];
+    // Number of mapped buffers passed to the entry.
     uint8_t binding_count;
+    // First mapped-buffer slot in the block data region.
     uint16_t binding_data_base;
-    uint8_t constant_count;
-    const uint32_t* constants;
+    // Command execution flags.
     uint8_t flags;
   };
 
@@ -181,9 +201,7 @@ class BlockProcessorTest : public ::testing::TestWithParam<uint32_t> {
                                 desc.workgroup_count[1] *
                                 desc.workgroup_count[2];
     const iree_host_size_t cmd_size =
-        iree_host_align(offsetof(iree_hal_cmd_dispatch_t, constants) +
-                            desc.constant_count * sizeof(uint32_t),
-                        8);
+        iree_host_align(offsetof(iree_hal_cmd_dispatch_t, constants), 8);
 
     iree_hal_cmd_dispatch_t* dispatch = NULL;
     iree_hal_cmd_fixup_t* out_fixups = NULL;
@@ -201,7 +219,7 @@ class BlockProcessorTest : public ::testing::TestWithParam<uint32_t> {
     dispatch->executable = &mock_executable_;
     dispatch->export_ordinal = 0;
     dispatch->reserved = 0;
-    dispatch->constant_count = desc.constant_count;
+    dispatch->constant_byte_length = 0;
     dispatch->binding_count = desc.binding_count;
     dispatch->binding_data_base = desc.binding_data_base;
     dispatch->workgroup_size[0] = 1;
@@ -213,11 +231,6 @@ class BlockProcessorTest : public ::testing::TestWithParam<uint32_t> {
     dispatch->tile_count = tile_count;
     dispatch->tiles_per_reservation = 1;
     dispatch->local_memory_size = 0;
-
-    if (desc.constant_count > 0 && desc.constants) {
-      memcpy(dispatch->constants, desc.constants,
-             desc.constant_count * sizeof(uint32_t));
-    }
 
     return iree_ok_status();
   }
@@ -368,8 +381,9 @@ TEST_P(BlockProcessorTest, SingleDispatch) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  DispatchDesc desc = {};
-  desc.function = kernel_count_tiles;
+  DispatchDesc desc = {
+      .function = kernel_count_tiles,
+  };
   desc.workgroup_count[0] = 8;
   desc.workgroup_count[1] = 1;
   desc.workgroup_count[2] = 1;
@@ -407,8 +421,9 @@ TEST_P(BlockProcessorTest, DispatchWritesTileIds) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  DispatchDesc desc = {};
-  desc.function = kernel_write_tile_id;
+  DispatchDesc desc = {
+      .function = kernel_write_tile_id,
+  };
   desc.workgroup_count[0] = 16;
   desc.workgroup_count[1] = 1;
   desc.workgroup_count[2] = 1;
@@ -429,47 +444,117 @@ TEST_P(BlockProcessorTest, DispatchWritesTileIds) {
   iree_hal_cmd_block_builder_deinitialize(&builder);
 }
 
-TEST_P(BlockProcessorTest, DispatchWithConstants) {
-  // Dispatch kernel_sum_constants with 3 push constants: 10 + 20 + 30 = 60.
-  // 4 tiles → 4 × 60 = 240 accumulated.
-  iree_atomic_int32_t result = IREE_ATOMIC_VAR_INIT(0);
+TEST_P(BlockProcessorTest, DispatchWithByteConstants) {
+  // Use the production recorder: both admission and execution must preserve
+  // the byte span, including odd lengths and the full 256-byte boundary.
+  uint8_t constants[IREE_HAL_EXECUTABLE_MAX_CONSTANT_BYTE_LENGTH];
+  for (size_t i = 0; i < sizeof(constants); ++i) {
+    constants[i] = static_cast<uint8_t>(31 + 17 * i);
+  }
+  for (uint16_t length : {0, 1, 2, 3, 4, 7, 255, 256}) {
+    SCOPED_TRACE(length);
+    iree_atomic_int32_t result = IREE_ATOMIC_VAR_INIT(0);
+    iree_hal_cmd_binding_entry_t table[] = {{&result, sizeof(result)}};
+    iree_hal_executable_dispatch_attrs_v0_t attributes = {};
+    attributes.constant_byte_length = length;
+    attributes.binding_count = 1;
+    attributes.workgroup_size_x = 1;
+    attributes.workgroup_size_y = 1;
+    attributes.workgroup_size_z = 1;
+    const iree_hal_executable_dispatch_v0_t entry = kernel_sum_constants;
+    mock_executable_.export_count = 1;
+    mock_executable_.dispatch_attrs = &attributes;
+    mock_executable_.dispatch_ptrs = &entry;
+
+    iree_hal_cmd_block_builder_t builder;
+    iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
+    IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
+    auto config = iree_hal_make_static_dispatch_config(4, 1, 1);
+    config.workgroup_size[0] = 1;
+    config.workgroup_size[1] = 1;
+    config.workgroup_size[2] = 1;
+    iree_hal_cmd_fixup_t* fixups = nullptr;
+    iree_hal_cmd_build_token_t token;
+    IREE_ASSERT_OK(iree_hal_cmd_build_dispatch(
+        &builder, &mock_executable_.base,
+        iree_hal_executable_function_from_index(0), config,
+        iree_make_const_byte_span(constants, length), 1,
+        IREE_HAL_DISPATCH_FLAG_NONE, &fixups, &token));
+    const uint16_t data_index = fixups[0].data_index;
+    fixups[0] = {};
+    fixups[0].slot = 0;
+    fixups[0].data_index = data_index;
+
+    iree_hal_cmd_block_recording_t recording;
+    IREE_ASSERT_OK(iree_hal_cmd_block_builder_end(&builder, &recording));
+    IREE_ASSERT_OK(execute(&recording, table, IREE_ARRAYSIZE(table)));
+    uint32_t expected = length;
+    for (size_t i = 0; i < length; ++i) {
+      expected += constants[i];
+    }
+    EXPECT_EQ(iree_atomic_load(&result, iree_memory_order_relaxed),
+              4 * expected);
+    iree_hal_cmd_block_recording_release(&recording);
+    iree_hal_cmd_block_builder_deinitialize(&builder);
+  }
+}
+
+#if defined(IREE_ARCH_X86_32) || defined(IREE_ARCH_X86_64)
+TEST_P(BlockProcessorTest, DispatchPreservesSubnormalsAndRestoresFpuState) {
+  float input = 0x1p-126f;
+  float output = 0.0f;
   iree_hal_cmd_binding_entry_t table[] = {
-      {&result, sizeof(result)},
+      {&input, sizeof(input)},
+      {&output, sizeof(output)},
   };
-
-  iree_hal_cmd_fixup_t fixups[1];
-  memset(fixups, 0, sizeof(fixups));
-  fixups[0].host_ptr = NULL;
-  fixups[0].slot = 0;
-  fixups[0].data_index = 0;
-
-  uint32_t constants[3] = {10, 20, 30};
+  iree_hal_executable_dispatch_attrs_v0_t attributes = {
+      .flags = IREE_HAL_EXECUTABLE_DISPATCH_FLAG_V0_PRESERVE_SUBNORMAL_INPUTS |
+               IREE_HAL_EXECUTABLE_DISPATCH_FLAG_V0_PRESERVE_SUBNORMAL_RESULTS,
+      .binding_count = 2,
+      .workgroup_size_x = 1,
+      .workgroup_size_y = 1,
+      .workgroup_size_z = 1,
+  };
+  const iree_hal_executable_dispatch_v0_t entry = kernel_halve_f32;
+  mock_executable_.export_count = 1;
+  mock_executable_.dispatch_attrs = &attributes;
+  mock_executable_.dispatch_ptrs = &entry;
 
   iree_hal_cmd_block_builder_t builder;
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
-
-  DispatchDesc desc = {};
-  desc.function = kernel_sum_constants;
-  desc.workgroup_count[0] = 4;
-  desc.workgroup_count[1] = 1;
-  desc.workgroup_count[2] = 1;
-  desc.binding_count = 1;
-  desc.binding_data_base = 0;
-  desc.constant_count = 3;
-  desc.constants = constants;
-  IREE_ASSERT_OK(record_dispatch(&builder, desc, fixups, 1));
+  const iree_hal_dispatch_config_t config =
+      iree_hal_make_static_dispatch_config(1, 1, 1);
+  iree_hal_cmd_fixup_t* fixups = nullptr;
+  iree_hal_cmd_build_token_t token;
+  IREE_ASSERT_OK(iree_hal_cmd_build_dispatch(
+      &builder, &mock_executable_.base,
+      iree_hal_executable_function_from_index(0), config,
+      iree_const_byte_span_empty(), IREE_ARRAYSIZE(table),
+      IREE_HAL_DISPATCH_FLAG_NONE, &fixups, &token));
+  for (uint16_t i = 0; i < IREE_ARRAYSIZE(table); ++i) {
+    fixups[i].host_ptr = nullptr;
+    fixups[i].slot = i;
+    fixups[i].offset = 0;
+  }
 
   iree_hal_cmd_block_recording_t recording;
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_end(&builder, &recording));
 
-  IREE_ASSERT_OK(execute(&recording, table, IREE_ARRAYSIZE(table)));
-
-  EXPECT_EQ(iree_atomic_load(&result, iree_memory_order_relaxed), 240);
+  const iree_fpu_state_t fpu_state =
+      iree_fpu_state_push(IREE_FPU_STATE_FLAG_FLUSH_DENORMALS_TO_ZERO);
+  iree_status_t status = execute(&recording, table, IREE_ARRAYSIZE(table));
+  volatile float ambient_input = input;
+  volatile float ambient_output = ambient_input * 0.5f;
+  iree_fpu_state_pop(fpu_state);
 
   iree_hal_cmd_block_recording_release(&recording);
   iree_hal_cmd_block_builder_deinitialize(&builder);
+  IREE_ASSERT_OK(status);
+  EXPECT_EQ(output, 0x1p-127f);
+  EXPECT_EQ(ambient_output, 0.0f);
 }
+#endif  // IREE_ARCH_X86_*
 
 TEST_P(BlockProcessorTest, FillCommand) {
   uint8_t buffer[256];
@@ -731,9 +816,9 @@ TEST_P(BlockProcessorTest, AtomicCommandsExecuteOnce) {
   iree_hal_cmd_fixup_t* fixups = NULL;
   iree_hal_cmd_build_token_t token;
   const iree_hal_atomic_store_params_t store_params = {
-      /*.value=*/10,
-      /*.flags=*/atomic_flags,
-      /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
+      .value = 10,
+      .flags = atomic_flags,
+      .width = IREE_HAL_ATOMIC_WIDTH_64,
   };
   IREE_ASSERT_OK(
       iree_hal_cmd_build_atomic_store(&builder, store_params, &fixups, &token));
@@ -741,11 +826,11 @@ TEST_P(BlockProcessorTest, AtomicCommandsExecuteOnce) {
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_barrier(&builder));
 
   const iree_hal_atomic_wait_params_t wait_params = {
-      /*.value=*/10,
-      /*.mask=*/UINT64_MAX,
-      /*.flags=*/IREE_HAL_ATOMIC_FLAG_ACQUIRE,
-      /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
-      /*.condition=*/IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
+      .value = 10,
+      .mask = UINT64_MAX,
+      .flags = IREE_HAL_ATOMIC_FLAG_ACQUIRE,
+      .width = IREE_HAL_ATOMIC_WIDTH_64,
+      .condition = IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
   };
   IREE_ASSERT_OK(
       iree_hal_cmd_build_atomic_wait(&builder, wait_params, &fixups, &token));
@@ -753,10 +838,10 @@ TEST_P(BlockProcessorTest, AtomicCommandsExecuteOnce) {
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_barrier(&builder));
 
   iree_hal_atomic_rmw_params_t rmw_params = {
-      /*.operand=*/5,
-      /*.flags=*/atomic_flags,
-      /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
-      /*.operation=*/IREE_HAL_ATOMIC_RMW_OPERATION_ADD,
+      .operand = 5,
+      .flags = atomic_flags,
+      .width = IREE_HAL_ATOMIC_WIDTH_64,
+      .operation = IREE_HAL_ATOMIC_RMW_OPERATION_ADD,
   };
   IREE_ASSERT_OK(
       iree_hal_cmd_build_atomic_rmw(&builder, rmw_params, &fixups, &token));
@@ -808,12 +893,12 @@ TEST_P(BlockProcessorTest,
       switch (kind) {
         case AtomicKind::kWait: {
           const iree_hal_atomic_wait_params_t params = {
-              /*.value=*/0,
-              /*.mask=*/UINT64_MAX,
-              /*.flags=*/IREE_HAL_ATOMIC_FLAG_ACQUIRE,
-              /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
-              /*.condition=*/IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
-              /*.target_error_mode=*/mode,
+              .value = 0,
+              .mask = UINT64_MAX,
+              .flags = IREE_HAL_ATOMIC_FLAG_ACQUIRE,
+              .width = IREE_HAL_ATOMIC_WIDTH_64,
+              .condition = IREE_HAL_ATOMIC_WAIT_CONDITION_EQUAL,
+              .target_error_mode = mode,
           };
           IREE_ASSERT_OK(iree_hal_cmd_build_atomic_wait(&builder, params,
                                                         &fixups, &token));
@@ -821,10 +906,10 @@ TEST_P(BlockProcessorTest,
         }
         case AtomicKind::kStore: {
           const iree_hal_atomic_store_params_t params = {
-              /*.value=*/10,
-              /*.flags=*/IREE_HAL_ATOMIC_FLAG_RELEASE,
-              /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
-              /*.target_error_mode=*/mode,
+              .value = 10,
+              .flags = IREE_HAL_ATOMIC_FLAG_RELEASE,
+              .width = IREE_HAL_ATOMIC_WIDTH_64,
+              .target_error_mode = mode,
           };
           IREE_ASSERT_OK(iree_hal_cmd_build_atomic_store(&builder, params,
                                                          &fixups, &token));
@@ -832,12 +917,12 @@ TEST_P(BlockProcessorTest,
         }
         case AtomicKind::kRmw: {
           const iree_hal_atomic_rmw_params_t params = {
-              /*.operand=*/1,
-              /*.flags=*/IREE_HAL_ATOMIC_FLAG_ACQUIRE |
-                  IREE_HAL_ATOMIC_FLAG_RELEASE,
-              /*.width=*/IREE_HAL_ATOMIC_WIDTH_64,
-              /*.operation=*/IREE_HAL_ATOMIC_RMW_OPERATION_ADD,
-              /*.target_error_mode=*/mode,
+              .operand = 1,
+              .flags =
+                  IREE_HAL_ATOMIC_FLAG_ACQUIRE | IREE_HAL_ATOMIC_FLAG_RELEASE,
+              .width = IREE_HAL_ATOMIC_WIDTH_64,
+              .operation = IREE_HAL_ATOMIC_RMW_OPERATION_ADD,
+              .target_error_mode = mode,
           };
           IREE_ASSERT_OK(
               iree_hal_cmd_build_atomic_rmw(&builder, params, &fixups, &token));
@@ -904,8 +989,9 @@ TEST_P(BlockProcessorTest, BarrierOrdering) {
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
   // Dispatch A: write tile IDs to buffer_a.
-  DispatchDesc desc_a = {};
-  desc_a.function = kernel_write_tile_id;
+  DispatchDesc desc_a = {
+      .function = kernel_write_tile_id,
+  };
   desc_a.workgroup_count[0] = 8;
   desc_a.workgroup_count[1] = 1;
   desc_a.workgroup_count[2] = 1;
@@ -916,8 +1002,9 @@ TEST_P(BlockProcessorTest, BarrierOrdering) {
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_barrier(&builder));
 
   // Dispatch B: copy buffer_a to buffer_b.
-  DispatchDesc desc_b = {};
-  desc_b.function = kernel_copy_elements;
+  DispatchDesc desc_b = {
+      .function = kernel_copy_elements,
+  };
   desc_b.workgroup_count[0] = 8;
   desc_b.workgroup_count[1] = 1;
   desc_b.workgroup_count[2] = 1;
@@ -954,8 +1041,9 @@ TEST_P(BlockProcessorTest, DirectFixup) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  DispatchDesc desc = {};
-  desc.function = kernel_count_tiles;
+  DispatchDesc desc = {
+      .function = kernel_count_tiles,
+  };
   desc.workgroup_count[0] = 5;
   desc.workgroup_count[1] = 1;
   desc.workgroup_count[2] = 1;
@@ -980,8 +1068,7 @@ TEST_P(BlockProcessorTest, KernelFailurePropagates) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  DispatchDesc desc = {};
-  desc.function = kernel_fail;
+  DispatchDesc desc = {.function = kernel_fail};
   desc.workgroup_count[0] = 1;
   desc.workgroup_count[1] = 1;
   desc.workgroup_count[2] = 1;
@@ -1014,8 +1101,9 @@ TEST_P(BlockProcessorTest, MultiBlockExecution) {
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
   for (int i = 0; i < 200; ++i) {
-    DispatchDesc desc = {};
-    desc.function = kernel_count_tiles;
+    DispatchDesc desc = {
+        .function = kernel_count_tiles,
+    };
     desc.workgroup_count[0] = 1;
     desc.workgroup_count[1] = 1;
     desc.workgroup_count[2] = 1;
@@ -1080,7 +1168,7 @@ TEST_P(BlockProcessorTest, IndirectDispatch) {
   dispatch->executable = &mock_executable_;
   dispatch->export_ordinal = 0;
   dispatch->reserved = 0;
-  dispatch->constant_count = 0;
+  dispatch->constant_byte_length = 0;
   dispatch->binding_count = 2;
   dispatch->binding_data_base = 0;
   dispatch->workgroup_size[0] = 1;
@@ -1145,7 +1233,7 @@ TEST_P(BlockProcessorTest, PredicatedDispatchSkipped) {
   dispatch->executable = &mock_executable_;
   dispatch->export_ordinal = 0;
   dispatch->reserved = 0;
-  dispatch->constant_count = 0;
+  dispatch->constant_byte_length = 0;
   dispatch->binding_count = 2;
   dispatch->binding_data_base = 0;
   dispatch->workgroup_size[0] = 1;
@@ -1186,8 +1274,9 @@ TEST_P(BlockProcessorTest, ThreeDimensionalDispatch) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  DispatchDesc desc = {};
-  desc.function = kernel_count_tiles;
+  DispatchDesc desc = {
+      .function = kernel_count_tiles,
+  };
   desc.workgroup_count[0] = 4;
   desc.workgroup_count[1] = 3;
   desc.workgroup_count[2] = 2;
@@ -1249,8 +1338,9 @@ TEST_P(BlockProcessorTest, MixedCommandSequence) {
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_barrier(&builder));
 
   // Step 2: Dispatch writes tile IDs into source (overwrites fill).
-  DispatchDesc desc = {};
-  desc.function = kernel_write_tile_id;
+  DispatchDesc desc = {
+      .function = kernel_write_tile_id,
+  };
   desc.workgroup_count[0] = 4;
   desc.workgroup_count[1] = 1;
   desc.workgroup_count[2] = 1;
@@ -1307,8 +1397,9 @@ TEST_P(BlockProcessorTest, LargeDispatchMultiWorker) {
   iree_hal_cmd_block_builder_initialize(&block_pool_, &builder);
   IREE_ASSERT_OK(iree_hal_cmd_block_builder_begin(&builder));
 
-  DispatchDesc desc = {};
-  desc.function = kernel_write_tile_id;
+  DispatchDesc desc = {
+      .function = kernel_write_tile_id,
+  };
   desc.workgroup_count[0] = 1024;
   desc.workgroup_count[1] = 1;
   desc.workgroup_count[2] = 1;
@@ -1350,8 +1441,9 @@ TEST_P(BlockProcessorTest, MultiRegionMultiDispatch) {
 
   // Region 0: 3 dispatches × 10 tiles = 30 tiles.
   for (int i = 0; i < 3; ++i) {
-    DispatchDesc desc = {};
-    desc.function = kernel_count_tiles;
+    DispatchDesc desc = {
+        .function = kernel_count_tiles,
+    };
     desc.workgroup_count[0] = 10;
     desc.workgroup_count[1] = 1;
     desc.workgroup_count[2] = 1;
@@ -1364,8 +1456,9 @@ TEST_P(BlockProcessorTest, MultiRegionMultiDispatch) {
 
   // Region 1: 2 dispatches × 20 tiles = 40 tiles.
   for (int i = 0; i < 2; ++i) {
-    DispatchDesc desc = {};
-    desc.function = kernel_count_tiles;
+    DispatchDesc desc = {
+        .function = kernel_count_tiles,
+    };
     desc.workgroup_count[0] = 20;
     desc.workgroup_count[1] = 1;
     desc.workgroup_count[2] = 1;
@@ -1378,8 +1471,9 @@ TEST_P(BlockProcessorTest, MultiRegionMultiDispatch) {
 
   // Region 2: 1 dispatch × 50 tiles = 50 tiles.
   {
-    DispatchDesc desc = {};
-    desc.function = kernel_count_tiles;
+    DispatchDesc desc = {
+        .function = kernel_count_tiles,
+    };
     desc.workgroup_count[0] = 50;
     desc.workgroup_count[1] = 1;
     desc.workgroup_count[2] = 1;
@@ -1422,8 +1516,9 @@ TEST_P(BlockProcessorTest, NarrowToWideTransition) {
 
   // Region 0: 1 tile.
   {
-    DispatchDesc desc = {};
-    desc.function = kernel_count_tiles;
+    DispatchDesc desc = {
+        .function = kernel_count_tiles,
+    };
     desc.workgroup_count[0] = 1;
     desc.workgroup_count[1] = 1;
     desc.workgroup_count[2] = 1;
@@ -1436,8 +1531,9 @@ TEST_P(BlockProcessorTest, NarrowToWideTransition) {
 
   // Region 1: 128 tiles.
   {
-    DispatchDesc desc = {};
-    desc.function = kernel_count_tiles;
+    DispatchDesc desc = {
+        .function = kernel_count_tiles,
+    };
     desc.workgroup_count[0] = 128;
     desc.workgroup_count[1] = 1;
     desc.workgroup_count[2] = 1;

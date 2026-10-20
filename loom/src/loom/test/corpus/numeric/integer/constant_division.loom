@@ -1,0 +1,1525 @@
+// Independent identity oracle: no quotient or remainder in the reference.
+func.def @bounded_remainder_identities(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4xi32>
+  %results = buffer.view %output[%base] : buffer -> view<8xi32>
+  %loaded = vector.load %values[0] : view<4xi32> -> vector<4xi32>
+  %mask = vector.constant 255 : vector<4xi32>
+  %bounded = vector.andi %loaded, %mask : vector<4xi32>
+  %divisors = vector.constant 257 : vector<4xi32>
+  %identities = vector.remui %bounded, %divisors : vector<4xi32>
+  vector.store %identities, %results[0] : vector<4xi32>, view<8xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %byte_mask = scalar.constant 255 : i32
+  %divisor = scalar.constant 257 : i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<4xi32> -> i32
+    %byte = scalar.andi %value, %byte_mask : i32
+    %result = scalar.remui %byte, %divisor : i32
+    %position = index.add %lane, %end : index
+    view.store %result, %results[%position] : i32, view<8xi32>
+  }
+  func.return
+}
+
+func.def @bounded_remainder_identity_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4xi32>
+  %results = buffer.view %output[%base] : buffer -> view<8xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %mask = scalar.constant 255 : i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<4xi32> -> i32
+    %byte = scalar.andi %value, %mask : i32
+    %position = index.add %lane, %end : index
+    view.store %byte, %results[%lane] : i32, view<8xi32>
+    view.store %byte, %results[%position] : i32, view<8xi32>
+  }
+  func.return
+}
+
+check.scenario @bounded_remainder_identity_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(254) step(1) : tensor<4xi32>
+    %output = check.generate.fill value(-1) : tensor<8xi32>
+    check.compare<@bounded_remainder_identities, @bounded_remainder_identity_oracle>(%input, %output) : (tensor<4xi32>, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xi32>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<4xi32>
+    %output = check.generate.fill value(-1) : tensor<8xi32>
+    check.compare<@bounded_remainder_identities, @bounded_remainder_identity_oracle>(%input, %output) : (tensor<4xi32>, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xi32>
+    }
+  }
+  check.return
+}
+
+// Byte and halfword division use unsigned promotion to the same u32 recipes.
+func.def @constant_narrow_quotients(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  %results = buffer.view %output[%base] : buffer -> view<6x32xi32>
+  %byte_uniform = scalar.trunci %uniform_bits : i64 to i8
+  %byte_third_constant = scalar.constant 3 : i8
+  %byte_seventh_constant = scalar.constant 7 : i8
+  %byte_high_constant = scalar.constant -127 : i8
+  %byte_uniform_quotient = scalar.divui %byte_uniform, %byte_third_constant : i8
+  %byte_uniform_result = scalar.extui %byte_uniform_quotient : i8 to i32
+  %halfword_uniform = scalar.trunci %uniform_bits : i64 to i16
+  %halfword_third_constant = scalar.constant 3 : i16
+  %halfword_seventh_constant = scalar.constant 7 : i16
+  %halfword_high_constant = scalar.constant -32767 : i16
+  %halfword_uniform_quotient = scalar.divui %halfword_uniform, %halfword_third_constant : i16
+  %halfword_uniform_result = scalar.extui %halfword_uniform_quotient : i16 to i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %byte = scalar.trunci %value : i32 to i8
+    %byte_seventh_quotient = scalar.divui %byte, %byte_seventh_constant : i8
+    %byte_seventh_result = scalar.extui %byte_seventh_quotient : i8 to i32
+    %byte_high_quotient = scalar.divui %byte, %byte_high_constant : i8
+    %byte_high_result = scalar.extui %byte_high_quotient : i8 to i32
+    view.store %byte_uniform_result, %results[0, %lane] : i32, view<6x32xi32>
+    view.store %byte_seventh_result, %results[1, %lane] : i32, view<6x32xi32>
+    view.store %byte_high_result, %results[2, %lane] : i32, view<6x32xi32>
+    %halfword = scalar.trunci %value : i32 to i16
+    %halfword_seventh_quotient = scalar.divui %halfword, %halfword_seventh_constant : i16
+    %halfword_seventh_result = scalar.extui %halfword_seventh_quotient : i16 to i32
+    %halfword_high_quotient = scalar.divui %halfword, %halfword_high_constant : i16
+    %halfword_high_result = scalar.extui %halfword_high_quotient : i16 to i32
+    view.store %halfword_uniform_result, %results[3, %lane] : i32, view<6x32xi32>
+    view.store %halfword_seventh_result, %results[4, %lane] : i32, view<6x32xi32>
+    view.store %halfword_high_result, %results[5, %lane] : i32, view<6x32xi32>
+  }
+  func.return
+}
+
+func.def @dynamic_narrow_quotients(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  %results = buffer.view %output[%base] : buffer -> view<6x32xi32>
+  %byte_uniform = scalar.trunci %uniform_bits : i64 to i8
+  %byte_zero = scalar.trunci %dynamic_zero : i32 to i8
+  %byte_third_constant = scalar.constant 3 : i8
+  %byte_third_divisor = scalar.addi %byte_zero, %byte_third_constant : i8
+  %byte_seventh_constant = scalar.constant 7 : i8
+  %byte_seventh_divisor = scalar.addi %byte_zero, %byte_seventh_constant : i8
+  %byte_high_constant = scalar.constant -127 : i8
+  %byte_high_divisor = scalar.addi %byte_zero, %byte_high_constant : i8
+  %byte_uniform_quotient = scalar.divui %byte_uniform, %byte_third_divisor : i8
+  %byte_uniform_result = scalar.extui %byte_uniform_quotient : i8 to i32
+  %halfword_uniform = scalar.trunci %uniform_bits : i64 to i16
+  %halfword_zero = scalar.trunci %dynamic_zero : i32 to i16
+  %halfword_third_constant = scalar.constant 3 : i16
+  %halfword_third_divisor = scalar.addi %halfword_zero, %halfword_third_constant : i16
+  %halfword_seventh_constant = scalar.constant 7 : i16
+  %halfword_seventh_divisor = scalar.addi %halfword_zero, %halfword_seventh_constant : i16
+  %halfword_high_constant = scalar.constant -32767 : i16
+  %halfword_high_divisor = scalar.addi %halfword_zero, %halfword_high_constant : i16
+  %halfword_uniform_quotient = scalar.divui %halfword_uniform, %halfword_third_divisor : i16
+  %halfword_uniform_result = scalar.extui %halfword_uniform_quotient : i16 to i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %byte = scalar.trunci %value : i32 to i8
+    %byte_seventh_quotient = scalar.divui %byte, %byte_seventh_divisor : i8
+    %byte_seventh_result = scalar.extui %byte_seventh_quotient : i8 to i32
+    %byte_high_quotient = scalar.divui %byte, %byte_high_divisor : i8
+    %byte_high_result = scalar.extui %byte_high_quotient : i8 to i32
+    view.store %byte_uniform_result, %results[0, %lane] : i32, view<6x32xi32>
+    view.store %byte_seventh_result, %results[1, %lane] : i32, view<6x32xi32>
+    view.store %byte_high_result, %results[2, %lane] : i32, view<6x32xi32>
+    %halfword = scalar.trunci %value : i32 to i16
+    %halfword_seventh_quotient = scalar.divui %halfword, %halfword_seventh_divisor : i16
+    %halfword_seventh_result = scalar.extui %halfword_seventh_quotient : i16 to i32
+    %halfword_high_quotient = scalar.divui %halfword, %halfword_high_divisor : i16
+    %halfword_high_result = scalar.extui %halfword_high_quotient : i16 to i32
+    view.store %halfword_uniform_result, %results[3, %lane] : i32, view<6x32xi32>
+    view.store %halfword_seventh_result, %results[4, %lane] : i32, view<6x32xi32>
+    view.store %halfword_high_result, %results[5, %lane] : i32, view<6x32xi32>
+  }
+  func.return
+}
+
+check.scenario @constant_narrow_quotient_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %dynamic_zero = check.literal value(0) : i32
+    %uniform_bits = check.literal value(-1) : i64
+    %input = check.generate.iota offset(120) step(1) : tensor<32xi32>
+    %output = check.generate.fill value(-123) : tensor<192xi32>
+    check.compare<@constant_narrow_quotients, @dynamic_narrow_quotients>(%dynamic_zero, %uniform_bits, %input, %output) : (i32, i64, tensor<32xi32>, tensor<192xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %dynamic_zero = check.literal value(0) : i32
+    %uniform_bits = check.literal value(-1) : i64
+    %input = check.generate.iota offset(32760) step(1) : tensor<32xi32>
+    %output = check.generate.fill value(-123) : tensor<192xi32>
+    check.compare<@constant_narrow_quotients, @dynamic_narrow_quotients>(%dynamic_zero, %uniform_bits, %input, %output) : (i32, i64, tensor<32xi32>, tensor<192xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi32>
+    }
+  }
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %uniform_bits = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %dynamic_zero = check.literal value(0) : i32
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<32xi32>
+    %output = check.generate.fill value(-123) : tensor<192xi32>
+    check.compare<@constant_narrow_quotients, @dynamic_narrow_quotients>(%dynamic_zero, %uniform_bits, %input, %output) : (i32, i64, tensor<32xi32>, tensor<192xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi32>
+    }
+  }
+  check.return
+}
+
+// Literal divisors stay beside the operations they specialize because constant
+// division lowering runs before calls can propagate operand facts.
+func.def inline @constant_scalar_quotient_rows(%value: i32, %output: buffer, %column: index) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<9x64xi32>
+  %c1 = scalar.constant 1 : i32
+  %c3 = scalar.constant 3 : i32
+  %c7 = scalar.constant 7 : i32
+  %c16 = scalar.constant 16 : i32
+  %c20 = scalar.constant 20 : i32
+  %high_power = scalar.constant -2147483648 : i32
+  %high_bit = scalar.constant -2147483647 : i32
+  %largest = scalar.constant -1 : i32
+  %below_high_bit = scalar.constant 2147483647 : i32
+  %quotient_1 = scalar.divui %value, %c1 : i32
+  %quotient_3 = scalar.divui %value, %c3 : i32
+  %quotient_7 = scalar.divui %value, %c7 : i32
+  %quotient_16 = scalar.divui %value, %c16 : i32
+  %quotient_20 = scalar.divui %value, %c20 : i32
+  %quotient_high_power = scalar.divui %value, %high_power : i32
+  %quotient_high_bit = scalar.divui %value, %high_bit : i32
+  %quotient_largest = scalar.divui %value, %largest : i32
+  %quotient_below_high_bit = scalar.divui %value, %below_high_bit : i32
+  view.store %quotient_1, %results[0, %column] : i32, view<9x64xi32>
+  view.store %quotient_3, %results[1, %column] : i32, view<9x64xi32>
+  view.store %quotient_7, %results[2, %column] : i32, view<9x64xi32>
+  view.store %quotient_16, %results[3, %column] : i32, view<9x64xi32>
+  view.store %quotient_20, %results[4, %column] : i32, view<9x64xi32>
+  view.store %quotient_high_power, %results[5, %column] : i32, view<9x64xi32>
+  view.store %quotient_high_bit, %results[6, %column] : i32, view<9x64xi32>
+  view.store %quotient_largest, %results[7, %column] : i32, view<9x64xi32>
+  view.store %quotient_below_high_bit, %results[8, %column] : i32, view<9x64xi32>
+  func.return
+}
+
+func.def inline @dynamic_scalar_quotient_rows(%value: i32, %divisor_1: i32, %divisor_3: i32, %divisor_7: i32, %divisor_16: i32, %divisor_20: i32, %divisor_high_power: i32, %divisor_high_bit: i32, %divisor_largest: i32, %divisor_below_high_bit: i32, %output: buffer, %column: index) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<9x64xi32>
+  %quotient_1 = scalar.divui %value, %divisor_1 : i32
+  %quotient_3 = scalar.divui %value, %divisor_3 : i32
+  %quotient_7 = scalar.divui %value, %divisor_7 : i32
+  %quotient_16 = scalar.divui %value, %divisor_16 : i32
+  %quotient_20 = scalar.divui %value, %divisor_20 : i32
+  %quotient_high_power = scalar.divui %value, %divisor_high_power : i32
+  %quotient_high_bit = scalar.divui %value, %divisor_high_bit : i32
+  %quotient_largest = scalar.divui %value, %divisor_largest : i32
+  %quotient_below_high_bit = scalar.divui %value, %divisor_below_high_bit : i32
+  view.store %quotient_1, %results[0, %column] : i32, view<9x64xi32>
+  view.store %quotient_3, %results[1, %column] : i32, view<9x64xi32>
+  view.store %quotient_7, %results[2, %column] : i32, view<9x64xi32>
+  view.store %quotient_16, %results[3, %column] : i32, view<9x64xi32>
+  view.store %quotient_20, %results[4, %column] : i32, view<9x64xi32>
+  view.store %quotient_high_power, %results[5, %column] : i32, view<9x64xi32>
+  view.store %quotient_high_bit, %results[6, %column] : i32, view<9x64xi32>
+  view.store %quotient_largest, %results[7, %column] : i32, view<9x64xi32>
+  view.store %quotient_below_high_bit, %results[8, %column] : i32, view<9x64xi32>
+  func.return
+}
+
+func.def inline @constant_scalar_remainder_rows(%value: i32, %output: buffer, %column: index) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<10x64xi32>
+  %c3 = scalar.constant 3 : i32
+  %c5 = scalar.constant 5 : i32
+  %c7 = scalar.constant 7 : i32
+  %c9 = scalar.constant 9 : i32
+  %c10 = scalar.constant 10 : i32
+  %c20 = scalar.constant 20 : i32
+  %high_power = scalar.constant -2147483648 : i32
+  %high_bit = scalar.constant -2147483647 : i32
+  %largest = scalar.constant -1 : i32
+  %below_high_bit = scalar.constant 2147483647 : i32
+  %remainder_3 = scalar.remui %value, %c3 : i32
+  %remainder_5 = scalar.remui %value, %c5 : i32
+  %remainder_7 = scalar.remui %value, %c7 : i32
+  %remainder_9 = scalar.remui %value, %c9 : i32
+  %remainder_10 = scalar.remui %value, %c10 : i32
+  %remainder_20 = scalar.remui %value, %c20 : i32
+  %remainder_high_power = scalar.remui %value, %high_power : i32
+  %remainder_high_bit = scalar.remui %value, %high_bit : i32
+  %remainder_largest = scalar.remui %value, %largest : i32
+  %remainder_below_high_bit = scalar.remui %value, %below_high_bit : i32
+  view.store %remainder_3, %results[0, %column] : i32, view<10x64xi32>
+  view.store %remainder_5, %results[1, %column] : i32, view<10x64xi32>
+  view.store %remainder_7, %results[2, %column] : i32, view<10x64xi32>
+  view.store %remainder_9, %results[3, %column] : i32, view<10x64xi32>
+  view.store %remainder_10, %results[4, %column] : i32, view<10x64xi32>
+  view.store %remainder_20, %results[5, %column] : i32, view<10x64xi32>
+  view.store %remainder_high_power, %results[6, %column] : i32, view<10x64xi32>
+  view.store %remainder_high_bit, %results[7, %column] : i32, view<10x64xi32>
+  view.store %remainder_largest, %results[8, %column] : i32, view<10x64xi32>
+  view.store %remainder_below_high_bit, %results[9, %column] : i32, view<10x64xi32>
+  func.return
+}
+
+func.def inline @dynamic_scalar_remainder_rows(%value: i32, %divisor_3: i32, %divisor_5: i32, %divisor_7: i32, %divisor_9: i32, %divisor_10: i32, %divisor_20: i32, %divisor_high_power: i32, %divisor_high_bit: i32, %divisor_largest: i32, %divisor_below_high_bit: i32, %output: buffer, %column: index) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<10x64xi32>
+  %remainder_3 = scalar.remui %value, %divisor_3 : i32
+  %remainder_5 = scalar.remui %value, %divisor_5 : i32
+  %remainder_7 = scalar.remui %value, %divisor_7 : i32
+  %remainder_9 = scalar.remui %value, %divisor_9 : i32
+  %remainder_10 = scalar.remui %value, %divisor_10 : i32
+  %remainder_20 = scalar.remui %value, %divisor_20 : i32
+  %remainder_high_power = scalar.remui %value, %divisor_high_power : i32
+  %remainder_high_bit = scalar.remui %value, %divisor_high_bit : i32
+  %remainder_largest = scalar.remui %value, %divisor_largest : i32
+  %remainder_below_high_bit = scalar.remui %value, %divisor_below_high_bit : i32
+  view.store %remainder_3, %results[0, %column] : i32, view<10x64xi32>
+  view.store %remainder_5, %results[1, %column] : i32, view<10x64xi32>
+  view.store %remainder_7, %results[2, %column] : i32, view<10x64xi32>
+  view.store %remainder_9, %results[3, %column] : i32, view<10x64xi32>
+  view.store %remainder_10, %results[4, %column] : i32, view<10x64xi32>
+  view.store %remainder_20, %results[5, %column] : i32, view<10x64xi32>
+  view.store %remainder_high_power, %results[6, %column] : i32, view<10x64xi32>
+  view.store %remainder_high_bit, %results[7, %column] : i32, view<10x64xi32>
+  view.store %remainder_largest, %results[8, %column] : i32, view<10x64xi32>
+  view.store %remainder_below_high_bit, %results[9, %column] : i32, view<10x64xi32>
+  func.return
+}
+
+func.def inline @constant_index_division_rows(%value: i32, %output: buffer, %column: index) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<10x64xi32>
+  %value_bits = scalar.extui %value : i32 to i64
+  %index_mask = scalar.constant 2147483647 : i64
+  %nonnegative_bits = scalar.andi %value_bits, %index_mask : i64
+  %position = index.cast %nonnegative_bits : i64 to index
+  %c3 = index.constant 3 : index
+  %c5 = index.constant 5 : index
+  %c7 = index.constant 7 : index
+  %c9 = index.constant 9 : index
+  %c20 = index.constant 20 : index
+  %quotient_3 = index.div %position, %c3 : index
+  %remainder_3 = index.rem %position, %c3 : index
+  %quotient_5 = index.div %position, %c5 : index
+  %remainder_5 = index.rem %position, %c5 : index
+  %quotient_7 = index.div %position, %c7 : index
+  %remainder_7 = index.rem %position, %c7 : index
+  %quotient_9 = index.div %position, %c9 : index
+  %remainder_9 = index.rem %position, %c9 : index
+  %quotient_20 = index.div %position, %c20 : index
+  %remainder_20 = index.rem %position, %c20 : index
+  %word_quotient_3 = index.cast %quotient_3 : index to i32
+  %word_remainder_3 = index.cast %remainder_3 : index to i32
+  %word_quotient_5 = index.cast %quotient_5 : index to i32
+  %word_remainder_5 = index.cast %remainder_5 : index to i32
+  %word_quotient_7 = index.cast %quotient_7 : index to i32
+  %word_remainder_7 = index.cast %remainder_7 : index to i32
+  %word_quotient_9 = index.cast %quotient_9 : index to i32
+  %word_remainder_9 = index.cast %remainder_9 : index to i32
+  %word_quotient_20 = index.cast %quotient_20 : index to i32
+  %word_remainder_20 = index.cast %remainder_20 : index to i32
+  view.store %word_quotient_3, %results[0, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_3, %results[1, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_5, %results[2, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_5, %results[3, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_7, %results[4, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_7, %results[5, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_9, %results[6, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_9, %results[7, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_20, %results[8, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_20, %results[9, %column] : i32, view<10x64xi32>
+  func.return
+}
+
+func.def inline @dynamic_index_division_rows(%value: i32, %divisor_3: i32, %divisor_5: i32, %divisor_7: i32, %divisor_9: i32, %divisor_20: i32, %output: buffer, %column: index) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<10x64xi32>
+  %value_bits = scalar.extui %value : i32 to i64
+  %index_mask = scalar.constant 2147483647 : i64
+  %nonnegative_bits = scalar.andi %value_bits, %index_mask : i64
+  %position = index.cast %nonnegative_bits : i64 to index
+  %positive_3 = scalar.assume %divisor_3 [range(%divisor_3, 1, 2147483647)] : i32
+  %positive_5 = scalar.assume %divisor_5 [range(%divisor_5, 1, 2147483647)] : i32
+  %positive_7 = scalar.assume %divisor_7 [range(%divisor_7, 1, 2147483647)] : i32
+  %positive_9 = scalar.assume %divisor_9 [range(%divisor_9, 1, 2147483647)] : i32
+  %positive_20 = scalar.assume %divisor_20 [range(%divisor_20, 1, 2147483647)] : i32
+  %divisor_3_offset = index.cast %positive_3 : i32 to offset
+  %divisor_5_offset = index.cast %positive_5 : i32 to offset
+  %divisor_7_offset = index.cast %positive_7 : i32 to offset
+  %divisor_9_offset = index.cast %positive_9 : i32 to offset
+  %divisor_20_offset = index.cast %positive_20 : i32 to offset
+  %index_3 = index.cast %divisor_3_offset : offset to index
+  %index_5 = index.cast %divisor_5_offset : offset to index
+  %index_7 = index.cast %divisor_7_offset : offset to index
+  %index_9 = index.cast %divisor_9_offset : offset to index
+  %index_20 = index.cast %divisor_20_offset : offset to index
+  %quotient_3 = index.div %position, %index_3 : index
+  %remainder_3 = index.rem %position, %index_3 : index
+  %quotient_5 = index.div %position, %index_5 : index
+  %remainder_5 = index.rem %position, %index_5 : index
+  %quotient_7 = index.div %position, %index_7 : index
+  %remainder_7 = index.rem %position, %index_7 : index
+  %quotient_9 = index.div %position, %index_9 : index
+  %remainder_9 = index.rem %position, %index_9 : index
+  %quotient_20 = index.div %position, %index_20 : index
+  %remainder_20 = index.rem %position, %index_20 : index
+  %word_quotient_3 = index.cast %quotient_3 : index to i32
+  %word_remainder_3 = index.cast %remainder_3 : index to i32
+  %word_quotient_5 = index.cast %quotient_5 : index to i32
+  %word_remainder_5 = index.cast %remainder_5 : index to i32
+  %word_quotient_7 = index.cast %quotient_7 : index to i32
+  %word_remainder_7 = index.cast %remainder_7 : index to i32
+  %word_quotient_9 = index.cast %quotient_9 : index to i32
+  %word_remainder_9 = index.cast %remainder_9 : index to i32
+  %word_quotient_20 = index.cast %quotient_20 : index to i32
+  %word_remainder_20 = index.cast %remainder_20 : index to i32
+  view.store %word_quotient_3, %results[0, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_3, %results[1, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_5, %results[2, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_5, %results[3, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_7, %results[4, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_7, %results[5, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_9, %results[6, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_9, %results[7, %column] : i32, view<10x64xi32>
+  view.store %word_quotient_20, %results[8, %column] : i32, view<10x64xi32>
+  view.store %word_remainder_20, %results[9, %column] : i32, view<10x64xi32>
+  func.return
+}
+
+func.def @constant_scalar_quotient_observations(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %varying_column = index.add %lane, %end : index
+    func.call @constant_scalar_quotient_rows(%uniform, %output, %lane) : (i32, buffer, index)
+    func.call @constant_scalar_quotient_rows(%value, %output, %varying_column) : (i32, buffer, index)
+  }
+  func.return
+}
+
+// The scenario supplies zero, but that value is absent from the oracle
+// compilation request and cannot specialize the dynamic division path.
+func.def @dynamic_scalar_quotient_observations(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  %c1 = scalar.constant 1 : i32
+  %c3 = scalar.constant 3 : i32
+  %c7 = scalar.constant 7 : i32
+  %c16 = scalar.constant 16 : i32
+  %c20 = scalar.constant 20 : i32
+  %high_power = scalar.constant -2147483648 : i32
+  %high_bit = scalar.constant -2147483647 : i32
+  %largest = scalar.constant -1 : i32
+  %below_high_bit = scalar.constant 2147483647 : i32
+  %divisor_1 = scalar.addi %dynamic_zero, %c1 : i32
+  %divisor_3 = scalar.addi %dynamic_zero, %c3 : i32
+  %divisor_7 = scalar.addi %dynamic_zero, %c7 : i32
+  %divisor_16 = scalar.addi %dynamic_zero, %c16 : i32
+  %divisor_20 = scalar.addi %dynamic_zero, %c20 : i32
+  %divisor_high_power = scalar.addi %dynamic_zero, %high_power : i32
+  %divisor_high_bit = scalar.addi %dynamic_zero, %high_bit : i32
+  %divisor_largest = scalar.addi %dynamic_zero, %largest : i32
+  %divisor_below_high_bit = scalar.addi %dynamic_zero, %below_high_bit : i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %varying_column = index.add %lane, %end : index
+    func.call @dynamic_scalar_quotient_rows(%uniform, %divisor_1, %divisor_3, %divisor_7, %divisor_16, %divisor_20, %divisor_high_power, %divisor_high_bit, %divisor_largest, %divisor_below_high_bit, %output, %lane) : (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, buffer, index)
+    func.call @dynamic_scalar_quotient_rows(%value, %divisor_1, %divisor_3, %divisor_7, %divisor_16, %divisor_20, %divisor_high_power, %divisor_high_bit, %divisor_largest, %divisor_below_high_bit, %output, %varying_column) : (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, buffer, index)
+  }
+  func.return
+}
+
+func.def @constant_scalar_remainder_observations(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %varying_column = index.add %lane, %end : index
+    func.call @constant_scalar_remainder_rows(%uniform, %output, %lane) : (i32, buffer, index)
+    func.call @constant_scalar_remainder_rows(%value, %output, %varying_column) : (i32, buffer, index)
+  }
+  func.return
+}
+
+func.def @dynamic_scalar_remainder_observations(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  %c3 = scalar.constant 3 : i32
+  %c5 = scalar.constant 5 : i32
+  %c7 = scalar.constant 7 : i32
+  %c9 = scalar.constant 9 : i32
+  %c10 = scalar.constant 10 : i32
+  %c20 = scalar.constant 20 : i32
+  %high_power = scalar.constant -2147483648 : i32
+  %high_bit = scalar.constant -2147483647 : i32
+  %largest = scalar.constant -1 : i32
+  %below_high_bit = scalar.constant 2147483647 : i32
+  %divisor_3 = scalar.addi %dynamic_zero, %c3 : i32
+  %divisor_5 = scalar.addi %dynamic_zero, %c5 : i32
+  %divisor_7 = scalar.addi %dynamic_zero, %c7 : i32
+  %divisor_9 = scalar.addi %dynamic_zero, %c9 : i32
+  %divisor_10 = scalar.addi %dynamic_zero, %c10 : i32
+  %divisor_20 = scalar.addi %dynamic_zero, %c20 : i32
+  %divisor_high_power = scalar.addi %dynamic_zero, %high_power : i32
+  %divisor_high_bit = scalar.addi %dynamic_zero, %high_bit : i32
+  %divisor_largest = scalar.addi %dynamic_zero, %largest : i32
+  %divisor_below_high_bit = scalar.addi %dynamic_zero, %below_high_bit : i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %varying_column = index.add %lane, %end : index
+    func.call @dynamic_scalar_remainder_rows(%uniform, %divisor_3, %divisor_5, %divisor_7, %divisor_9, %divisor_10, %divisor_20, %divisor_high_power, %divisor_high_bit, %divisor_largest, %divisor_below_high_bit, %output, %lane) : (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, buffer, index)
+    func.call @dynamic_scalar_remainder_rows(%value, %divisor_3, %divisor_5, %divisor_7, %divisor_9, %divisor_10, %divisor_20, %divisor_high_power, %divisor_high_bit, %divisor_largest, %divisor_below_high_bit, %output, %varying_column) : (i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, buffer, index)
+  }
+  func.return
+}
+
+func.def @constant_index_division_observations(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %varying_column = index.add %lane, %end : index
+    func.call @constant_index_division_rows(%uniform, %output, %lane) : (i32, buffer, index)
+    func.call @constant_index_division_rows(%value, %output, %varying_column) : (i32, buffer, index)
+  }
+  func.return
+}
+
+func.def @dynamic_index_division_observations(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %values = buffer.view %input[%base] : buffer -> view<32xi32>
+  %c3 = scalar.constant 3 : i32
+  %c5 = scalar.constant 5 : i32
+  %c7 = scalar.constant 7 : i32
+  %c9 = scalar.constant 9 : i32
+  %c20 = scalar.constant 20 : i32
+  %divisor_3 = scalar.addi %dynamic_zero, %c3 : i32
+  %divisor_5 = scalar.addi %dynamic_zero, %c5 : i32
+  %divisor_7 = scalar.addi %dynamic_zero, %c7 : i32
+  %divisor_9 = scalar.addi %dynamic_zero, %c9 : i32
+  %divisor_20 = scalar.addi %dynamic_zero, %c20 : i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<32xi32> -> i32
+    %varying_column = index.add %lane, %end : index
+    func.call @dynamic_index_division_rows(%uniform, %divisor_3, %divisor_5, %divisor_7, %divisor_9, %divisor_20, %output, %lane) : (i32, i32, i32, i32, i32, i32, buffer, index)
+    func.call @dynamic_index_division_rows(%value, %divisor_3, %divisor_5, %divisor_7, %divisor_9, %divisor_20, %output, %varying_column) : (i32, i32, i32, i32, i32, i32, buffer, index)
+  }
+  func.return
+}
+
+func.def @constant_index_boundary_division(%dynamic_zero: index, %value: index, %output: buffer) {
+  %base = index.constant 0 : offset
+  %bounded = index.assume %value [range(%value, 0, 4294967295)] : index
+  %results = buffer.view %output[%base] : buffer -> view<4xi32>
+  %high_power = index.constant 2147483648 : index
+  %largest = index.constant 4294967295 : index
+  %high_power_quotient = index.div %bounded, %high_power : index
+  %high_power_remainder = index.rem %bounded, %high_power : index
+  %largest_quotient = index.div %bounded, %largest : index
+  %largest_remainder = index.rem %bounded, %largest : index
+  %word_high_power_quotient = index.cast %high_power_quotient : index to i32
+  %word_high_power_remainder = index.cast %high_power_remainder : index to i32
+  %word_largest_quotient = index.cast %largest_quotient : index to i32
+  %word_largest_remainder = index.cast %largest_remainder : index to i32
+  view.store %word_high_power_quotient, %results[0] : i32, view<4xi32>
+  view.store %word_high_power_remainder, %results[1] : i32, view<4xi32>
+  view.store %word_largest_quotient, %results[2] : i32, view<4xi32>
+  view.store %word_largest_remainder, %results[3] : i32, view<4xi32>
+  func.return
+}
+
+func.def @dynamic_index_boundary_division(%dynamic_zero: index, %value: index, %output: buffer) {
+  %base = index.constant 0 : offset
+  %bounded = index.assume %value [range(%value, 0, 4294967295)] : index
+  %results = buffer.view %output[%base] : buffer -> view<4xi32>
+  %high_power_constant = index.constant 2147483648 : index
+  %largest_constant = index.constant 4294967295 : index
+  %high_power = index.add %dynamic_zero, %high_power_constant : index
+  %largest = index.add %dynamic_zero, %largest_constant : index
+  %bounded_high_power = index.assume %high_power [range(%high_power, 1, 4294967295)] : index
+  %bounded_largest = index.assume %largest [range(%largest, 1, 4294967295)] : index
+  %high_power_quotient = index.div %bounded, %bounded_high_power : index
+  %high_power_remainder = index.rem %bounded, %bounded_high_power : index
+  %largest_quotient = index.div %bounded, %bounded_largest : index
+  %largest_remainder = index.rem %bounded, %bounded_largest : index
+  %word_high_power_quotient = index.cast %high_power_quotient : index to i32
+  %word_high_power_remainder = index.cast %high_power_remainder : index to i32
+  %word_largest_quotient = index.cast %largest_quotient : index to i32
+  %word_largest_remainder = index.cast %largest_remainder : index to i32
+  view.store %word_high_power_quotient, %results[0] : i32, view<4xi32>
+  view.store %word_high_power_remainder, %results[1] : i32, view<4xi32>
+  view.store %word_largest_quotient, %results[2] : i32, view<4xi32>
+  view.store %word_largest_remainder, %results[3] : i32, view<4xi32>
+  func.return
+}
+
+check.scenario @constant_scalar_quotient_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i32
+    %maximum = check.literal value(4294967295) : i64
+    %input = check.generate.iota offset(0) step(1) : tensor<32xi32>
+    %unchanged_input = check.generate.iota offset(0) step(1) : tensor<32xi32>
+    %storage = check.generate.fill value(-123) : tensor<592xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<592xi32> -> tensor<8xi32>
+    %output = check.tensor.view %storage offset(32) : tensor<592xi32> -> tensor<576xi32>
+    %suffix = check.tensor.view %storage offset(2336) : tensor<592xi32> -> tensor<8xi32>
+    %guard = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@constant_scalar_quotient_observations, @dynamic_scalar_quotient_observations>(%zero, %maximum, %input, %output) : (i32, i64, tensor<32xi32>, tensor<576xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%unchanged_input) : tensor<32xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<576xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<8xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<8xi32>
+    }
+  }
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %uniform_bits = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i32
+    %input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<32xi32>
+    %unchanged_input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<32xi32>
+    %storage = check.generate.fill value(-123) : tensor<592xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<592xi32> -> tensor<8xi32>
+    %output = check.tensor.view %storage offset(32) : tensor<592xi32> -> tensor<576xi32>
+    %suffix = check.tensor.view %storage offset(2336) : tensor<592xi32> -> tensor<8xi32>
+    %guard = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@constant_scalar_quotient_observations, @dynamic_scalar_quotient_observations>(%zero, %uniform_bits, %input, %output) : (i32, i64, tensor<32xi32>, tensor<576xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%unchanged_input) : tensor<32xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<576xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<8xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<8xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @constant_scalar_remainder_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i32
+    %maximum = check.literal value(4294967295) : i64
+    %input = check.generate.iota offset(0) step(1) : tensor<32xi32>
+    %unchanged_input = check.generate.iota offset(0) step(1) : tensor<32xi32>
+    %storage = check.generate.fill value(-123) : tensor<656xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<656xi32> -> tensor<8xi32>
+    %output = check.tensor.view %storage offset(32) : tensor<656xi32> -> tensor<640xi32>
+    %suffix = check.tensor.view %storage offset(2592) : tensor<656xi32> -> tensor<8xi32>
+    %guard = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@constant_scalar_remainder_observations, @dynamic_scalar_remainder_observations>(%zero, %maximum, %input, %output) : (i32, i64, tensor<32xi32>, tensor<640xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%unchanged_input) : tensor<32xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<640xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<8xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<8xi32>
+    }
+  }
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %uniform_bits = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i32
+    %input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<32xi32>
+    %unchanged_input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<32xi32>
+    %storage = check.generate.fill value(-123) : tensor<656xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<656xi32> -> tensor<8xi32>
+    %output = check.tensor.view %storage offset(32) : tensor<656xi32> -> tensor<640xi32>
+    %suffix = check.tensor.view %storage offset(2592) : tensor<656xi32> -> tensor<8xi32>
+    %guard = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@constant_scalar_remainder_observations, @dynamic_scalar_remainder_observations>(%zero, %uniform_bits, %input, %output) : (i32, i64, tensor<32xi32>, tensor<640xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%unchanged_input) : tensor<32xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<640xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<8xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<8xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @constant_index_division_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i32
+    %maximum = check.literal value(4294967295) : i64
+    %input = check.generate.iota offset(0) step(1) : tensor<32xi32>
+    %unchanged_input = check.generate.iota offset(0) step(1) : tensor<32xi32>
+    %storage = check.generate.fill value(-123) : tensor<656xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<656xi32> -> tensor<8xi32>
+    %output = check.tensor.view %storage offset(32) : tensor<656xi32> -> tensor<640xi32>
+    %suffix = check.tensor.view %storage offset(2592) : tensor<656xi32> -> tensor<8xi32>
+    %guard = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@constant_index_division_observations, @dynamic_index_division_observations>(%zero, %maximum, %input, %output) : (i32, i64, tensor<32xi32>, tensor<640xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%unchanged_input) : tensor<32xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<640xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<8xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<8xi32>
+    }
+  }
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %uniform_bits = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i32
+    %input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<32xi32>
+    %unchanged_input = check.generate.random.uniform seed(%input_seed) range(-2147483648 to 2147483647) : tensor<32xi32>
+    %storage = check.generate.fill value(-123) : tensor<656xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<656xi32> -> tensor<8xi32>
+    %output = check.tensor.view %storage offset(32) : tensor<656xi32> -> tensor<640xi32>
+    %suffix = check.tensor.view %storage offset(2592) : tensor<656xi32> -> tensor<8xi32>
+    %guard = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@constant_index_division_observations, @dynamic_index_division_observations>(%zero, %uniform_bits, %input, %output) : (i32, i64, tensor<32xi32>, tensor<640xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%unchanged_input) : tensor<32xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<640xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<8xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<8xi32>
+    }
+  }
+  check.return
+}
+
+// The same full-width payload is observed through uniform scalar operations
+// and shaped, loaded lanes. Divisors cross word and sign-bit boundaries.
+func.def @constant_wide_division(%dynamic_zero: i64, %uniform: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4x4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<36xi64>
+  %c1 = scalar.constant 1 : i64
+  %c2 = scalar.constant 2 : i64
+  %c3 = scalar.constant 3 : i64
+  %c7 = scalar.constant 7 : i64
+  %c20 = scalar.constant 20 : i64
+  %c31 = scalar.constant 31 : i64
+  %c32 = scalar.constant 32 : i64
+  %prime = scalar.constant 20000003 : i64
+  %other_prime = scalar.constant 20000171 : i64
+  %below_word = scalar.constant 4294967295 : i64
+  %word = scalar.constant 4294967296 : i64
+  %above_word = scalar.constant 4294967297 : i64
+  %below_sign = scalar.constant 9223372036854775807 : i64
+  %sign = scalar.constant -9223372036854775808 : i64
+  %above_sign = scalar.constant -9223372036854775807 : i64
+  %maximum = scalar.constant -1 : i64
+  %third = scalar.divui %uniform, %c3 : i64
+  %seventh = scalar.remui %uniform, %c7 : i64
+  %high_quotient = scalar.divui %uniform, %above_sign : i64
+  %wide_remainder = scalar.remui %uniform, %above_word : i64
+  view.store %third, %results[0] : i64, view<36xi64>
+  view.store %seventh, %results[1] : i64, view<36xi64>
+  view.store %high_quotient, %results[2] : i64, view<36xi64>
+  view.store %wide_remainder, %results[3] : i64, view<36xi64>
+  %loaded = vector.load %values[0, 0] : view<4x4xi64> -> vector<4x4xi64>
+  %divisors = vector.from_elements %c1, %c2, %c3, %c7, %c20, %c31, %c32, %prime, %other_prime, %below_word, %word, %above_word, %below_sign, %sign, %above_sign, %maximum : vector<4x4xi64>
+  %quotients = vector.divui %loaded, %divisors : vector<4x4xi64>
+  %remainders = vector.remui %loaded, %divisors : vector<4x4xi64>
+  %flat_quotients = vector.bitcast %quotients : vector<4x4xi64> to vector<16xi64>
+  %flat_remainders = vector.bitcast %remainders : vector<4x4xi64> to vector<16xi64>
+  vector.store %flat_quotients, %results[4] : vector<16xi64>, view<36xi64>
+  vector.store %flat_remainders, %results[20] : vector<16xi64>, view<36xi64>
+  func.return
+}
+
+// Runtime addition prevents the reference from specializing its divisors.
+func.def @dynamic_wide_division(%dynamic_zero: i64, %uniform: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4x4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<36xi64>
+  %c1 = scalar.constant 1 : i64
+  %c2 = scalar.constant 2 : i64
+  %c3 = scalar.constant 3 : i64
+  %c7 = scalar.constant 7 : i64
+  %c20 = scalar.constant 20 : i64
+  %c31 = scalar.constant 31 : i64
+  %c32 = scalar.constant 32 : i64
+  %prime = scalar.constant 20000003 : i64
+  %other_prime = scalar.constant 20000171 : i64
+  %below_word = scalar.constant 4294967295 : i64
+  %word = scalar.constant 4294967296 : i64
+  %above_word = scalar.constant 4294967297 : i64
+  %below_sign = scalar.constant 9223372036854775807 : i64
+  %sign = scalar.constant -9223372036854775808 : i64
+  %above_sign = scalar.constant -9223372036854775807 : i64
+  %maximum = scalar.constant -1 : i64
+  %d3 = scalar.addi %dynamic_zero, %c3 : i64
+  %d7 = scalar.addi %dynamic_zero, %c7 : i64
+  %high_divisor = scalar.addi %dynamic_zero, %above_sign : i64
+  %wide_divisor = scalar.addi %dynamic_zero, %above_word : i64
+  %third = scalar.divui %uniform, %d3 : i64
+  %seventh = scalar.remui %uniform, %d7 : i64
+  %high_quotient = scalar.divui %uniform, %high_divisor : i64
+  %wide_remainder = scalar.remui %uniform, %wide_divisor : i64
+  view.store %third, %results[0] : i64, view<36xi64>
+  view.store %seventh, %results[1] : i64, view<36xi64>
+  view.store %high_quotient, %results[2] : i64, view<36xi64>
+  view.store %wide_remainder, %results[3] : i64, view<36xi64>
+  %loaded = vector.load %values[0, 0] : view<4x4xi64> -> vector<4x4xi64>
+  %constants = vector.from_elements %c1, %c2, %c3, %c7, %c20, %c31, %c32, %prime, %other_prime, %below_word, %word, %above_word, %below_sign, %sign, %above_sign, %maximum : vector<4x4xi64>
+  %zero = vector.splat %dynamic_zero : vector<4x4xi64>
+  %divisors = vector.addi %zero, %constants : vector<4x4xi64>
+  %quotients = vector.divui %loaded, %divisors : vector<4x4xi64>
+  %remainders = vector.remui %loaded, %divisors : vector<4x4xi64>
+  %flat_quotients = vector.bitcast %quotients : vector<4x4xi64> to vector<16xi64>
+  %flat_remainders = vector.bitcast %remainders : vector<4x4xi64> to vector<16xi64>
+  vector.store %flat_quotients, %results[4] : vector<16xi64>, view<36xi64>
+  vector.store %flat_remainders, %results[20] : vector<16xi64>, view<36xi64>
+  func.return
+}
+
+check.scenario @constant_wide_division_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(-1) : i64
+    %input = check.generate.fill value(-1) : tensor<16xi64>
+    %output = check.generate.fill value(-123) : tensor<36xi64>
+    check.compare<@constant_wide_division, @dynamic_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<16xi64>, tensor<36xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(0) : i64
+    %input = check.generate.iota offset(0) step(1) : tensor<16xi64>
+    %output = check.generate.fill value(-123) : tensor<36xi64>
+    check.compare<@constant_wide_division, @dynamic_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<16xi64>, tensor<36xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(4294967297) : i64
+    %input = check.generate.iota offset(4294967288) step(1) : tensor<16xi64>
+    %output = check.generate.fill value(-123) : tensor<36xi64>
+    check.compare<@constant_wide_division, @dynamic_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<16xi64>, tensor<36xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(9223372036854775807) : i64
+    %input = check.generate.iota offset(9223372036854775792) step(1) : tensor<16xi64>
+    %output = check.generate.fill value(-123) : tensor<36xi64>
+    check.compare<@constant_wide_division, @dynamic_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<16xi64>, tensor<36xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(-9223372036854775807) : i64
+    %input = check.generate.iota offset(-9223372036854775808) step(1) : tensor<16xi64>
+    %output = check.generate.fill value(-123) : tensor<36xi64>
+    check.compare<@constant_wide_division, @dynamic_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<16xi64>, tensor<36xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi64>
+    }
+  }
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %uniform = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i64
+    %input = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to 9223372036854775807) : tensor<16xi64>
+    %storage = check.generate.fill value(-123) : tensor<44xi64>
+    %prefix = check.tensor.view %storage offset(0) : tensor<44xi64> -> tensor<4xi64>
+    %output = check.tensor.view %storage offset(32) : tensor<44xi64> -> tensor<36xi64>
+    %suffix = check.tensor.view %storage offset(320) : tensor<44xi64> -> tensor<4xi64>
+    %guard = check.generate.fill value(-123) : tensor<4xi64>
+    check.compare<@constant_wide_division, @dynamic_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<16xi64>, tensor<36xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi64>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<4xi64>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<4xi64>
+    }
+  }
+  check.return
+}
+
+// Widened products keep their complete value while proving a clear sign bit.
+// Shaped lanes and uniform scalars exercise the same retained numerator bounds.
+// The word remainder uses a mask-derived bound; narrow integer promotion is
+// exercised separately by constant_narrow_quotient_values.
+func.def @bounded_wide_division(%zero: i64, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4xi32>
+  %results = buffer.view %output[%base] : buffer -> view<12xi64>
+  %c7 = scalar.constant 7 : i64
+  %c31 = scalar.constant 31 : i64
+  %prime = scalar.constant 20000171 : i64
+  %sign = scalar.constant -9223372036854775808 : i64
+  %factor = scalar.constant 2147483647 : i64
+  %wide = scalar.extui %uniform : i32 to i64
+  %product = scalar.muli %wide, %factor : i64
+  %hash = scalar.xori %product, %wide : i64
+  %quotient = scalar.divui %hash, %c7 : i64
+  %remainder = scalar.remui %hash, %c7 : i64
+  view.store %quotient, %results[0] : i64, view<12xi64>
+  view.store %remainder, %results[1] : i64, view<12xi64>
+  %byte_mask = scalar.constant 255 : i32
+  %byte_wide = scalar.andi %uniform, %byte_mask : i32
+  %byte_divisor = scalar.constant 7 : i32
+  %byte_quotient = scalar.divui %byte_wide, %byte_divisor : i32
+  %byte_remainder = scalar.remui %byte_wide, %byte_divisor : i32
+  %stored_quotient = scalar.extui %byte_quotient : i32 to i64
+  %stored_remainder = scalar.extui %byte_remainder : i32 to i64
+  view.store %stored_quotient, %results[2] : i64, view<12xi64>
+  view.store %stored_remainder, %results[3] : i64, view<12xi64>
+  %loaded = vector.load %values[0] : view<4xi32> -> vector<4xi32>
+  %lanes = vector.extui %loaded : vector<4xi32> to vector<4xi64>
+  %factors = vector.splat %factor : vector<4xi64>
+  %products = vector.muli %lanes, %factors : vector<4xi64>
+  %hashes = vector.xori %products, %lanes : vector<4xi64>
+  %divisors = vector.from_elements %c7, %c31, %prime, %sign : vector<4xi64>
+  %quotients = vector.divui %hashes, %divisors : vector<4xi64>
+  %remainders = vector.remui %hashes, %divisors : vector<4xi64>
+  vector.store %quotients, %results[4] : vector<4xi64>, view<12xi64>
+  vector.store %remainders, %results[8] : vector<4xi64>, view<12xi64>
+  func.return
+}
+
+// Dynamic divisors leave the oracle independent of reciprocal specialization.
+func.def @dynamic_bounded_wide_division(%zero: i64, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4xi32>
+  %results = buffer.view %output[%base] : buffer -> view<12xi64>
+  %c7 = scalar.constant 7 : i64
+  %c31 = scalar.constant 31 : i64
+  %prime = scalar.constant 20000171 : i64
+  %sign = scalar.constant -9223372036854775808 : i64
+  %factor = scalar.constant 2147483647 : i64
+  %wide = scalar.extui %uniform : i32 to i64
+  %product = scalar.muli %wide, %factor : i64
+  %hash = scalar.xori %product, %wide : i64
+  %divisor = scalar.addi %zero, %c7 : i64
+  %quotient = scalar.divui %hash, %divisor : i64
+  %remainder = scalar.remui %hash, %divisor : i64
+  view.store %quotient, %results[0] : i64, view<12xi64>
+  view.store %remainder, %results[1] : i64, view<12xi64>
+  %byte_mask = scalar.constant 255 : i32
+  %byte_wide = scalar.andi %uniform, %byte_mask : i32
+  %byte_divisor = scalar.trunci %divisor : i64 to i32
+  %byte_quotient = scalar.divui %byte_wide, %byte_divisor : i32
+  %byte_remainder = scalar.remui %byte_wide, %byte_divisor : i32
+  %stored_quotient = scalar.extui %byte_quotient : i32 to i64
+  %stored_remainder = scalar.extui %byte_remainder : i32 to i64
+  view.store %stored_quotient, %results[2] : i64, view<12xi64>
+  view.store %stored_remainder, %results[3] : i64, view<12xi64>
+  %loaded = vector.load %values[0] : view<4xi32> -> vector<4xi32>
+  %lanes = vector.extui %loaded : vector<4xi32> to vector<4xi64>
+  %factors = vector.splat %factor : vector<4xi64>
+  %products = vector.muli %lanes, %factors : vector<4xi64>
+  %hashes = vector.xori %products, %lanes : vector<4xi64>
+  %constants = vector.from_elements %c7, %c31, %prime, %sign : vector<4xi64>
+  %zeros = vector.splat %zero : vector<4xi64>
+  %divisors = vector.addi %constants, %zeros : vector<4xi64>
+  %quotients = vector.divui %hashes, %divisors : vector<4xi64>
+  %remainders = vector.remui %hashes, %divisors : vector<4xi64>
+  vector.store %quotients, %results[4] : vector<4xi64>, view<12xi64>
+  vector.store %remainders, %results[8] : vector<4xi64>, view<12xi64>
+  func.return
+}
+
+check.scenario @bounded_wide_division_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(-1) : i64
+    %input = check.generate.fill value(-1) : tensor<4xi32>
+    %output = check.generate.fill value(-123) : tensor<12xi64>
+    check.compare<@bounded_wide_division, @dynamic_bounded_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<4xi32>, tensor<12xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<12xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(0) : i64
+    %input = check.generate.iota offset(0) step(1) : tensor<4xi32>
+    %output = check.generate.fill value(-123) : tensor<12xi64>
+    check.compare<@bounded_wide_division, @dynamic_bounded_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<4xi32>, tensor<12xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<12xi64>
+    }
+  }
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %uniform = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<4xi32>
+    %output = check.generate.fill value(-123) : tensor<12xi64>
+    check.compare<@bounded_wide_division, @dynamic_bounded_wide_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<4xi32>, tensor<12xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<12xi64>
+    }
+  }
+  check.return
+}
+
+// A 35-bit numerator divided by nine has a u32 quotient, whose product with
+// the divisor still needs both words when reconstructing the remainder.
+func.def @narrow_remainder_product(%divisor_input: i64, %uniform: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<5xi64>
+  %mask = scalar.constant 34359738367 : i64
+  %divisor = scalar.constant 9 : i64
+  %bounded = scalar.andi %uniform, %mask : i64
+  %remainder = scalar.remui %bounded, %divisor : i64
+  view.store %remainder, %results[0] : i64, view<5xi64>
+  %loaded = vector.load %values[0] : view<4xi64> -> vector<4xi64>
+  %masks = vector.splat %mask : vector<4xi64>
+  %lanes = vector.andi %loaded, %masks : vector<4xi64>
+  %divisors = vector.splat %divisor : vector<4xi64>
+  %remainders = vector.remui %lanes, %divisors : vector<4xi64>
+  vector.store %remainders, %results[1] : vector<4xi64>, view<5xi64>
+  func.return
+}
+
+func.def @dynamic_narrow_remainder_product(%divisor: i64, %uniform: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<5xi64>
+  %mask = scalar.constant 34359738367 : i64
+  %bounded = scalar.andi %uniform, %mask : i64
+  %remainder = scalar.remui %bounded, %divisor : i64
+  view.store %remainder, %results[0] : i64, view<5xi64>
+  %loaded = vector.load %values[0] : view<4xi64> -> vector<4xi64>
+  %masks = vector.splat %mask : vector<4xi64>
+  %lanes = vector.andi %loaded, %masks : vector<4xi64>
+  %divisors = vector.splat %divisor : vector<4xi64>
+  %remainders = vector.remui %lanes, %divisors : vector<4xi64>
+  vector.store %remainders, %results[1] : vector<4xi64>, view<5xi64>
+  func.return
+}
+
+check.scenario @narrow_remainder_product_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %divisor = check.literal value(9) : i64
+    %uniform = check.literal value(-1) : i64
+    %input = check.generate.iota offset(34359738366) step(1) : tensor<4xi64>
+    %output = check.generate.fill value(-123) : tensor<5xi64>
+    check.compare<@narrow_remainder_product, @dynamic_narrow_remainder_product>(%divisor, %uniform, %input, %output) : (i64, i64, tensor<4xi64>, tensor<5xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<5xi64>
+    }
+  }
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("uniform") : check.entropy
+    %uniform = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %divisor = check.literal value(9) : i64
+    %input = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to 9223372036854775807) : tensor<4xi64>
+    %output = check.generate.fill value(-123) : tensor<5xi64>
+    check.compare<@narrow_remainder_product, @dynamic_narrow_remainder_product>(%divisor, %uniform, %input, %output) : (i64, i64, tensor<4xi64>, tensor<5xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<5xi64>
+    }
+  }
+  check.return
+}
+
+check.scenario @constant_index_boundary_division_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : index
+    %value = check.literal value(0) : index
+    %storage = check.generate.fill value(-123) : tensor<12xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<12xi32> -> tensor<4xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    %suffix = check.tensor.view %storage offset(32) : tensor<12xi32> -> tensor<4xi32>
+    %guard = check.generate.fill value(-123) : tensor<4xi32>
+    check.compare<@constant_index_boundary_division, @dynamic_index_boundary_division>(%zero, %value, %output) : (index, index, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<4xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : index
+    %value = check.literal value(2147483647) : index
+    %storage = check.generate.fill value(-123) : tensor<12xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<12xi32> -> tensor<4xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    %suffix = check.tensor.view %storage offset(32) : tensor<12xi32> -> tensor<4xi32>
+    %guard = check.generate.fill value(-123) : tensor<4xi32>
+    check.compare<@constant_index_boundary_division, @dynamic_index_boundary_division>(%zero, %value, %output) : (index, index, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// Signed word divisors cover every reciprocal arithmetic shape, identities,
+// and signed boundaries on both uniform scalars and loaded vector lanes.
+func.def @constant_signed_word_division(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4x4xi32>
+  %results = buffer.view %output[%base] : buffer -> view<36xi32>
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %c1 = scalar.constant 1 : i32
+  %cn1 = scalar.constant -1 : i32
+  %c2 = scalar.constant 2 : i32
+  %cn2 = scalar.constant -2 : i32
+  %c3 = scalar.constant 3 : i32
+  %cn3 = scalar.constant -3 : i32
+  %c4 = scalar.constant 4 : i32
+  %cn4 = scalar.constant -4 : i32
+  %c5 = scalar.constant 5 : i32
+  %cn5 = scalar.constant -5 : i32
+  %c7 = scalar.constant 7 : i32
+  %cn7 = scalar.constant -7 : i32
+  %c20 = scalar.constant 20 : i32
+  %cn20 = scalar.constant -20 : i32
+  %minimum = scalar.constant -2147483648 : i32
+  %maximum = scalar.constant 2147483647 : i32
+  %uniform_quotient = scalar.divsi %uniform, %c20 : i32
+  %uniform_remainder = scalar.remsi %uniform, %c20 : i32
+  %negative_quotient = scalar.divsi %uniform, %cn20 : i32
+  %negative_remainder = scalar.remsi %uniform, %cn20 : i32
+  view.store %uniform_quotient, %results[0] : i32, view<36xi32>
+  view.store %uniform_remainder, %results[1] : i32, view<36xi32>
+  view.store %negative_quotient, %results[2] : i32, view<36xi32>
+  view.store %negative_remainder, %results[3] : i32, view<36xi32>
+  %loaded = vector.load %values[0, 0] : view<4x4xi32> -> vector<4x4xi32>
+  %divisors = vector.from_elements %c1, %cn1, %c2, %cn2, %c3, %cn3, %c4, %cn4, %c5, %cn5, %c7, %cn7, %minimum, %maximum, %c20, %cn20 : vector<4x4xi32>
+  %quotients = vector.divsi %loaded, %divisors : vector<4x4xi32>
+  %remainders = vector.remsi %loaded, %divisors : vector<4x4xi32>
+  %flat_quotients = vector.bitcast %quotients : vector<4x4xi32> to vector<16xi32>
+  %flat_remainders = vector.bitcast %remainders : vector<4x4xi32> to vector<16xi32>
+  vector.store %flat_quotients, %results[4] : vector<16xi32>, view<36xi32>
+  vector.store %flat_remainders, %results[20] : vector<16xi32>, view<36xi32>
+  func.return
+}
+
+// Runtime addition prevents the oracle from selecting constant recipes.
+func.def @dynamic_signed_word_division(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4x4xi32>
+  %results = buffer.view %output[%base] : buffer -> view<36xi32>
+  %uniform = scalar.trunci %uniform_bits : i64 to i32
+  %c1 = scalar.constant 1 : i32
+  %cn1 = scalar.constant -1 : i32
+  %c2 = scalar.constant 2 : i32
+  %cn2 = scalar.constant -2 : i32
+  %c3 = scalar.constant 3 : i32
+  %cn3 = scalar.constant -3 : i32
+  %c4 = scalar.constant 4 : i32
+  %cn4 = scalar.constant -4 : i32
+  %c5 = scalar.constant 5 : i32
+  %cn5 = scalar.constant -5 : i32
+  %c7 = scalar.constant 7 : i32
+  %cn7 = scalar.constant -7 : i32
+  %c20 = scalar.constant 20 : i32
+  %cn20 = scalar.constant -20 : i32
+  %minimum = scalar.constant -2147483648 : i32
+  %maximum = scalar.constant 2147483647 : i32
+  %positive_interval = scalar.addi %dynamic_zero, %c20 : i32
+  %negative_interval = scalar.addi %dynamic_zero, %cn20 : i32
+  %uniform_quotient = scalar.divsi %uniform, %positive_interval : i32
+  %uniform_remainder = scalar.remsi %uniform, %positive_interval : i32
+  %negative_quotient = scalar.divsi %uniform, %negative_interval : i32
+  %negative_remainder = scalar.remsi %uniform, %negative_interval : i32
+  view.store %uniform_quotient, %results[0] : i32, view<36xi32>
+  view.store %uniform_remainder, %results[1] : i32, view<36xi32>
+  view.store %negative_quotient, %results[2] : i32, view<36xi32>
+  view.store %negative_remainder, %results[3] : i32, view<36xi32>
+  %loaded = vector.load %values[0, 0] : view<4x4xi32> -> vector<4x4xi32>
+  %constants = vector.from_elements %c1, %cn1, %c2, %cn2, %c3, %cn3, %c4, %cn4, %c5, %cn5, %c7, %cn7, %minimum, %maximum, %c20, %cn20 : vector<4x4xi32>
+  %zeros = vector.splat %dynamic_zero : vector<4x4xi32>
+  %divisors = vector.addi %constants, %zeros : vector<4x4xi32>
+  %quotients = vector.divsi %loaded, %divisors : vector<4x4xi32>
+  %remainders = vector.remsi %loaded, %divisors : vector<4x4xi32>
+  %flat_quotients = vector.bitcast %quotients : vector<4x4xi32> to vector<16xi32>
+  %flat_remainders = vector.bitcast %remainders : vector<4x4xi32> to vector<16xi32>
+  vector.store %flat_quotients, %results[4] : vector<16xi32>, view<36xi32>
+  vector.store %flat_remainders, %results[20] : vector<16xi32>, view<36xi32>
+  func.return
+}
+
+check.scenario @constant_signed_word_division_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i32
+    %uniform = check.literal value(-2147483647) : i64
+    %input = check.generate.iota offset(-17) step(1) : tensor<16xi32>
+    %output = check.generate.fill value(-123) : tensor<36xi32>
+    check.compare<@constant_signed_word_division, @dynamic_signed_word_division>(%zero, %uniform, %input, %output) : (i32, i64, tensor<16xi32>, tensor<36xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i32
+    %uniform = check.literal value(2147483647) : i64
+    %input = check.generate.iota offset(2147483632) step(1) : tensor<16xi32>
+    %output = check.generate.fill value(-123) : tensor<36xi32>
+    check.compare<@constant_signed_word_division, @dynamic_signed_word_division>(%zero, %uniform, %input, %output) : (i32, i64, tensor<16xi32>, tensor<36xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi32>
+    }
+  }
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("signed_word_uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("signed_word_input") : check.entropy
+    %uniform = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i32
+    %input = check.generate.random.uniform seed(%seed) range(-2147483647 to 2147483647) : tensor<16xi32>
+    %output = check.generate.fill value(-123) : tensor<36xi32>
+    check.compare<@constant_signed_word_division, @dynamic_signed_word_division>(%zero, %uniform, %input, %output) : (i32, i64, tensor<16xi32>, tensor<36xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<36xi32>
+    }
+  }
+  check.return
+}
+
+// Byte and halfword operations prove that signed widening preserves the
+// dividend before selecting the shared i32 reciprocal recipe.
+func.def @constant_narrow_signed_division(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 16 : index
+  %step = index.constant 1 : index
+  %values = buffer.view %input[%base] : buffer -> view<16xi32>
+  %results = buffer.view %output[%base] : buffer -> view<8x16xi32>
+  %byte = scalar.trunci %uniform_bits : i64 to i8
+  %byte_divisor = scalar.constant -3 : i8
+  %byte_quotient = scalar.divsi %byte, %byte_divisor : i8
+  %byte_remainder = scalar.remsi %byte, %byte_divisor : i8
+  %byte_uniform_quotient = scalar.extsi %byte_quotient : i8 to i32
+  %byte_uniform_remainder = scalar.extsi %byte_remainder : i8 to i32
+  %halfword = scalar.trunci %uniform_bits : i64 to i16
+  %halfword_divisor = scalar.constant 5 : i16
+  %halfword_quotient = scalar.divsi %halfword, %halfword_divisor : i16
+  %halfword_remainder = scalar.remsi %halfword, %halfword_divisor : i16
+  %halfword_uniform_quotient = scalar.extsi %halfword_quotient : i16 to i32
+  %halfword_uniform_remainder = scalar.extsi %halfword_remainder : i16 to i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<16xi32> -> i32
+    %byte_value = scalar.trunci %value : i32 to i8
+    %byte_lane_quotient = scalar.divsi %byte_value, %byte_divisor : i8
+    %byte_lane_remainder = scalar.remsi %byte_value, %byte_divisor : i8
+    %byte_lane_quotient_wide = scalar.extsi %byte_lane_quotient : i8 to i32
+    %byte_lane_remainder_wide = scalar.extsi %byte_lane_remainder : i8 to i32
+    %halfword_value = scalar.trunci %value : i32 to i16
+    %halfword_lane_quotient = scalar.divsi %halfword_value, %halfword_divisor : i16
+    %halfword_lane_remainder = scalar.remsi %halfword_value, %halfword_divisor : i16
+    %halfword_lane_quotient_wide = scalar.extsi %halfword_lane_quotient : i16 to i32
+    %halfword_lane_remainder_wide = scalar.extsi %halfword_lane_remainder : i16 to i32
+    view.store %byte_uniform_quotient, %results[0, %lane] : i32, view<8x16xi32>
+    view.store %byte_uniform_remainder, %results[1, %lane] : i32, view<8x16xi32>
+    view.store %byte_lane_quotient_wide, %results[2, %lane] : i32, view<8x16xi32>
+    view.store %byte_lane_remainder_wide, %results[3, %lane] : i32, view<8x16xi32>
+    view.store %halfword_uniform_quotient, %results[4, %lane] : i32, view<8x16xi32>
+    view.store %halfword_uniform_remainder, %results[5, %lane] : i32, view<8x16xi32>
+    view.store %halfword_lane_quotient_wide, %results[6, %lane] : i32, view<8x16xi32>
+    view.store %halfword_lane_remainder_wide, %results[7, %lane] : i32, view<8x16xi32>
+  }
+  func.return
+}
+
+func.def @dynamic_narrow_signed_division(%dynamic_zero: i32, %uniform_bits: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 16 : index
+  %step = index.constant 1 : index
+  %values = buffer.view %input[%base] : buffer -> view<16xi32>
+  %results = buffer.view %output[%base] : buffer -> view<8x16xi32>
+  %byte = scalar.trunci %uniform_bits : i64 to i8
+  %byte_zero = scalar.trunci %dynamic_zero : i32 to i8
+  %byte_constant = scalar.constant -3 : i8
+  %byte_divisor = scalar.addi %byte_zero, %byte_constant : i8
+  %byte_quotient = scalar.divsi %byte, %byte_divisor : i8
+  %byte_remainder = scalar.remsi %byte, %byte_divisor : i8
+  %byte_uniform_quotient = scalar.extsi %byte_quotient : i8 to i32
+  %byte_uniform_remainder = scalar.extsi %byte_remainder : i8 to i32
+  %halfword = scalar.trunci %uniform_bits : i64 to i16
+  %halfword_zero = scalar.trunci %dynamic_zero : i32 to i16
+  %halfword_constant = scalar.constant 5 : i16
+  %halfword_divisor = scalar.addi %halfword_zero, %halfword_constant : i16
+  %halfword_quotient = scalar.divsi %halfword, %halfword_divisor : i16
+  %halfword_remainder = scalar.remsi %halfword, %halfword_divisor : i16
+  %halfword_uniform_quotient = scalar.extsi %halfword_quotient : i16 to i32
+  %halfword_uniform_remainder = scalar.extsi %halfword_remainder : i16 to i32
+  scf.for %lane = [%begin to %end step %step] {
+    %value = view.load %values[%lane] : view<16xi32> -> i32
+    %byte_value = scalar.trunci %value : i32 to i8
+    %byte_lane_quotient = scalar.divsi %byte_value, %byte_divisor : i8
+    %byte_lane_remainder = scalar.remsi %byte_value, %byte_divisor : i8
+    %byte_lane_quotient_wide = scalar.extsi %byte_lane_quotient : i8 to i32
+    %byte_lane_remainder_wide = scalar.extsi %byte_lane_remainder : i8 to i32
+    %halfword_value = scalar.trunci %value : i32 to i16
+    %halfword_lane_quotient = scalar.divsi %halfword_value, %halfword_divisor : i16
+    %halfword_lane_remainder = scalar.remsi %halfword_value, %halfword_divisor : i16
+    %halfword_lane_quotient_wide = scalar.extsi %halfword_lane_quotient : i16 to i32
+    %halfword_lane_remainder_wide = scalar.extsi %halfword_lane_remainder : i16 to i32
+    view.store %byte_uniform_quotient, %results[0, %lane] : i32, view<8x16xi32>
+    view.store %byte_uniform_remainder, %results[1, %lane] : i32, view<8x16xi32>
+    view.store %byte_lane_quotient_wide, %results[2, %lane] : i32, view<8x16xi32>
+    view.store %byte_lane_remainder_wide, %results[3, %lane] : i32, view<8x16xi32>
+    view.store %halfword_uniform_quotient, %results[4, %lane] : i32, view<8x16xi32>
+    view.store %halfword_uniform_remainder, %results[5, %lane] : i32, view<8x16xi32>
+    view.store %halfword_lane_quotient_wide, %results[6, %lane] : i32, view<8x16xi32>
+    view.store %halfword_lane_remainder_wide, %results[7, %lane] : i32, view<8x16xi32>
+  }
+  func.return
+}
+
+check.scenario @constant_narrow_signed_division_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i32
+    %uniform = check.literal value(-1) : i64
+    %input = check.generate.iota offset(-136) step(1) : tensor<16xi32>
+    %output = check.generate.fill value(-123) : tensor<128xi32>
+    check.compare<@constant_narrow_signed_division, @dynamic_narrow_signed_division>(%zero, %uniform, %input, %output) : (i32, i64, tensor<16xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<128xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i32
+    %uniform = check.literal value(-32768) : i64
+    %input = check.generate.iota offset(32760) step(1) : tensor<16xi32>
+    %output = check.generate.fill value(-123) : tensor<128xi32>
+    check.compare<@constant_narrow_signed_division, @dynamic_narrow_signed_division>(%zero, %uniform, %input, %output) : (i32, i64, tensor<16xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<128xi32>
+    }
+  }
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("narrow_signed_uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("narrow_signed_input") : check.entropy
+    %uniform = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i32
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<16xi32>
+    %output = check.generate.fill value(-123) : tensor<128xi32>
+    check.compare<@constant_narrow_signed_division, @dynamic_narrow_signed_division>(%zero, %uniform, %input, %output) : (i32, i64, tensor<16xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<128xi32>
+    }
+  }
+  check.return
+}
+
+// Wide signed division uses the retained two-word plan for both uniform and
+// varying carriers. The divisor matrix covers every reciprocal recipe shape.
+func.def @constant_wide_signed_division(%dynamic_zero: i64, %uniform: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<3x4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<28xi64>
+  %c1 = scalar.constant 1 : i64
+  %cn1 = scalar.constant -1 : i64
+  %c2 = scalar.constant 2 : i64
+  %cn2 = scalar.constant -2 : i64
+  %c3 = scalar.constant 3 : i64
+  %cn3 = scalar.constant -3 : i64
+  %c4 = scalar.constant 4 : i64
+  %cn4 = scalar.constant -4 : i64
+  %c5 = scalar.constant 5 : i64
+  %cn5 = scalar.constant -5 : i64
+  %minimum = scalar.constant -9223372036854775808 : i64
+  %maximum = scalar.constant 9223372036854775807 : i64
+  %c20 = scalar.constant 20 : i64
+  %cn20 = scalar.constant -20 : i64
+  %uniform_quotient = scalar.divsi %uniform, %c20 : i64
+  %uniform_remainder = scalar.remsi %uniform, %c20 : i64
+  %negative_quotient = scalar.divsi %uniform, %cn20 : i64
+  %negative_remainder = scalar.remsi %uniform, %cn20 : i64
+  view.store %uniform_quotient, %results[0] : i64, view<28xi64>
+  view.store %uniform_remainder, %results[1] : i64, view<28xi64>
+  view.store %negative_quotient, %results[2] : i64, view<28xi64>
+  view.store %negative_remainder, %results[3] : i64, view<28xi64>
+  %loaded = vector.load %values[0, 0] : view<3x4xi64> -> vector<3x4xi64>
+  %divisors = vector.from_elements %c1, %cn1, %c2, %cn2, %c3, %cn3, %c4, %cn4, %c5, %cn5, %minimum, %maximum : vector<3x4xi64>
+  %quotients = vector.divsi %loaded, %divisors : vector<3x4xi64>
+  %remainders = vector.remsi %loaded, %divisors : vector<3x4xi64>
+  %flat_quotients = vector.bitcast %quotients : vector<3x4xi64> to vector<12xi64>
+  %flat_remainders = vector.bitcast %remainders : vector<3x4xi64> to vector<12xi64>
+  vector.store %flat_quotients, %results[4] : vector<12xi64>, view<28xi64>
+  vector.store %flat_remainders, %results[16] : vector<12xi64>, view<28xi64>
+  func.return
+}
+
+func.def @dynamic_wide_signed_division(%dynamic_zero: i64, %uniform: i64, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<3x4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<28xi64>
+  %c1 = scalar.constant 1 : i64
+  %cn1 = scalar.constant -1 : i64
+  %c2 = scalar.constant 2 : i64
+  %cn2 = scalar.constant -2 : i64
+  %c3 = scalar.constant 3 : i64
+  %cn3 = scalar.constant -3 : i64
+  %c4 = scalar.constant 4 : i64
+  %cn4 = scalar.constant -4 : i64
+  %c5 = scalar.constant 5 : i64
+  %cn5 = scalar.constant -5 : i64
+  %minimum = scalar.constant -9223372036854775808 : i64
+  %maximum = scalar.constant 9223372036854775807 : i64
+  %c20 = scalar.constant 20 : i64
+  %cn20 = scalar.constant -20 : i64
+  %positive_interval = scalar.addi %dynamic_zero, %c20 : i64
+  %negative_interval = scalar.addi %dynamic_zero, %cn20 : i64
+  %uniform_quotient = scalar.divsi %uniform, %positive_interval : i64
+  %uniform_remainder = scalar.remsi %uniform, %positive_interval : i64
+  %negative_quotient = scalar.divsi %uniform, %negative_interval : i64
+  %negative_remainder = scalar.remsi %uniform, %negative_interval : i64
+  view.store %uniform_quotient, %results[0] : i64, view<28xi64>
+  view.store %uniform_remainder, %results[1] : i64, view<28xi64>
+  view.store %negative_quotient, %results[2] : i64, view<28xi64>
+  view.store %negative_remainder, %results[3] : i64, view<28xi64>
+  %loaded = vector.load %values[0, 0] : view<3x4xi64> -> vector<3x4xi64>
+  %constants = vector.from_elements %c1, %cn1, %c2, %cn2, %c3, %cn3, %c4, %cn4, %c5, %cn5, %minimum, %maximum : vector<3x4xi64>
+  %zeros = vector.splat %dynamic_zero : vector<3x4xi64>
+  %divisors = vector.addi %constants, %zeros : vector<3x4xi64>
+  %quotients = vector.divsi %loaded, %divisors : vector<3x4xi64>
+  %remainders = vector.remsi %loaded, %divisors : vector<3x4xi64>
+  %flat_quotients = vector.bitcast %quotients : vector<3x4xi64> to vector<12xi64>
+  %flat_remainders = vector.bitcast %remainders : vector<3x4xi64> to vector<12xi64>
+  vector.store %flat_quotients, %results[4] : vector<12xi64>, view<28xi64>
+  vector.store %flat_remainders, %results[16] : vector<12xi64>, view<28xi64>
+  func.return
+}
+
+check.scenario @constant_wide_signed_division_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(-9223372036854775807) : i64
+    %input = check.generate.iota offset(-17) step(1) : tensor<12xi64>
+    %output = check.generate.fill value(-123) : tensor<28xi64>
+    check.compare<@constant_wide_signed_division, @dynamic_wide_signed_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<12xi64>, tensor<28xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<28xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %uniform = check.literal value(9223372036854775807) : i64
+    %input = check.generate.iota offset(4294967290) step(1) : tensor<12xi64>
+    %output = check.generate.fill value(-123) : tensor<28xi64>
+    check.compare<@constant_wide_signed_division, @dynamic_wide_signed_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<12xi64>, tensor<28xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<28xi64>
+    }
+  }
+  check.trial[24](%trial: index, %entropy: check.entropy) {
+    %uniform_entropy = check.entropy.fork %entropy name("signed_wide_uniform") : check.entropy
+    %input_entropy = check.entropy.fork %entropy name("signed_wide_input") : check.entropy
+    %uniform = check.entropy.read %uniform_entropy[%trial] : check.entropy -> i64
+    %seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %zero = check.literal value(0) : i64
+    %input = check.generate.random.uniform seed(%seed) range(-9223372036854775807 to 9223372036854775807) : tensor<12xi64>
+    %output = check.generate.fill value(-123) : tensor<28xi64>
+    check.compare<@constant_wide_signed_division, @dynamic_wide_signed_division>(%zero, %uniform, %input, %output) : (i64, i64, tensor<12xi64>, tensor<28xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<28xi64>
+    }
+  }
+  check.return
+}
+
+// Signed minimum remainder by negative one is defined even though the matching
+// quotient overflows. Dynamic divisors keep the oracle independent.
+func.def @constant_signed_minimum_remainders(%dynamic_zero: i64, %output: buffer) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<4xi64>
+  %byte_minimum = scalar.constant -128 : i8
+  %byte_opposite_unit = scalar.constant -1 : i8
+  %byte_remainder = scalar.remsi %byte_minimum, %byte_opposite_unit : i8
+  %byte_result = scalar.extsi %byte_remainder : i8 to i32
+  %byte_storage = scalar.extsi %byte_result : i32 to i64
+  %halfword_minimum = scalar.constant -32768 : i16
+  %halfword_opposite_unit = scalar.constant -1 : i16
+  %halfword_remainder = scalar.remsi %halfword_minimum, %halfword_opposite_unit : i16
+  %halfword_result = scalar.extsi %halfword_remainder : i16 to i32
+  %halfword_storage = scalar.extsi %halfword_result : i32 to i64
+  %word_minimum = scalar.constant -2147483648 : i32
+  %word_opposite_unit = scalar.constant -1 : i32
+  %word_remainder = scalar.remsi %word_minimum, %word_opposite_unit : i32
+  %word_storage = scalar.extsi %word_remainder : i32 to i64
+  %wide_minimum = scalar.constant -9223372036854775808 : i64
+  %wide_opposite_unit = scalar.constant -1 : i64
+  %wide_remainder = scalar.remsi %wide_minimum, %wide_opposite_unit : i64
+  view.store %byte_storage, %results[0] : i64, view<4xi64>
+  view.store %halfword_storage, %results[1] : i64, view<4xi64>
+  view.store %word_storage, %results[2] : i64, view<4xi64>
+  view.store %wide_remainder, %results[3] : i64, view<4xi64>
+  func.return
+}
+
+func.def @dynamic_signed_minimum_remainders(%dynamic_zero: i64, %output: buffer) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<4xi64>
+  %byte_zero = scalar.trunci %dynamic_zero : i64 to i8
+  %byte_minimum = scalar.constant -128 : i8
+  %byte_opposite_unit = scalar.constant -1 : i8
+  %byte_divisor = scalar.addi %byte_zero, %byte_opposite_unit : i8
+  %byte_remainder = scalar.remsi %byte_minimum, %byte_divisor : i8
+  %byte_result = scalar.extsi %byte_remainder : i8 to i32
+  %byte_storage = scalar.extsi %byte_result : i32 to i64
+  %halfword_zero = scalar.trunci %dynamic_zero : i64 to i16
+  %halfword_minimum = scalar.constant -32768 : i16
+  %halfword_opposite_unit = scalar.constant -1 : i16
+  %halfword_divisor = scalar.addi %halfword_zero, %halfword_opposite_unit : i16
+  %halfword_remainder = scalar.remsi %halfword_minimum, %halfword_divisor : i16
+  %halfword_result = scalar.extsi %halfword_remainder : i16 to i32
+  %halfword_storage = scalar.extsi %halfword_result : i32 to i64
+  %word_zero = scalar.trunci %dynamic_zero : i64 to i32
+  %word_minimum = scalar.constant -2147483648 : i32
+  %word_opposite_unit = scalar.constant -1 : i32
+  %word_divisor = scalar.addi %word_zero, %word_opposite_unit : i32
+  %word_remainder = scalar.remsi %word_minimum, %word_divisor : i32
+  %word_storage = scalar.extsi %word_remainder : i32 to i64
+  %wide_minimum = scalar.constant -9223372036854775808 : i64
+  %wide_opposite_unit = scalar.constant -1 : i64
+  %wide_divisor = scalar.addi %dynamic_zero, %wide_opposite_unit : i64
+  %wide_remainder = scalar.remsi %wide_minimum, %wide_divisor : i64
+  view.store %byte_storage, %results[0] : i64, view<4xi64>
+  view.store %halfword_storage, %results[1] : i64, view<4xi64>
+  view.store %word_storage, %results[2] : i64, view<4xi64>
+  view.store %wide_remainder, %results[3] : i64, view<4xi64>
+  func.return
+}
+
+check.scenario @constant_signed_minimum_remainder_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %zero = check.literal value(0) : i64
+    %output = check.generate.fill value(-123) : tensor<4xi64>
+    check.compare<@constant_signed_minimum_remainders, @dynamic_signed_minimum_remainders>(%zero, %output) : (i64, tensor<4xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi64>
+    }
+  }
+  check.return
+}

@@ -1,0 +1,558 @@
+func.def inline @vector_floating_rounded_bits(%value: f32) -> (i32) {
+  %bits = scalar.bitcast %value : f32 to i32
+  %is_nan = scalar.isnanf %value : f32
+  %nan_bits = scalar.constant 2143289344 : i32
+  %observed = scf.select %is_nan, %nan_bits, %bits : i32
+  func.return %observed : i32
+}
+
+// Dynamic lanes cover vector rounding and sign manipulation. Rounding
+// canonicalizes NaNs; abs and copysign retain exact payload and sign bits.
+func.def @vector_floating_observations(%a_bits: i64, %b_bits: i64, %output: buffer) {
+  %a_word = scalar.trunci %a_bits : i64 to i32
+  %b_word = scalar.trunci %b_bits : i64 to i32
+  %a = scalar.bitcast %a_word : i32 to f32
+  %b = scalar.bitcast %b_word : i32 to f32
+  %values = vector.from_elements %a, %b : vector<2xf32>
+  %signs = vector.from_elements %b, %a : vector<2xf32>
+  %rounded = vector.roundevenf %values : vector<2xf32>
+  %truncated = vector.truncf %values : vector<2xf32>
+  %absolute = vector.absf %values : vector<2xf32>
+  %copied = vector.copysignf %values, %signs : vector<2xf32>
+  %r0 = vector.extract %rounded[0] : vector<2xf32> -> f32
+  %r1 = vector.extract %rounded[1] : vector<2xf32> -> f32
+  %t0 = vector.extract %truncated[0] : vector<2xf32> -> f32
+  %t1 = vector.extract %truncated[1] : vector<2xf32> -> f32
+  %a0 = vector.extract %absolute[0] : vector<2xf32> -> f32
+  %a1 = vector.extract %absolute[1] : vector<2xf32> -> f32
+  %c0 = vector.extract %copied[0] : vector<2xf32> -> f32
+  %c1 = vector.extract %copied[1] : vector<2xf32> -> f32
+  %rb0 = func.call @vector_floating_rounded_bits(%r0) : (f32) -> (i32)
+  %rb1 = func.call @vector_floating_rounded_bits(%r1) : (f32) -> (i32)
+  %tb0 = func.call @vector_floating_rounded_bits(%t0) : (f32) -> (i32)
+  %tb1 = func.call @vector_floating_rounded_bits(%t1) : (f32) -> (i32)
+  %ab0 = scalar.bitcast %a0 : f32 to i32
+  %ab1 = scalar.bitcast %a1 : f32 to i32
+  %cb0 = scalar.bitcast %c0 : f32 to i32
+  %cb1 = scalar.bitcast %c1 : f32 to i32
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<8xi32>
+  view.store %rb0, %results[0] : i32, view<8xi32>
+  view.store %rb1, %results[1] : i32, view<8xi32>
+  view.store %tb0, %results[2] : i32, view<8xi32>
+  view.store %tb1, %results[3] : i32, view<8xi32>
+  view.store %ab0, %results[4] : i32, view<8xi32>
+  view.store %ab1, %results[5] : i32, view<8xi32>
+  view.store %cb0, %results[6] : i32, view<8xi32>
+  view.store %cb1, %results[7] : i32, view<8xi32>
+  func.return
+}
+
+check.scenario @vector_floating_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %a_bits = check.literal value(1069547520) : i64
+    %b_bits = check.literal value(-1071644672) : i64
+    %output = check.generate.fill value(0) : tensor<8xi32>
+    check.compare<@vector_floating_observations>(%a_bits, %b_bits, %output) : (i64, i64, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xi32>
+    }
+  }
+  check.trial[256](%trial: index, %entropy: check.entropy) {
+    %a_entropy = check.entropy.fork %entropy name("a") : check.entropy
+    %b_entropy = check.entropy.fork %entropy name("b") : check.entropy
+    %a_bits = check.entropy.read %a_entropy[%trial] : check.entropy -> i64
+    %b_bits = check.entropy.read %b_entropy[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<8xi32>
+    check.compare<@vector_floating_observations>(%a_bits, %b_bits, %output) : (i64, i64, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xi32>
+    }
+  }
+  check.return
+}
+
+// Broadcast arithmetic preserves the loaded factor across an intervening
+// overwrite. Runtime recurrences keep the two-, three-, and four-lane vectors
+// intact through target lowering and exercise both authored operand positions.
+func.def @vector_scale_f16(%input: buffer, %factor_buffer: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<9xf16>
+  %factors = buffer.view %factor_buffer[%base] : buffer -> view<1xf16>
+  %results = buffer.view %output[%base] : buffer -> view<9xf16>
+  %factor = view.load %factors[0] : view<1xf16> -> f16
+  %replacement = scalar.constant 2.0 : f16
+  view.store %replacement, %factors[0] : f16, view<1xf16>
+  %initial_pair = vector.load %values[0] : view<9xf16> -> vector<2xf16>
+  %initial_triple = vector.load %values[2] : view<9xf16> -> vector<3xf16>
+  %initial_quad = vector.load %values[5] : view<9xf16> -> vector<4xf16>
+  %pair_factor = vector.splat %factor : vector<2xf16>
+  %triple_factor = vector.splat %factor : vector<3xf16>
+  %quad_factor = vector.splat %factor : vector<4xf16>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %pair_result, %triple_result, %quad_result = scf.for %iteration = [%begin to %count step %step](%pair = %initial_pair : vector<2xf16>, %triple = %initial_triple : vector<3xf16>, %quad = %initial_quad : vector<4xf16>) -> (vector<2xf16>, vector<3xf16>, vector<4xf16>) {
+    %next_pair = vector.mulf %pair_factor, %pair : vector<2xf16>
+    %next_triple = vector.mulf %triple, %triple_factor : vector<3xf16>
+    %next_quad = vector.mulf %quad_factor, %quad : vector<4xf16>
+    scf.yield %next_pair, %next_triple, %next_quad : vector<2xf16>, vector<3xf16>, vector<4xf16>
+  }
+  vector.store %pair_result, %results[0] : vector<2xf16>, view<9xf16>
+  vector.store %triple_result, %results[2] : vector<3xf16>, view<9xf16>
+  vector.store %quad_result, %results[5] : vector<4xf16>, view<9xf16>
+  func.return
+}
+
+func.def @vector_scale_f32(%input: buffer, %factor_buffer: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<9xf32>
+  %factors = buffer.view %factor_buffer[%base] : buffer -> view<1xf32>
+  %results = buffer.view %output[%base] : buffer -> view<9xf32>
+  %factor = view.load %factors[0] : view<1xf32> -> f32
+  %replacement = scalar.constant 2.0 : f32
+  view.store %replacement, %factors[0] : f32, view<1xf32>
+  %initial_pair = vector.load %values[0] : view<9xf32> -> vector<2xf32>
+  %initial_triple = vector.load %values[2] : view<9xf32> -> vector<3xf32>
+  %initial_quad = vector.load %values[5] : view<9xf32> -> vector<4xf32>
+  %pair_factor = vector.splat %factor : vector<2xf32>
+  %triple_factor = vector.splat %factor : vector<3xf32>
+  %quad_factor = vector.splat %factor : vector<4xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %pair_result, %triple_result, %quad_result = scf.for %iteration = [%begin to %count step %step](%pair = %initial_pair : vector<2xf32>, %triple = %initial_triple : vector<3xf32>, %quad = %initial_quad : vector<4xf32>) -> (vector<2xf32>, vector<3xf32>, vector<4xf32>) {
+    %next_pair = vector.mulf %pair_factor, %pair : vector<2xf32>
+    %next_triple = vector.mulf %triple, %triple_factor : vector<3xf32>
+    %next_quad = vector.mulf %quad_factor, %quad : vector<4xf32>
+    scf.yield %next_pair, %next_triple, %next_quad : vector<2xf32>, vector<3xf32>, vector<4xf32>
+  }
+  vector.store %pair_result, %results[0] : vector<2xf32>, view<9xf32>
+  vector.store %triple_result, %results[2] : vector<3xf32>, view<9xf32>
+  vector.store %quad_result, %results[5] : vector<4xf32>, view<9xf32>
+  func.return
+}
+
+func.def @vector_scale_f64(%input: buffer, %factor_buffer: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<9xf64>
+  %factors = buffer.view %factor_buffer[%base] : buffer -> view<1xf64>
+  %results = buffer.view %output[%base] : buffer -> view<9xf64>
+  %factor = view.load %factors[0] : view<1xf64> -> f64
+  %replacement = scalar.constant 2.0 : f64
+  view.store %replacement, %factors[0] : f64, view<1xf64>
+  %initial_pair = vector.load %values[0] : view<9xf64> -> vector<2xf64>
+  %initial_triple = vector.load %values[2] : view<9xf64> -> vector<3xf64>
+  %initial_quad = vector.load %values[5] : view<9xf64> -> vector<4xf64>
+  %pair_factor = vector.splat %factor : vector<2xf64>
+  %triple_factor = vector.splat %factor : vector<3xf64>
+  %quad_factor = vector.splat %factor : vector<4xf64>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %pair_result, %triple_result, %quad_result = scf.for %iteration = [%begin to %count step %step](%pair = %initial_pair : vector<2xf64>, %triple = %initial_triple : vector<3xf64>, %quad = %initial_quad : vector<4xf64>) -> (vector<2xf64>, vector<3xf64>, vector<4xf64>) {
+    %next_pair = vector.mulf %pair_factor, %pair : vector<2xf64>
+    %next_triple = vector.mulf %triple, %triple_factor : vector<3xf64>
+    %next_quad = vector.mulf %quad_factor, %quad : vector<4xf64>
+    scf.yield %next_pair, %next_triple, %next_quad : vector<2xf64>, vector<3xf64>, vector<4xf64>
+  }
+  vector.store %pair_result, %results[0] : vector<2xf64>, view<9xf64>
+  vector.store %triple_result, %results[2] : vector<3xf64>, view<9xf64>
+  vector.store %quad_result, %results[5] : vector<4xf64>, view<9xf64>
+  func.return
+}
+
+// The oracle computes one scalar recurrence at a time, independently of vector
+// formation, broadcast selection, and loop-carried vector legalization.
+func.def @scalar_scale_f16(%input: buffer, %factor_buffer: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<9xf16>
+  %factors = buffer.view %factor_buffer[%base] : buffer -> view<1xf16>
+  %results = buffer.view %output[%base] : buffer -> view<9xf16>
+  %factor = view.load %factors[0] : view<1xf16> -> f16
+  %replacement = scalar.constant 2.0 : f16
+  view.store %replacement, %factors[0] : f16, view<1xf16>
+  %begin = index.constant 0 : index
+  %end = index.constant 9 : index
+  %step = index.constant 1 : index
+  scf.for %lane = [%begin to %end step %step] {
+    %initial = view.load %values[%lane] : view<9xf16> -> f16
+    %result = scf.for %iteration = [%begin to %count step %step](%value = %initial : f16) -> (f16) {
+      %next = scalar.mulf %value, %factor : f16
+      scf.yield %next : f16
+    }
+    view.store %result, %results[%lane] : f16, view<9xf16>
+  }
+  func.return
+}
+
+func.def @scalar_scale_f32(%input: buffer, %factor_buffer: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<9xf32>
+  %factors = buffer.view %factor_buffer[%base] : buffer -> view<1xf32>
+  %results = buffer.view %output[%base] : buffer -> view<9xf32>
+  %factor = view.load %factors[0] : view<1xf32> -> f32
+  %replacement = scalar.constant 2.0 : f32
+  view.store %replacement, %factors[0] : f32, view<1xf32>
+  %begin = index.constant 0 : index
+  %end = index.constant 9 : index
+  %step = index.constant 1 : index
+  scf.for %lane = [%begin to %end step %step] {
+    %initial = view.load %values[%lane] : view<9xf32> -> f32
+    %result = scf.for %iteration = [%begin to %count step %step](%value = %initial : f32) -> (f32) {
+      %next = scalar.mulf %value, %factor : f32
+      scf.yield %next : f32
+    }
+    view.store %result, %results[%lane] : f32, view<9xf32>
+  }
+  func.return
+}
+
+func.def @scalar_scale_f64(%input: buffer, %factor_buffer: buffer, %output: buffer, %count: index) {
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<9xf64>
+  %factors = buffer.view %factor_buffer[%base] : buffer -> view<1xf64>
+  %results = buffer.view %output[%base] : buffer -> view<9xf64>
+  %factor = view.load %factors[0] : view<1xf64> -> f64
+  %replacement = scalar.constant 2.0 : f64
+  view.store %replacement, %factors[0] : f64, view<1xf64>
+  %begin = index.constant 0 : index
+  %end = index.constant 9 : index
+  %step = index.constant 1 : index
+  scf.for %lane = [%begin to %end step %step] {
+    %initial = view.load %values[%lane] : view<9xf64> -> f64
+    %result = scf.for %iteration = [%begin to %count step %step](%value = %initial : f64) -> (f64) {
+      %next = scalar.mulf %value, %factor : f64
+      scf.yield %next : f64
+    }
+    view.store %result, %results[%lane] : f64, view<9xf64>
+  }
+  func.return
+}
+
+// Normal finite inputs isolate arithmetic and read preservation from target
+// subnormal modes. Each product is rounded at its authored precision.
+check.scenario @vector_scale_f16_values {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %factor_entropy = check.entropy.fork %entropy name("factor") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %factor_seed = check.entropy.read %factor_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-4.0 to -0.5) : tensor<9xf16>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-4.0 to -0.5) : tensor<9xf16>
+    %factor = check.generate.random.uniform seed(%factor_seed) range(-1.125 to -0.875) : tensor<1xf16>
+    %expected_factor = check.generate.fill value(2.0) : tensor<1xf16>
+    %storage = check.generate.fill value(-123.5) : tensor<13xf16>
+    %output = check.tensor.view %storage offset(4) : tensor<13xf16> -> tensor<9xf16>
+    %prefix = check.tensor.view %storage offset(0) : tensor<13xf16> -> tensor<2xf16>
+    %suffix = check.tensor.view %storage offset(22) : tensor<13xf16> -> tensor<2xf16>
+    %guard = check.generate.fill value(-123.5) : tensor<2xf16>
+    check.compare<@vector_scale_f16, @scalar_scale_f16>(%input, %factor, %output, %trial) : (tensor<9xf16>, tensor<1xf16>, tensor<9xf16>, index) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<9xf16>
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xf16>
+      check.expect.bitwise actual(%factor) expected(%expected_factor) : tensor<1xf16>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<2xf16>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<2xf16>
+    }
+  }
+  check.return
+}
+
+check.scenario @vector_scale_f32_values {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %factor_entropy = check.entropy.fork %entropy name("factor") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %factor_seed = check.entropy.read %factor_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-4.0 to -0.5) : tensor<9xf32>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-4.0 to -0.5) : tensor<9xf32>
+    %factor = check.generate.random.uniform seed(%factor_seed) range(-1.125 to -0.875) : tensor<1xf32>
+    %expected_factor = check.generate.fill value(2.0) : tensor<1xf32>
+    %storage = check.generate.fill value(-123.5) : tensor<13xf32>
+    %output = check.tensor.view %storage offset(8) : tensor<13xf32> -> tensor<9xf32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<13xf32> -> tensor<2xf32>
+    %suffix = check.tensor.view %storage offset(44) : tensor<13xf32> -> tensor<2xf32>
+    %guard = check.generate.fill value(-123.5) : tensor<2xf32>
+    check.compare<@vector_scale_f32, @scalar_scale_f32>(%input, %factor, %output, %trial) : (tensor<9xf32>, tensor<1xf32>, tensor<9xf32>, index) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<9xf32>
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xf32>
+      check.expect.bitwise actual(%factor) expected(%expected_factor) : tensor<1xf32>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<2xf32>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<2xf32>
+    }
+  }
+  check.return
+}
+
+check.scenario @vector_scale_f64_values {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input_entropy = check.entropy.fork %entropy name("input") : check.entropy
+    %factor_entropy = check.entropy.fork %entropy name("factor") : check.entropy
+    %input_seed = check.entropy.read %input_entropy[%trial] : check.entropy -> i64
+    %factor_seed = check.entropy.read %factor_entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%input_seed) range(-4.0 to -0.5) : tensor<9xf64>
+    %expected_input = check.generate.random.uniform seed(%input_seed) range(-4.0 to -0.5) : tensor<9xf64>
+    %factor = check.generate.random.uniform seed(%factor_seed) range(-1.125 to -0.875) : tensor<1xf64>
+    %expected_factor = check.generate.fill value(2.0) : tensor<1xf64>
+    %storage = check.generate.fill value(-123.5) : tensor<13xf64>
+    %output = check.tensor.view %storage offset(16) : tensor<13xf64> -> tensor<9xf64>
+    %prefix = check.tensor.view %storage offset(0) : tensor<13xf64> -> tensor<2xf64>
+    %suffix = check.tensor.view %storage offset(88) : tensor<13xf64> -> tensor<2xf64>
+    %guard = check.generate.fill value(-123.5) : tensor<2xf64>
+    check.compare<@vector_scale_f64, @scalar_scale_f64>(%input, %factor, %output, %trial) : (tensor<9xf64>, tensor<1xf64>, tensor<9xf64>, index) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<9xf64>
+      check.expect.bitwise actual(%input) expected(%expected_input) : tensor<9xf64>
+      check.expect.bitwise actual(%factor) expected(%expected_factor) : tensor<1xf64>
+      check.expect.bitwise actual(%prefix) expected(%guard) : tensor<2xf64>
+      check.expect.bitwise actual(%suffix) expected(%guard) : tensor<2xf64>
+    }
+  }
+  check.return
+}
+
+// BF16 lookup results feed both lane operations and matrix arithmetic.
+// Sign operations preserve arbitrary payloads, including NaNs and subnormals.
+func.def @bfloat_lookup_arithmetic(%input: buffer, %output: buffer) {
+  %source, %destination = buffer.assume.alignment %input, %output {minimum_alignment = 64} : buffer, buffer
+  %origin = index.constant 0 : offset
+  %rhs_offset = index.constant 16 : offset
+  %codes_offset = index.constant 32 : offset
+  %bits_offset = index.constant 48 : offset
+  %acc_offset = index.constant 64 : offset
+  %table_view = buffer.view %source[%origin] : buffer -> view<8xbf16>
+  %rhs_view = buffer.view %source[%rhs_offset] : buffer -> view<8xbf16>
+  %codes_view = buffer.view %source[%codes_offset] : buffer -> view<8xi16>
+  %bits_view = buffer.view %source[%bits_offset] : buffer -> view<8xbf16>
+  %acc_view = buffer.view %source[%acc_offset] : buffer -> view<4xf32>
+  %table = vector.load %table_view[0] : view<8xbf16> -> vector<8xbf16>
+  %rhs = vector.load %rhs_view[0] : view<8xbf16> -> vector<8xbf16>
+  %raw_codes = vector.load %codes_view[0] : view<8xi16> -> vector<8xi16>
+  %code_mask = vector.constant 7 : vector<8xi16>
+  %codes = vector.andi %raw_codes, %code_mask : vector<8xi16>
+  %bits = vector.load %bits_view[0] : view<8xbf16> -> vector<8xbf16>
+  %initial = vector.load %acc_view[0] : view<4xf32> -> vector<4xf32>
+  %decoded = vector.table.lookup %table[%codes] : vector<8xbf16>, vector<8xi16> -> vector<8xbf16>
+  %negative = vector.negf %bits : vector<8xbf16>
+  %absolute = vector.absf %bits : vector<8xbf16>
+  %copied = vector.copysignf %bits, %rhs : vector<8xbf16>
+  %last = vector.extract %table[7] : vector<8xbf16> -> bf16
+  %updated = vector.insert %last into %decoded[5] : bf16, vector<8xbf16>
+  %splat = vector.splat %last : vector<8xbf16>
+  %initial_zero = vector.constant 0.0 : vector<4xf32>
+  %dot_zero = vector.dot2f %decoded, %rhs, %initial_zero : vector<8xbf16>, vector<8xbf16>, vector<4xf32>
+  %dot_initial = vector.dot2f %decoded, %rhs, %initial : vector<8xbf16>, vector<8xbf16>, vector<4xf32>
+  // Volatile initialization keeps the guard writes before the partial stores.
+  // Each 16-byte result leaves 48 bytes of the same register-sized slot intact.
+  %guard_view = buffer.view %destination[%origin] : buffer -> view<128xi32>
+  %guard = vector.constant -1515870811 : vector<16xi32>
+  vector.store<volatile> %guard, %guard_view[0] : vector<16xi32>, view<128xi32>
+  vector.store<volatile> %guard, %guard_view[16] : vector<16xi32>, view<128xi32>
+  vector.store<volatile> %guard, %guard_view[32] : vector<16xi32>, view<128xi32>
+  vector.store<volatile> %guard, %guard_view[48] : vector<16xi32>, view<128xi32>
+  vector.store<volatile> %guard, %guard_view[64] : vector<16xi32>, view<128xi32>
+  vector.store<volatile> %guard, %guard_view[80] : vector<16xi32>, view<128xi32>
+  vector.store<volatile> %guard, %guard_view[96] : vector<16xi32>, view<128xi32>
+  vector.store<volatile> %guard, %guard_view[112] : vector<16xi32>, view<128xi32>
+  %bf16_results = buffer.view %destination[%origin] : buffer -> view<256xbf16>
+  %f32_results = buffer.view %destination[%origin] : buffer -> view<128xf32>
+  vector.store %decoded, %bf16_results[0] : vector<8xbf16>, view<256xbf16>
+  vector.store %negative, %bf16_results[32] : vector<8xbf16>, view<256xbf16>
+  vector.store %absolute, %bf16_results[64] : vector<8xbf16>, view<256xbf16>
+  vector.store %copied, %bf16_results[96] : vector<8xbf16>, view<256xbf16>
+  vector.store %updated, %bf16_results[128] : vector<8xbf16>, view<256xbf16>
+  vector.store %splat, %bf16_results[160] : vector<8xbf16>, view<256xbf16>
+  vector.store %dot_zero, %f32_results[96] : vector<4xf32>, view<128xf32>
+  vector.store %dot_initial, %f32_results[112] : vector<4xf32>, view<128xf32>
+  %m = index.constant 8 : index
+  %n = index.constant 8 : index
+  %k = index.constant 1 : index
+  %lhs_fragment = vector.fragment<lhs> %decoded shape [%m, %k] : vector<8xbf16>
+  %rhs_fragment = vector.fragment<rhs> %rhs shape [%k, %n] : vector<8xbf16>
+  %accumulator = vector.constant 0.0 : vector<64xf32>
+  %acc_fragment = vector.fragment<init> %accumulator shape [%m, %n] : vector<64xf32>
+  %product = vector.mma %lhs_fragment, %rhs_fragment, %acc_fragment : vector<8xbf16>, vector<8xbf16>, vector<64xf32>
+  %product_offset = index.constant 512 : offset
+  %product_view = buffer.view %destination[%product_offset] : buffer -> view<64xf32>
+  vector.store %product, %product_view[0] : vector<64xf32>, view<64xf32>
+  func.return
+}
+
+// Finite quarter-valued operands make products and sums exactly representable.
+// The remaining halfwords retain arbitrary bits except for eight rotated IEEE
+// edge records; these bits participate only in payload-preserving operations.
+global.rodata.def @bfloat_sign_edges = align(2) bytes("00000080807f80ffc17fa5ff01000180")
+
+func.def @generate_bfloat_lookup(%trial: index, %input: buffer) {
+  %record = index.assume %trial [range(%trial, 0, 63)] : index
+  %origin = index.constant 0 : offset
+  %words = buffer.view %input[%origin] : buffer -> view<64xi16>
+  %halves = buffer.view %input[%origin] : buffer -> view<64xbf16>
+  %floats = buffer.view %input[%origin] : buffer -> view<32xf32>
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %c16 = index.constant 16 : index
+  %c24 = index.constant 24 : index
+  %c40 = index.constant 40 : index
+  %mask = scalar.constant 127 : i16
+  %bias = scalar.constant 64 : i16
+  %quarter = scalar.constant 0.25 : f32
+  scf.for %i = [%c0 to %c16 step %c1] {
+    %raw = view.load %words[%i] : view<64xi16> -> i16
+    %bounded = scalar.andi %raw, %mask : i16
+    %signed = scalar.subi %bounded, %bias : i16
+    %wide = scalar.sitofp %signed : i16 to f32
+    %value = scalar.mulf %wide, %quarter : f32
+    %half = scalar.fptrunc %value : f32 to bf16
+    view.store %half, %halves[%i] : bf16, view<64xbf16>
+  }
+  scf.for %i = [%c0 to %c8 step %c1] {
+    %stride = index.mul %i, %c3 : index
+    %sum = index.add %record, %stride : index
+    %bounded = index.rem %sum, %c8 : index
+    %code = index.cast %bounded : index to i16
+    %position = index.add %i, %c16 : index
+    view.store %code, %words[%position] : i16, view<64xi16>
+  }
+  %directed = index.cmp ult, %record, %c8 : index
+  scf.if %directed {
+    %edge_buffer = global.load @bfloat_sign_edges : buffer
+    %edges = buffer.view %edge_buffer[%origin] : buffer -> view<8xi16>
+    scf.for %i = [%c0 to %c8 step %c1] {
+      %sum = index.add %record, %i : index
+      %source = index.rem %sum, %c8 : index
+      %bits = view.load %edges[%source] : view<8xi16> -> i16
+      %position = index.add %i, %c24 : index
+      view.store %bits, %words[%position] : i16, view<64xi16>
+    }
+  }
+  %initial_mask = scalar.constant 511 : i16
+  %initial_bias = scalar.constant 256 : i16
+  %initial_scale = scalar.constant 0.0625 : f32
+  scf.for %i = [%c0 to %c4 step %c1] {
+    %source = index.add %i, %c40 : index
+    %raw = view.load %words[%source] : view<64xi16> -> i16
+    %bounded = scalar.andi %raw, %initial_mask : i16
+    %signed = scalar.subi %bounded, %initial_bias : i16
+    %wide = scalar.sitofp %signed : i16 to f32
+    %value = scalar.mulf %wide, %initial_scale : f32
+    %position = index.add %i, %c16 : index
+    view.store %value, %floats[%position] : f32, view<32xf32>
+  }
+  func.return
+}
+
+// Scalar indexing and raw masks specify lane results independently of vector
+// lookup and sign lowering. Scalar f32 products specify dot and outer products.
+func.def @bfloat_lookup_oracle(%input: buffer, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %words = buffer.view %input[%origin] : buffer -> view<64xi16>
+  %halves = buffer.view %input[%origin] : buffer -> view<64xbf16>
+  %floats = buffer.view %input[%origin] : buffer -> view<32xf32>
+  %guards = buffer.view %output[%origin] : buffer -> view<128xi32>
+  %bits_output = buffer.view %output[%origin] : buffer -> view<384xi16>
+  %float_output = buffer.view %output[%origin] : buffer -> view<192xf32>
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c5 = index.constant 5 : index
+  %c8 = index.constant 8 : index
+  %c16 = index.constant 16 : index
+  %c24 = index.constant 24 : index
+  %c32 = index.constant 32 : index
+  %c64 = index.constant 64 : index
+  %c96 = index.constant 96 : index
+  %c112 = index.constant 112 : index
+  %c128 = index.constant 128 : index
+  %c160 = index.constant 160 : index
+  %guard = scalar.constant -1515870811 : i32
+  %sign = scalar.constant -32768 : i16
+  %magnitude = scalar.constant 32767 : i16
+  %initial_zero = scalar.constant 0.0 : f32
+  %code_mask = scalar.constant 7 : i16
+  %last = view.load %words[7] : view<64xi16> -> i16
+  scf.for %i = [%c0 to %c128 step %c1] {
+    view.store %guard, %guards[%i] : i32, view<128xi32>
+  }
+  scf.for %i = [%c0 to %c8 step %c1] {
+    %code_position = index.add %i, %c16 : index
+    %code = view.load %words[%code_position] : view<64xi16> -> i16
+    %bounded_code = scalar.andi %code, %code_mask : i16
+    %position = index.cast %bounded_code : i16 to index
+    %decoded = view.load %words[%position] : view<64xi16> -> i16
+    %rhs_position = index.add %i, %c8 : index
+    %rhs = view.load %words[%rhs_position] : view<64xi16> -> i16
+    %bits_position = index.add %i, %c24 : index
+    %bits = view.load %words[%bits_position] : view<64xi16> -> i16
+    %negative = scalar.xori %bits, %sign : i16
+    %absolute = scalar.andi %bits, %magnitude : i16
+    %rhs_sign = scalar.andi %rhs, %sign : i16
+    %copied = scalar.ori %absolute, %rhs_sign : i16
+    %replace = index.cmp eq, %i, %c5 : index
+    %updated = scf.select %replace, %last, %decoded : i16
+    %negative_position = index.add %i, %c32 : index
+    %absolute_position = index.add %i, %c64 : index
+    %copied_position = index.add %i, %c96 : index
+    %updated_position = index.add %i, %c128 : index
+    %splat_position = index.add %i, %c160 : index
+    view.store %decoded, %bits_output[%i] : i16, view<384xi16>
+    view.store %negative, %bits_output[%negative_position] : i16, view<384xi16>
+    view.store %absolute, %bits_output[%absolute_position] : i16, view<384xi16>
+    view.store %copied, %bits_output[%copied_position] : i16, view<384xi16>
+    view.store %updated, %bits_output[%updated_position] : i16, view<384xi16>
+    view.store %last, %bits_output[%splat_position] : i16, view<384xi16>
+    %left_half = view.load %halves[%position] : view<64xbf16> -> bf16
+    %left = scalar.extf %left_half : bf16 to f32
+    scf.for %j = [%c0 to %c8 step %c1] {
+      %right_position = index.add %j, %c8 : index
+      %right_half = view.load %halves[%right_position] : view<64xbf16> -> bf16
+      %right = scalar.extf %right_half : bf16 to f32
+      %product = scalar.mulf %left, %right : f32
+      %result = scalar.addf %product, %initial_zero : f32
+      %row = index.mul %i, %c8 : index
+      %element = index.add %row, %j : index
+      %output_position = index.add %element, %c128 : index
+      view.store %result, %float_output[%output_position] : f32, view<192xf32>
+    }
+  }
+  scf.for %i = [%c0 to %c4 step %c1] {
+    %pair = index.mul %i, %c2 : index
+    %dot = scf.for %j = [%c0 to %c2 step %c1](%sum = %initial_zero : f32) -> (f32) {
+      %lane = index.add %pair, %j : index
+      %code_position = index.add %lane, %c16 : index
+      %code = view.load %words[%code_position] : view<64xi16> -> i16
+      %bounded_code = scalar.andi %code, %code_mask : i16
+      %position = index.cast %bounded_code : i16 to index
+      %left_half = view.load %halves[%position] : view<64xbf16> -> bf16
+      %right_position = index.add %lane, %c8 : index
+      %right_half = view.load %halves[%right_position] : view<64xbf16> -> bf16
+      %left = scalar.extf %left_half : bf16 to f32
+      %right = scalar.extf %right_half : bf16 to f32
+      %product = scalar.mulf %left, %right : f32
+      %next = scalar.addf %sum, %product : f32
+      scf.yield %next : f32
+    }
+    %initial_position = index.add %i, %c16 : index
+    %initial = view.load %floats[%initial_position] : view<32xf32> -> f32
+    %accumulated = scalar.addf %dot, %initial : f32
+    %dot_position = index.add %i, %c96 : index
+    %accumulated_position = index.add %i, %c112 : index
+    view.store %dot, %float_output[%dot_position] : f32, view<192xf32>
+    view.store %accumulated, %float_output[%accumulated_position] : f32, view<192xf32>
+  }
+  func.return
+}
+
+check.scenario @bfloat_lookup_arithmetic_values {
+  check.trial[64](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input_storage = check.generate.random.uniform seed(%seed) range(-32768 to 32767) : tensor<128xi16>
+    %input = check.tensor.view %input_storage offset(64) : tensor<128xi16> -> tensor<64xi16>
+    check.generate<@generate_bfloat_lookup>(%trial, %input) : (index, tensor<64xi16>) -> ()
+    %output_storage = check.generate.fill value(-52) : tensor<896xi8>
+    %output = check.tensor.view %output_storage offset(64) : tensor<896xi8> -> tensor<768xi8>
+    check.compare<@bfloat_lookup_arithmetic, @bfloat_lookup_oracle>(%input, %output) : (tensor<64xi16>, tensor<768xi8>) -> () {
+      check.expect.bitwise actual(%input_storage) expected(%input_storage) : tensor<128xi16>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<896xi8>
+    }
+  }
+  check.return
+}

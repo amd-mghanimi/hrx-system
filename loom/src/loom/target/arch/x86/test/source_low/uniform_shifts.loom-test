@@ -1,0 +1,196 @@
+// Truncation retains unrelated upper bits in the GPR32 count carrier. The
+// native uniform shift reads 64 count bits and therefore needs normalization.
+// RUN: emit source-low target=x86:avx2 output=low
+func.def @word_counts(%values: vector<16xi16>, %raw_count: i32) -> (vector<16xi16>, vector<16xi16>, vector<16xi16>) {
+  %narrow = scalar.trunci %raw_count : i32 to i16
+  %count = scalar.assume %narrow [range(%narrow, 0, 15)] : i16
+  %counts = vector.splat %count : vector<16xi16>
+  %left = vector.shli %values, %counts : vector<16xi16>
+  %signed = vector.shrsi %values, %counts : vector<16xi16>
+  %unsigned = vector.shrui %values, %counts : vector<16xi16>
+  func.return %left, %signed, %unsigned : vector<16xi16>, vector<16xi16>, vector<16xi16>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<16xi16>, i32) -> (vector<16xi16>, vector<16xi16>, vector<16xi16>)}) @word_counts(%values: reg<x86.ymm>, %count: reg<x86.gpr32>) -> (reg<x86.ymm>, reg<x86.ymm>, reg<x86.ymm>) asm {
+  %16 = movzx.u16.gpr32 %count
+  %17 = vmovd.xmm.gpr32 %16
+  %left = vpsllw.count.ymm %values, %17
+  %signed = vpsraw.count.ymm %values, %17
+  %unsigned = vpsrlw.count.ymm %values, %17
+  return %left, %signed, %unsigned
+}
+
+// ====
+
+// A GPR32 count needs only VMOVD. An exact vector count needs neither that
+// move nor a broadcast. A genuinely varying count retains its native form.
+// RUN: emit source-low target=x86:avx2 output=low
+func.def @dword_counts(%values: vector<8xi32>, %raw_count: i32, %varying_counts: vector<8xi32>) -> (vector<8xi32>, vector<8xi32>, vector<8xi32>) {
+  %count = scalar.assume %raw_count [range(%raw_count, 0, 31)] : i32
+  %counts = vector.splat %count : vector<8xi32>
+  %fixed_counts = vector.constant 4 : vector<8xi32>
+  %left = vector.shli %values, %counts : vector<8xi32>
+  %signed = vector.shrsi %values, %fixed_counts : vector<8xi32>
+  %unsigned = vector.shrui %values, %varying_counts : vector<8xi32>
+  func.return %left, %signed, %unsigned : vector<8xi32>, vector<8xi32>, vector<8xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<8xi32>, i32, vector<8xi32>) -> (vector<8xi32>, vector<8xi32>, vector<8xi32>)}) @dword_counts(%values: reg<x86.ymm>, %count: reg<x86.gpr32>, %varying_counts: reg<x86.ymm>) -> (reg<x86.ymm>, reg<x86.ymm>, reg<x86.ymm>) asm {
+  %18 = vmovd.xmm.gpr32 %count
+  %left = vpslld.count.ymm %values, %18
+  %signed = vpsrad.ymm %values, 4
+  %unsigned = vpsrlvd.ymm %values, %varying_counts
+  return %left, %signed, %unsigned
+}
+
+// ====
+
+// The I64 origin crosses into XMM with VMOVQ, without truncating its count.
+// RUN: emit source-low target=x86:avx2 output=low
+func.def @qword_counts(%values: vector<2xi64>, %raw_count: i64) -> (vector<2xi64>, vector<2xi64>) {
+  %count = scalar.assume %raw_count [range(%raw_count, 0, 63)] : i64
+  %counts = vector.splat %count : vector<2xi64>
+  %fixed_counts = vector.constant 63 : vector<2xi64>
+  %left = vector.shli %values, %counts : vector<2xi64>
+  %unsigned = vector.shrui %values, %fixed_counts : vector<2xi64>
+  func.return %left, %unsigned : vector<2xi64>, vector<2xi64>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<2xi64>, i64) -> (vector<2xi64>, vector<2xi64>)}) @qword_counts(%values: reg<x86.xmm>, %count: reg<x86.gpr64>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %13 = vmovq.xmm.gpr64 %count
+  %left = vpsllq.count.xmm %values, %13
+  %unsigned = vpsrlq.xmm %values, 63
+  return %left, %unsigned
+}
+
+// ====
+
+// AVX512 retains its direct-GPR broadcast for runtime counts, while constant
+// counts select the immediate family, including arithmetic qword shifts.
+// RUN: emit source-low target=x86:avx512 output=low
+func.def @wide_counts(%values: vector<8xi64>, %raw_count: i64) -> (vector<8xi64>, vector<8xi64>, vector<8xi64>, vector<8xi64>) {
+  %count = scalar.assume %raw_count [range(%raw_count, 0, 63)] : i64
+  %counts = vector.splat %count : vector<8xi64>
+  %fixed_counts = vector.constant 63 : vector<8xi64>
+  %runtime = vector.shrui %values, %counts : vector<8xi64>
+  %left = vector.shli %values, %fixed_counts : vector<8xi64>
+  %signed = vector.shrsi %values, %fixed_counts : vector<8xi64>
+  %unsigned = vector.shrui %values, %fixed_counts : vector<8xi64>
+  func.return %runtime, %left, %signed, %unsigned : vector<8xi64>, vector<8xi64>, vector<8xi64>, vector<8xi64>
+}
+
+// ----
+low.func.def target<x86.avx512.core> abi(object_function) abi_layout({signature = (vector<8xi64>, i64) -> (vector<8xi64>, vector<8xi64>, vector<8xi64>, vector<8xi64>)}) @wide_counts(%values: reg<x86.zmm>, %count: reg<x86.gpr64>) -> (reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>) asm {
+  %counts = vpbroadcastq %count
+  %runtime = vpsrlvq %values, %counts
+  %left = avx512.vpsllq.zmm %values, 63
+  %signed = avx512.vpsraq.zmm %values, 63
+  %unsigned = avx512.vpsrlq.zmm %values, 63
+  return %runtime, %left, %signed, %unsigned
+}
+
+// ====
+
+// Full-profile selection retains compact runtime word shifts at XMM width.
+// RUN: emit source-low target=x86:avx512 output=low
+func.def @small_words(%values: vector<8xi16>, %raw_count: i16) -> (vector<8xi16>, vector<8xi16>) {
+  %count = scalar.assume %raw_count [range(%raw_count, 0, 15)] : i16
+  %counts = vector.splat %count : vector<8xi16>
+  %fixed_counts = vector.constant 4 : vector<8xi16>
+  %runtime = vector.shrui %values, %counts : vector<8xi16>
+  %fixed = vector.shrui %values, %fixed_counts : vector<8xi16>
+  func.return %runtime, %fixed : vector<8xi16>, vector<8xi16>
+}
+
+// ----
+low.func.def target<x86.avx512.core> abi(object_function) abi_layout({signature = (vector<8xi16>, i16) -> (vector<8xi16>, vector<8xi16>)}) @small_words(%values: reg<x86.xmm>, %count: reg<x86.gpr32>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %counts = avx512.vpbroadcastw.xmm %count
+  %runtime = vpsrlvw.xmm %values, %counts
+  %fixed = vpsrlw.xmm %values, 4
+  return %runtime, %fixed
+}
+
+// ====
+
+// AVX512VL supplies the qword arithmetic shift absent from AVX2.
+// RUN: emit source-low target=x86:avx512 output=low
+func.def @small_signed_qwords(%values: vector<4xi64>) -> (vector<4xi64>) {
+  %fixed_counts = vector.constant 63 : vector<4xi64>
+  %result = vector.shrsi %values, %fixed_counts : vector<4xi64>
+  func.return %result : vector<4xi64>
+}
+
+// ----
+low.func.def target<x86.avx512.core> abi(object_function) abi_layout({signature = (vector<4xi64>) -> (vector<4xi64>)}) @small_signed_qwords(%values: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  %result = avx512.vpsraq.ymm %values, 63
+  return %result
+}
+
+// ====
+
+// Uniformity alone cannot select a bounded-count rule.
+// RUN: emit source-low target=x86:avx2 output=low
+func.def @unproven_count(%values: vector<4xi32>, %count: i32) -> (vector<4xi32>) {
+  %counts = vector.splat %count : vector<4xi32>
+  %result = vector.shrui %values, %counts : vector<4xi32>
+  func.return %result : vector<4xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<4xi32>, i32) -> (vector<4xi32>)}) @unproven_count(%values: reg<x86.xmm>, %count: reg<x86.gpr32>) -> (reg<x86.xmm>) asm {
+  %8 = vmovd.xmm.gpr32 %count
+  %counts = avx2.vpbroadcastd.xmm %8
+  %result = vpsrlvd.xmm %values, %counts
+  return %result
+}
+
+// ====
+
+// Host selection uses the feature-aware descriptor view even when no optional
+// packed-dot features are present. Its rule index must stay within AVX2.
+// RUN: emit source-low output=low
+x86.target<avx2> @target {features = []}
+
+func.def target(@target) @host_avx2_counts(%values: vector<8xi32>, %raw_count: i32) -> (vector<8xi32>, vector<8xi32>) {
+  %count = scalar.assume %raw_count [range(%raw_count, 0, 31)] : i32
+  %counts = vector.splat %count : vector<8xi32>
+  %fixed_counts = vector.constant 4 : vector<8xi32>
+  %runtime = vector.shli %values, %counts : vector<8xi32>
+  %fixed = vector.shrsi %values, %fixed_counts : vector<8xi32>
+  func.return %runtime, %fixed : vector<8xi32>, vector<8xi32>
+}
+
+// ----
+low.func.def target<x86.avx2_features.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi32>, i32) -> (vector<8xi32>, vector<8xi32>)}) @host_avx2_counts(%values: reg<x86.ymm>, %count: reg<x86.gpr32>) -> (reg<x86.ymm>, reg<x86.ymm>) asm {
+  %13 = vmovd.xmm.gpr32 %count
+  %runtime = vpslld.count.ymm %values, %13
+  %fixed = vpsrad.ymm %values, 4
+  return %runtime, %fixed
+}
+
+// ====
+
+// AVX512 host selection also admits base AVX2 shift forms through its shared
+// descriptor view, independently of the optional feature bits.
+// RUN: emit source-low output=low
+x86.target<avx512> @target {features = [-avx512vl]}
+
+func.def target(@target) @host_avx512_counts(%values: vector<8xi32>, %raw_count: i32) -> (vector<8xi32>, vector<8xi32>) {
+  %count = scalar.assume %raw_count [range(%raw_count, 0, 31)] : i32
+  %counts = vector.splat %count : vector<8xi32>
+  %fixed_counts = vector.constant 4 : vector<8xi32>
+  %runtime = vector.shli %values, %counts : vector<8xi32>
+  %fixed = vector.shrsi %values, %fixed_counts : vector<8xi32>
+  func.return %runtime, %fixed : vector<8xi32>, vector<8xi32>
+}
+
+// ----
+low.func.def target<x86.avx512_features.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi32>, i32) -> (vector<8xi32>, vector<8xi32>)}) @host_avx512_counts(%values: reg<x86.ymm>, %count: reg<x86.gpr32>) -> (reg<x86.ymm>, reg<x86.ymm>) asm {
+  %13 = vmovd.xmm.gpr32 %count
+  %runtime = vpslld.count.ymm %values, %13
+  %fixed = vpsrad.ymm %values, 4
+  return %runtime, %fixed
+}

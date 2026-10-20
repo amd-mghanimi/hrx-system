@@ -17,7 +17,7 @@
 #include "loom/target/arch/amdgpu/abi/asan.h"
 #include "loom/target/arch/amdgpu/abi/feedback.h"
 #include "loom/target/arch/amdgpu/abi/tsan.h"
-#include "loom/target/emit/native/amdgpu/hsaco.h"
+#include "loom/target/emit/native/amdgpu/hsaco_build.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -37,34 +37,29 @@ typedef enum loom_amdgpu_runtime_global_flag_bits_e {
 // Bitset of loom_amdgpu_runtime_global_flag_bits_t values.
 typedef uint32_t loom_amdgpu_runtime_global_flags_t;
 
-#define LOOM_AMDGPU_RUNTIME_GLOBALS_KNOWN                                            \
-  ((loom_amdgpu_runtime_global_flags_t)(LOOM_AMDGPU_RUNTIME_GLOBAL_FEEDBACK_CONFIG | \
-                                        LOOM_AMDGPU_RUNTIME_GLOBAL_ASAN_CONFIG |     \
-                                        LOOM_AMDGPU_RUNTIME_GLOBAL_TSAN_CONFIG))
-
 enum {
   // Maximum number of symbols produced by the current runtime-global bitset.
-  LOOM_AMDGPU_RUNTIME_GLOBAL_SYMBOL_CAPACITY = 3u,
+  LOOM_AMDGPU_RUNTIME_GLOBAL_SYMBOL_CAPACITY = 4u,
   // Writable configuration globals use pointer-granularity alignment.
   LOOM_AMDGPU_RUNTIME_GLOBAL_CONFIG_ALIGNMENT = 8u,
   // Byte length of the AMDGPU HAL feedback-channel configuration global.
   LOOM_AMDGPU_RUNTIME_GLOBAL_FEEDBACK_CONFIG_BYTE_LENGTH = 64u,
   // Byte length of the AMDGPU HAL ASAN configuration global.
   LOOM_AMDGPU_RUNTIME_GLOBAL_ASAN_CONFIG_BYTE_LENGTH = 96u,
+  // Byte length of the ASAN global-layout marker object.
+  LOOM_AMDGPU_RUNTIME_GLOBAL_ASAN_LAYOUT_MARKER_BYTE_LENGTH = 1u,
   // Byte length of the AMDGPU HAL TSAN configuration global.
-  LOOM_AMDGPU_RUNTIME_GLOBAL_TSAN_CONFIG_BYTE_LENGTH = 96u,
+  LOOM_AMDGPU_RUNTIME_GLOBAL_TSAN_CONFIG_BYTE_LENGTH = 32u,
 };
 
 #define LOOM_AMDGPU_RUNTIME_GLOBAL_FEEDBACK_CONFIG_NAME \
   IREE_SVL(LOOM_AMDGPU_FEEDBACK_CONFIG_GLOBAL_NAME)
 #define LOOM_AMDGPU_RUNTIME_GLOBAL_ASAN_CONFIG_NAME \
   IREE_SVL(LOOM_AMDGPU_ASAN_CONFIG_GLOBAL_NAME)
+#define LOOM_AMDGPU_RUNTIME_GLOBAL_ASAN_LAYOUT_MARKER_NAME \
+  IREE_SVL(LOOM_AMDGPU_ASAN_GLOBAL_LAYOUT_V0_MARKER_NAME)
 #define LOOM_AMDGPU_RUNTIME_GLOBAL_TSAN_CONFIG_NAME \
   IREE_SVL(LOOM_AMDGPU_TSAN_CONFIG_GLOBAL_NAME)
-
-// Validates that all runtime-global option bits are understood.
-iree_status_t loom_amdgpu_runtime_global_flags_validate(
-    loom_amdgpu_runtime_global_flags_t flags);
 
 // Returns the number of HSACO data symbols required for |flags|.
 iree_host_size_t loom_amdgpu_runtime_global_count(

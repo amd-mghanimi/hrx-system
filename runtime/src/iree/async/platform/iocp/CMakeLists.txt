@@ -104,6 +104,21 @@ iree_cc_test(
     iree::async
     iree::testing::gtest
     iree::testing::gtest_main
+    iree::testing::temp_file
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Windows")
+iree_cc_test(
+  NAME
+    proactor_cancel_test
+  SRCS
+    "proactor_cancel_test.cc"
+  DEPS
+    ::iocp
+    iree::async
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 endif()
 

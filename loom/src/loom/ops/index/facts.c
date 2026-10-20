@@ -8,13 +8,15 @@
 
 #include "loom/ir/facts.h"
 
-#include "iree/base/internal/math.h"
 #include "loom/ir/attribute.h"
 #include "loom/ir/module.h"
 #include "loom/ir/scalar_type.h"
 #include "loom/ops/index/carrier.h"
+#include "loom/ops/index/cast.h"
 #include "loom/ops/index/compare.h"
 #include "loom/ops/index/ops.h"
+#include "loom/util/fact_relation.h"
+#include "loom/util/fact_table.h"
 #include "loom/util/predicate_facts.h"
 
 #define LOOM_INDEX_BINARY_FACTS(name, transfer_fn)                       \
@@ -47,26 +49,29 @@ static bool loom_index_cast_scalar_type(const loom_module_t* module,
   return true;
 }
 
-static bool loom_index_cast_to_offset_zero_extends_source(
-    loom_scalar_type_t input_scalar_type, loom_scalar_type_t result_scalar_type,
-    int32_t input_bitwidth) {
-  return result_scalar_type == LOOM_SCALAR_TYPE_OFFSET &&
-         loom_scalar_type_is_integer(input_scalar_type) && input_bitwidth < 63;
-}
+static void loom_index_wrap_offset_result_facts(
+    const loom_fact_context_t* context, const loom_module_t* module,
+    const loom_op_t* op, loom_value_facts_t* facts) {
+  int32_t bit_count =
+      loom_index_target_carrier_bitwidth(context, LOOM_SCALAR_TYPE_OFFSET);
+  if (bit_count == 0) {
+    bit_count = 64;
+  }
+  // Most address arithmetic remains inside every possible target carrier.
+  // Prove that before loading the result's segmented type record; only a
+  // mathematical result that may wrap needs to distinguish index from offset.
+  if (bit_count > 0 &&
+      loom_value_facts_unsigned_wrap_is_identity(*facts, (uint8_t)bit_count)) {
+    return;
+  }
 
-static loom_value_facts_t loom_index_cast_zero_extend_to_offset_facts(
-    loom_value_facts_t facts, int32_t input_bitwidth) {
-  const int64_t unsigned_extent = INT64_C(1) << input_bitwidth;
-  const int64_t unsigned_max = unsigned_extent - 1;
-  if (facts.range_lo >= 0) {
-    return loom_value_facts_clamp_domain(facts, 0, unsigned_max);
+  const loom_type_t result_type =
+      loom_module_value_type(module, loom_op_const_results(op)[0]);
+  if (loom_type_element_type(result_type) != LOOM_SCALAR_TYPE_OFFSET) {
+    return;
   }
-  if (facts.range_hi < 0) {
-    return loom_value_facts_make(
-        facts.range_lo + unsigned_extent, facts.range_hi + unsigned_extent,
-        iree_math_gcd_i64(facts.known_divisor, unsigned_extent));
-  }
-  return loom_value_facts_make(0, unsigned_max, 1);
+
+  *facts = loom_index_wrap_offset_facts(context, *facts);
 }
 
 iree_status_t loom_index_cast_facts(loom_fact_context_t* context,
@@ -84,38 +89,8 @@ iree_status_t loom_index_cast_facts(loom_fact_context_t* context,
     return iree_ok_status();
   }
 
-  int64_t input_lo = 0;
-  int64_t input_hi = 0;
-  int64_t result_lo = 0;
-  int64_t result_hi = 0;
-  if (!loom_value_facts_scalar_type_domain(input_scalar_type, &input_lo,
-                                           &input_hi) ||
-      !loom_value_facts_scalar_type_domain(result_scalar_type, &result_lo,
-                                           &result_hi)) {
-    result_facts[0] = loom_value_facts_unknown();
-    return iree_ok_status();
-  }
-
-  int32_t input_bitwidth = loom_scalar_type_bitwidth(input_scalar_type);
-  loom_value_facts_t facts =
-      loom_value_facts_clamp_domain(operand_facts[0], input_lo, input_hi);
-
-  if (loom_index_cast_to_offset_zero_extends_source(
-          input_scalar_type, result_scalar_type, input_bitwidth)) {
-    result_facts[0] =
-        loom_index_cast_zero_extend_to_offset_facts(facts, input_bitwidth);
-    return iree_ok_status();
-  }
-
-  if (facts.range_lo >= result_lo && facts.range_hi <= result_hi) {
-    result_facts[0] = facts;
-    return iree_ok_status();
-  }
-
-  // Truncation can wrap, and a signed-to-offset cast requires an input proof.
-  // Intersecting an unproven input with the result domain could manufacture an
-  // exact value and let folding erase the cast before legality checks it.
-  result_facts[0] = loom_value_facts_make(result_lo, result_hi, 1);
+  result_facts[0] = loom_index_cast_transfer_facts(
+      input_scalar_type, result_scalar_type, operand_facts[0]);
   return iree_ok_status();
 }
 
@@ -141,101 +116,22 @@ iree_status_t loom_index_assume_facts(loom_fact_context_t* context,
       result_facts);
 }
 
-LOOM_INDEX_BINARY_FACTS(loom_index_add_facts, loom_value_facts_addi)
-
-typedef enum loom_index_assumed_order_flag_bits_e {
-  LOOM_INDEX_ASSUMED_ORDER_NONE = 0,
-  LOOM_INDEX_ASSUMED_ORDER_LESS_OR_EQUAL = 1u << 0,
-  LOOM_INDEX_ASSUMED_ORDER_LESS = 1u << 1,
-  LOOM_INDEX_ASSUMED_ORDER_GREATER_OR_EQUAL = 1u << 2,
-  LOOM_INDEX_ASSUMED_ORDER_GREATER = 1u << 3,
-} loom_index_assumed_order_flag_bits_t;
-
-typedef uint32_t loom_index_assumed_order_flags_t;
-
-static bool loom_index_assume_source_for_result(const loom_module_t* module,
-                                                loom_value_id_t value_id,
-                                                const loom_op_t** out_assume_op,
-                                                loom_value_id_t* out_source) {
-  const loom_value_t* value = loom_module_value(module, value_id);
-  if (loom_value_is_block_arg(value)) {
-    return false;
-  }
-  const loom_op_t* defining_op = loom_value_def_op(value);
-  if (!defining_op || !loom_index_assume_isa(defining_op)) {
-    return false;
-  }
-
-  loom_value_slice_t sources = loom_index_assume_values(defining_op);
-  uint16_t result_index = loom_value_def_index(value);
-  if (result_index >= sources.count) {
-    return false;
-  }
-  *out_assume_op = defining_op;
-  *out_source = sources.values[result_index];
-  return true;
+iree_status_t loom_index_constexpr_facts(
+    loom_fact_context_t* context, const loom_module_t* module,
+    const loom_op_t* op, const loom_value_facts_t* operand_facts,
+    loom_value_facts_t* result_facts) {
+  result_facts[0] = operand_facts[0];
+  return iree_ok_status();
 }
 
-static loom_value_id_t loom_index_strip_assume_chain(
-    const loom_module_t* module, loom_value_id_t value_id) {
-  const loom_op_t* assume_op = NULL;
-  loom_value_id_t source = LOOM_VALUE_ID_INVALID;
-  while (loom_index_assume_source_for_result(module, value_id, &assume_op,
-                                             &source)) {
-    value_id = source;
-  }
-  return value_id;
-}
-
-static loom_index_assumed_order_flags_t loom_index_assumed_order(
-    const loom_module_t* module, loom_value_id_t value_id,
-    loom_value_id_t other_value_id) {
-  loom_index_assumed_order_flags_t flags = LOOM_INDEX_ASSUMED_ORDER_NONE;
-  const loom_value_id_t other_source =
-      loom_index_strip_assume_chain(module, other_value_id);
-  const loom_op_t* assume_op = NULL;
-  loom_value_id_t source = LOOM_VALUE_ID_INVALID;
-  while (loom_index_assume_source_for_result(module, value_id, &assume_op,
-                                             &source)) {
-    loom_attribute_t predicates_attr = loom_index_assume_predicates(assume_op);
-    for (uint16_t i = 0; i < predicates_attr.count; ++i) {
-      const loom_predicate_t* predicate = &predicates_attr.predicate_list[i];
-      if (predicate->arg_count != 2 ||
-          predicate->arg_tags[0] != LOOM_PRED_ARG_VALUE ||
-          predicate->arg_tags[1] != LOOM_PRED_ARG_VALUE ||
-          loom_index_strip_assume_chain(module,
-                                        (loom_value_id_t)predicate->args[0]) !=
-              loom_index_strip_assume_chain(module, source) ||
-          loom_index_strip_assume_chain(
-              module, (loom_value_id_t)predicate->args[1]) != other_source) {
-        continue;
-      }
-      switch ((loom_predicate_kind_t)predicate->kind) {
-        case LOOM_PREDICATE_EQ:
-          flags |= LOOM_INDEX_ASSUMED_ORDER_LESS_OR_EQUAL |
-                   LOOM_INDEX_ASSUMED_ORDER_GREATER_OR_EQUAL;
-          break;
-        case LOOM_PREDICATE_LT:
-          flags |= LOOM_INDEX_ASSUMED_ORDER_LESS |
-                   LOOM_INDEX_ASSUMED_ORDER_LESS_OR_EQUAL;
-          break;
-        case LOOM_PREDICATE_LE:
-          flags |= LOOM_INDEX_ASSUMED_ORDER_LESS_OR_EQUAL;
-          break;
-        case LOOM_PREDICATE_GT:
-          flags |= LOOM_INDEX_ASSUMED_ORDER_GREATER |
-                   LOOM_INDEX_ASSUMED_ORDER_GREATER_OR_EQUAL;
-          break;
-        case LOOM_PREDICATE_GE:
-          flags |= LOOM_INDEX_ASSUMED_ORDER_GREATER_OR_EQUAL;
-          break;
-        default:
-          break;
-      }
-    }
-    value_id = source;
-  }
-  return flags;
+iree_status_t loom_index_add_facts(loom_fact_context_t* context,
+                                   const loom_module_t* module,
+                                   const loom_op_t* op,
+                                   const loom_value_facts_t* operand_facts,
+                                   loom_value_facts_t* result_facts) {
+  loom_value_facts_addi(&operand_facts[0], &operand_facts[1], &result_facts[0]);
+  loom_index_wrap_offset_result_facts(context, module, op, &result_facts[0]);
+  return iree_ok_status();
 }
 
 iree_status_t loom_index_sub_facts(loom_fact_context_t* context,
@@ -247,62 +143,107 @@ iree_status_t loom_index_sub_facts(loom_fact_context_t* context,
 
   loom_value_id_t lhs = loom_index_sub_lhs(op);
   loom_value_id_t rhs = loom_index_sub_rhs(op);
-  loom_index_assumed_order_flags_t lhs_order =
-      loom_index_assumed_order(module, lhs, rhs);
-  loom_index_assumed_order_flags_t rhs_order =
-      loom_index_assumed_order(module, rhs, lhs);
+  const loom_integer_order_outcome_bits_t order =
+      loom_value_fact_table_query_signed_integer_order(context->table, lhs,
+                                                       rhs);
   // Operand order describes the mathematical difference. Its sign survives
   // only when that ordered half of the difference cannot wrap the fact carrier.
   // The opposite endpoint may overflow: the relation excludes that half.
   int64_t difference_bound = 0;
   if (iree_checked_sub_i64(operand_facts[0].range_hi, operand_facts[1].range_lo,
                            &difference_bound)) {
-    if (iree_any_bit_set(lhs_order, LOOM_INDEX_ASSUMED_ORDER_GREATER) ||
-        iree_any_bit_set(rhs_order, LOOM_INDEX_ASSUMED_ORDER_LESS)) {
+    if ((order & (LOOM_INTEGER_ORDER_OUTCOME_BIT_LESS |
+                  LOOM_INTEGER_ORDER_OUTCOME_BIT_EQUAL)) == 0) {
       result_facts[0].range_lo = iree_max(result_facts[0].range_lo, INT64_C(1));
-    } else if (iree_any_bit_set(lhs_order,
-                                LOOM_INDEX_ASSUMED_ORDER_GREATER_OR_EQUAL) ||
-               iree_any_bit_set(rhs_order,
-                                LOOM_INDEX_ASSUMED_ORDER_LESS_OR_EQUAL)) {
+    } else if ((order & LOOM_INTEGER_ORDER_OUTCOME_BIT_LESS) == 0) {
       result_facts[0].range_lo = iree_max(result_facts[0].range_lo, INT64_C(0));
     }
   }
   if (iree_checked_sub_i64(operand_facts[0].range_lo, operand_facts[1].range_hi,
                            &difference_bound)) {
-    if (iree_any_bit_set(lhs_order, LOOM_INDEX_ASSUMED_ORDER_LESS) ||
-        iree_any_bit_set(rhs_order, LOOM_INDEX_ASSUMED_ORDER_GREATER)) {
+    if ((order & (LOOM_INTEGER_ORDER_OUTCOME_BIT_EQUAL |
+                  LOOM_INTEGER_ORDER_OUTCOME_BIT_GREATER)) == 0) {
       result_facts[0].range_hi =
           iree_min(result_facts[0].range_hi, INT64_C(-1));
-    } else if (iree_any_bit_set(lhs_order,
-                                LOOM_INDEX_ASSUMED_ORDER_LESS_OR_EQUAL) ||
-               iree_any_bit_set(rhs_order,
-                                LOOM_INDEX_ASSUMED_ORDER_GREATER_OR_EQUAL)) {
+    } else if ((order & LOOM_INTEGER_ORDER_OUTCOME_BIT_GREATER) == 0) {
       result_facts[0].range_hi = iree_min(result_facts[0].range_hi, INT64_C(0));
     }
   }
   loom_value_facts_recompute_flags(&result_facts[0]);
+  loom_index_wrap_offset_result_facts(context, module, op, &result_facts[0]);
   return iree_ok_status();
 }
 
 LOOM_INDEX_BINARY_FACTS(loom_index_mul_facts, loom_value_facts_muli)
-LOOM_INDEX_BINARY_FACTS(loom_index_scale_facts, loom_value_facts_muli)
-LOOM_INDEX_BINARY_FACTS(loom_index_div_facts, loom_value_facts_divui)
+iree_status_t loom_index_scale_facts(loom_fact_context_t* context,
+                                     const loom_module_t* module,
+                                     const loom_op_t* op,
+                                     const loom_value_facts_t* operand_facts,
+                                     loom_value_facts_t* result_facts) {
+  loom_value_facts_muli(&operand_facts[0], &operand_facts[1], &result_facts[0]);
+  loom_index_wrap_offset_result_facts(context, module, op, &result_facts[0]);
+  return iree_ok_status();
+}
+
+static void loom_index_div_result_facts(const loom_value_facts_t* operand_facts,
+                                        loom_value_facts_t* result_facts) {
+  if (!loom_value_facts_is_positive(operand_facts[1])) {
+    *result_facts = loom_value_facts_unknown();
+    loom_value_facts_propagate_binary_distribution(
+        operand_facts[0], operand_facts[1], result_facts);
+    return;
+  }
+  loom_value_facts_divui(&operand_facts[0], &operand_facts[1], 64,
+                         result_facts);
+  // The raw unsigned transfer establishes divisibility independently of the
+  // range. Keep that fact, but do not expose a raw-bit range for an index whose
+  // required nonnegative logical-coordinate domain has not been proven.
+  if (!loom_value_facts_is_non_negative(operand_facts[0])) {
+    const int64_t divisor = result_facts->known_divisor;
+    *result_facts = loom_value_facts_make(INT64_MIN, INT64_MAX, divisor);
+    loom_value_facts_propagate_binary_distribution(
+        operand_facts[0], operand_facts[1], result_facts);
+  }
+}
+
+iree_status_t loom_index_div_facts(loom_fact_context_t* context,
+                                   const loom_module_t* module,
+                                   const loom_op_t* op,
+                                   const loom_value_facts_t* operand_facts,
+                                   loom_value_facts_t* result_facts) {
+  loom_index_div_result_facts(operand_facts, &result_facts[0]);
+  return iree_ok_status();
+}
+
+static void loom_index_rem_result_facts(const loom_value_facts_t* operand_facts,
+                                        loom_value_facts_t* result_facts) {
+  if (!loom_value_facts_is_non_negative(operand_facts[0]) ||
+      !loom_value_facts_is_positive(operand_facts[1])) {
+    *result_facts = loom_value_facts_unknown();
+    loom_value_facts_propagate_binary_distribution(
+        operand_facts[0], operand_facts[1], result_facts);
+    return;
+  }
+  loom_value_facts_remui(&operand_facts[0], &operand_facts[1], 64,
+                         result_facts);
+}
 
 iree_status_t loom_index_rem_facts(loom_fact_context_t* context,
                                    const loom_module_t* module,
                                    const loom_op_t* op,
                                    const loom_value_facts_t* operand_facts,
                                    loom_value_facts_t* result_facts) {
-  if (!loom_value_facts_is_float(operand_facts[0]) &&
-      !loom_value_facts_is_float(operand_facts[1]) &&
-      loom_value_facts_is_exact(operand_facts[0]) &&
-      operand_facts[0].range_lo == 0 &&
-      loom_value_facts_is_positive(operand_facts[1])) {
-    result_facts[0] = loom_value_facts_exact_i64(0);
-    return iree_ok_status();
-  }
-  loom_value_facts_remui(&operand_facts[0], &operand_facts[1],
-                         &result_facts[0]);
+  loom_index_rem_result_facts(operand_facts, &result_facts[0]);
+  return iree_ok_status();
+}
+
+iree_status_t loom_index_divrem_facts(loom_fact_context_t* context,
+                                      const loom_module_t* module,
+                                      const loom_op_t* op,
+                                      const loom_value_facts_t* operand_facts,
+                                      loom_value_facts_t* result_facts) {
+  loom_index_div_result_facts(operand_facts, &result_facts[0]);
+  loom_index_rem_result_facts(operand_facts, &result_facts[1]);
   return iree_ok_status();
 }
 
@@ -389,31 +330,15 @@ iree_status_t loom_index_shrui_facts(loom_fact_context_t* context,
 static iree_status_t loom_index_rotate_facts(
     const loom_fact_context_t* context, const loom_value_facts_t* operand_facts,
     bool rotate_left, loom_value_facts_t* result_facts) {
-  int64_t value = 0;
-  int64_t amount = 0;
   int32_t bitwidth =
       loom_index_target_carrier_bitwidth(context, LOOM_SCALAR_TYPE_INDEX);
-  if (!loom_value_facts_as_exact_i64(operand_facts[0], &value) ||
-      !loom_value_facts_as_exact_i64(operand_facts[1], &amount) ||
-      bitwidth <= 0 || bitwidth > 64 || amount < 0 || amount >= bitwidth) {
-    result_facts[0] = loom_value_facts_unknown();
-    return iree_ok_status();
+  if (rotate_left) {
+    loom_value_facts_rotli(&operand_facts[0], &operand_facts[1], bitwidth,
+                           &result_facts[0]);
+  } else {
+    loom_value_facts_rotri(&operand_facts[0], &operand_facts[1], bitwidth,
+                           &result_facts[0]);
   }
-  uint64_t mask = bitwidth == 64 ? UINT64_MAX : ((UINT64_C(1) << bitwidth) - 1);
-  uint64_t raw_value = (uint64_t)value & mask;
-  uint32_t shift = (uint32_t)amount;
-  if (shift == 0) {
-    result_facts[0] =
-        loom_value_facts_make_signed_raw_bits(raw_value, bitwidth);
-    return iree_ok_status();
-  }
-  uint64_t rotated =
-      rotate_left
-          ? ((raw_value << shift) | (raw_value >> ((uint32_t)bitwidth - shift)))
-          : ((raw_value >> shift) |
-             (raw_value << ((uint32_t)bitwidth - shift)));
-  result_facts[0] =
-      loom_value_facts_make_signed_raw_bits(rotated & mask, bitwidth);
   return iree_ok_status();
 }
 
@@ -483,10 +408,14 @@ iree_status_t loom_index_cmp_facts(loom_fact_context_t* context,
                                    const loom_value_facts_t* operand_facts,
                                    loom_value_facts_t* result_facts) {
   if (op->operand_count >= 2 && op->attribute_count >= 1) {
+    const loom_value_id_t lhs_identity = loom_value_fact_table_query_identity(
+        context->table, loom_index_cmp_lhs(op));
+    const loom_value_id_t rhs_identity = loom_value_fact_table_query_identity(
+        context->table, loom_index_cmp_rhs(op));
     bool result = false;
     uint8_t predicate = loom_index_cmp_predicate(op);
     loom_scalar_type_t operand_scalar_type = LOOM_SCALAR_TYPE_NONE;
-    if ((loom_index_cmp_lhs(op) == loom_index_cmp_rhs(op) &&
+    if ((lhs_identity == rhs_identity &&
          loom_index_cmp_same_value_result(predicate, &result)) ||
         (loom_index_cast_scalar_type(module, loom_index_cmp_lhs(op),
                                      &operand_scalar_type) &&

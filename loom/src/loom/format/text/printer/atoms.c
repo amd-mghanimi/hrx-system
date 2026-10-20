@@ -507,11 +507,15 @@ static iree_status_t loom_print_descriptor_backed_type(
             false));
         break;
       }
-      case LOOM_TYPE_FMT_OPTIONAL:
-        if (loom_attr_is_absent(parameters[element->field_index])) {
-          i = (uint16_t)(i + (element->data >> 8));
+      case LOOM_TYPE_FMT_OPTIONAL: {
+        const bool present =
+            !loom_attr_is_absent(parameters[element->field_index]);
+        if (present == LOOM_TYPE_FORMAT_OPTIONAL_IS_INVERTED(element->data)) {
+          i = (uint16_t)(i +
+                         LOOM_TYPE_FORMAT_OPTIONAL_SKIP_COUNT(element->data));
         }
         break;
+      }
       case LOOM_TYPE_FMT_GLUE:
         loom_print_set_glue(&parameter_context);
         break;
@@ -631,10 +635,17 @@ static iree_status_t loom_text_print_type_impl(
       return loom_print_descriptor_backed_type(type, module, stream, ctx);
     case LOOM_TYPE_BUFFER:
       return loom_output_stream_write_cstring(stream, "buffer");
-    case LOOM_TYPE_POOL: {
+    case LOOM_TYPE_POOL:
+      return loom_output_stream_write_cstring(stream, "pool");
+    case LOOM_TYPE_GROUP: {
       IREE_RETURN_IF_ERROR(
           loom_print_compact_shape_prefix(stream, loom_type_kind(type)));
-      IREE_RETURN_IF_ERROR(loom_print_dim(stream, type, 0, module, ctx));
+      for (uint8_t i = 0; i < loom_type_rank(type); ++i) {
+        if (i > 0) {
+          IREE_RETURN_IF_ERROR(loom_output_stream_write_cstring(stream, "x"));
+        }
+        IREE_RETURN_IF_ERROR(loom_print_dim(stream, type, i, module, ctx));
+      }
       return loom_output_stream_write_char(stream, '>');
     }
     case LOOM_TYPE_FUNCTION: {
@@ -1056,6 +1067,29 @@ static iree_status_t loom_print_attr_impl(
         return loom_output_stream_write(stream, attr_string);
       }
       return loom_print_string_literal(stream, attr_string);
+    }
+    case LOOM_ATTR_STRING_ARRAY: {
+      if (attr->count > 0 && !attr->string_ids) {
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "STRING_ARRAY attr has count %u but NULL values", attr->count);
+      }
+      IREE_RETURN_IF_ERROR(loom_output_stream_write_char(stream, '['));
+      for (uint16_t i = 0; i < attr->count; ++i) {
+        if (i > 0) {
+          IREE_RETURN_IF_ERROR(loom_output_stream_write_cstring(stream, ", "));
+        }
+        if (!module || attr->string_ids[i] >= module->strings.count) {
+          return iree_make_status(
+              IREE_STATUS_INVALID_ARGUMENT,
+              "STRING_ARRAY attr element %u has invalid string id %u",
+              (unsigned)i, (unsigned)attr->string_ids[i]);
+        }
+        IREE_RETURN_IF_ERROR(loom_print_string_literal(
+            stream,
+            loom_string_table_get(&module->strings, attr->string_ids[i])));
+      }
+      return loom_output_stream_write_char(stream, ']');
     }
     case LOOM_ATTR_BOOL:
       return loom_output_stream_write_cstring(stream,

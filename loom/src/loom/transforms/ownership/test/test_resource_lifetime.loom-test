@@ -1,15 +1,15 @@
 // RUN: pass test.resource-lifetime,ownership-lifetime
 
 func.def @materializes_linear_release(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  test.resource.borrow %resource : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  test.resource.borrow %resource : pool
   func.return
 }
 // ----
 func.def @materializes_linear_release(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  test.resource.borrow %resource : pool<16>
-  test.resource.release %resource : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  test.resource.borrow %resource : pool
+  test.resource.release %resource : pool
   func.return
 }
 
@@ -17,14 +17,14 @@ func.def @materializes_linear_release(%size: index) {
 
 // RUN: pass test.resource-lifetime,ownership-lifetime
 
-func.def @preserves_owned_return(%size: index) -> (pool<16>) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  func.return %resource : pool<16>
+func.def @preserves_owned_return(%size: index) -> (pool) {
+  %resource = test.resource.alloc %size : index -> pool
+  func.return %resource : pool
 }
 // ----
-func.def @preserves_owned_return(%size: index) -> (pool<16>) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  func.return %resource : pool<16>
+func.def @preserves_owned_return(%size: index) -> (pool) {
+  %resource = test.resource.alloc %size : index -> pool
+  func.return %resource : pool
 }
 
 // ====
@@ -32,27 +32,27 @@ func.def @preserves_owned_return(%size: index) -> (pool<16>) {
 // RUN: pass test.resource-lifetime,ownership-lifetime
 
 func.def @materializes_conditional_dead_edge(%cond: i1, %size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
+  %resource = test.resource.alloc %size : index -> pool
   cfg.cond_br %cond, ^use, ^done
 ^use:
-  test.resource.borrow %resource : pool<16>
-  test.resource.release %resource : pool<16>
+  test.resource.borrow %resource : pool
+  test.resource.release %resource : pool
   cfg.br ^done
 ^done:
   func.return
 }
 // ----
 func.def @materializes_conditional_dead_edge(%cond: i1, %size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
+  %resource = test.resource.alloc %size : index -> pool
   cfg.cond_br %cond, ^use, ^_bb3
 ^use:
-  test.resource.borrow %resource : pool<16>
-  test.resource.release %resource : pool<16>
+  test.resource.borrow %resource : pool
+  test.resource.release %resource : pool
   cfg.br ^done
 ^done:
   func.return
 ^_bb3:
-  test.resource.release %resource : pool<16>
+  test.resource.release %resource : pool
   cfg.br ^done
 }
 
@@ -61,34 +61,34 @@ func.def @materializes_conditional_dead_edge(%cond: i1, %size: index) {
 // RUN: pass test.resource-lifetime,ownership-lifetime
 
 func.def @materializes_multiple_releases_on_split_edge(%cond: i1, %size: index) {
-  %left_resource = test.resource.alloc %size : index -> pool<16>
-  %right_resource = test.resource.alloc %size : index -> pool<16>
+  %left_resource = test.resource.alloc %size : index -> pool
+  %right_resource = test.resource.alloc %size : index -> pool
   cfg.cond_br %cond, ^use, ^done
 ^use:
-  test.resource.borrow %left_resource : pool<16>
-  test.resource.release %left_resource : pool<16>
-  test.resource.borrow %right_resource : pool<16>
-  test.resource.release %right_resource : pool<16>
+  test.resource.borrow %left_resource : pool
+  test.resource.release %left_resource : pool
+  test.resource.borrow %right_resource : pool
+  test.resource.release %right_resource : pool
   cfg.br ^done
 ^done:
   func.return
 }
 // ----
 func.def @materializes_multiple_releases_on_split_edge(%cond: i1, %size: index) {
-  %left_resource = test.resource.alloc %size : index -> pool<16>
-  %right_resource = test.resource.alloc %size : index -> pool<16>
+  %left_resource = test.resource.alloc %size : index -> pool
+  %right_resource = test.resource.alloc %size : index -> pool
   cfg.cond_br %cond, ^use, ^_bb3
 ^use:
-  test.resource.borrow %left_resource : pool<16>
-  test.resource.release %left_resource : pool<16>
-  test.resource.borrow %right_resource : pool<16>
-  test.resource.release %right_resource : pool<16>
+  test.resource.borrow %left_resource : pool
+  test.resource.release %left_resource : pool
+  test.resource.borrow %right_resource : pool
+  test.resource.release %right_resource : pool
   cfg.br ^done
 ^done:
   func.return
 ^_bb3:
-  test.resource.release %left_resource : pool<16>
-  test.resource.release %right_resource : pool<16>
+  test.resource.release %left_resource : pool
+  test.resource.release %right_resource : pool
   cfg.br ^done
 }
 
@@ -97,16 +97,78 @@ func.def @materializes_multiple_releases_on_split_edge(%cond: i1, %size: index) 
 // RUN: pass test.resource-lifetime,ownership-lifetime
 
 func.def @materializes_dead_branch_payload(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  cfg.br ^join(%resource: pool<16>)
-^join(%unused: pool<16>):
+  %resource = test.resource.alloc %size : index -> pool
+  cfg.br ^join(%resource: pool)
+^join(%unused: pool):
   func.return
 }
 // ----
 func.def @materializes_dead_branch_payload(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  cfg.br ^join(%resource: pool<16>)
-^join(%unused: pool<16>):
-  test.resource.release %unused : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  cfg.br ^join(%resource: pool)
+^join(%unused: pool):
+  test.resource.release %unused : pool
+  func.return
+}
+
+// ====
+
+// RUN: with-checks pass test.resource-lifetime,ownership-lifetime
+
+func.def @materializes_replaced_loop_ownership(%size: index) {
+  %initial = test.resource.alloc %size : index -> pool
+  cfg.br ^loop(%initial: pool)
+^loop(%current: pool):
+  test.resource.borrow %current : pool
+  %replacement = test.resource.alloc %size : index -> pool
+  cfg.br ^loop(%replacement: pool)
+}
+
+// ----
+CHECK: test.resource.release %current : pool
+CHECK: cfg.br ^loop(%replacement: pool)
+
+// ====
+
+// RUN: pass test.resource-lifetime
+
+// Cleanup must not claim success for an allocation hidden in nested control.
+func.def @nested_cleanup_requires_cfg(%condition: i1, %size: index) {
+  // ERROR@+1: DOMINANCE/018 {phase_name="test.resource-lifetime", op_name="scf.if"}
+  scf.if %condition {
+    %resource = test.resource.alloc %size : index -> pool
+    test.resource.borrow %resource : pool
+  }
+  func.return
+}
+
+// ====
+
+// RUN: pass test.resource-lifetime
+
+// This cleanup stage owns only pools; channel validation is a separate stage.
+func.def @other_resource_family_remains_structured(%condition: i1, %channel: channel<tile<144xi32>>) {
+  scf.if %condition {
+    %read = channel.accept %channel : channel<tile<144xi32>> -> read<tile<144xi32>>
+    channel.release %read : read<tile<144xi32>>
+  }
+  func.return
+}
+
+// ====
+
+// RUN: pass test.resource-lifetime
+
+func.def noinline @take_record(%channel: channel<tile<144xi32>>) -> (read<tile<144xi32>>) {
+  %read = channel.accept %channel : channel<tile<144xi32>> -> read<tile<144xi32>>
+  func.return %read : read<tile<144xi32>>
+}
+
+// Callable summaries use the same selected resource families as cleanup.
+func.def @other_family_call_remains_structured(%condition: i1, %channel: channel<tile<144xi32>>) {
+  scf.if %condition {
+    %read = func.call @take_record(%channel) : (channel<tile<144xi32>>) -> (read<tile<144xi32>>)
+    channel.release %read : read<tile<144xi32>>
+  }
   func.return
 }

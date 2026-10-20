@@ -14,67 +14,106 @@
 #include "iree/base/internal/arena.h"
 #include "loom/analysis/liveness.h"
 #include "loom/codegen/low/allocation/assignment.h"
+#include "loom/codegen/low/allocation/clobber_index.h"
 #include "loom/codegen/low/placement.h"
-#include "loom/codegen/low/target_binding.h"
 #include "loom/ir/ir.h"
-#include "loom/ir/local_value_domain.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-// Indexed physical write point retained by the unit-liveness producer.
-typedef struct loom_low_allocation_clobber_t loom_low_allocation_clobber_t;
+typedef struct loom_low_allocation_write_interference_t
+    loom_low_allocation_write_interference_t;
 
-// Mutable unit-liveness state indexed by liveness value ordinal.
+// Per-value storage lifetime facts retained beside the per-unit lifetime
+// cursor.
+typedef struct loom_low_allocation_unit_liveness_value_t {
+  // First per-unit lifetime record, or UINT32_MAX for a nonallocatable value.
+  uint32_t unit_point_start;
+  // Earliest storage acquisition required by this value and its mandatory tied
+  // descendants, or UINT32_MAX when the value has no allocatable lifetime.
+  uint32_t acquisition_start_point;
+} loom_low_allocation_unit_liveness_value_t;
+
+// A whole component read at an edge that bypasses the aggregate's SSA storage.
+// Concat relations consume complete source values; a partial source is a
+// separate slice value, not a subrange duplicated in this observation record.
+typedef struct loom_low_allocation_decomposed_use_t {
+  // Next node in the required storage component's observation list, or zero.
+  uint32_t next_node;
+  // Index of the observing operation in canonical liveness operation points.
+  uint32_t operation_index;
+} loom_low_allocation_decomposed_use_t;
+
+// Mutable unit-liveness state indexed by liveness value ordinal. Published
+// per-unit points and storage segments have result-arena lifetime; all other
+// owned state has allocation-decision lifetime.
 typedef struct loom_low_allocation_unit_liveness_t {
-  // First per-unit lifetime record indexed by liveness local value ordinal.
-  // Values without allocatable unit liveness contain UINT32_MAX.
-  uint32_t* point_starts_by_value_ordinal;
-  // Per-assignment-unit storage start points.
+  // Borrowed required storage identities, or NULL when no tied components
+  // contribute reservations. The placement value domain remains acquired
+  // throughout allocation.
+  const loom_low_placement_table_t* tied_storage_placement;
+  // Per-value storage facts indexed by liveness local value ordinal.
+  loom_low_allocation_unit_liveness_value_t* values;
+  // Result-arena-owned per-assignment-unit storage start points.
   uint32_t* start_points;
-  // Mutable per-assignment-unit live end points.
+  // Result-arena-owned mutable per-assignment-unit live end points.
   uint32_t* end_points;
-  // Number of initialized records in |start_points| and |end_points|.
+  // Number of initialized records in |start_points| and |end_points|, at most
+  // UINT32_MAX. Every nonempty value range ends at or before this count, so no
+  // record index aliases the UINT32_MAX sentinel.
   iree_host_size_t point_count;
   // Values whose concrete storage lifetime is not fully represented by their
   // semantic sparse segments.
   iree_bitmap_t values_with_incomplete_storage_segments;
+  // Values whose incomplete storage lifetime has a cause independent of
+  // decomposed structural edge observations. Allocated only when a decomposed
+  // observation requires distinguishing removable and persistent obligations.
+  iree_bitmap_t values_with_independent_storage_extensions;
+  // Required-component observations retained by the existing edge-use producer.
+  // One-based nodes 1..V identify SSA values; V+1..V+D identify decomposed
+  // reads. Each component starts at its origin value and ends at node zero.
+  struct {
+    // Decision-arena-owned successors indexed by value ordinal. An origin's
+    // successor starts its indirect observations and other required members.
+    // NULL without tied components or decomposed reads at control-flow edges.
+    uint32_t* value_links;
+    // Decision-arena-owned decomposed reads, indexed by node minus V+1.
+    loom_low_allocation_decomposed_use_t* entries;
+    // Number of initialized decomposed reads; V+count fits in uint32_t.
+    uint32_t count;
+    // Capacity of the decomposed-read construction array.
+    iree_host_size_t capacity;
+  } observations;
+  // Linear physical units implicitly read or written at location zero,
+  // indexed by descriptor register class. NULL when no such operands occur.
+  // Retaining reads as well as writes anchors every implicit location during
+  // final numbering, independently of the write-point conflict index.
+  uint16_t* implicit_location_counts_by_reg_class;
   // Sparse physical reservations, separate from semantic SSA liveness.
   struct {
-    // Borrowed semantic segments, or arena-owned semantic prefix followed by
-    // tied-source reservations. Assignment ranges index this table.
+    // Borrowed semantic segments, or result-arena-owned semantic prefix
+    // followed by tied-source reservations. Assignment ranges index this table.
     const loom_liveness_segment_t* entries;
-    // Optional arena-owned tied-source ranges indexed by value ordinal.
-    // Empty entries retain conservative per-unit bounds for incomplete values.
+    // Optional decision-arena-owned tied-source ranges indexed by value
+    // ordinal. Empty entries retain conservative per-unit bounds for incomplete
+    // values.
     const loom_liveness_segment_range_t* tied_sources;
   } storage_segments;
-  // Implicit physical writes, sorted by storage identity and program point
-  // after construction. These occupy storage without defining SSA values.
-  struct {
-    // Arena-owned atomic-unit write points.
-    loom_low_allocation_clobber_t* entries;
-    // Number of initialized write points.
-    iree_host_size_t count;
-    // Allocated entry capacity used during construction.
-    iree_host_size_t capacity;
-    // Smallest explicit atomic unit written when atomic_unit_end is nonzero.
-    uint32_t atomic_unit_begin;
-    // One past the largest explicit atomic unit written; zero for none.
-    uint32_t atomic_unit_end;
-  } clobbers;
+  // Decision-arena-owned implicit physical writes indexed by storage location.
+  loom_low_allocation_clobber_index_t clobbers;
+  // Instruction reads retained beyond semantic value death. Operand events
+  // are collected here and finalized after fixed bindings, before assignment.
+  loom_low_allocation_write_interference_t* write_interference;
 } loom_low_allocation_unit_liveness_t;
 
-// Initializes |out_unit_liveness| from value-granular liveness and IR use
-// structure. The resulting points refine register intervals down to their
-// target allocation units for low.slice, descriptor early-clobber hazards, and
-// structured loop backedges.
-iree_status_t loom_low_allocation_unit_liveness_initialize(
-    const loom_module_t* module, const loom_low_resolved_target_t* target,
-    const loom_low_placement_table_t* placement,
-    const loom_local_value_domain_t* value_domain,
-    const loom_liveness_analysis_t* liveness, iree_arena_allocator_t* arena,
-    loom_low_allocation_unit_liveness_t* out_unit_liveness);
+// Returns true when |value_id|'s required storage component is excluded by
+// |ignored_value_ids|. Callers establish alias or relocation legality before
+// excluding a component; its separate SSA names are one physical reservation.
+bool loom_low_allocation_unit_liveness_storage_is_ignored(
+    const loom_low_allocation_unit_liveness_t* unit_liveness,
+    loom_value_id_t value_id, const loom_value_id_t* ignored_value_ids,
+    uint16_t ignored_value_count);
 
 // Returns true when an implicit physical write overlaps |candidate|'s refined
 // per-unit storage lifetime and sparse live segments. Write points remain
@@ -109,15 +148,17 @@ loom_low_allocation_unit_liveness_storage_segment_range_for_value_ordinal(
     const loom_liveness_analysis_t* liveness,
     loom_value_ordinal_t value_ordinal);
 
-// Propagates storage lifetimes across structural placement relations. Exact
-// tied results extend source ends and carry source starts into results.
-// Contiguous aggregate parts carry source starts into potential result
-// reservations. Sparse tied-source reservations retain the union of source and
-// result lifetimes without occupying gaps between mutually exclusive paths.
-iree_status_t loom_low_allocation_unit_liveness_propagate_storage_relations(
-    loom_low_allocation_unit_liveness_t* unit_liveness,
+// Returns true when any unit in |unit_offset, unit_count| of |value_ordinal|'s
+// required tied component retains concrete storage across |program_point|.
+// The retained component origin owns the complete per-unit ends and sparse
+// physical segments after retain_tied_storage, making the query independent of
+// tied-chain depth.
+bool loom_low_allocation_unit_liveness_storage_component_live_at_point(
+    const loom_low_allocation_unit_liveness_t* unit_liveness,
     const loom_liveness_analysis_t* liveness,
-    const loom_low_placement_table_t* placement, iree_arena_allocator_t* arena);
+    const loom_low_placement_table_t* placement,
+    loom_value_ordinal_t value_ordinal, uint32_t unit_offset,
+    uint32_t unit_count, uint32_t program_point);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -25,6 +25,8 @@ extern const loom_op_vtable_t loom_scalar_subi_vtable;
 extern const loom_op_vtable_t loom_scalar_muli_vtable;
 extern const loom_op_vtable_t loom_scalar_divsi_vtable;
 extern const loom_op_vtable_t loom_scalar_divui_vtable;
+extern const loom_op_vtable_t loom_scalar_divremsi_vtable;
+extern const loom_op_vtable_t loom_scalar_divremui_vtable;
 extern const loom_op_vtable_t loom_scalar_remsi_vtable;
 extern const loom_op_vtable_t loom_scalar_remui_vtable;
 extern const loom_op_vtable_t loom_scalar_ceildivsi_vtable;
@@ -121,6 +123,7 @@ extern const loom_op_vtable_t loom_scalar_ctpopi_vtable;
 extern const loom_op_vtable_t loom_scalar_bitfield_extractu_vtable;
 extern const loom_op_vtable_t loom_scalar_bitfield_extracts_vtable;
 extern const loom_op_vtable_t loom_scalar_assume_vtable;
+extern const loom_op_vtable_t loom_scalar_constexpr_vtable;
 
 #ifdef __cplusplus
 }  // extern "C"

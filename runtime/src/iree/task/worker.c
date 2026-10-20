@@ -19,6 +19,13 @@
 
 #define IREE_TASK_WORKER_MIN_STACK_SIZE (32 * 1024)
 
+static IREE_THREAD_LOCAL iree_task_executor_t*
+    iree_task_worker_current_executor;
+
+bool iree_task_worker_is_current_executor(iree_task_executor_t* executor) {
+  return iree_task_worker_current_executor == executor;
+}
+
 static int iree_task_worker_main(iree_task_worker_t* worker);
 
 static int iree_task_worker_thread_entry(void* entry_arg) {
@@ -1139,17 +1146,15 @@ static void iree_task_worker_pump_until_exit(iree_task_worker_t* worker) {
       break;
     }
 
-    // Scan compute slots first (wake_budget > 1 cooperative drain). If compute
-    // work was found, skip the immediate list — workers doing tile execution
-    // shouldn't contend on the immediate list's mutex. Only check the
-    // immediate list when no compute work is available, so exactly one idle
-    // worker picks up the wake_budget == 1 control process.
-    bool did_work = false;
-    if (iree_task_worker_drain_compute_slots(worker)) {
+    // Interleave finite control work with cooperative compute passes. A live
+    // compute process may depend on an immediate CPU job even on one worker.
+    // Empty immediate-list pops only read the atomic head without locking.
+    const bool compute_work = iree_task_worker_drain_compute_slots(worker);
+    bool did_work = compute_work;
+    while (iree_task_worker_drain_process(worker)) {
       did_work = true;
-    } else {
-      while (iree_task_worker_drain_process(worker)) {
-        did_work = true;
+      if (compute_work) {
+        break;
       }
     }
 
@@ -1180,15 +1185,12 @@ static void iree_task_worker_pump_until_exit(iree_task_worker_t* worker) {
 
 // Thread entry point for each worker.
 static int iree_task_worker_main(iree_task_worker_t* worker) {
+  iree_task_worker_current_executor = worker->executor;
   IREE_TRACE_ZONE_BEGIN_NAMED(thread_zone_entry, "iree_task_worker_main_entry");
 
   // We cannot rely on the global process settings for FPU state.
   // Be explicit here on what we need.
   iree_fpu_state_push(IREE_FPU_STATE_FLAG_FLUSH_DENORMALS_TO_ZERO);
-
-  // Reset affinity (as it can change over time).
-  // TODO(benvanik): call this after waking in case CPU hotplugging happens.
-  iree_thread_request_affinity(worker->thread, worker->ideal_thread_affinity);
 
   // Enter the running state immediately. Note that we could have been requested
   // to exit while suspended/still starting up, so check that here before we
@@ -1215,5 +1217,8 @@ static int iree_task_worker_main(iree_task_worker_t* worker) {
   iree_notification_post(&worker->state_notification, IREE_ALL_WAITERS);
 
   IREE_TRACE_ZONE_END(thread_zone_exit);
+  iree_task_executor_t* executor = worker->executor;
+  iree_task_worker_current_executor = NULL;
+  iree_task_executor_worker_exit(executor);
   return 0;
 }

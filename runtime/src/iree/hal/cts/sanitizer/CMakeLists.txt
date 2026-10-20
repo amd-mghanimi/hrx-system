@@ -28,10 +28,14 @@ iree_cc_library(
     "asan_allocation_test.cc"
   DEPS
     ::sanitizer_test_util
+    iree::async
     iree::hal
+    iree::hal::cts::util::pool_test_util
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
+    iree::hal::memory::fixed_block_pool
     iree::hal::memory::passthrough_pool
+    iree::hal::memory::tlsf_pool
   TESTONLY
   ALWAYSLINK
   PUBLIC

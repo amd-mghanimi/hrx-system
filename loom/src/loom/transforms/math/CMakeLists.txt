@@ -14,11 +14,23 @@ loom_cc_library(
     legalize
   HDRS
     "legalize.h"
+  TEXTUAL_HDRS
+    "approximate_f32_cos_turns.inl"
+    "approximate_f32_exp2.inl"
+    "approximate_f32_sin_turns.inl"
   SRCS
+    "approximate_f32.c"
+    "approximate_f32.h"
+    "evaluation.c"
+    "evaluation.h"
+    "inverse_hyperbolic.c"
+    "inverse_hyperbolic.h"
     "legalize.c"
     "patterns.c"
     "patterns.h"
     "patterns_elementwise.c"
+    "trigonometry.c"
+    "trigonometry.h"
   DEPS
     iree::base
     iree::base::internal::arena
@@ -29,15 +41,18 @@ loom_cc_library(
     loom::ops::scalar
     loom::ops::scf
     loom::ops::vector
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types
     loom::pass::value_facts
     loom::rewrite::greedy
     loom::rewrite::rewriter
+    loom::target::legalization
     loom::target::math_policy
     loom::target::pass_environment
     loom::target::reporting::report
+    loom::util::fact_table_api
   PUBLIC
 )
 

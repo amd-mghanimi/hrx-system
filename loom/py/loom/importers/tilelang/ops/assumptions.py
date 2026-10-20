@@ -292,7 +292,7 @@ def _extract_divisibility(
         return None
     return _ExtractedPredicate(
         predicate=Predicate(
-            "mul",
+            "multiple_of",
             (PredicateArg("value", value.ref.id), PredicateArg("const", modulus)),
         ),
         values=(value,),

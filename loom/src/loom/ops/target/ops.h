@@ -174,7 +174,7 @@ iree_status_t loom_target_decl_build(
     loom_location_id_t location,
     loom_op_t** out_op);
 
-// LOOM_OP_TARGET_SUBGROUP_SIZE: Read the selected subgroup size of the current function version.
+// LOOM_OP_TARGET_SUBGROUP_SIZE: Read the selected subgroup size of the current execution target. The query remains in its source context until target facts resolve it.
 // %size = target.subgroup.size : index
 LOOM_DEFINE_ISA(loom_target_subgroup_size_isa, LOOM_OP_TARGET_SUBGROUP_SIZE)
 LOOM_DEFINE_RESULT(loom_target_subgroup_size_result, 0)

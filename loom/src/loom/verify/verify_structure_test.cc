@@ -20,11 +20,18 @@ namespace {
 
 // One operation exercises the dictionary representation API. Authored programs
 // and bytecode round trips live in test/operand_dictionary.loom-test.
-class OperandDictionaryTest : public ::testing::Test {
+class VerifyStructureTest : public ::testing::Test {
  protected:
+  struct DiagnosticCapture {
+    // Number of diagnostic sink calls.
+    uint32_t count = 0;
+    // Total fallback source bytes delivered to the sink.
+    iree_host_size_t source_bytes = 0;
+  };
+
   static iree_status_t Allocate(void* self, iree_allocator_command_t command,
                                 const void* parameters, void** pointer) {
-    auto* test = static_cast<OperandDictionaryTest*>(self);
+    auto* test = static_cast<VerifyStructureTest*>(self);
     if (test->fail_allocations_ && command != IREE_ALLOCATOR_COMMAND_FREE) {
       return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
                               "injected allocation failure");
@@ -110,11 +117,13 @@ class OperandDictionaryTest : public ::testing::Test {
   loom_value_id_t input_ = LOOM_VALUE_ID_INVALID;
   // Diagnostic counters for the operation API fixtures.
   loom_verify_result_t result_ = {};
+  // Sink backing retained for the lifetime of the verifier state.
+  DiagnosticCapture diagnostic_capture_;
   // Production verifier scratch reused across calls.
   loom_verify_state_t state_ = {};
 };
 
-TEST_F(OperandDictionaryTest, PermutationsAndScratchReuse) {
+TEST_F(VerifyStructureTest, PermutationsAndScratchReuse) {
   Check(Dictionary(0), 0);
   for (uint16_t count : {1, 63, 64, 65, 129, 128, 32, 129}) {
     SCOPED_TRACE(count);
@@ -139,7 +148,7 @@ TEST_F(OperandDictionaryTest, PermutationsAndScratchReuse) {
   }
 }
 
-TEST_F(OperandDictionaryTest, DuplicateOrdinalsAcrossWords) {
+TEST_F(VerifyStructureTest, DuplicateOrdinalsAcrossWords) {
   for (uint16_t count : {2, 64, 65, 128, 129}) {
     SCOPED_TRACE(count);
     loom_op_t* op = Dictionary(count);
@@ -155,7 +164,7 @@ TEST_F(OperandDictionaryTest, DuplicateOrdinalsAcrossWords) {
   }
 }
 
-TEST_F(OperandDictionaryTest, EveryRepeatedOrdinalIsDiagnosed) {
+TEST_F(VerifyStructureTest, EveryRepeatedOrdinalIsDiagnosed) {
   loom_op_t* op = Dictionary(65);
   auto names = Names(op);
   for (auto& entry : names) {
@@ -166,7 +175,7 @@ TEST_F(OperandDictionaryTest, EveryRepeatedOrdinalIsDiagnosed) {
   Check(op, 64);
 }
 
-TEST_F(OperandDictionaryTest, ErrorBudgetBoundsFallbackAttempts) {
+TEST_F(VerifyStructureTest, ErrorBudgetBoundsFallbackAttempts) {
   loom_op_t* op = Dictionary(65);
   auto names = Names(op);
   for (auto& entry : names) {
@@ -174,16 +183,10 @@ TEST_F(OperandDictionaryTest, ErrorBudgetBoundsFallbackAttempts) {
   }
   IREE_ASSERT_OK(loom_test_operand_dict_set_param_names(
       module_, op, loom_make_canonical_attr_dict(names.data(), names.size())));
-  struct Capture {
-    // Number of diagnostic sink calls.
-    uint32_t count = 0;
-    // Total fallback source bytes delivered to the sink.
-    iree_host_size_t source_bytes = 0;
-  } capture;
   state_.sink = {
       [](void* user_data,
          const loom_diagnostic_t* diagnostic) -> iree_status_t {
-        auto* capture = static_cast<Capture*>(user_data);
+        auto* capture = static_cast<DiagnosticCapture*>(user_data);
         ++capture->count;
         capture->source_bytes += diagnostic->source_location.source.size;
         EXPECT_EQ(diagnostic->source_location.provenance,
@@ -191,20 +194,20 @@ TEST_F(OperandDictionaryTest, ErrorBudgetBoundsFallbackAttempts) {
         EXPECT_GT(diagnostic->source_location.source.size, 0u);
         return iree_ok_status();
       },
-      &capture,
+      &diagnostic_capture_,
   };
   for (uint32_t limit : {1, 3, 0}) {
     SCOPED_TRACE(limit);
-    capture = {};
+    diagnostic_capture_ = {};
     state_.max_errors = limit;
     const uint32_t expected_count = limit == 0 ? 64 : limit;
     Check(op, expected_count);
-    EXPECT_EQ(capture.count, expected_count);
-    EXPECT_GT(capture.source_bytes, 0u);
+    EXPECT_EQ(diagnostic_capture_.count, expected_count);
+    EXPECT_GT(diagnostic_capture_.source_bytes, 0u);
   }
 }
 
-TEST_F(OperandDictionaryTest, TypeErrorsAlsoBoundSuccessfulFallbackRendering) {
+TEST_F(VerifyStructureTest, TypeErrorsAlsoBoundSuccessfulFallbackRendering) {
   // The budget belongs to diagnostic emission, not dictionary checks. Wrong
   // index operand types remain printable, so this exercises full source text.
   loom_value_id_t tile = LOOM_VALUE_ID_INVALID;
@@ -221,7 +224,6 @@ TEST_F(OperandDictionaryTest, TypeErrorsAlsoBoundSuccessfulFallbackRendering) {
       static_dimensions.data(), static_dimensions.size(), LOOM_LOCATION_UNKNOWN,
       &op));
   state_.max_errors = 3;
-  uint32_t sink_calls = 0;
   state_.sink = {
       [](void* user_data,
          const loom_diagnostic_t* diagnostic) -> iree_status_t {
@@ -231,15 +233,15 @@ TEST_F(OperandDictionaryTest, TypeErrorsAlsoBoundSuccessfulFallbackRendering) {
         EXPECT_GT(diagnostic->source_location.source.size, 65u * 3u);
         return iree_ok_status();
       },
-      &sink_calls,
+      &diagnostic_capture_.count,
   };
   loom_verify_type_constraints(&state_, op, loom_op_vtable(module_, op));
   IREE_ASSERT_OK(loom_verify_take_diagnostic_status(&state_));
   EXPECT_EQ(result_.error_count, 3u);
-  EXPECT_EQ(sink_calls, 3u);
+  EXPECT_EQ(diagnostic_capture_.count, 3u);
 }
 
-TEST_F(OperandDictionaryTest, ErrorBudgetBoundsCountsWithoutSink) {
+TEST_F(VerifyStructureTest, ErrorBudgetBoundsCountsWithoutSink) {
   loom_op_t* op = Dictionary(65);
   auto names = Names(op);
   for (auto& entry : names) {
@@ -251,7 +253,7 @@ TEST_F(OperandDictionaryTest, ErrorBudgetBoundsCountsWithoutSink) {
   Check(op, 2);
 }
 
-TEST_F(OperandDictionaryTest, SinkFailureAtErrorBudgetIsPreserved) {
+TEST_F(VerifyStructureTest, SinkFailureAtErrorBudgetIsPreserved) {
   loom_op_t* op = Dictionary(65);
   auto names = Names(op);
   for (auto& entry : names) {
@@ -260,21 +262,20 @@ TEST_F(OperandDictionaryTest, SinkFailureAtErrorBudgetIsPreserved) {
   IREE_ASSERT_OK(loom_test_operand_dict_set_param_names(
       module_, op, loom_make_canonical_attr_dict(names.data(), names.size())));
   state_.max_errors = 1;
-  uint32_t sink_calls = 0;
   state_.sink = {
       [](void* user_data, const loom_diagnostic_t*) -> iree_status_t {
         ++*static_cast<uint32_t*>(user_data);
         return iree_make_status(IREE_STATUS_ABORTED, "diagnostic sink failure");
       },
-      &sink_calls,
+      &diagnostic_capture_.count,
   };
   Check(op, 1);
-  EXPECT_EQ(sink_calls, 1u);
+  EXPECT_EQ(diagnostic_capture_.count, 1u);
   IREE_EXPECT_STATUS_IS(IREE_STATUS_ABORTED,
                         loom_verify_take_diagnostic_status(&state_));
 }
 
-TEST_F(OperandDictionaryTest, InvalidOrdinalsDoNotClaimBits) {
+TEST_F(VerifyStructureTest, InvalidOrdinalsDoNotClaimBits) {
   loom_op_t* op = Dictionary(65);
   auto names = Names(op);
   IREE_ASSERT_OK(loom_test_operand_dict_set_param_names(
@@ -288,7 +289,7 @@ TEST_F(OperandDictionaryTest, InvalidOrdinalsDoNotClaimBits) {
   Check(op, 3);
 }
 
-TEST_F(OperandDictionaryTest, InvalidKeyStillClaimsValidOrdinal) {
+TEST_F(VerifyStructureTest, InvalidKeyStillClaimsValidOrdinal) {
   loom_op_t* op = Dictionary(2);
   auto names = Names(op);
   IREE_ASSERT_OK(loom_test_operand_dict_set_param_names(
@@ -300,7 +301,7 @@ TEST_F(OperandDictionaryTest, InvalidKeyStillClaimsValidOrdinal) {
   Check(op, 2);
 }
 
-TEST_F(OperandDictionaryTest, AllocationFailurePreservesScratch) {
+TEST_F(VerifyStructureTest, AllocationFailurePreservesScratch) {
   fail_allocations_ = true;
   Check(Dictionary(64), 0);
   EXPECT_EQ(state_.arena.used_allocation_size, 0u);
@@ -332,7 +333,7 @@ TEST_F(OperandDictionaryTest, AllocationFailurePreservesScratch) {
   Check(op, 0);
 }
 
-TEST_F(OperandDictionaryTest, AllocationFailurePreservesPendingDiagnostic) {
+TEST_F(VerifyStructureTest, AllocationFailurePreservesPendingDiagnostic) {
   loom_op_t* op = Dictionary(65);
   fail_allocations_ = true;
   state_.diagnostic_status =
@@ -343,6 +344,43 @@ TEST_F(OperandDictionaryTest, AllocationFailurePreservesPendingDiagnostic) {
   IREE_EXPECT_OK(loom_verify_take_diagnostic_status(&state_));
   EXPECT_EQ(state_.operand_dictionary.bits, nullptr);
   EXPECT_EQ(state_.operand_dictionary.word_capacity, 0u);
+}
+
+TEST_F(VerifyStructureTest, AlternativeRequiredAncestorsAcceptEitherKind) {
+  const loom_op_kind_t required_ancestors[] = {
+      LOOM_OP_TEST_ISOLATED_REGION,
+      LOOM_OP_TEST_MAP,
+  };
+  const loom_op_placement_descriptor_t placement = {
+      .required_parents = nullptr,
+      .required_ancestors = nullptr,
+      .required_any_ancestors = required_ancestors,
+      .forbidden_ancestors = nullptr,
+      .required_any_ancestor_names = "test.isolated_region or test.map",
+      .required_parent_count = 0,
+      .required_ancestor_count = 0,
+      .required_any_ancestor_count = IREE_ARRAYSIZE(required_ancestors),
+      .forbidden_ancestor_count = 0,
+  };
+  loom_op_t* op = Dictionary(0);
+  loom_op_vtable_t vtable = *loom_op_vtable(module_, op);
+  vtable.placement = &placement;
+
+  for (loom_op_kind_t ancestor_kind : required_ancestors) {
+    SCOPED_TRACE(ancestor_kind);
+    loom_op_t ancestor = {.kind = ancestor_kind};
+    op->parent_op = &ancestor;
+    result_ = {};
+    loom_verify_op_placement(&state_, op, &vtable);
+    EXPECT_EQ(result_.error_count, 0u);
+  }
+
+  loom_op_t wrong_ancestor = {.kind = LOOM_OP_TEST_CONSTANT};
+  op->parent_op = &wrong_ancestor;
+  result_ = {};
+  loom_verify_op_placement(&state_, op, &vtable);
+  EXPECT_EQ(result_.error_count, 1u);
+  op->parent_op = nullptr;
 }
 
 }  // namespace

@@ -1,0 +1,365 @@
+// Adjacent cells share CAS words across wave boundaries. Interior views and
+// guard cells expose misplaced writes; divergent retries preserve retired lanes.
+kernel.def @subword_cmpxchg_i8() {
+  %unit = index.constant 1 : index
+  %width = index.constant 65 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%output: buffer, %guard_output: buffer) {
+  %origin = index.constant 0 : offset
+  %cell_origin = index.constant 2 : offset
+  %bytes = index.constant 68 : offset
+  %lane = kernel.workitem.id<x> : index
+  %scratch = buffer.alloca<workgroup> align(1) %bytes : buffer
+  %cells = buffer.view %scratch[%cell_origin] : buffer -> view<65xi8>
+  %storage = buffer.view %scratch[%origin] : buffer -> view<68xi8>
+  %results = buffer.view %output[%origin] : buffer -> view<4x65xi8>
+  %guards = buffer.view %guard_output[%origin] : buffer -> view<2xi8>
+  %initial = scalar.constant -128 : i8
+  %replacement = scalar.constant 71 : i8
+  %next = scalar.constant 72 : i8
+  %guard = scalar.constant 77 : i8
+  %first_lane = index.constant 0 : index
+  %is_first = index.cmp eq, %lane, %first_lane : index
+  scf.if %is_first {
+    view.store %guard, %storage[0] : i8, view<68xi8>
+    view.store %guard, %storage[67] : i8, view<68xi8>
+  }
+  view.store %initial, %cells[%lane] : i8, view<65xi8>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %old = view.atomic.cmpxchg %initial, %replacement, %cells[%lane] {failure_ordering = acquire, scope = workgroup, success_ordering = acq_rel} : i8, view<65xi8> -> i8
+  view.store %old, %results[0, %lane] : i8, view<4x65xi8>
+  %pair_size = index.constant 2 : index
+  %parity = index.rem %lane, %pair_size : index
+  %even = index.cmp eq, %parity, %first_lane : index
+  %second = scf.if %even -> (i8) {
+    %observed = view.atomic.cmpxchg %replacement, %next, %cells[%lane] {failure_ordering = relaxed, scope = subgroup, success_ordering = relaxed} : i8, view<65xi8> -> i8
+    scf.yield %observed : i8
+  } else {
+    %observed = view.load %cells[%lane] : view<65xi8> -> i8
+    scf.yield %observed : i8
+  }
+  view.store %second, %results[1, %lane] : i8, view<4x65xi8>
+  %failed = view.atomic.cmpxchg %initial, %replacement, %cells[%lane] {failure_ordering = seq_cst, scope = system, success_ordering = seq_cst} : i8, view<65xi8> -> i8
+  view.store %failed, %results[2, %lane] : i8, view<4x65xi8>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %final = view.load %cells[%lane] : view<65xi8> -> i8
+  view.store %final, %results[3, %lane] : i8, view<4x65xi8>
+  scf.if %is_first {
+    %prefix = view.load %storage[0] : view<68xi8> -> i8
+    %suffix = view.load %storage[67] : view<68xi8> -> i8
+    view.store %prefix, %guards[0] : i8, view<2xi8>
+    view.store %suffix, %guards[1] : i8, view<2xi8>
+  }
+  kernel.return
+}
+
+func.def @subword_cmpxchg_i8_oracle(%output: buffer, %guard_output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 65 : index
+  %pair_size = index.constant 2 : index
+  %step = index.constant 1 : index
+  %results = buffer.view %output[%base] : buffer -> view<4x65xi8>
+  %guards = buffer.view %guard_output[%base] : buffer -> view<2xi8>
+  %initial = scalar.constant -128 : i8
+  %replacement = scalar.constant 71 : i8
+  %next = scalar.constant 72 : i8
+  %guard = scalar.constant 77 : i8
+  scf.for %lane = [%begin to %end step %step] {
+    %parity = index.rem %lane, %pair_size : index
+    %even = index.cmp eq, %parity, %begin : index
+    %final = scf.select %even, %next, %replacement : i8
+    view.store %initial, %results[0, %lane] : i8, view<4x65xi8>
+    view.store %replacement, %results[1, %lane] : i8, view<4x65xi8>
+    view.store %final, %results[2, %lane] : i8, view<4x65xi8>
+    view.store %final, %results[3, %lane] : i8, view<4x65xi8>
+  }
+  view.store %guard, %guards[0] : i8, view<2xi8>
+  view.store %guard, %guards[1] : i8, view<2xi8>
+  func.return
+}
+
+check.scenario @subword_cmpxchg_values_i8 {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %output = check.generate.fill value(0) : tensor<4x65xi8>
+    %guards = check.generate.fill value(0) : tensor<2xi8>
+    check.compare<@subword_cmpxchg_i8, @subword_cmpxchg_i8_oracle>(%output, %guards) : (tensor<4x65xi8>, tensor<2xi8>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x65xi8>
+      check.expect.bitwise actual(%guards) expected(%guards) : tensor<2xi8>
+    }
+  }
+  check.return
+}
+
+// Adjacent cells share CAS words across wave boundaries. Interior views and
+// guard cells expose misplaced writes; divergent retries preserve retired lanes.
+kernel.def @subword_cmpxchg_i16() {
+  %unit = index.constant 1 : index
+  %width = index.constant 65 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%output: buffer, %guard_output: buffer) {
+  %origin = index.constant 0 : offset
+  %cell_origin = index.constant 4 : offset
+  %bytes = index.constant 136 : offset
+  %lane = kernel.workitem.id<x> : index
+  %scratch = buffer.alloca<workgroup> align(2) %bytes : buffer
+  %cells = buffer.view %scratch[%cell_origin] : buffer -> view<65xi16>
+  %storage = buffer.view %scratch[%origin] : buffer -> view<68xi16>
+  %results = buffer.view %output[%origin] : buffer -> view<4x65xi16>
+  %guards = buffer.view %guard_output[%origin] : buffer -> view<2xi16>
+  %initial = scalar.constant -32768 : i16
+  %replacement = scalar.constant 71 : i16
+  %next = scalar.constant 72 : i16
+  %guard = scalar.constant 77 : i16
+  %first_lane = index.constant 0 : index
+  %is_first = index.cmp eq, %lane, %first_lane : index
+  scf.if %is_first {
+    view.store %guard, %storage[0] : i16, view<68xi16>
+    view.store %guard, %storage[67] : i16, view<68xi16>
+  }
+  view.store %initial, %cells[%lane] : i16, view<65xi16>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %old = view.atomic.cmpxchg %initial, %replacement, %cells[%lane] {failure_ordering = acquire, scope = workgroup, success_ordering = acq_rel} : i16, view<65xi16> -> i16
+  view.store %old, %results[0, %lane] : i16, view<4x65xi16>
+  %pair_size = index.constant 2 : index
+  %parity = index.rem %lane, %pair_size : index
+  %even = index.cmp eq, %parity, %first_lane : index
+  %second = scf.if %even -> (i16) {
+    %observed = view.atomic.cmpxchg %replacement, %next, %cells[%lane] {failure_ordering = relaxed, scope = subgroup, success_ordering = relaxed} : i16, view<65xi16> -> i16
+    scf.yield %observed : i16
+  } else {
+    %observed = view.load %cells[%lane] : view<65xi16> -> i16
+    scf.yield %observed : i16
+  }
+  view.store %second, %results[1, %lane] : i16, view<4x65xi16>
+  %failed = view.atomic.cmpxchg %initial, %replacement, %cells[%lane] {failure_ordering = seq_cst, scope = system, success_ordering = seq_cst} : i16, view<65xi16> -> i16
+  view.store %failed, %results[2, %lane] : i16, view<4x65xi16>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %final = view.load %cells[%lane] : view<65xi16> -> i16
+  view.store %final, %results[3, %lane] : i16, view<4x65xi16>
+  scf.if %is_first {
+    %prefix = view.load %storage[0] : view<68xi16> -> i16
+    %suffix = view.load %storage[67] : view<68xi16> -> i16
+    view.store %prefix, %guards[0] : i16, view<2xi16>
+    view.store %suffix, %guards[1] : i16, view<2xi16>
+  }
+  kernel.return
+}
+
+func.def @subword_cmpxchg_i16_oracle(%output: buffer, %guard_output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 65 : index
+  %pair_size = index.constant 2 : index
+  %step = index.constant 1 : index
+  %results = buffer.view %output[%base] : buffer -> view<4x65xi16>
+  %guards = buffer.view %guard_output[%base] : buffer -> view<2xi16>
+  %initial = scalar.constant -32768 : i16
+  %replacement = scalar.constant 71 : i16
+  %next = scalar.constant 72 : i16
+  %guard = scalar.constant 77 : i16
+  scf.for %lane = [%begin to %end step %step] {
+    %parity = index.rem %lane, %pair_size : index
+    %even = index.cmp eq, %parity, %begin : index
+    %final = scf.select %even, %next, %replacement : i16
+    view.store %initial, %results[0, %lane] : i16, view<4x65xi16>
+    view.store %replacement, %results[1, %lane] : i16, view<4x65xi16>
+    view.store %final, %results[2, %lane] : i16, view<4x65xi16>
+    view.store %final, %results[3, %lane] : i16, view<4x65xi16>
+  }
+  view.store %guard, %guards[0] : i16, view<2xi16>
+  view.store %guard, %guards[1] : i16, view<2xi16>
+  func.return
+}
+
+check.scenario @subword_cmpxchg_values_i16 {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %output = check.generate.fill value(0) : tensor<4x65xi16>
+    %guards = check.generate.fill value(0) : tensor<2xi16>
+    check.compare<@subword_cmpxchg_i16, @subword_cmpxchg_i16_oracle>(%output, %guards) : (tensor<4x65xi16>, tensor<2xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x65xi16>
+      check.expect.bitwise actual(%guards) expected(%guards) : tensor<2xi16>
+    }
+  }
+  check.return
+}
+
+// Subspans expose unaligned base pointers. Neighbor words span workgroups;
+// matching and failing lanes must retain their independent observations.
+kernel.def @subword_global_cmpxchg_i8() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 3 : index
+  %width = index.constant 65 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%global_storage: buffer, %generic_storage: buffer, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %width = index.constant 65 : index
+  %group = kernel.workgroup.id<x> : index
+  %item = kernel.workitem.id<x> : index
+  %base = index.mul %group, %width : index
+  %lane = index.add %base, %item : index
+  %even_remainder = index.constant 0 : index
+  %pair_size = index.constant 2 : index
+  %parity = index.rem %lane, %pair_size : index
+  %even = index.cmp eq, %parity, %even_remainder : index
+  %global = buffer.assume.memory_space<global> %global_storage : buffer
+  %generic = buffer.assume.memory_space<generic> %generic_storage : buffer
+  %global_cells = buffer.view %global[%origin] : buffer -> view<195xi8>
+  %generic_cells = buffer.view %generic[%origin] : buffer -> view<195xi8>
+  %results = buffer.view %output[%origin] : buffer -> view<4x195xi8>
+  %initial = scalar.constant 77 : i8
+  %replacement = scalar.constant 71 : i8
+  %next = scalar.constant 72 : i8
+  %last = scalar.constant 73 : i8
+  %expected = scf.select %even, %initial, %replacement : i8
+  %global_old = view.atomic.cmpxchg %expected, %next, %global_cells[%lane] {failure_ordering = acquire, scope = system, success_ordering = acq_rel} : i8, view<195xi8> -> i8
+  %generic_old = view.atomic.cmpxchg %initial, %replacement, %generic_cells[%lane] {failure_ordering = acquire, scope = device, success_ordering = acq_rel} : i8, view<195xi8> -> i8
+  %generic_second = scf.if %even -> (i8) {
+    %previous = view.atomic.cmpxchg %replacement, %next, %generic_cells[%lane] {failure_ordering = relaxed, scope = subgroup, success_ordering = relaxed} : i8, view<195xi8> -> i8
+    scf.yield %previous : i8
+  } else {
+    %previous = view.load %generic_cells[%lane] : view<195xi8> -> i8
+    scf.yield %previous : i8
+  }
+  %global_second = view.atomic.cmpxchg %initial, %last, %global_cells[%lane] {failure_ordering = seq_cst, scope = system, success_ordering = seq_cst} : i8, view<195xi8> -> i8
+  view.store %global_old, %results[0, %lane] : i8, view<4x195xi8>
+  view.store %generic_old, %results[1, %lane] : i8, view<4x195xi8>
+  view.store %generic_second, %results[2, %lane] : i8, view<4x195xi8>
+  view.store %global_second, %results[3, %lane] : i8, view<4x195xi8>
+  kernel.return
+}
+
+func.def @subword_global_cmpxchg_i8_oracle(%global_storage: buffer, %generic_storage: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 195 : index
+  %pair_size = index.constant 2 : index
+  %step = index.constant 1 : index
+  %global = buffer.view %global_storage[%base] : buffer -> view<195xi8>
+  %generic = buffer.view %generic_storage[%base] : buffer -> view<195xi8>
+  %results = buffer.view %output[%base] : buffer -> view<4x195xi8>
+  %initial = scalar.constant 77 : i8
+  %replacement = scalar.constant 71 : i8
+  %next = scalar.constant 72 : i8
+  %last = scalar.constant 73 : i8
+  scf.for %lane = [%begin to %end step %step] {
+    %parity = index.rem %lane, %pair_size : index
+    %even = index.cmp eq, %parity, %begin : index
+    %global_second = scf.select %even, %next, %initial : i8
+    %global_final = scf.select %even, %next, %last : i8
+    %generic_final = scf.select %even, %next, %replacement : i8
+    view.store %initial, %results[0, %lane] : i8, view<4x195xi8>
+    view.store %initial, %results[1, %lane] : i8, view<4x195xi8>
+    view.store %replacement, %results[2, %lane] : i8, view<4x195xi8>
+    view.store %global_second, %results[3, %lane] : i8, view<4x195xi8>
+    view.store %global_final, %global[%lane] : i8, view<195xi8>
+    view.store %generic_final, %generic[%lane] : i8, view<195xi8>
+  }
+  func.return
+}
+
+check.scenario @subword_global_cmpxchg_values_i8 {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %global_storage = check.generate.fill value(77) : tensor<197xi8>
+    %generic_storage = check.generate.fill value(77) : tensor<197xi8>
+    %global_cells = check.tensor.view %global_storage offset(1) : tensor<197xi8> -> tensor<195xi8>
+    %generic_cells = check.tensor.view %generic_storage offset(1) : tensor<197xi8> -> tensor<195xi8>
+    %output = check.generate.fill value(0) : tensor<4x195xi8>
+    check.compare<@subword_global_cmpxchg_i8, @subword_global_cmpxchg_i8_oracle>(%global_cells, %generic_cells, %output) : (tensor<195xi8>, tensor<195xi8>, tensor<4x195xi8>) -> () {
+      check.expect.bitwise actual(%global_storage) expected(%global_storage) : tensor<197xi8>
+      check.expect.bitwise actual(%generic_storage) expected(%generic_storage) : tensor<197xi8>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x195xi8>
+    }
+  }
+  check.return
+}
+
+// Subspans expose unaligned base pointers. Neighbor words span workgroups;
+// matching and failing lanes must retain their independent observations.
+kernel.def @subword_global_cmpxchg_i16() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 3 : index
+  %width = index.constant 65 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%global_storage: buffer, %generic_storage: buffer, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %width = index.constant 65 : index
+  %group = kernel.workgroup.id<x> : index
+  %item = kernel.workitem.id<x> : index
+  %base = index.mul %group, %width : index
+  %lane = index.add %base, %item : index
+  %even_remainder = index.constant 0 : index
+  %pair_size = index.constant 2 : index
+  %parity = index.rem %lane, %pair_size : index
+  %even = index.cmp eq, %parity, %even_remainder : index
+  %global = buffer.assume.memory_space<global> %global_storage : buffer
+  %generic = buffer.assume.memory_space<generic> %generic_storage : buffer
+  %global_cells = buffer.view %global[%origin] : buffer -> view<195xi16>
+  %generic_cells = buffer.view %generic[%origin] : buffer -> view<195xi16>
+  %results = buffer.view %output[%origin] : buffer -> view<4x195xi16>
+  %initial = scalar.constant 77 : i16
+  %replacement = scalar.constant 71 : i16
+  %next = scalar.constant 72 : i16
+  %last = scalar.constant 73 : i16
+  %expected = scf.select %even, %initial, %replacement : i16
+  %global_old = view.atomic.cmpxchg %expected, %next, %global_cells[%lane] {failure_ordering = acquire, scope = system, success_ordering = acq_rel} : i16, view<195xi16> -> i16
+  %generic_old = view.atomic.cmpxchg %initial, %replacement, %generic_cells[%lane] {failure_ordering = acquire, scope = device, success_ordering = acq_rel} : i16, view<195xi16> -> i16
+  %generic_second = scf.if %even -> (i16) {
+    %previous = view.atomic.cmpxchg %replacement, %next, %generic_cells[%lane] {failure_ordering = relaxed, scope = subgroup, success_ordering = relaxed} : i16, view<195xi16> -> i16
+    scf.yield %previous : i16
+  } else {
+    %previous = view.load %generic_cells[%lane] : view<195xi16> -> i16
+    scf.yield %previous : i16
+  }
+  %global_second = view.atomic.cmpxchg %initial, %last, %global_cells[%lane] {failure_ordering = seq_cst, scope = system, success_ordering = seq_cst} : i16, view<195xi16> -> i16
+  view.store %global_old, %results[0, %lane] : i16, view<4x195xi16>
+  view.store %generic_old, %results[1, %lane] : i16, view<4x195xi16>
+  view.store %generic_second, %results[2, %lane] : i16, view<4x195xi16>
+  view.store %global_second, %results[3, %lane] : i16, view<4x195xi16>
+  kernel.return
+}
+
+func.def @subword_global_cmpxchg_i16_oracle(%global_storage: buffer, %generic_storage: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 195 : index
+  %pair_size = index.constant 2 : index
+  %step = index.constant 1 : index
+  %global = buffer.view %global_storage[%base] : buffer -> view<195xi16>
+  %generic = buffer.view %generic_storage[%base] : buffer -> view<195xi16>
+  %results = buffer.view %output[%base] : buffer -> view<4x195xi16>
+  %initial = scalar.constant 77 : i16
+  %replacement = scalar.constant 71 : i16
+  %next = scalar.constant 72 : i16
+  %last = scalar.constant 73 : i16
+  scf.for %lane = [%begin to %end step %step] {
+    %parity = index.rem %lane, %pair_size : index
+    %even = index.cmp eq, %parity, %begin : index
+    %global_second = scf.select %even, %next, %initial : i16
+    %global_final = scf.select %even, %next, %last : i16
+    %generic_final = scf.select %even, %next, %replacement : i16
+    view.store %initial, %results[0, %lane] : i16, view<4x195xi16>
+    view.store %initial, %results[1, %lane] : i16, view<4x195xi16>
+    view.store %replacement, %results[2, %lane] : i16, view<4x195xi16>
+    view.store %global_second, %results[3, %lane] : i16, view<4x195xi16>
+    view.store %global_final, %global[%lane] : i16, view<195xi16>
+    view.store %generic_final, %generic[%lane] : i16, view<195xi16>
+  }
+  func.return
+}
+
+check.scenario @subword_global_cmpxchg_values_i16 {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %global_storage = check.generate.fill value(77) : tensor<197xi16>
+    %generic_storage = check.generate.fill value(77) : tensor<197xi16>
+    %global_cells = check.tensor.view %global_storage offset(2) : tensor<197xi16> -> tensor<195xi16>
+    %generic_cells = check.tensor.view %generic_storage offset(2) : tensor<197xi16> -> tensor<195xi16>
+    %output = check.generate.fill value(0) : tensor<4x195xi16>
+    check.compare<@subword_global_cmpxchg_i16, @subword_global_cmpxchg_i16_oracle>(%global_cells, %generic_cells, %output) : (tensor<195xi16>, tensor<195xi16>, tensor<4x195xi16>) -> () {
+      check.expect.bitwise actual(%global_storage) expected(%global_storage) : tensor<197xi16>
+      check.expect.bitwise actual(%generic_storage) expected(%generic_storage) : tensor<197xi16>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4x195xi16>
+    }
+  }
+  check.return
+}

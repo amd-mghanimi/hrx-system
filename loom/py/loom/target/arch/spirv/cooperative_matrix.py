@@ -20,23 +20,19 @@ from loom.target.arch.spirv.scalar_memory import (
 def cooperative_matrix_descriptor_key(
     op_name: str,
     *,
-    role: str | None = None,
     element: str,
     m_size: int,
     n_size: int,
     k_size: int,
     accumulator: str,
     scope: str,
-    layout: str | None = None,
     operand_mode: str | None = None,
 ) -> str:
-    role_part = f".{role}" if role else ""
-    layout_part = f".{layout}" if layout else ""
     operand_mode_part = f".{operand_mode}" if operand_mode else ""
     return (
-        f"spirv.{op_name}{role_part}.{element}."
+        f"spirv.{op_name}.{element}."
         f"m{m_size}n{n_size}k{k_size}.{accumulator}.{scope}"
-        f"{layout_part}{operand_mode_part}"
+        f"{operand_mode_part}"
     )
 
 
@@ -53,23 +49,61 @@ class CooperativeMatrixCase:
     k_size: int
     lhs_rows: int
     lhs_columns: int
-    lhs_vector_lanes: int
     rhs_rows: int
     rhs_columns: int
-    rhs_vector_lanes: int
     accumulator_rows: int
     accumulator_columns: int
-    accumulator_vector_lanes: int
     feature_atoms: tuple[str, ...]
     lhs_scalar_suffix: str | None = None
     rhs_scalar_suffix: str | None = None
     accumulator_scalar_suffix: str | None = None
     result_scalar_suffix: str | None = None
-    property_storage_flags: str = "MATRIX_STORAGE_ANY"
-    operand_mode: str | None = None
-    property_operand_flags: str = "0"
-    packet_operand_mask: str | None = None
+    # Saturates the accumulation into the result component's integer range.
+    saturating_accumulation: bool = False
     source_rule_enabled: bool = True
+
+    @property
+    def operand_mode(self) -> str | None:
+        return "saturating" if self.saturating_accumulation else None
+
+    @property
+    def signed_component_roles(self) -> tuple[str, ...]:
+        return tuple(
+            role
+            for role, scalar in (
+                ("A", self.lhs_scalar),
+                ("B", self.rhs_scalar),
+                ("C", self.accumulator_scalar),
+                ("RESULT", self.result_scalar),
+            )
+            if scalar.suffix.startswith("i")
+        )
+
+    @property
+    def property_operand_flags(self) -> str:
+        operands = [
+            f"LOOM_SPIRV_COOPERATIVE_MATRIX_OPERAND_{role}_SIGNED_COMPONENTS"
+            for role in self.signed_component_roles
+        ]
+        if self.saturating_accumulation:
+            operands.append(
+                "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERAND_SATURATING_ACCUMULATION"
+            )
+        return " | ".join(operands) or "0"
+
+    @property
+    def packet_operand_mask(self) -> str | None:
+        operands = [
+            "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERANDS_"
+            f"MATRIX_{role}_SIGNED_COMPONENTS_KHR_MASK"
+            for role in self.signed_component_roles
+        ]
+        if self.saturating_accumulation:
+            operands.append(
+                "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERANDS_"
+                "SATURATING_ACCUMULATION_KHR_MASK"
+            )
+        return " | ".join(operands) or None
 
     @property
     def property_name(self) -> str:
@@ -120,25 +154,18 @@ class CooperativeMatrixCase:
         self,
         op_name: str,
         *,
-        role: str | None = None,
-        layout: str | None = None,
         include_operand_mode: bool = False,
     ) -> str:
         return cooperative_matrix_descriptor_key(
             op_name,
-            role=role,
             element=self.element,
             m_size=self.m_size,
             n_size=self.n_size,
             k_size=self.k_size,
             accumulator=self.accumulator,
             scope="subgroup",
-            layout=layout,
             operand_mode=self.operand_mode if include_operand_mode else None,
         )
-
-    def memory_feature_bits(self, scalar: StorageBufferScalar) -> int:
-        return self.feature_bits | scalar.feature_bits
 
 
 def _require_storage_buffer_scalar(suffix: str) -> StorageBufferScalar:
@@ -148,48 +175,70 @@ def _require_storage_buffer_scalar(suffix: str) -> StorageBufferScalar:
     return scalar
 
 
-_SIGNED_SATURATING_PROPERTY_OPERANDS = " | ".join(
-    (
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERAND_A_SIGNED_COMPONENTS",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERAND_B_SIGNED_COMPONENTS",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERAND_C_SIGNED_COMPONENTS",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERAND_RESULT_SIGNED_COMPONENTS",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERAND_SATURATING_ACCUMULATION",
-    )
-)
+@dataclass(frozen=True, slots=True)
+class CooperativeMatrixMemory:
+    """A matrix component and its independently typed memory pointer."""
 
-_SIGNED_SATURATING_PACKET_OPERANDS = " | ".join(
-    (
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERANDS_MATRIX_A_SIGNED_COMPONENTS_KHR_MASK",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERANDS_MATRIX_B_SIGNED_COMPONENTS_KHR_MASK",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERANDS_MATRIX_C_SIGNED_COMPONENTS_KHR_MASK",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERANDS_MATRIX_RESULT_SIGNED_COMPONENTS_KHR_MASK",
-        "LOOM_SPIRV_COOPERATIVE_MATRIX_OPERANDS_SATURATING_ACCUMULATION_KHR_MASK",
+    # Scalar interpreted by the cooperative matrix instruction.
+    component: StorageBufferScalar
+    # Pointee scalar selected by the allocation's storage layout.
+    carrier: StorageBufferScalar
+    # SPIR-V memory family used by the address materializer and effects.
+    space: str
+
+    @property
+    def descriptor_suffix(self) -> str:
+        if self.carrier == self.component:
+            return self.space
+        return f"{self.space}.{self.carrier.suffix}"
+
+    @property
+    def feature_bits(self) -> int:
+        if self.space == "workgroup":
+            return (
+                self.component.register_feature_bits
+                | self.carrier.register_feature_bits
+            )
+        return self.component.feature_bits
+
+
+def cooperative_matrix_memory_variants(
+    component: StorageBufferScalar,
+) -> tuple[CooperativeMatrixMemory, ...]:
+    memory = (
+        CooperativeMatrixMemory(component, component, "storage_buffer"),
+        CooperativeMatrixMemory(component, component, "workgroup"),
     )
-)
+    # Workgroup layout retains a signed integer carrier when same-width views
+    # alias. KHR cooperative memory interprets those bits as matrix components;
+    # equal widths preserve the stride's units without a conversion or copy.
+    carrier = _require_storage_buffer_scalar(f"i{component.byte_width * 8}")
+    if carrier != component:
+        memory += (CooperativeMatrixMemory(component, carrier, "workgroup"),)
+    return memory
 
 
 COOPERATIVE_MATRIX_CASES = (
-    CooperativeMatrixCase(
-        element="f16",
-        lhs_source_type="f16",
-        rhs_source_type="f16",
-        accumulator_source_type="f32",
-        result_source_type="f32",
-        accumulator="f32",
-        m_size=16,
-        n_size=16,
-        k_size=16,
-        lhs_rows=16,
-        lhs_columns=16,
-        lhs_vector_lanes=16,
-        rhs_rows=16,
-        rhs_columns=16,
-        rhs_vector_lanes=16,
-        accumulator_rows=16,
-        accumulator_columns=16,
-        accumulator_vector_lanes=8,
-        feature_atoms=("cooperative_matrix_khr", "float16"),
+    *(
+        CooperativeMatrixCase(
+            element="f16",
+            lhs_source_type="f16",
+            rhs_source_type="f16",
+            accumulator_source_type=accumulator,
+            result_source_type=accumulator,
+            accumulator=accumulator,
+            m_size=16,
+            n_size=16,
+            k_size=16,
+            lhs_rows=16,
+            lhs_columns=16,
+            rhs_rows=16,
+            rhs_columns=16,
+            accumulator_rows=16,
+            accumulator_columns=16,
+            feature_atoms=("cooperative_matrix_khr", "float16"),
+        )
+        for accumulator in ("f32", "f16")
     ),
     CooperativeMatrixCase(
         element="bf16",
@@ -203,76 +252,119 @@ COOPERATIVE_MATRIX_CASES = (
         k_size=16,
         lhs_rows=16,
         lhs_columns=16,
-        lhs_vector_lanes=16,
         rhs_rows=16,
         rhs_columns=16,
-        rhs_vector_lanes=16,
         accumulator_rows=16,
         accumulator_columns=16,
-        accumulator_vector_lanes=8,
         feature_atoms=(
             "cooperative_matrix_khr",
             "bfloat16_type_khr",
             "bfloat16_cooperative_matrix_khr",
         ),
     ),
-    CooperativeMatrixCase(
-        element="s8",
-        lhs_source_type="i8",
-        rhs_source_type="i8",
-        accumulator_source_type="i32",
-        result_source_type="i32",
-        accumulator="s32",
-        m_size=16,
-        n_size=16,
-        k_size=32,
-        lhs_rows=16,
-        lhs_columns=32,
-        lhs_vector_lanes=32,
-        rhs_rows=32,
-        rhs_columns=16,
-        rhs_vector_lanes=32,
-        accumulator_rows=16,
-        accumulator_columns=16,
-        accumulator_vector_lanes=8,
-        feature_atoms=(
-            "cooperative_matrix_khr",
-            "int8",
-            "storage_buffer_8bit_access",
-        ),
-        property_storage_flags="STORAGE_BUFFER_OR_BDA",
-        operand_mode="signed_saturating",
-        property_operand_flags=_SIGNED_SATURATING_PROPERTY_OPERANDS,
-        packet_operand_mask=_SIGNED_SATURATING_PACKET_OPERANDS,
+    *(
+        CooperativeMatrixCase(
+            element=lhs_name if lhs == rhs else f"{lhs_name}_{rhs_name}",
+            lhs_source_type="i8",
+            rhs_source_type="i8",
+            accumulator_source_type="i32",
+            result_source_type="i32",
+            accumulator=accumulator_name,
+            m_size=16,
+            n_size=16,
+            k_size=reduction,
+            lhs_rows=16,
+            lhs_columns=reduction,
+            rhs_rows=reduction,
+            rhs_columns=16,
+            accumulator_rows=16,
+            accumulator_columns=16,
+            feature_atoms=("cooperative_matrix_khr", "int8"),
+            lhs_scalar_suffix=lhs,
+            rhs_scalar_suffix=rhs,
+            accumulator_scalar_suffix=accumulator,
+            result_scalar_suffix=accumulator,
+            saturating_accumulation=saturating,
+        )
+        for reduction in (16, 32)
+        for lhs_name, lhs in (("s8", "i8"), ("u8", "u8"))
+        for rhs_name, rhs in (("s8", "i8"), ("u8", "u8"))
+        for accumulator_name, accumulator in (("s32", "i32"), ("u32", "u32"))
+        for saturating in (False, True)
     ),
-    CooperativeMatrixCase(
-        element="u8",
-        lhs_source_type="i8",
-        rhs_source_type="i8",
-        accumulator_source_type="i32",
-        result_source_type="i32",
-        accumulator="u32",
-        m_size=16,
-        n_size=16,
-        k_size=32,
-        lhs_rows=16,
-        lhs_columns=32,
-        lhs_vector_lanes=32,
-        rhs_rows=32,
-        rhs_columns=16,
-        rhs_vector_lanes=32,
-        accumulator_rows=16,
-        accumulator_columns=16,
-        accumulator_vector_lanes=8,
-        feature_atoms=(
-            "cooperative_matrix_khr",
-            "int8",
-            "storage_buffer_8bit_access",
-        ),
-        lhs_scalar_suffix="u8",
-        rhs_scalar_suffix="u8",
-        accumulator_scalar_suffix="u32",
-        result_scalar_suffix="u32",
-        property_storage_flags="STORAGE_BUFFER_OR_BDA",
-    ),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class CooperativeMatrixType:
+    """One native value type shared by the declared matrix operations."""
+
+    scalar: StorageBufferScalar
+    rows: int
+    columns: int
+    role: str
+
+    @property
+    def constructor_key(self) -> str:
+        return (
+            f"spirv.op_composite_construct.cooperative.{self.scalar.suffix}."
+            f"{self.rows}x{self.columns}.{self.role}"
+        )
+
+    def memory_key(self, role: str, memory: CooperativeMatrixMemory) -> str:
+        operation = "store" if role == "result" else "load"
+        return (
+            f"spirv.op_cooperative_matrix_{operation}_khr.{role}."
+            f"{self.scalar.suffix}.{self.rows}x{self.columns}.subgroup."
+            f"{memory.descriptor_suffix}"
+        )
+
+    @property
+    def feature_bits(self) -> int:
+        atoms = ["cooperative_matrix_khr"]
+        if self.scalar.source_type == "bf16":
+            atoms.append("bfloat16_cooperative_matrix_khr")
+        return feature_bits_value(atoms) | self.scalar.register_feature_bits
+
+    @property
+    def source_roles(self) -> tuple[str, ...]:
+        return ("init", "result") if self.role == "accumulator" else (self.role,)
+
+    @property
+    def use_c_expression(self) -> str:
+        return {
+            "lhs": "LOOM_SPIRV_COOPERATIVE_MATRIX_USE_MATRIX_AKHR",
+            "rhs": "LOOM_SPIRV_COOPERATIVE_MATRIX_USE_MATRIX_BKHR",
+            "accumulator": "LOOM_SPIRV_COOPERATIVE_MATRIX_USE_MATRIX_ACCUMULATOR_KHR",
+        }[self.role]
+
+
+# Distinct contractions can share native matrix types. Constructors and memory
+# operations belong to those types, independent of the contraction using them.
+COOPERATIVE_MATRIX_TYPES = tuple(
+    dict.fromkeys(
+        matrix_type
+        for case in COOPERATIVE_MATRIX_CASES
+        if case.source_rule_enabled
+        for matrix_type in (
+            CooperativeMatrixType(
+                case.lhs_scalar, case.lhs_rows, case.lhs_columns, "lhs"
+            ),
+            CooperativeMatrixType(
+                case.rhs_scalar, case.rhs_rows, case.rhs_columns, "rhs"
+            ),
+            CooperativeMatrixType(
+                case.accumulator_scalar,
+                case.accumulator_rows,
+                case.accumulator_columns,
+                "accumulator",
+            ),
+            CooperativeMatrixType(
+                case.result_scalar,
+                case.accumulator_rows,
+                case.accumulator_columns,
+                "accumulator",
+            ),
+        )
+    )
 )

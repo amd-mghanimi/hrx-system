@@ -1,0 +1,236 @@
+// Copyright 2026 The IREE Authors
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+#include "loom/target/arch/x86/call_abi.h"
+
+#include "loom/target/arch/x86/register_classes.h"
+
+uint16_t loom_x86_call_abi_register_byte_length(uint16_t register_class) {
+  switch (register_class) {
+    case LOOM_X86_REGISTER_CLASS_GPR32:
+      return 4;
+    case LOOM_X86_REGISTER_CLASS_GPR64:
+      return 8;
+    case LOOM_X86_REGISTER_CLASS_XMM:
+      return 16;
+    case LOOM_X86_REGISTER_CLASS_YMM:
+      return 32;
+    case LOOM_X86_REGISTER_CLASS_ZMM:
+      return 64;
+    default:
+      return 0;
+  }
+}
+
+static bool loom_x86_call_abi_classify_scalar(
+    loom_type_t source_type,
+    loom_x86_call_abi_classification_t* out_classification) {
+  if (!loom_type_is_scalar(source_type)) {
+    return false;
+  }
+  switch (loom_type_element_type(source_type)) {
+    case LOOM_SCALAR_TYPE_I1:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_INTEGER,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .byte_length = 1,
+          .byte_alignment = 1,
+          .action = LOOM_X86_CALL_ABI_VALUE_ACTION_NORMALIZE_I1,
+      };
+      return true;
+    case LOOM_SCALAR_TYPE_I8:
+    case LOOM_SCALAR_TYPE_F8E4M3:
+    case LOOM_SCALAR_TYPE_F8E5M2:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_INTEGER,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .byte_length = 1,
+          .byte_alignment = 1,
+          .action = LOOM_X86_CALL_ABI_VALUE_ACTION_NORMALIZE_I8,
+      };
+      return true;
+    case LOOM_SCALAR_TYPE_I16:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_INTEGER,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .byte_length = 2,
+          .byte_alignment = 2,
+          .action = LOOM_X86_CALL_ABI_VALUE_ACTION_NORMALIZE_I16,
+      };
+      return true;
+    case LOOM_SCALAR_TYPE_F16:
+    case LOOM_SCALAR_TYPE_BF16:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_SSE,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_XMM,
+          .byte_length = 2,
+          .byte_alignment = 2,
+      };
+      return true;
+    case LOOM_SCALAR_TYPE_I32:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_INTEGER,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_GPR32,
+          .byte_length = 4,
+          .byte_alignment = 4,
+      };
+      return true;
+    case LOOM_SCALAR_TYPE_I64:
+    case LOOM_SCALAR_TYPE_INDEX:
+    case LOOM_SCALAR_TYPE_OFFSET:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_INTEGER,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_GPR64,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_GPR64,
+          .byte_length = 8,
+          .byte_alignment = 8,
+      };
+      return true;
+    case LOOM_SCALAR_TYPE_F32:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_SSE,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_XMM,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_XMM,
+          .byte_length = 4,
+          .byte_alignment = 4,
+      };
+      return true;
+    case LOOM_SCALAR_TYPE_F64:
+      *out_classification = (loom_x86_call_abi_classification_t){
+          .abi_class = LOOM_X86_CALL_ABI_CLASS_SSE,
+          .carrier_register_class = LOOM_X86_REGISTER_CLASS_XMM,
+          .boundary_register_class = LOOM_X86_REGISTER_CLASS_XMM,
+          .byte_length = 8,
+          .byte_alignment = 8,
+      };
+      return true;
+    default:
+      return false;
+  }
+}
+
+static bool loom_x86_call_abi_vector_element_bit_width(
+    loom_scalar_type_t scalar_type, uint32_t* out_bit_width) {
+  static const loom_scalar_type_set_t kElementTypes =
+      LOOM_SCALAR_TYPE_SET_I8 | LOOM_SCALAR_TYPE_SET_I16 |
+      LOOM_SCALAR_TYPE_SET_I32 | LOOM_SCALAR_TYPE_SET_I64 |
+      LOOM_SCALAR_TYPE_SET_F8E4M3 | LOOM_SCALAR_TYPE_SET_F8E5M2 |
+      LOOM_SCALAR_TYPE_SET_16BIT_FLOAT | LOOM_SCALAR_TYPE_SET_F32 |
+      LOOM_SCALAR_TYPE_SET_F64;
+  if (!loom_scalar_type_set_contains(kElementTypes, scalar_type)) {
+    return false;
+  }
+  *out_bit_width = (uint32_t)loom_scalar_type_bitwidth(scalar_type);
+  return true;
+}
+
+static bool loom_x86_call_abi_classify_vector(
+    loom_type_t source_type,
+    loom_x86_call_abi_classification_t* out_classification) {
+  if (!loom_type_is_vector(source_type) || loom_type_rank(source_type) != 1 ||
+      !loom_type_is_all_static(source_type)) {
+    return false;
+  }
+  const int64_t lane_count = loom_type_dim_static_size_at(source_type, 0);
+  if (lane_count <= 0) {
+    return false;
+  }
+  loom_x86_register_class_t register_class = LOOM_X86_REGISTER_CLASS_GPR32;
+  if (loom_type_element_type(source_type) == LOOM_SCALAR_TYPE_I1) {
+    switch (lane_count) {
+      case 2:
+      case 4:
+      case 8:
+      case 16:
+        register_class = LOOM_X86_REGISTER_CLASS_XMM;
+        break;
+      case 32:
+        register_class = LOOM_X86_REGISTER_CLASS_YMM;
+        break;
+      case 64:
+        register_class = LOOM_X86_REGISTER_CLASS_ZMM;
+        break;
+      default:
+        return false;
+    }
+  } else {
+    uint32_t element_bit_width = 0;
+    if (!loom_x86_call_abi_vector_element_bit_width(
+            loom_type_element_type(source_type), &element_bit_width)) {
+      return false;
+    }
+    const uint64_t vector_bit_width = (uint64_t)lane_count * element_bit_width;
+    if (vector_bit_width > UINT32_MAX ||
+        !loom_x86_register_class_for_vector_bit_width(
+            (uint32_t)vector_bit_width, &register_class)) {
+      return false;
+    }
+    const uint16_t byte_length = (uint16_t)(vector_bit_width / 8);
+    *out_classification = (loom_x86_call_abi_classification_t){
+        .abi_class = LOOM_X86_CALL_ABI_CLASS_SSE,
+        .carrier_register_class = register_class,
+        .boundary_register_class = register_class,
+        .byte_length = byte_length,
+        .byte_alignment = (uint8_t)byte_length,
+    };
+    return true;
+  }
+  const uint16_t byte_length =
+      loom_x86_call_abi_register_byte_length(register_class);
+  *out_classification = (loom_x86_call_abi_classification_t){
+      .abi_class = LOOM_X86_CALL_ABI_CLASS_SSE,
+      .carrier_register_class = register_class,
+      .boundary_register_class = register_class,
+      .byte_length = byte_length,
+      .byte_alignment = (uint8_t)byte_length,
+  };
+  return true;
+}
+
+bool loom_x86_call_abi_classify_source_type(
+    loom_type_t source_type,
+    loom_x86_call_abi_classification_t* out_classification) {
+  if (loom_type_is_buffer(source_type) || loom_type_is_view(source_type)) {
+    *out_classification = (loom_x86_call_abi_classification_t){
+        .abi_class = LOOM_X86_CALL_ABI_CLASS_INTEGER,
+        .carrier_register_class = LOOM_X86_REGISTER_CLASS_GPR64,
+        .boundary_register_class = LOOM_X86_REGISTER_CLASS_GPR64,
+        .byte_length = 8,
+        .byte_alignment = 8,
+    };
+    return true;
+  }
+  return loom_x86_call_abi_classify_scalar(source_type, out_classification) ||
+         loom_x86_call_abi_classify_vector(source_type, out_classification);
+}
+
+bool loom_x86_call_abi_classify_source_carrier(
+    loom_type_t source_type, uint16_t carrier_register_class,
+    loom_x86_call_abi_classification_t* out_classification) {
+  if (!loom_x86_call_abi_classify_source_type(source_type,
+                                              out_classification)) {
+    return false;
+  }
+  if (out_classification->carrier_register_class == carrier_register_class) {
+    return true;
+  }
+  if (carrier_register_class != LOOM_X86_REGISTER_CLASS_XMM ||
+      !loom_type_is_scalar(source_type)) {
+    return false;
+  }
+  const loom_scalar_type_t scalar_type = loom_type_element_type(source_type);
+  if (scalar_type != LOOM_SCALAR_TYPE_F16 &&
+      scalar_type != LOOM_SCALAR_TYPE_BF16) {
+    return false;
+  }
+  out_classification->carrier_register_class = carrier_register_class;
+  return true;
+}

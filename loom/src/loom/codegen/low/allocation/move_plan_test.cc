@@ -45,8 +45,9 @@ class LowAllocationMovePlanTest : public ::testing::Test {
   }
 
   ModulePtr Parse(const char* source) {
-    loom_text_parse_options_t options = {};
-    options.diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr};
+    loom_text_parse_options_t options = {
+        .diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr},
+    };
     loom_low_descriptor_text_asm_environment_initialize(
         &registry_.registry, &options.low_asm_environment);
     loom_module_t* module = nullptr;
@@ -70,8 +71,8 @@ class LowAllocationMovePlanTest : public ::testing::Test {
         // Independent identity lookup is deliberately confined to the test.
         const loom_liveness_operation_point_t* expected = nullptr;
         for (iree_host_size_t i = 0; i < liveness.operation_count; ++i) {
-          if (liveness.operation_points[i].op == op) {
-            expected = &liveness.operation_points[i];
+          if (loom_liveness_operation_at(&liveness, i)->op == op) {
+            expected = loom_liveness_operation_at(&liveness, i);
             break;
           }
         }
@@ -119,13 +120,16 @@ low.func.def target<test.low.core> @subtrees(%condition: reg<test.i32>, %lhs: re
   return %returned
 }
 )");
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY;
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+  };
   loom_low_emission_frame_t frame = {};
+  bool frame_accepted = false;
   IREE_ASSERT_OK(loom_low_emission_frame_build(
       module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
-      &arena_, &frame));
+      &arena_, &frame, &frame_accepted));
+  ASSERT_TRUE(frame_accepted);
   ASSERT_EQ(frame.allocation.error_count, 0u);
   ASSERT_GT(frame.allocation.liveness.operation_count,
             frame.schedule.node_count);
@@ -163,13 +167,16 @@ low.func.def target<test.low.core> @reordered(%lhs: reg<test.i32>, %rhs: reg<tes
   return %result
 }
 )");
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL;
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+  };
   loom_low_emission_frame_t frame = {};
+  bool frame_accepted = false;
   IREE_ASSERT_OK(loom_low_emission_frame_build(
       module.get(), loom_block_op(loom_module_block(module.get()), 0), &options,
-      &arena_, &frame));
+      &arena_, &frame, &frame_accepted));
+  ASSERT_TRUE(frame_accepted);
   ASSERT_EQ(frame.allocation.error_count, 0u);
   ASSERT_LT(frame.schedule.nodes[2].scheduled_ordinal,
             frame.schedule.nodes[1].scheduled_ordinal);
@@ -207,14 +214,17 @@ low.func.def target<test.low.core> @swap(%lhs: reg<test.phys>, %rhs: reg<test.ph
       {loom_block_arg_id(exit, 0),
        LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER, 0, 2},
   };
-  loom_low_emission_frame_options_t options = {};
-  options.descriptor_registry = &registry_.registry;
-  options.schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY;
-  options.allocation_fixed_values = fixed_values;
-  options.allocation_fixed_value_count = IREE_ARRAYSIZE(fixed_values);
+  loom_low_emission_frame_options_t options = {
+      .descriptor_registry = &registry_.registry,
+      .schedule_strategy = LOOM_LOW_SCHEDULE_STRATEGY_SOURCE_PRIORITY,
+      .allocation_fixed_values = fixed_values,
+      .allocation_fixed_value_count = IREE_ARRAYSIZE(fixed_values),
+  };
   loom_low_emission_frame_t frame = {};
-  IREE_ASSERT_OK(loom_low_emission_frame_build(module.get(), function, &options,
-                                               &arena_, &frame));
+  bool frame_accepted = false;
+  IREE_ASSERT_OK(loom_low_emission_frame_build(
+      module.get(), function, &options, &arena_, &frame, &frame_accepted));
+  ASSERT_TRUE(frame_accepted);
   ASSERT_EQ(frame.allocation.error_count, 0u);
   EXPECT_EQ(frame.allocation.placement.max_move_group_unit_count, 2u);
   EXPECT_EQ(frame.allocation.placement.packet_move_unit_count, 2u);

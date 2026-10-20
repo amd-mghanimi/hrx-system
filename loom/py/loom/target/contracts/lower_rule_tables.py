@@ -12,15 +12,17 @@ from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, unique
 
-from loom.dsl import Op
+from loom.dsl import EncodingOperandSummaryDef, Op
 from loom.errors import ErrorDef
 from loom.target.contracts.diagnostics import (
     DiagnosticParamKind,
 )
+from loom.target.contracts.emits import DescriptorOperandMaterialization
 from loom.target.contracts.guards import GuardKind
 from loom.target.contracts.kinds import SourceValueKind
 from loom.target.contracts.patterns import TypePattern
 from loom.target.contracts.rules import (
+    MAX_RULE_PRIORITY,
     SourceNodeRelation,
 )
 from loom.target.contracts.source_memory import (
@@ -39,6 +41,7 @@ class LowerEmitKind(Enum):
 
     DESCRIPTOR_OP = "descriptor_op"
     DESCRIPTOR_CONST = "descriptor_const"
+    DESCRIPTOR_COND_BR = "descriptor_cond_br"
     DESCRIPTOR_OP_FIRST_LANE = "descriptor_op_first_lane"
     DESCRIPTOR_OP_PER_LANE = "descriptor_op_per_lane"
     DESCRIPTOR_OP_PER_LANE_SEQUENCE = "descriptor_op_per_lane_sequence"
@@ -46,6 +49,7 @@ class LowerEmitKind(Enum):
     REGISTER_SLICE = "register_slice"
     REGISTER_CONCAT = "register_concat"
     REGISTER_COPY = "register_copy"
+    REGISTER_MOVE = "register_move"
 
 
 @unique
@@ -54,9 +58,13 @@ class LowerAttrCopyKind(Enum):
 
     DIRECT = "direct"
     ENUM_ORDINAL = "enum_ordinal"
+    ENUM_REMAP = "enum_remap"
     I64_LOG2 = "i64_log2"
     I64_ARRAY_ELEMENT = "i64_array_element"
     I64_ARRAY_ELEMENT_PLUS_LITERAL = "i64_array_element_plus_literal"
+    I64_ARRAY_LITERAL_MINUS_ELEMENT = "i64_array_literal_minus_element"
+    I64_ARRAY_ELEMENT_QUOTIENT = "i64_array_element_quotient"
+    I64_ARRAY_ELEMENT_REMAINDER = "i64_array_element_remainder"
     I64_ARRAY_PACK_ELEMENTS = "i64_array_pack_elements"
     ATTRS_PACK_CONSECUTIVE = "attrs_pack_consecutive"
     I64_LITERAL = "i64_literal"
@@ -70,15 +78,29 @@ class LowerAttrCopyKind(Enum):
         "value_u32_divisor_magic_multiplier_as_i32"
     )
     VALUE_U32_DIVISOR_MAGIC_SHIFT = "value_u32_divisor_magic_shift"
+    VALUE_I32_DIVISOR_MAGIC_MULTIPLIER = "value_i32_divisor_magic_multiplier"
+    VALUE_I32_DIVISOR_MAGIC_SHIFT = "value_i32_divisor_magic_shift"
     VALUE_I32_AS_U32_BITS = "value_i32_as_u32_bits"
     VALUE_FLOAT_BITS = "value_float_bits"
     VALUE_FLOAT_AS_F32_I32 = "value_float_as_f32_i32"
+    VALUE_FLOAT_AS_F64_I64 = "value_float_as_f64_i64"
     VALUE_FLOAT_AS_F64_I32_WORD = "value_float_as_f64_i32_word"
+    VALUE_FLOAT_POWER_OF_TWO_EXPONENT = "value_float_power_of_two_exponent"
+    VALUE_FLOAT_POWER_OF_TWO_NEGATED_EXPONENT = (
+        "value_float_power_of_two_negated_exponent"
+    )
     VALUE_TYPE_STATIC_DIM_SCALED = "value_type_static_dim_scaled"
     VALUE_TYPE_LITERAL_MINUS_STATIC_DIM_SCALED = (
         "value_type_literal_minus_static_dim_scaled"
     )
+    VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK = "value_type_static_dim_low_bits_mask"
     I64_ARRAY_LANE_BYTE = "i64_array_lane_byte"
+    I64_ARRAY_SHUFFLE_MASK_CHUNK = "i64_array_shuffle_mask_chunk"
+    I64_ARRAY_READ_ONLY_ELEMENTS = "i64_array_read_only_elements"
+    I64_ARRAY_READ_ONLY_BYTE_SEGMENT = "i64_array_read_only_byte_segment"
+    I64_ARRAY_READ_ONLY_BYTE_WORDS = "i64_array_read_only_byte_words"
+    OPERAND_SEGMENT_EXACT_BITS_READ_ONLY = "operand_segment_exact_bits_read_only"
+    READ_ONLY_DATA_LITERAL = "read_only_data_literal"
     SOURCE_MEMORY_STATIC_BYTE_OFFSET = "source_memory_static_byte_offset"
     SOURCE_MEMORY_STATIC_BYTE_OFFSET_PLUS_LITERAL = (
         "source_memory_static_byte_offset_plus_literal"
@@ -98,6 +120,17 @@ class LowerAttrCopyKind(Enum):
     I64_LITERAL_MINUS_ATTRS = "i64_literal_minus_attrs"
     I64_ATTR_MINUS_LITERAL = "i64_attr_minus_literal"
 
+    @property
+    def is_read_only_data(self) -> bool:
+        """Whether this projection retains bytes for deferred symbol publication."""
+        return self in (
+            LowerAttrCopyKind.I64_ARRAY_READ_ONLY_ELEMENTS,
+            LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
+            LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_WORDS,
+            LowerAttrCopyKind.OPERAND_SEGMENT_EXACT_BITS_READ_ONLY,
+            LowerAttrCopyKind.READ_ONLY_DATA_LITERAL,
+        )
+
 
 LOWER_EMIT_FLAG_SWAP_OPERANDS_0_1 = 1 << 0
 LOWER_EMIT_FLAG_BIND_RESULTS_TO_REFS = 1 << 1
@@ -110,10 +143,14 @@ LOWER_EMIT_FLAG_RECORD_SOURCE_MEMORY = 1 << 7
 LOWER_SOURCE_MEMORY_NONE = 0
 LOWER_RULE_FLAG_CONTRACT_ONLY = 1 << 0
 LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS = 1 << 1
+LOWER_RULE_FLAG_NONLOCAL_SOURCE_GRAPH = 1 << 2
+LOWER_RULE_PRIORITY_SHIFT = 4
+LOWER_RULE_PRIORITY_MAX = MAX_RULE_PRIORITY
 LOWER_RULE_PRIMARY_EMIT_NONE = 0xFFFF
 
 _LOW_VALUE_GUARD_KINDS = (
     GuardKind.LOW_VALUE_REGISTER_CLASS,
+    GuardKind.LOW_VALUE_REPRESENTATION,
     GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT,
     GuardKind.VALUE_STATIC_DIM0_MULTIPLE,
     GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT_EQ,
@@ -174,15 +211,50 @@ class LowerDiagnostic:
     target_context_param_count: int = 0
 
 
+@unique
+class SourceMemoryRejectionReason(Enum):
+    """Stable reason selecting a generated source-memory diagnostic."""
+
+    UNSUPPORTED_OP = "source_memory.unsupported_op"
+    DESCRIBE_FAILED = "source_memory.describe_failed"
+    LAYOUT = "source_memory.layout"
+    ELEMENT_WIDTH = "source_memory.element_width"
+    VECTOR_RANK = "source_memory.vector_rank"
+    VECTOR_LANE_COUNT = "source_memory.vector_lane_count"
+    VECTOR_AXIS_STRIDE = "source_memory.vector_axis_stride"
+    STATIC_OFFSET = "source_memory.static_offset"
+    DYNAMIC_INDEX_COUNT = "source_memory.dynamic_index_count"
+    DYNAMIC_AXIS = "source_memory.dynamic_axis"
+    DYNAMIC_STRIDE = "source_memory.dynamic_stride"
+    VIEW_SOURCE = "source_memory.view_source"
+    VIEW_BASE = "source_memory.view_base"
+    VIEW_BASE_OVERFLOW = "source_memory.view_base_overflow"
+    CACHE_POLICY = "source_memory.cache_policy"
+    REPRESENTABILITY = "source_memory.representability"
+    OPERATION_KIND = "source_memory.operation_kind"
+    ROOT_VALUE = "source_memory.root_value"
+    ROOT_KIND = "source_memory.root_kind"
+    MEMORY_SPACE = "source_memory.memory_space"
+    ELEMENT_BYTE_COUNT = "source_memory.element_byte_count"
+    VECTOR_LANE_BYTE_STRIDE = "source_memory.vector_lane_byte_stride"
+    MINIMUM_ALIGNMENT = "source_memory.minimum_alignment"
+    SOURCE_INDEX_PRESERVATION = "source_memory.source_index_preservation"
+    DYNAMIC_VIEW_BASE_TERM_COUNT = "source_memory.dynamic_view_base_term_count"
+    DYNAMIC_STRIDE_VALUES = "source_memory.dynamic_stride_values"
+    DYNAMIC_INDEX_SOURCE = "source_memory.dynamic_index_source"
+    ADDRESS_LAYOUT = "source_memory.address_layout"
+    BYTE_OFFSET_WIDTH = "source_memory.byte_offset_width"
+    ADDRESS_MATERIALIZATION = "source_memory.address_materialization"
+    UNIFORMITY = "source_memory.subgroup_uniform"
+    ELEMENT_STRIDE = "source_memory.element_stride"
+
+
 @dataclass(frozen=True, slots=True)
 class LowerSourceMemory:
     """Compiled source-memory constraint row."""
 
     constraint: SourceMemoryConstraint
-    diagnostic_index: int
-    dynamic_offset_diagnostic_index: int
-    address_layout_diagnostic_index: int = 0xFFFF
-    address_diagnostic_index: int = 0xFFFF
+    rejection_diagnostic_indices: tuple[int, ...]
     byte_offset_materializer: SourceMemoryByteOffsetMaterializer | None = None
     address_materializer: SourceMemoryAddressMaterializer | None = None
 
@@ -195,11 +267,14 @@ class LowerGuard:
     value_ref_index: int = 0
     other_value_ref_index: int = 0
     attr_index: int = 0
+    # Second source attribute selected by pairwise attribute guards.
+    other_attr_index: int = 0
     type_pattern_index: int = 0
     diagnostic_index: int = 0xFFFF
     attr_kind: str | None = None
     u64: int = 0
     u64_c_expression: str | None = None
+    storage_operand_schema: EncodingOperandSummaryDef | None = None
     memory_spaces: tuple[str, ...] = ()
     descriptor: Descriptor | None = None
     register_class_id: int = 0
@@ -207,6 +282,8 @@ class LowerGuard:
     maximum_i64: int = 0
     # Signed bias applied before the exact-power-of-two predicate.
     addend: int = 0
+    # Exact signed payload carried by a kind-specific guard.
+    literal_i64: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,15 +292,21 @@ class LowerAttrCopy:
 
     kind: LowerAttrCopyKind
     target_name: str
+    source_node_index: int = 0
     source_attr_index: int = 0
+    source_operand_field_index: int = 0
     other_source_attr_index: int = 0
     source_element_index: int = 0
     source_element_count: int = 0
     source_element_bit_width: int = 0
     target_bit_offset: int = 0
     value_ref_index: int = 0
+    # Second value retained by pairwise immediate projections.
+    other_value_ref_index: int = 0
     literal_i64: int = 0
     dynamic_term_index: int = 0
+    literal_data_offset: int = 0
+    literal_data_length: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +324,9 @@ class LowerEmit:
 
     kind: LowerEmitKind
     descriptor: Descriptor | None = None
+    operand_materialization: DescriptorOperandMaterialization = (
+        DescriptorOperandMaterialization.DIRECT
+    )
     flags: int = 0
     operand_ref_start: int = 0
     operand_ref_count: int = 0
@@ -252,6 +338,7 @@ class LowerEmit:
     result_bind_ref_start: int = 0
     attr_copy_start: int = 0
     attr_copy_count: int = 0
+    has_read_only_data_attributes: bool = False
     tied_result_start: int = 0
     tied_result_count: int = 0
     source_memory_ordinal: int = LOWER_SOURCE_MEMORY_NONE
@@ -300,12 +387,14 @@ class CompiledLowerRuleSet:
     type_patterns: tuple[LowerTypePattern, ...]
     value_refs: tuple[LowerValueRef, ...]
     source_nodes: tuple[LowerSourceNode, ...]
+    source_graph_root_op_kinds: tuple[int, ...]
     source_memories: tuple[LowerSourceMemory, ...]
     guards: tuple[LowerGuard, ...]
     attr_copies: tuple[LowerAttrCopy, ...]
     tied_results: tuple[LowerTiedResult, ...]
     emits: tuple[LowerEmit, ...]
     diagnostics: tuple[LowerDiagnostic, ...]
+    literal_data: bytes = b""
 
 
 def _intern_program_rows[ProgramRowT: Hashable](
@@ -329,18 +418,23 @@ def _intern_program_rows[ProgramRowT: Hashable](
 
 
 def _append_interned_row_sequence[RowT](
-    rows: list[RowT], sequence: tuple[RowT, ...]
+    rows: list[RowT],
+    sequence: tuple[RowT, ...],
+    sequence_starts: dict[tuple[RowT, ...], int],
 ) -> int:
-    """Appends a row sequence unless an identical span already exists."""
+    """Returns one stable table span for each requested row sequence."""
 
-    if not sequence:
-        return 0
+    existing_start = sequence_starts.get(sequence)
+    if existing_start is not None:
+        return existing_start
     sequence_count = len(sequence)
     for start in range(len(rows) - sequence_count + 1):
         if tuple(rows[start : start + sequence_count]) == sequence:
+            sequence_starts[sequence] = start
             return start
     ordinal = len(rows)
     rows.extend(sequence)
+    sequence_starts[sequence] = ordinal
     return ordinal
 
 
@@ -388,3 +482,8 @@ def _op_kind_key(op: Op, op_ordinals: dict[int, int]) -> tuple[int, int]:
     except KeyError as exc:
         raise ValueError(f"op '{op.name}' is not present in dialect_ops") from exc
     return (op.group.dialect_id, op_index)
+
+
+def _op_kind_value(op: Op, op_ordinals: dict[int, int]) -> int:
+    dialect_id, op_index = _op_kind_key(op, op_ordinals)
+    return (dialect_id << 8) | op_index

@@ -1,0 +1,109 @@
+func.def @owned_bytes(%byte_count: i64, %byte_start: i64, %pattern: i32) -> (i32, i32, i32) {
+  %count_input = scalar.assume %byte_count [range(%byte_count, 0, 65)] : i64
+  %length = index.cast %count_input : i64 to offset
+  %start_input = scalar.assume %byte_start [range(%byte_start, 0, 65)] : i64
+  %start = index.cast %start_input : i64 to offset
+  %base_offset = index.constant 0 : offset
+  %extent = index.add %start, %length : offset
+  %source = buffer.alloca<private> align(64) %extent : buffer
+  %target = buffer.alloca<private> align(8) %extent : buffer
+  %zero_pattern = scalar.constant 0 : i32
+  buffer.fill %zero_pattern, %target[%base_offset], %extent : i32
+  buffer.fill %pattern, %source[%start], %length : i32
+  %before = buffer.compare %source[%start], %target[%base_offset], %length
+  buffer.copy %source[%start], %target[%base_offset], %length
+  %equal = buffer.compare %source[%start], %target[%base_offset], %length
+  %increment = scalar.constant 1 : i32
+  %other = scalar.addi %pattern, %increment : i32
+  buffer.fill %other, %target[%base_offset], %length : i32
+  %after = buffer.compare %source[%start], %target[%base_offset], %length
+  func.return %before, %equal, %after : i32, i32, i32
+}
+
+func.def @buffer_generations(%count: i32, %byte_count: i64) -> (i32) {
+  %count_input = scalar.assume %byte_count [range(%byte_count, 0, 65)] : i64
+  %length = index.cast %count_input : i64 to offset
+  %base_offset = index.constant 0 : offset
+  %first = buffer.alloca<private> align(8) %length : buffer
+  %second = buffer.alloca<private> align(8) %length : buffer
+  %a = scalar.constant 17 : i8
+  %b = scalar.constant 18 : i8
+  buffer.fill %a, %first[%base_offset], %length : i8
+  buffer.fill %b, %second[%base_offset], %length : i8
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %remaining, %left, %right = scf.while(%before = %count : i32, %x = %first : buffer, %y = %second : buffer) -> (i32, buffer, buffer) {
+    %condition = scalar.cmpi sgt, %before, %c0 : i32
+    scf.condition %condition, %before, %x, %y : i1, i32, buffer, buffer
+  } do(%current: i32, %x: buffer, %y: buffer) {
+    %extra = index.cast %current : i32 to offset
+    %extent = index.add %length, %extra : offset
+    %replacement = buffer.alloca<private> align(8) %extent : buffer
+    buffer.copy %x[%base_offset], %replacement[%base_offset], %length
+    %next = scalar.subi %current, %c1 : i32
+    scf.yield %next, %y, %replacement : i32, buffer, buffer
+  }
+  %order = buffer.compare %left[%base_offset], %right[%base_offset], %length
+  func.return %order : i32
+}
+
+func.def @floating_patterns(%byte_count: i64, %half: bf16, %byte: f8E4M3, %wide: f64) -> (i32, i32, i32) {
+  %count_input = scalar.assume %byte_count [range(%byte_count, 0, 65)] : i64
+  %length = index.cast %count_input : i64 to offset
+  %base_offset = index.constant 0 : offset
+  %left = buffer.alloca<private> align(8) %length : buffer
+  %right = buffer.alloca<private> align(8) %length : buffer
+  %half_bits = scalar.bitcast %half : bf16 to i16
+  buffer.fill %half, %left[%base_offset], %length : bf16
+  buffer.fill %half_bits, %right[%base_offset], %length : i16
+  %half_order = buffer.compare %left[%base_offset], %right[%base_offset], %length
+  %byte_bits = scalar.bitcast %byte : f8E4M3 to i8
+  buffer.fill %byte, %left[%base_offset], %length : f8E4M3
+  buffer.fill %byte_bits, %right[%base_offset], %length : i8
+  %byte_order = buffer.compare %left[%base_offset], %right[%base_offset], %length
+  %wide_bits = scalar.bitcast %wide : f64 to i64
+  buffer.fill %wide, %left[%base_offset], %length : f64
+  buffer.fill %wide_bits, %right[%base_offset], %length : i64
+  %wide_order = buffer.compare %left[%base_offset], %right[%base_offset], %length
+  func.return %half_order, %byte_order, %wide_order : i32, i32, i32
+}
+
+func.def @buffer_observations(%ordinal: index, %pattern_entropy: i64, %output: buffer) {
+  %length = index.cast %ordinal : index to i64
+  %start = index.cast %ordinal : index to i64
+  %pattern = scalar.trunci %pattern_entropy : i64 to i32
+  %before, %equal, %after = func.call @owned_bytes(%length, %start, %pattern) : (i64, i64, i32) -> (i32, i32, i32)
+  %count = index.cast %ordinal : index to i32
+  %generation_order = func.call @buffer_generations(%count, %length) : (i32, i64) -> (i32)
+  %c0 = index.constant 0 : index
+  %special = index.cmp eq, %ordinal, %c0 : index
+  %fixed_half_bits = scalar.constant 4295016384 : i64
+  %half_source = scf.select %special, %fixed_half_bits, %pattern_entropy : i64
+  %half_bits = scalar.trunci %half_source : i64 to i16
+  %half = scalar.bitcast %half_bits : i16 to bf16
+  %fixed_byte_bits = scalar.constant 4294967424 : i64
+  %byte_source = scf.select %special, %fixed_byte_bits, %pattern_entropy : i64
+  %byte_bits = scalar.trunci %byte_source : i64 to i8
+  %byte = scalar.bitcast %byte_bits : i8 to f8E4M3
+  %fixed_wide_bits = scalar.constant 9221120237041090560 : i64
+  %wide_source = scf.select %special, %fixed_wide_bits, %pattern_entropy : i64
+  %wide = scalar.bitcast %wide_source : i64 to f64
+  %half_order, %byte_order, %wide_order = func.call @floating_patterns(%length, %half, %byte, %wide) : (i64, bf16, f8E4M3, f64) -> (i32, i32, i32)
+  %values = vector.from_elements %before, %equal, %after, %generation_order, %half_order, %byte_order, %wide_order : vector<7xi32>
+  %origin = index.constant 0 : offset
+  %results = buffer.view %output[%origin] : buffer -> view<7xi32>
+  vector.store %values, %results[0] : vector<7xi32>, view<7xi32>
+  func.return
+}
+
+check.scenario @buffer_values {
+  check.trial[66](%trial: index, %entropy: check.entropy) {
+    %pattern_source = check.entropy.fork %entropy name("pattern") : check.entropy
+    %pattern = check.entropy.read %pattern_source[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<7xi32>
+    check.compare<@buffer_observations>(%trial, %pattern, %output) : (index, i64, tensor<7xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<7xi32>
+    }
+  }
+  check.return
+}

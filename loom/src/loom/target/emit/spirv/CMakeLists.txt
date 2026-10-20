@@ -47,6 +47,7 @@ loom_cc_library(
     ::binary_format
     ::binary_writer
     iree::base
+    loom::target::arch::spirv::extended_instruction
     loom::target::arch::spirv::features
     loom::target::types
   PUBLIC
@@ -66,6 +67,7 @@ loom_cc_library(
     ::module_builder
     iree::base
     iree::base::internal::arena
+    loom::target::arch::spirv::bda_abi
     loom::target::arch::spirv::scalar_types
     loom::target::arch::spirv::value_types
   PUBLIC
@@ -86,6 +88,22 @@ loom_cc_library(
     iree::base::internal::arena
     loom::ir
     loom::target::arch::spirv::value_types
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+loom_cc_library(
+  NAME
+    program
+  HDRS
+    "program.h"
+  DEPS
+    iree::base
+    loom::codegen::low::descriptors
+    loom::ir
+    loom::target::facts
+    loom::target::types
   PUBLIC
 )
 endif()
@@ -121,11 +139,12 @@ loom_cc_library(
     ::module_instructions
     ::module_types
     ::module_values
+    ::program
     iree::base
     iree::base::internal::arena
-    loom::codegen::low::target_binding
     loom::ir
     loom::ops::low
+    loom::target::arch::spirv::bda_abi
     loom::target::arch::spirv::descriptors::descriptors_ids
     loom::target::arch::spirv::registers
     loom::target::arch::spirv::scalar_types
@@ -184,60 +203,83 @@ loom_cc_library(
     ::module_storage
     ::module_types
     ::module_values
+    ::program
+    iree::base
+    iree::base::internal::arena
+    loom::codegen::low::function
+    loom::codegen::low::representation_binding
+    loom::ir
+    loom::ops::low
+    loom::target::arch::spirv::descriptors::descriptors_ids
+    loom::target::arch::spirv::features
+    loom::target::arch::spirv::packet_rows
+    loom::target::types
+  PUBLIC
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+loom_cc_library(
+  NAME
+    module_compiler
+  HDRS
+    "module_compiler.h"
+  SRCS
+    "module_compiler.c"
+  DEPS
+    ::module_builder
+    ::module_emitter
+    ::program
     iree::base
     iree::base::internal::arena
     loom::analysis::symbol_facts
+    loom::codegen::low::descriptors
     loom::codegen::low::diagnostics
     loom::codegen::low::function
     loom::codegen::low::target_binding
     loom::error::emitter
     loom::error::error_defs
     loom::ir
-    loom::ops::low
-    loom::target::arch::spirv::descriptors::descriptors_ids
-    loom::target::arch::spirv::features
+    loom::ops::op_defs
+    loom::target::arch::spirv::descriptors
     loom::target::arch::spirv::module_contract
-    loom::target::arch::spirv::packet_rows
+    loom::target::facts
     loom::target::function_version
-    loom::target::low_descriptor_registry
+    loom::target::provider
+    loom::target::reporting::artifact_manifest_collect
     loom::target::types
   PUBLIC
 )
 endif()
 
-if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_cc_library(
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+loom_cc_test(
   NAME
-    loom_check
-  HDRS
-    "check/loom_check.h"
+    module_compiler_test
   SRCS
-    "check/loom_check.c"
+    "module_compiler_test.cc"
   DEPS
-    ::module_emitter
-    iree::base
-    loom::target::entry_selection
-    loom::target::tool::spirv
-    loom::tooling::compile::pipeline
-    loom::tools::loom-check::execute
-    loom::verify
-  PUBLIC
-)
-endif()
-
-if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-loom_cc_library(
-  NAME
-    check_provider
-  HDRS
-    "check/provider.h"
-  SRCS
-    "check/provider.c"
-  DEPS
-    ::loom_check
-    iree::base
-    loom::tools::loom-check::provider
-  PUBLIC
+    ::module_compiler
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::low::text_asm
+    loom::format::text::parser
+    loom::ir
+    loom::ops::op_defs
+    loom::ops::op_registry
+    loom::target::arch::spirv::descriptors
+    loom::target::arch::spirv::features
+    loom::target::arch::spirv::records::target_records
+    loom::target::facts_builder
+    loom::target::function_version
+    loom::target::low_descriptor_registry
+    loom::target::types
+    loom::testing::byte_sequence
+    loom::testing::module_ptr
+  LABELS
+    "iree-build-requirement=loom.target.arch.spirv"
+    "iree-build-requirement=loom.emit.spirv"
 )
 endif()
 
@@ -292,31 +334,36 @@ loom_check_test_suite(
     "test/atomic_diagnostics.loom-test"
     "test/barrier.loom-test"
     "test/buffer_raw.loom-test"
+    "test/builtin_queries.loom-test"
     "test/cooperative_matrix.loom-test"
     "test/entry_point.loom-test"
+    "test/extended_math.loom-test"
     "test/immediate_enums.loom-test"
     "test/index_conversion.loom-test"
     "test/integer_boolean.loom-test"
     "test/loop_termination.loom-test"
     "test/memory_access_flags.loom-test"
+    "test/narrow_scalar_abi.loom-test"
     "test/ordinary_vector_bit_layout.loom-test"
     "test/ordinary_vector_float.loom-test"
     "test/ordinary_vector_integer.loom-test"
     "test/ordinary_vector_integer_conversion.loom-test"
     "test/ordinary_vector_structure.loom-test"
+    "test/parameter_reflection.loom-test"
     "test/scalar_abi.loom-test"
     "test/scalar_operations.loom-test"
     "test/schedule_scopes.loom-test"
-    "test/source_low/buffer_selection.loom-test"
-    "test/source_low/index_numeric.loom-test"
-    "test/source_low/memory_integer_terms.loom-test"
-    "test/source_low/memory_scalar_addressing.loom-test"
-    "test/source_low/memory_workgroup_scalar_addressing.loom-test"
+    "test/source_low/numeric_bfloat_narrow.loom-test"
     "test/source_low/numeric_bfloat_widen.loom-test"
-    "test/source_low/source_ordinary_vector_structure.loom-test"
+    "test/source_low/numeric_float_narrow.loom-test"
+    "test/source_low/predicate_truncation.loom-test"
     "test/source_structured_control.loom-test"
     "test/storage_buffer_abi.loom-test"
     "test/structured_control.loom-test"
+    "test/subgroup_ballot.loom-test"
+    "test/subgroup_predicates.loom-test"
+    "test/subgroup_reductions.loom-test"
+    "test/subgroup_size.loom-test"
     "test/workgroup_byte_offsets.loom-test"
     "test/workgroup_storage.loom-test"
   DATA

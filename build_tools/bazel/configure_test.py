@@ -38,6 +38,64 @@ class ConfigureBazelTest(unittest.TestCase):
         (rocm_root / "include").mkdir(parents=True)
         return rocm_root
 
+    def test_loom_image_configuration_is_portable_and_independent(self):
+        for arguments in (
+            ["-DLOOM_SERVE_IMAGE_INPUT=OFF", "-DLOOM_SERVE_IMAGE_CODECS=png;jpeg"],
+            [
+                "--//loom/config/serve:image_input=false",
+                "--//loom/config/serve:image_codecs=png,jpeg",
+            ],
+        ):
+            with self.subTest(arguments=arguments):
+                request = self.configure_bazel.parse_arguments(arguments)
+                config = self.configure_bazel.generate_config(request)
+                self.assertIn("--//loom/config/serve:image_input=false", config)
+                self.assertIn("--//loom/config/serve:image_codecs=png,jpeg", config)
+                self.assertIn("--//loom/config/execute:enable=iree_hal", config)
+
+    def test_loom_image_configuration_rejects_unknown_and_mixed_options(self):
+        for arguments in (
+            ["-DLOOM_SERVE_IMAGE_CODECS=png;typo"],
+            ["--//loom/config/serve:image_codecs=typo"],
+            ["-DLOOM_SERVE_IMAGE_INPUT=ON", "--//loom/config/serve:image_input=false"],
+            [
+                "-DLOOM_SERVE_IMAGE_CODECS=png",
+                "--//loom/config/serve:image_codecs=jpeg",
+            ],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                self.configure_bazel.generate_config(
+                    self.configure_bazel.parse_arguments(arguments)
+                )
+
+    def test_loom_audio_codec_selection_is_portable(self):
+        for codecs in ((), ("wav",), ("mp3", "flac"), ("wav", "mp3", "flac")):
+            for argument in (
+                "-DLOOM_SERVE_AUDIO_CODECS=" + ";".join(codecs),
+                "--//loom/config/serve:audio_codecs=" + ",".join(codecs),
+            ):
+                with self.subTest(argument=argument):
+                    config = self.configure_bazel.generate_config(
+                        self.configure_bazel.parse_arguments([argument])
+                    )
+                    self.assertIn(
+                        "build --//loom/config/serve:audio_codecs="
+                        + ",".join(codecs)
+                        + "\n",
+                        config,
+                    )
+
+    def test_loom_audio_configuration_rejects_unknown_and_mixed_options(self):
+        for arguments in (
+            ["-DLOOM_SERVE_AUDIO_CODECS=wav;typo"],
+            ["--//loom/config/serve:audio_codecs=typo"],
+            ["-DLOOM_SERVE_AUDIO_CODECS=wav", "--//loom/config/serve:audio_codecs=mp3"],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                self.configure_bazel.generate_config(
+                    self.configure_bazel.parse_arguments(arguments)
+                )
+
     def assert_rocm_path(self, config: str, rocm_root: Path) -> None:
         self.assertIn(
             self.configure_bazel.bazelrc_line(
@@ -110,6 +168,23 @@ class ConfigureBazelTest(unittest.TestCase):
         args = self.configure_bazel.parse_arguments(["-DAMDF_BUILD=ON"])
         config = self.configure_bazel.generate_config(args)
 
+        self.assertIn("build --//libamdf/config:enabled=true", config)
+
+    def test_xdna_driver_rejects_explicitly_disabled_native_provider(self):
+        for options in (
+            ["-DIREE_HAL_DRIVER_XDNA=ON", "-DAMDF_BUILD=OFF"],
+            ["-DIREE_HAL_DRIVER_XDNA=ON", "-DAMDF_FAMILY_XDNA=OFF"],
+        ):
+            with self.subTest(options=options):
+                args = self.configure_bazel.parse_arguments(options)
+                with self.assertRaisesRegex(SystemExit, "conflicts with"):
+                    self.configure_bazel.generate_config(args)
+
+    def test_xdna_driver_resolves_native_provider(self):
+        args = self.configure_bazel.parse_arguments(["-DIREE_HAL_DRIVER_XDNA=ON"])
+        config = self.configure_bazel.generate_config(args)
+
+        self.assertIn("build --//runtime/config/hal:drivers=task,xdna", config)
         self.assertIn("build --//libamdf/config:enabled=true", config)
 
     def test_libamdf_explicit_disable_is_independent_of_hal_driver(self):
@@ -344,41 +419,25 @@ class ConfigureBazelTest(unittest.TestCase):
         config = self.configure_bazel.generate_config(args)
 
         self.assertIn(
-            "build --//loom/config/target:enable=amdgpu,spirv,xdna,x86",
+            "build --//loom/config/target:enable=amdgpu,spirv,vm,xdna,x86",
             config,
         )
         self.assertIn("build --//loom/config/execute:enable=iree_hal", config)
         self.assertIn("build --//loom/config/import:enable=", config)
         self.assertIn("build --//loom/config/emit:enable=", config)
 
-    def test_portable_loom_target_option_configures_target_scope(self):
-        for target in ("vm", "wasm"):
-            with self.subTest(target=target):
-                args = self.configure_bazel.parse_arguments(
-                    [f"-DLOOM_TARGET_{target.upper()}=ON"]
-                )
-                config = self.configure_bazel.generate_config(args)
-
-                self.assertIn(
-                    "build --//loom/config/target:enable="
-                    f"amdgpu,spirv,{target},xdna,x86",
-                    config,
-                )
-                self.assertIn("build --//loom/config/execute:enable=iree_hal", config)
-                self.assertIn("build --//loom/config/emit:enable=", config)
-                self.assertIn(
-                    "common --repo_env=IREE_HAL_AMDGPU_DEVICE_TOOLCHAIN=none", config
-                )
-                self.assertNotIn("IREE_ROCM_PATH", config)
-
-    def test_portable_vm_target_option_configures_target_scope(self):
-        args = self.configure_bazel.parse_arguments(["-DLOOM_TARGET_VM=ON"])
+    def test_portable_wasm_target_option_configures_target_scope(self):
+        args = self.configure_bazel.parse_arguments(["-DLOOM_TARGET_WASM=ON"])
         config = self.configure_bazel.generate_config(args)
 
         self.assertIn(
-            "build --//loom/config/target:enable=amdgpu,spirv,vm,xdna,x86",
+            "build --//loom/config/target:enable=amdgpu,spirv,vm,wasm,xdna,x86",
             config,
         )
+        self.assertIn("build --//loom/config/execute:enable=iree_hal", config)
+        self.assertIn("build --//loom/config/emit:enable=", config)
+        self.assertIn("common --repo_env=IREE_HAL_AMDGPU_DEVICE_TOOLCHAIN=none", config)
+        self.assertNotIn("IREE_ROCM_PATH", config)
 
     def test_native_vm_target_option_configures_target_scope(self):
         args = self.configure_bazel.parse_arguments(
@@ -393,7 +452,7 @@ class ConfigureBazelTest(unittest.TestCase):
         config = self.configure_bazel.generate_config(args)
 
         self.assertIn(
-            "build --//loom/config/target:enable=spirv,xdna,x86",
+            "build --//loom/config/target:enable=spirv,vm,xdna,x86",
             config,
         )
         self.assertIn("build --//loom/config/execute:enable=iree_hal", config)
@@ -404,7 +463,7 @@ class ConfigureBazelTest(unittest.TestCase):
         config = self.configure_bazel.generate_config(args)
 
         self.assertIn(
-            "build --//loom/config/target:enable=amdgpu,spirv,xdna,x86",
+            "build --//loom/config/target:enable=amdgpu,spirv,vm,xdna,x86",
             config,
         )
         self.assertIn("build --//loom/config/execute:enable=", config)
@@ -415,7 +474,7 @@ class ConfigureBazelTest(unittest.TestCase):
         config = self.configure_bazel.generate_config(args)
 
         self.assertIn(
-            "build --//loom/config/target:enable=amdgpu,spirv,xdna,x86",
+            "build --//loom/config/target:enable=amdgpu,spirv,vm,xdna,x86",
             config,
         )
         self.assertIn("build --//loom/config/execute:enable=iree_hal", config)
@@ -451,6 +510,24 @@ class ConfigureBazelTest(unittest.TestCase):
         )
         self.assertIn("build --//loom/config/execute:enable=iree_hal", config)
         self.assertIn("build --//loom/config/emit:enable=xdna", config)
+
+    def test_native_amdgpu_targets_configure_processor_scope(self):
+        args = self.configure_bazel.parse_arguments(
+            [
+                "--//runtime/src/iree/hal/drivers/amdgpu:targets=gfx942,gfx125X-all",
+                "--//loom/config/target/amdgpu:targets=gfx942,gfx125X-all",
+            ]
+        )
+        config = self.configure_bazel.generate_config(args)
+
+        self.assertIn(
+            "build --//runtime/src/iree/hal/drivers/amdgpu:targets=gfx125X-all,gfx942",
+            config,
+        )
+        self.assertIn(
+            "build --//loom/config/target/amdgpu:targets=gfx125X-all,gfx942",
+            config,
+        )
 
     def test_portable_and_native_loom_target_options_conflict(self):
         args = self.configure_bazel.parse_arguments(

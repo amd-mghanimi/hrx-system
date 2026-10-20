@@ -4,15 +4,42 @@
 // Buffer allocation, mapping, and lifecycle.
 // Adapted from iree-hal-streaming's memory.c allocation patterns.
 
+#include "buffer.h"
+
+#include <stdio.h>
 #include <string.h>
 
 #include "hrx_internal.h"
 #include "mem_pool.h"
 
+iree_status_t hrx_buffer_create_from_hal(iree_hal_buffer_t* hal_buffer,
+                                         hrx_device_t device,
+                                         hrx_memory_type_t mem_type,
+                                         size_t size, void* device_ptr,
+                                         hrx_buffer_t* out_buffer) {
+  hrx_buffer_s* buffer = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(iree_allocator_system(),
+                                             sizeof(*buffer), (void**)&buffer));
+  memset(buffer, 0, sizeof(*buffer));
+  iree_atomic_ref_count_init(&buffer->ref_count);
+  buffer->hal_buffer = hal_buffer;
+  if (hal_buffer) {
+    iree_hal_buffer_retain(hal_buffer);
+  }
+  buffer->device = device;
+  if (device) {
+    hrx_device_retain(device);
+  }
+  buffer->mem_type = mem_type;
+  buffer->size = size;
+  buffer->device_ptr = device_ptr;
+  *out_buffer = buffer;
+  return iree_ok_status();
+}
+
 static iree_status_t hrx_buffer_unmap_internal(hrx_buffer_t buffer) {
   iree_status_t status = iree_hal_buffer_unmap_range(&buffer->mapping);
   buffer->is_mapped = false;
-  buffer->mapped_ptr = NULL;
   return status;
 }
 
@@ -39,25 +66,6 @@ hrx_status_t hrx_buffer_allocate(hrx_stream_t stream, size_t size,
   }
   memset(buf, 0, sizeof(*buf));
 
-  iree_hal_buffer_params_t params = {
-      .type = (iree_hal_memory_type_t)mem_type,
-      .access = IREE_HAL_MEMORY_ACCESS_ALL,
-      .usage = (iree_hal_buffer_usage_t)usage,
-  };
-  const iree_hal_buffer_compatibility_t compatibility =
-      iree_hal_allocator_query_buffer_compatibility(
-          stream->device->allocator.hal_allocator, params,
-          (iree_device_size_t)size, &params,
-          /*out_allocation_size=*/NULL);
-  if (!iree_all_bits_set(compatibility,
-                         IREE_HAL_BUFFER_COMPATIBILITY_ALLOCATABLE)) {
-    iree_allocator_free(iree_allocator_system(), buf);
-    HRX_RETURN_AND_END_ZONE(
-        z0,
-        hrx_make_status(HRX_STATUS_INVALID_ARGUMENT,
-                        "buffer params are not allocatable on this device"));
-  }
-
   hrx_status_t flush_status = hrx_stream_flush(stream);
   if (!hrx_status_is_ok(flush_status)) {
     iree_allocator_free(iree_allocator_system(), buf);
@@ -78,14 +86,12 @@ hrx_status_t hrx_buffer_allocate(hrx_stream_t stream, size_t size,
       .payload_values = &signal_value,
   };
 
-  iree_status_t status = iree_ok_status();
-  status = hrx_iree_exact_pool_create(stream->device->allocator.hal_allocator,
-                                      params, &buf->hal_pool);
+  iree_status_t status = hrx_mem_pool_backing_retain_allocation_source(
+      stream->device, mem_type, usage, &buf->hal_pool);
   if (iree_status_is_ok(status)) {
-    const iree_hal_pool_reservation_request_t request = {
-        .params = params,
-        .allocation_size = (iree_device_size_t)size,
-    };
+    const iree_hal_pool_reservation_request_t request =
+        iree_hal_make_pool_reservation_request((iree_device_size_t)size,
+                                               /*min_alignment=*/0);
     status = iree_hal_queue_alloca(
         stream->device->transfer_queue, wait_list, signal_list, buf->hal_pool,
         /*request_count=*/1, &request, &buf->hal_buffer);
@@ -108,7 +114,6 @@ hrx_status_t hrx_buffer_allocate(hrx_stream_t stream, size_t size,
   hrx_device_retain(buf->device);
   buf->mem_type = mem_type;
   buf->size = size;
-  buf->mapped_ptr = NULL;
   stream->timepoint = signal_value;
 
   *buffer = buf;
@@ -141,7 +146,12 @@ void hrx_buffer_release(hrx_buffer_t buffer) {
       iree_atomic_ref_count_dec(&buffer->ref_count) == 1;
   if (is_final_reference) {
     if (buffer->is_mapped) {
-      iree_status_ignore(hrx_buffer_unmap_internal(buffer));
+      iree_status_t status = hrx_buffer_unmap_internal(buffer);
+      if (!iree_status_is_ok(status)) {
+        // Final release has no error channel. Report the terminal unmap error.
+        iree_status_fprint(stderr, status);
+        iree_status_free(status);
+      }
     }
     iree_allocator_free(iree_allocator_system(), buffer);
   }
@@ -169,8 +179,20 @@ hrx_status_t hrx_buffer_map(hrx_buffer_t buffer, hrx_map_flags_t flags,
     HRX_RETURN_AND_END_ZONE(z0, hrx_make_status(HRX_STATUS_FAILED_PRECONDITION,
                                                 "buffer is already mapped"));
   }
+  *mapped_ptr = NULL;
+  if (!buffer->hal_buffer) {
+    HRX_RETURN_AND_END_ZONE(
+        z0, hrx_make_status(HRX_STATUS_UNAVAILABLE,
+                            "host-only registration has no HAL mapping"));
+  }
 
-  iree_hal_memory_access_t access = 0;
+  if (flags &
+      ~(HRX_MAP_READ | HRX_MAP_WRITE | HRX_MAP_DISCARD | HRX_MAP_MAY_ALIAS)) {
+    HRX_RETURN_AND_END_ZONE(z0, hrx_make_status(HRX_STATUS_INVALID_ARGUMENT,
+                                                "unsupported map flags"));
+  }
+  iree_hal_memory_access_t access = IREE_HAL_MEMORY_ACCESS_NONE;
+  iree_hal_buffer_map_flags_t map_flags = IREE_HAL_BUFFER_MAP_FLAG_NONE;
   if (flags & HRX_MAP_READ) {
     access |= IREE_HAL_MEMORY_ACCESS_READ;
   }
@@ -178,18 +200,22 @@ hrx_status_t hrx_buffer_map(hrx_buffer_t buffer, hrx_map_flags_t flags,
     access |= IREE_HAL_MEMORY_ACCESS_WRITE;
   }
   if (flags & HRX_MAP_DISCARD) {
-    access |= IREE_HAL_MEMORY_ACCESS_DISCARD_WRITE;
+    access |= IREE_HAL_MEMORY_ACCESS_WRITE;
+    map_flags |= IREE_HAL_BUFFER_MAP_FLAG_DISCARD;
+  }
+
+  if (flags & HRX_MAP_MAY_ALIAS) {
+    map_flags |= IREE_HAL_BUFFER_MAP_FLAG_MAY_ALIAS;
   }
 
   iree_status_t status = iree_hal_buffer_map_range(
-      buffer->hal_buffer, IREE_HAL_MAPPING_MODE_SCOPED, access,
+      buffer->hal_buffer, IREE_HAL_MAPPING_MODE_SCOPED, access, map_flags,
       (iree_device_size_t)offset, (iree_device_size_t)size, &buffer->mapping);
   if (!iree_status_is_ok(status)) {
     HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
   }
 
   buffer->is_mapped = true;
-  buffer->mapped_ptr = buffer->mapping.contents.data;
   *mapped_ptr = buffer->mapping.contents.data;
   HRX_RETURN_AND_END_ZONE(z0, hrx_ok_status());
 }
@@ -221,41 +247,32 @@ hrx_status_t hrx_buffer_get_device_ptr(hrx_buffer_t buffer, void** device_ptr) {
                             hrx_make_status(HRX_STATUS_INVALID_ARGUMENT,
                                             "buffer or device_ptr is NULL"));
   }
-  // Device allocations may not be host-visible, so ask the buffer for its
-  // native device address before falling back to a host mapping.
-  iree_hal_external_buffer_t external_buffer;
-  iree_status_t status = iree_hal_buffer_export(
-      buffer->hal_buffer, IREE_HAL_EXTERNAL_BUFFER_TYPE_DEVICE_ALLOCATION,
-      IREE_HAL_EXTERNAL_BUFFER_FLAG_NONE, &external_buffer);
-  if (iree_status_is_ok(status)) {
-    *device_ptr =
-        (void*)(uintptr_t)external_buffer.handle.device_allocation.ptr;
-    HRX_RETURN_AND_END_ZONE(z0, hrx_ok_status());
-  }
-  iree_status_ignore(status);
-
-  // CPU allocators expose their device address through the host mapping.
-  if (buffer->mapped_ptr) {
-    *device_ptr = buffer->mapped_ptr;
-    HRX_RETURN_AND_END_ZONE(z0, hrx_ok_status());
-  }
-
-  // Try to get a native allocation pointer.
-  status = iree_hal_buffer_map_range(
-      buffer->hal_buffer, IREE_HAL_MAPPING_MODE_SCOPED,
-      IREE_HAL_MEMORY_ACCESS_ALL, 0, buffer->size, &buffer->mapping);
-  if (iree_status_is_ok(status)) {
-    buffer->is_mapped = true;
-    buffer->mapped_ptr = buffer->mapping.contents.data;
-    *device_ptr = buffer->mapping.contents.data;
-    HRX_RETURN_AND_END_ZONE(z0, hrx_ok_status());
-  }
-
-  iree_status_ignore(status);
   *device_ptr = NULL;
-  HRX_RETURN_AND_END_ZONE(
-      z0, hrx_make_status(HRX_STATUS_UNAVAILABLE,
-                          "cannot get device pointer for this buffer type"));
+  if (buffer->device_ptr) {
+    *device_ptr = buffer->device_ptr;
+    HRX_RETURN_AND_END_ZONE(z0, hrx_ok_status());
+  }
+  if (!buffer->hal_buffer) {
+    HRX_RETURN_AND_END_ZONE(z0,
+                            hrx_make_status(HRX_STATUS_UNAVAILABLE,
+                                            "buffer has no device address"));
+  }
+
+  // A scoped mapping grants access only to its interval and cannot provide a
+  // whole-buffer device address. Native export leaves any active map untouched.
+  iree_hal_external_storage_t external_buffer = {0};
+  iree_hal_buffer_range_t logical_range = {0};
+  iree_status_t status = iree_hal_buffer_export(
+      buffer->hal_buffer, iree_hal_make_buffer_range(0, IREE_HAL_WHOLE_BUFFER),
+      iree_hal_make_external_storage_class(
+          IREE_HAL_EXTERNAL_STORAGE_TYPE_DEVICE_ADDRESS),
+      &external_buffer, &logical_range);
+  if (iree_status_is_ok(status)) {
+    *device_ptr = (void*)(uintptr_t)(external_buffer.payload.device_address +
+                                     logical_range.byte_offset);
+  }
+  iree_hal_external_storage_release(&external_buffer);
+  HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
 }
 
 hrx_status_t hrx_buffer_get_size(hrx_buffer_t buffer, size_t* size) {
@@ -274,28 +291,20 @@ hrx_status_t hrx_host_memory_register(hrx_device_t device, void* host_ptr,
     return hrx_make_status(HRX_STATUS_INVALID_ARGUMENT, "NULL argument");
   }
 
-  hrx_buffer_s* buf = NULL;
-  iree_status_t alloc_s = iree_allocator_malloc(
-      iree_allocator_system(), sizeof(hrx_buffer_s), (void**)&buf);
-  if (!iree_status_is_ok(alloc_s)) {
-    return hrx_status_from_iree(alloc_s);
+  hrx_buffer_t buffer = NULL;
+  iree_status_t create_status = hrx_buffer_create_from_hal(
+      NULL, device, HRX_MEMORY_TYPE_HOST_LOCAL, size, host_ptr, &buffer);
+  if (!iree_status_is_ok(create_status)) {
+    return hrx_status_from_iree(create_status);
   }
-  memset(buf, 0, sizeof(*buf));
-  iree_atomic_ref_count_init(&buf->ref_count);
-  buf->device = device;
-  buf->mem_type = HRX_MEMORY_TYPE_HOST_LOCAL;
-  buf->size = size;
-  buf->mapped_ptr = host_ptr;
-  buf->hal_buffer = NULL;
 
   uint64_t key = (uint64_t)(uintptr_t)host_ptr;
   hrx_status_t status = hrx_buffer_table_insert(&device->buffer_table, key,
-                                                host_ptr, size, buf, NULL);
+                                                host_ptr, size, buffer, NULL);
   if (!hrx_status_is_ok(status)) {
-    iree_allocator_free(iree_allocator_system(), buf);
-    return status;
+    hrx_buffer_release(buffer);
   }
-  return hrx_ok_status();
+  return status;
 }
 
 hrx_status_t hrx_host_memory_unregister(hrx_device_t device, void* host_ptr) {
@@ -304,18 +313,15 @@ hrx_status_t hrx_host_memory_unregister(hrx_device_t device, void* host_ptr) {
   }
 
   uint64_t key = (uint64_t)(uintptr_t)host_ptr;
-  hrx_buffer_t buf = NULL;
-  size_t offset = 0;
-  hrx_status_t status =
-      hrx_buffer_table_find(&device->buffer_table, key, &buf, &offset, NULL);
+  hrx_buffer_table_entry_t entry = {0};
+  hrx_status_t status = hrx_buffer_table_remove_reserved_if(
+      &device->buffer_table, key, NULL, NULL, &entry, NULL);
   if (!hrx_status_is_ok(status)) {
     return status;
   }
 
-  hrx_buffer_table_remove(&device->buffer_table, key);
-  if (buf) {
-    iree_allocator_free(iree_allocator_system(), buf);
-  }
+  hrx_buffer_table_cancel_reserved_insert(&device->buffer_table);
+  hrx_buffer_release(entry.buffer);
   return hrx_ok_status();
 }
 

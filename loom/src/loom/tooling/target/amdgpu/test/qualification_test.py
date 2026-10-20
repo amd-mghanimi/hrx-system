@@ -21,11 +21,9 @@ class QualificationTest(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.corpus = self.root / "corpus.loom-test"
-        self.corpus.write_bytes(Path(_ARGS.corpus).read_bytes())
+        source = Path(_ARGS.accepted).read_text()
+        self.corpus.write_text(source, newline="\n")
         self.fixture = self.root / "fixture.loom-test"
-        source = Path(_ARGS.fixture).read_text()
-        source = "// TEMPLATE: corpus.loom-test\n" + source.split("\n", 1)[1]
-        # Keep the copied fixture in its canonical LF form.
         self.fixture.write_text(source, newline="\n")
         self.rejected = self.root / "rejected.loom-test"
         self.rejected.write_bytes(Path(_ARGS.rejected).read_bytes())
@@ -43,12 +41,12 @@ class QualificationTest(unittest.TestCase):
             text=True,
         )
 
-    def test_native_compilation_is_independent_of_low_goldens(self):
+    def test_native_compilation_uses_authored_cases(self):
         result = self.check(self.fixture)
         self.assertEqual(result.returncode, 0, result.stderr)
         report = json.loads(result.stdout)
         self.assertEqual(
-            report["summary"], {"total": 14, "passed": 14, "failed": 0, "skipped": 0}
+            report["summary"], {"total": 2, "passed": 2, "failed": 0, "skipped": 0}
         )
         self.assertTrue(all(case["mode"] == "compile" for case in report["cases"]))
 
@@ -58,6 +56,18 @@ class QualificationTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(
             report["summary"], {"total": 1, "passed": 1, "failed": 0, "skipped": 0}
+        )
+        diagnostics = report["cases"][0]["diagnostics"]
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]["domain"], "AMDGPU")
+        self.assertEqual(diagnostics[0]["code"], 26)
+        self.assertEqual(
+            diagnostics[0]["params"],
+            {
+                "target_name": "wave32",
+                "subgroup_size": 32,
+                "processor": "gfx942",
+            },
         )
 
     def test_wrong_diagnostic_identity_fails(self):
@@ -87,7 +97,7 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(report["summary"]["passed"], 0)
         self.assertEqual(report["summary"]["failed"], 1)
 
-    def test_compilation_uses_concrete_cases_without_template_synchronization(self):
+    def test_compilation_uses_selected_concrete_cases(self):
         self.fixture.write_text(
             self.fixture.read_text().split("// ====", 1)[0], newline="\n"
         )
@@ -98,24 +108,11 @@ class QualificationTest(unittest.TestCase):
             report["summary"], {"total": 1, "passed": 1, "failed": 0, "skipped": 0}
         )
 
-    def test_compilation_needs_no_template_source(self):
-        self.corpus.unlink()
-        original = self.fixture.read_bytes()
-        result = self.check(self.fixture)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        report = json.loads(result.stdout)
-        self.assertEqual(
-            report["summary"], {"total": 14, "passed": 14, "failed": 0, "skipped": 0}
-        )
-        self.assertEqual(self.fixture.read_bytes(), original)
-
-    def test_update_does_not_rewrite_goldens(self):
+    def test_update_does_not_rewrite_targeted_input(self):
         original = self.fixture.read_bytes()
         result = self.check(self.fixture, "--update")
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(
-            "cannot maintain template sources or update RUN goldens", result.stderr
-        )
+        self.assertIn("--target cannot be combined with --update", result.stderr)
         self.assertEqual(self.fixture.read_bytes(), original)
 
     def test_unknown_profile_is_not_a_skip(self):
@@ -144,8 +141,7 @@ class QualificationTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_native_entry_report_and_publication(self):
-        output = self.root / "module.hal"
-        native_output = self.root / "module.hsaco"
+        artifact_path = self.root / "module.hsaco"
         report_path = self.root / "report.json"
         roots = ["address_guarded_rows", "address_materialized_wide_offset"]
         result = subprocess.run(
@@ -154,8 +150,7 @@ class QualificationTest(unittest.TestCase):
                 _ARGS.realizations,
                 "--target=amdgpu:gfx942",
                 *[f"--root=@{root}" for root in roots],
-                f"--output={output}",
-                f"--emit-target-artifact={native_output}",
+                f"--output={artifact_path}",
                 "--compile-report=summary",
                 f"--compile-report-output={report_path}",
             ],
@@ -163,8 +158,7 @@ class QualificationTest(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertGreater(output.stat().st_size, 0)
-        self.assertGreater(native_output.stat().st_size, 0)
+        self.assertGreater(artifact_path.stat().st_size, 0)
         report = json.loads(report_path.read_text())
         self.assertEqual(report["target_key"], "gfx942")
         self.assertEqual(report["entries"]["count"], len(roots))
@@ -176,21 +170,18 @@ class QualificationTest(unittest.TestCase):
         )
 
     def test_rejected_compilation_does_not_publish_output(self):
-        output = self.root / "rejected.hal"
-        native_output = self.root / "rejected.hsaco"
+        artifact_path = self.root / "rejected.hsaco"
         for contents in (None, b"previous artifact"):
             with self.subTest(existing_output=contents is not None):
                 if contents is not None:
-                    output.write_bytes(contents)
-                    native_output.write_bytes(contents)
+                    artifact_path.write_bytes(contents)
                 result = subprocess.run(
                     [
                         _ARGS.compiler,
                         str(self.rejected),
                         "--target=amdgpu:gfx942",
                         "--root=@unsupported_wave_size",
-                        f"--output={output}",
-                        f"--emit-target-artifact={native_output}",
+                        f"--output={artifact_path}",
                     ],
                     capture_output=True,
                     text=True,
@@ -198,18 +189,16 @@ class QualificationTest(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("AMDGPU/026", result.stderr)
                 self.assertEqual(result.stdout, "")
-                for artifact in (output, native_output):
-                    if contents is None:
-                        self.assertFalse(artifact.exists())
-                    else:
-                        self.assertEqual(artifact.read_bytes(), contents)
+                if contents is None:
+                    self.assertFalse(artifact_path.exists())
+                else:
+                    self.assertEqual(artifact_path.read_bytes(), contents)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("checker")
-    parser.add_argument("corpus")
-    parser.add_argument("fixture")
+    parser.add_argument("accepted")
     parser.add_argument("compiler")
     parser.add_argument("realizations")
     parser.add_argument("rejected")

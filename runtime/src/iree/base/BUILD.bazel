@@ -38,6 +38,7 @@ iree_runtime_cc_library(
         "wait_source.c",
     ] + iree_select({
         "//runtime/config/base:allocator_system_custom": [],
+        "//runtime/config/base:allocator_system_mimalloc": ["allocator_mimalloc.c"],
         "//conditions:default": ["allocator_libc.c"],
     }),
     hdrs = [
@@ -58,6 +59,9 @@ iree_runtime_cc_library(
     ],
     defines = iree_select({
         "//runtime/config/base:allocator_system_custom": [],
+        "//runtime/config/base:allocator_system_mimalloc": [
+            "IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_mimalloc_ctl",
+        ],
         "//conditions:default": [
             "IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl",
         ],
@@ -68,6 +72,28 @@ iree_runtime_cc_library(
         "//runtime/src/iree/base/internal:time",
         "//runtime/src/iree/base/tracing:provider",
         "//third_party:libbacktrace",
+    ] + iree_select({
+        "//runtime/config/base:allocator_system_mimalloc": ["//third_party:mimalloc"],
+        "//conditions:default": [],
+    }),
+)
+
+iree_runtime_cc_test(
+    name = "allocator_mimalloc_test",
+    srcs = ["allocator_mimalloc_test.cc"],
+    cxxopts = select({
+        "@platforms//os:windows": ["/EHsc"],
+        "//conditions:default": ["-fexceptions"],
+    }),
+    target_compatible_with = iree_select({
+        "//runtime/config/base:allocator_system_mimalloc": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//third_party:mimalloc",
     ],
 )
 
@@ -106,6 +132,21 @@ iree_runtime_cc_test(
     srcs = ["alignment_test.cc"],
     deps = [
         ":core_headers",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "attributes_test",
+    srcs = [
+        "attributes_c_test.c",
+        "attributes_test.cc",
+    ],
+    deps = [
+        ":base",
+        ":core_headers",
+        "//runtime/src/iree/base/internal",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -210,6 +251,16 @@ iree_runtime_cc_fuzz(
 iree_runtime_cc_test(
     name = "string_view_test",
     srcs = ["string_view_test.cc"],
+    deps = [
+        ":base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "time_test",
+    srcs = ["time_test.cc"],
     deps = [
         ":base",
         "//runtime/src/iree/testing:gtest",

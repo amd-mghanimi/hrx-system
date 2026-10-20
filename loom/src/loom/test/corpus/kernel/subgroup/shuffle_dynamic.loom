@@ -1,0 +1,354 @@
+// Bounded dynamic source lanes use the general cross-lane path while keeping
+// the cluster width static; unconstrained widths and offsets exercise invalid
+// sources and logical clusters through the same topology-aware oracle.
+
+// Find the source workitem from actual subgroup/lane metadata. A workitem's
+// coordinates need not match its subgroup lane, and active lanes may have holes.
+func.def device inline @check_dynamic_shuffle(%actual: i32, %actual_valid: i1, %source_lane: i32, %within_cluster: i1, %input: buffer, %output: buffer, %output_base: offset) {
+  %item = kernel.workitem.id<x> : index
+  %lane = kernel.subgroup.lane.id : index
+  %subgroup = kernel.subgroup.id : index
+  %lane_i32 = index.cast %lane : index to i32
+  %subgroup_i32 = index.cast %subgroup : index to i32
+  %base = index.constant 0 : offset
+  %bytes = index.constant 512 : offset
+  %scratch = buffer.alloca<workgroup> align(4) %bytes : buffer
+  %topology = buffer.view %scratch[%base] : buffer -> view<64x2xi32>
+  view.store %lane_i32, %topology[%item, 0] : i32, view<64x2xi32>
+  view.store %subgroup_i32, %topology[%item, 1] : i32, view<64x2xi32>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %input_view = buffer.view %input[%base] : buffer -> view<64xi32>
+  %output_view = buffer.view %output[%output_base] : buffer -> view<64xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %step = index.constant 1 : index
+  %no_difference = scalar.constant 0 : i32
+  %false = scalar.constant false : i1
+  %expected, %expected_valid = scf.for %other = [%begin to %end step %step](%current = %no_difference : i32, %found = %false : i1) -> (i32, i1) {
+    %other_lane = view.load %topology[%other, 0] : view<64x2xi32> -> i32
+    %other_subgroup = view.load %topology[%other, 1] : view<64x2xi32> -> i32
+    %same_subgroup = scalar.cmpi eq, %subgroup_i32, %other_subgroup : i32
+    %same_lane = scalar.cmpi eq, %source_lane, %other_lane : i32
+    %same_source = scalar.andi %same_subgroup, %same_lane : i1
+    %matches = scalar.andi %same_source, %within_cluster : i1
+    %value = view.load %input_view[%other] : view<64xi32> -> i32
+    %next = scf.select %matches, %value, %current : i32
+    %next_found = scalar.ori %found, %matches : i1
+    scf.yield %next, %next_found : i32, i1
+  }
+  %valid_difference = scalar.xori %actual_valid, %expected_valid : i1
+  %valid_bits = scalar.extui %valid_difference : i1 to i32
+  %both_valid = scalar.andi %actual_valid, %expected_valid : i1
+  %value_difference = scf.if %both_valid -> (i32) {
+    %difference = scalar.xori %actual, %expected : i32
+    scf.yield %difference : i32
+  } else {
+    scf.yield %no_difference : i32
+  }
+  %difference = scalar.ori %valid_bits, %value_difference : i32
+  view.store %difference, %output_view[%item] : i32, view<64xi32>
+  func.return
+}
+
+kernel.def @subgroup_shuffle_dynamic_index() {
+  %c1 = index.constant 1 : index
+  %c64 = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c64, %c1, %c1) : index
+} launch(%input: buffer, %output: buffer) {
+  %workitem0 = kernel.workitem.id<x> : index
+  %lane = kernel.subgroup.lane.id : index
+  %c16 = index.constant 16 : index
+  %c0 = index.constant 0 : offset
+  %workitem = index.assume %workitem0 [range(%workitem0, 0, 63)] : index
+  %source_lane0 = index.rem %lane, %c16 : index
+  %source_lane = index.assume %source_lane0 [range(%source_lane0, 0, 15)] : index
+  %source_lane_i32 = index.cast %source_lane : index to i32
+  %width = scalar.constant 16 : i32
+  %input_view = buffer.view %input[%c0] : buffer -> view<64xi32>
+  %value = view.load %input_view[%workitem] : view<64xi32> -> i32
+  %shuffled, %valid = kernel.subgroup.shuffle<index> %value, %source_lane_i32, %width : i32, i32, i32
+  %expected_lane = index.cast %lane : index to i32
+  %within_cluster = scalar.constant true : i1
+  func.call @check_dynamic_shuffle(%shuffled, %valid, %expected_lane, %within_cluster, %input, %output, %c0) : (i32, i1, i32, i1, buffer, buffer, offset)
+  kernel.return
+}
+
+kernel.def @subgroup_shuffle_dynamic_xor() {
+  %c1 = index.constant 1 : index
+  %c64 = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c64, %c1, %c1) : index
+} launch(%input: buffer, %output: buffer) {
+  %workitem0 = kernel.workitem.id<x> : index
+  %lane = kernel.subgroup.lane.id : index
+  %c16 = index.constant 16 : index
+  %c0 = index.constant 0 : offset
+  %workitem = index.assume %workitem0 [range(%workitem0, 0, 63)] : index
+  %source_lane0 = index.rem %lane, %c16 : index
+  %source_lane = index.assume %source_lane0 [range(%source_lane0, 0, 15)] : index
+  %source_lane_i32 = index.cast %source_lane : index to i32
+  %width = scalar.constant 16 : i32
+  %input_view = buffer.view %input[%c0] : buffer -> view<64xi32>
+  %value = view.load %input_view[%workitem] : view<64xi32> -> i32
+  %shuffled, %valid = kernel.subgroup.shuffle<xor> %value, %source_lane_i32, %width : i32, i32, i32
+  %lane_i32 = index.cast %lane : index to i32
+  %expected_lane = scalar.xori %lane_i32, %source_lane_i32 : i32
+  %within_cluster = scalar.constant true : i1
+  func.call @check_dynamic_shuffle(%shuffled, %valid, %expected_lane, %within_cluster, %input, %output, %c0) : (i32, i1, i32, i1, buffer, buffer, offset)
+  kernel.return
+}
+
+kernel.def @subgroup_shuffle_dynamic_up() {
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c64 = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c64, %c1, %c1) : index
+} launch(%input: buffer, %output: buffer) {
+  %workitem0 = kernel.workitem.id<x> : index
+  %lane = kernel.subgroup.lane.id : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c0 = index.constant 0 : offset
+  %workitem = index.assume %workitem0 [range(%workitem0, 0, 63)] : index
+  %relative_lane = index.rem %lane, %c2 : index
+  %source_lane0 = index.sub %c1, %relative_lane : index
+  %source_lane = index.assume %source_lane0 [range(%source_lane0, 0, 1)] : index
+  %source_lane_i32 = index.cast %source_lane : index to i32
+  %width = scalar.constant 2 : i32
+  %input_view = buffer.view %input[%c0] : buffer -> view<64xi32>
+  %value = view.load %input_view[%workitem] : view<64xi32> -> i32
+  %shuffled, %valid = kernel.subgroup.shuffle<up> %value, %source_lane_i32, %width : i32, i32, i32
+  %lane_i32 = index.cast %lane : index to i32
+  %expected_lane = scalar.subi %lane_i32, %source_lane_i32 : i32
+  %within_cluster = index.cmp uge, %relative_lane, %source_lane : index
+  func.call @check_dynamic_shuffle(%shuffled, %valid, %expected_lane, %within_cluster, %input, %output, %c0) : (i32, i1, i32, i1, buffer, buffer, offset)
+  kernel.return
+}
+
+kernel.def @subgroup_shuffle_dynamic_down() {
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %c64 = index.constant 64 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c64, %c1, %c1) : index
+} launch(%input: buffer, %output: buffer) {
+  %workitem0 = kernel.workitem.id<x> : index
+  %lane = kernel.subgroup.lane.id : index
+  %c2 = index.constant 2 : index
+  %c0 = index.constant 0 : offset
+  %workitem = index.assume %workitem0 [range(%workitem0, 0, 63)] : index
+  %source_lane0 = index.rem %lane, %c2 : index
+  %source_lane = index.assume %source_lane0 [range(%source_lane0, 0, 1)] : index
+  %source_lane_i32 = index.cast %source_lane : index to i32
+  %width = scalar.constant 2 : i32
+  %input_view = buffer.view %input[%c0] : buffer -> view<64xi32>
+  %value = view.load %input_view[%workitem] : view<64xi32> -> i32
+  %shuffled, %valid = kernel.subgroup.shuffle<down> %value, %source_lane_i32, %width : i32, i32, i32
+  %lane_i32 = index.cast %lane : index to i32
+  %expected_lane = scalar.addi %lane_i32, %source_lane_i32 : i32
+  %relative_source = index.add %source_lane0, %source_lane : index
+  %within_cluster = index.cmp ult, %relative_source, %c2 : index
+  func.call @check_dynamic_shuffle(%shuffled, %valid, %expected_lane, %within_cluster, %input, %output, %c0) : (i32, i1, i32, i1, buffer, buffer, offset)
+  kernel.return
+}
+
+func.def @subgroup_shuffle_dynamic_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %step = index.constant 1 : index
+  %output_view = buffer.view %output[%base] : buffer -> view<64xi32>
+  %no_difference = scalar.constant 0 : i32
+  scf.for %item = [%begin to %end step %step] {
+    view.store %no_difference, %output_view[%item] : i32, view<64xi32>
+  }
+  func.return
+}
+
+check.scenario @subgroup_shuffle_dynamic_index_case {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<64xi32>
+    %storage = check.generate.fill value(-123456789) : tensor<72xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<72xi32> -> tensor<4xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<72xi32> -> tensor<64xi32>
+    %suffix = check.tensor.view %storage offset(272) : tensor<72xi32> -> tensor<4xi32>
+    check.compare<@subgroup_shuffle_dynamic_index, @subgroup_shuffle_dynamic_oracle>(%input, %output) : (tensor<64xi32>, tensor<64xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xi32>
+      check.expect.bitwise actual(%prefix) expected(%prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%suffix) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @subgroup_shuffle_dynamic_xor_case {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<64xi32>
+    %storage = check.generate.fill value(-123456789) : tensor<72xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<72xi32> -> tensor<4xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<72xi32> -> tensor<64xi32>
+    %suffix = check.tensor.view %storage offset(272) : tensor<72xi32> -> tensor<4xi32>
+    check.compare<@subgroup_shuffle_dynamic_xor, @subgroup_shuffle_dynamic_oracle>(%input, %output) : (tensor<64xi32>, tensor<64xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xi32>
+      check.expect.bitwise actual(%prefix) expected(%prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%suffix) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @subgroup_shuffle_dynamic_up_case {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<64xi32>
+    %storage = check.generate.fill value(-123456789) : tensor<72xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<72xi32> -> tensor<4xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<72xi32> -> tensor<64xi32>
+    %suffix = check.tensor.view %storage offset(272) : tensor<72xi32> -> tensor<4xi32>
+    check.compare<@subgroup_shuffle_dynamic_up, @subgroup_shuffle_dynamic_oracle>(%input, %output) : (tensor<64xi32>, tensor<64xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xi32>
+      check.expect.bitwise actual(%prefix) expected(%prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%suffix) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @subgroup_shuffle_dynamic_down_case {
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<64xi32>
+    %storage = check.generate.fill value(-123456789) : tensor<72xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<72xi32> -> tensor<4xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<72xi32> -> tensor<64xi32>
+    %suffix = check.tensor.view %storage offset(272) : tensor<72xi32> -> tensor<4xi32>
+    check.compare<@subgroup_shuffle_dynamic_down, @subgroup_shuffle_dynamic_oracle>(%input, %output) : (tensor<64xi32>, tensor<64xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<64xi32>
+      check.expect.bitwise actual(%prefix) expected(%prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%suffix) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// This oracle computes a candidate source coordinate independently of the
+// target's normalized shuffle, then finds that source in actual topology.
+func.def device inline @check_logical_shuffle(%actual: i32, %actual_valid: i1, %mode: i32, %offset: i32, %width: i32, %input: buffer, %output: buffer, %output_base: offset) {
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %c2 = scalar.constant 2 : i32
+  %size_index = kernel.subgroup.size : index
+  %size = index.cast %size_index : index to i32
+  %lane_index = kernel.subgroup.lane.id : index
+  %lane = index.cast %lane_index : index to i32
+  %positive = scalar.cmpi sgt, %width, %c0 : i32
+  %fits = scalar.cmpi ule, %width, %size : i32
+  %width_valid = scalar.andi %positive, %fits : i1
+  %safe_width = scf.select %width_valid, %width, %c1 : i32
+  %cluster = scalar.divui %lane, %safe_width : i32
+  %base = scalar.muli %cluster, %safe_width : i32
+  %indexed = scalar.addi %base, %offset : i32
+  %xor = scalar.xori %lane, %offset : i32
+  %up = scalar.subi %lane, %offset : i32
+  %down = scalar.addi %lane, %offset : i32
+  %is_index = scalar.cmpi eq, %mode, %c0 : i32
+  %is_xor = scalar.cmpi eq, %mode, %c1 : i32
+  %is_up = scalar.cmpi eq, %mode, %c2 : i32
+  %relative = scf.select %is_up, %up, %down : i32
+  %permuted = scf.select %is_xor, %xor, %relative : i32
+  %source = scf.select %is_index, %indexed, %permuted : i32
+  %source_cluster = scalar.divui %source, %safe_width : i32
+  %same_cluster = scalar.cmpi eq, %source_cluster, %cluster : i32
+  %offset_fits = scalar.cmpi ult, %offset, %safe_width : i32
+  %valid = scalar.andi %width_valid, %offset_fits : i1
+  %within_cluster = scalar.andi %valid, %same_cluster : i1
+  func.call @check_dynamic_shuffle(%actual, %actual_valid, %source, %within_cluster, %input, %output, %output_base) : (i32, i1, i32, i1, buffer, buffer, offset)
+  func.return
+}
+
+kernel.def @subgroup_shuffle_unbounded() {
+  %unit = index.constant 1 : index
+  %items = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%width: i32, %offsets: buffer, %input: buffer, %output: buffer) {
+  %item = kernel.workitem.id<x> : index
+  %base = index.constant 0 : offset
+  %offset_view = buffer.view %offsets[%base] : buffer -> view<64xi32>
+  %input_view = buffer.view %input[%base] : buffer -> view<64xi32>
+  %offset = view.load %offset_view[%item] : view<64xi32> -> i32
+  %value = view.load %input_view[%item] : view<64xi32> -> i32
+  %index_mode = scalar.constant 0 : i32
+  %xor_mode = scalar.constant 1 : i32
+  %up_mode = scalar.constant 2 : i32
+  %down_mode = scalar.constant 3 : i32
+  %xor_base = index.constant 256 : offset
+  %up_base = index.constant 512 : offset
+  %down_base = index.constant 768 : offset
+  %indexed, %index_valid = kernel.subgroup.shuffle<index> %value, %offset, %width : i32, i32, i32
+  func.call @check_logical_shuffle(%indexed, %index_valid, %index_mode, %offset, %width, %input, %output, %base) : (i32, i1, i32, i32, i32, buffer, buffer, offset)
+  %xor, %xor_valid = kernel.subgroup.shuffle<xor> %value, %offset, %width : i32, i32, i32
+  func.call @check_logical_shuffle(%xor, %xor_valid, %xor_mode, %offset, %width, %input, %output, %xor_base) : (i32, i1, i32, i32, i32, buffer, buffer, offset)
+  %up, %up_valid = kernel.subgroup.shuffle<up> %value, %offset, %width : i32, i32, i32
+  func.call @check_logical_shuffle(%up, %up_valid, %up_mode, %offset, %width, %input, %output, %up_base) : (i32, i1, i32, i32, i32, buffer, buffer, offset)
+  %down, %down_valid = kernel.subgroup.shuffle<down> %value, %offset, %width : i32, i32, i32
+  func.call @check_logical_shuffle(%down, %down_valid, %down_mode, %offset, %width, %input, %output, %down_base) : (i32, i1, i32, i32, i32, buffer, buffer, offset)
+  kernel.return
+}
+
+func.def @subgroup_shuffle_unbounded_oracle(%width: i32, %offsets: buffer, %input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 256 : index
+  %step = index.constant 1 : index
+  %view = buffer.view %output[%base] : buffer -> view<256xi32>
+  %c0 = scalar.constant 0 : i32
+  scf.for %item = [%begin to %end step %step] {
+    view.store %c0, %view[%item] : i32, view<256xi32>
+  }
+  func.return
+}
+
+func.def @subgroup_shuffle_width(%trial: index) -> (i32) {
+  %ordinal = index.cast %trial : index to i32
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %c3 = scalar.constant 3 : i32
+  %c7 = scalar.constant 7 : i32
+  %c8 = scalar.constant 8 : i32
+  %negative = scalar.constant -1 : i32
+  %power = scalar.shli %c1, %ordinal : i32
+  %ordinary = scalar.cmpi ult, %ordinal, %c7 : i32
+  %odd = scalar.cmpi eq, %ordinal, %c7 : i32
+  %empty = scalar.cmpi eq, %ordinal, %c8 : i32
+  %invalid = scf.select %empty, %c0, %negative : i32
+  %special = scf.select %odd, %c3, %invalid : i32
+  %width = scf.select %ordinary, %power, %special : i32
+  func.return %width : i32
+}
+
+check.scenario @subgroup_shuffle_unbounded_case {
+  // Widths 1, 2, 4, 8, 16, 32, 64, 3, 0, and -1; runtime offsets include
+  // negative, in-cluster, cross-cluster, and out-of-subgroup coordinates.
+  check.trial[10](%trial: index, %entropy: check.entropy) {
+    %width = check.generate<@subgroup_shuffle_width>(%trial) : (index) -> (i32)
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %offsets = check.generate.random.uniform seed(%seed) range(-2 to 66) : tensor<64xi32>
+    %input = check.generate.iota offset(19) step(731) : tensor<64xi32>
+    %storage = check.generate.fill value(-123456789) : tensor<264xi32>
+    %prefix = check.tensor.view %storage offset(0) : tensor<264xi32> -> tensor<4xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<264xi32> -> tensor<256xi32>
+    %suffix = check.tensor.view %storage offset(1040) : tensor<264xi32> -> tensor<4xi32>
+    check.compare<@subgroup_shuffle_unbounded, @subgroup_shuffle_unbounded_oracle>(%width, %offsets, %input, %output) : (i32, tensor<64xi32>, tensor<64xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%offsets) expected(%offsets) : tensor<64xi32>
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<256xi32>
+      check.expect.bitwise actual(%prefix) expected(%prefix) : tensor<4xi32>
+      check.expect.bitwise actual(%suffix) expected(%suffix) : tensor<4xi32>
+    }
+  }
+  check.return
+}

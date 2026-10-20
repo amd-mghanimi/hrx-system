@@ -17,20 +17,17 @@
 #include "iree/vm/bytecode/module.h"
 #include "iree/vm/reflection.h"
 #include "iree/vm/sync.h"
-#include "loom/format/bytecode/reader.h"
 #include "loom/format/bytecode/writer.h"
 #include "loom/format/location.h"
-#include "loom/link/linker.h"
 #include "loom/ops/func/location_capture.h"
 #include "loom/ops/func/location_capture_test_data.h"
 #include "loom/ops/func/ops.h"
 #include "loom/ops/op_registry.h"
-#include "loom/target/arch/vm/module.h"
-#include "loom/target/arch/vm/provider.h"
-#include "loom/tooling/compile/pipeline.h"
 #include "loom/tooling/input/input.h"
 #include "loom/tooling/target/vm/imports_bytecode.h"
-#include "loom/transforms/cleanup/configured.h"
+#include "loomc/iree.h"
+#include "loomc/loomc.h"
+#include "loomc/target/vm.h"
 
 namespace {
 
@@ -356,22 +353,16 @@ class VMSourceCaptureTest : public VMImportsTest {
     iree_arena_block_pool_initialize(32 * 1024, iree_allocator_system(), &pool);
     iree_arena_allocator_t arena;
     iree_arena_initialize(&pool, &arena);
-    const loom_target_provider_t* providers[] = {&loom_vm_target_provider};
-    const auto provider_set = loom_target_provider_set_make(providers, 1);
-    loom_target_environment_t environment;
-    IREE_ASSERT_OK(
-        loom_target_environment_initialize(&provider_set, &environment));
     loom_context_t context;
     loom_context_initialize(iree_allocator_system(), &context);
     IREE_ASSERT_OK(loom_op_registry_register_all_dialects(&context));
-    IREE_ASSERT_OK(
-        loom_target_environment_register_context(&environment, &context));
     IREE_ASSERT_OK(loom_context_finalize(&context));
     const auto* data = loom_location_capture_test_data_create();
-    loom_input_request_t request = {};
-    request.source = iree_make_string_view(
-        reinterpret_cast<const char*>(data[0].data), data[0].size);
-    request.path = IREE_SV("admitted.loom");
+    loom_input_request_t request = {
+        .source = iree_make_string_view(
+            reinterpret_cast<const char*>(data[0].data), data[0].size),
+        .path = IREE_SV("admitted.loom"),
+    };
     loom_input_module_t input;
     IREE_ASSERT_OK(loom_input_module_load(&loom_input_text_provider, &request,
                                           &context, &pool,
@@ -400,8 +391,9 @@ class VMSourceCaptureTest : public VMImportsTest {
         IREE_IO_STREAM_MODE_WRITABLE | IREE_IO_STREAM_MODE_READABLE |
             IREE_IO_STREAM_MODE_SEEKABLE,
         4096, iree_allocator_system(), &stream));
-    loom_bytecode_write_options_t write_options = {};
-    write_options.location_mode = LOOM_BYTECODE_LOCATION_MODE_NO_LOCATIONS;
+    loom_bytecode_write_options_t write_options = {
+        .location_mode = LOOM_BYTECODE_LOCATION_MODE_NO_LOCATIONS,
+    };
     IREE_ASSERT_OK(loom_bytecode_write_module(input.module, stream,
                                               &write_options, &pool));
     std::vector<uint8_t> serialized(iree_io_stream_length(stream));
@@ -412,65 +404,101 @@ class VMSourceCaptureTest : public VMImportsTest {
     loom_input_module_deinitialize(&input);
     iree_arena_reset(&arena);
 
-    loom_bytecode_read_result_t read_result;
-    loom_module_t* decoded = nullptr;
-    IREE_ASSERT_OK(loom_bytecode_read_module(
-        {serialized.data(), serialized.size()}, IREE_SV("stripped.loombc"),
-        &context, &pool, nullptr, &read_result, &decoded,
-        iree_allocator_system()));
-    ASSERT_EQ(read_result.error_count, 0u);
-    ASSERT_NE(decoded, nullptr);
-    EXPECT_LE(decoded->locations.count, 1u);
-    const loom_module_t* sources[] = {decoded};
-    const iree_string_view_t root = IREE_SV("captured");
-    loom_link_options_t link_options = {};
-    link_options.module_name = IREE_SV("captured");
-    link_options.root_symbols = {1, &root};
-    loom_module_t* module = nullptr;
-    IREE_ASSERT_OK(loom_link_materialized_modules(
-        sources, 1, &link_options, &pool, iree_allocator_system(), &module));
-    loom_module_free(decoded);
-    serialized.clear();
+    const loomc_allocator_t compiler_allocator = loomc_allocator_system();
+    loomc_target_environment_t* target_environment = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_target_environment_create_vm(
+        compiler_allocator, &target_environment)));
+    loomc_context_target_options_t target_options = {
+        .type = LOOMC_STRUCTURE_TYPE_CONTEXT_TARGET_OPTIONS,
+        .structure_size = sizeof(target_options),
+        .next = nullptr,
+        .target_environment = target_environment,
+    };
+    loomc_context_options_t context_options = {
+        .type = LOOMC_STRUCTURE_TYPE_CONTEXT_OPTIONS,
+        .structure_size = sizeof(context_options),
+        .next = &target_options,
+    };
+    loomc_context_t* compiler_context = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_context_create(
+        &context_options, compiler_allocator, &compiler_context)));
+    loomc_workspace_t* workspace = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_workspace_create(
+        /*options=*/nullptr, compiler_allocator, &workspace)));
+    loomc_compiler_t* compiler = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_compiler_create(
+        compiler_context, /*options=*/nullptr, compiler_allocator, &compiler)));
+    loomc_target_profile_t* profile = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_target_profile_select(
+        target_environment, loomc_make_cstring_view("vm:core"),
+        compiler_allocator, &profile)));
 
-    const loom_target_profile_t* profile = nullptr;
-    IREE_ASSERT_OK(
-        loom_vm_target_provider.select_profile(IREE_SV("core"), &profile));
-    loom_target_low_descriptor_registry_t registry;
-    IREE_ASSERT_OK(loom_target_environment_initialize_low_descriptor_registry(
-        &environment, &registry));
-    loom_target_specialization_request_t specialization = {};
-    specialization.function_name = root;
-    specialization.target_profile = profile;
-    loom_compile_pipeline_options_t options;
-    loom_compile_pipeline_options_initialize(&options);
-    options.target_environment = &environment;
-    options.low_descriptor_registry = &registry;
-    options.cleanup_pattern_provider_set =
-        loom_cleanup_configured_pattern_provider_set();
-    options.target_specializations = {&specialization, 1};
-    loom_compile_pipeline_result_t pipeline;
-    IREE_ASSERT_OK(
-        loom_compile_run_pipeline(module, &options, &pool, &pipeline));
-    ASSERT_EQ(pipeline.pass.error_count, 0u);
-    loom_target_emit_request_t emission = {};
-    emission.target_environment = &environment;
-    emission.low_descriptor_registry = &registry.registry;
-    emission.module = module;
-    emission.function_versions = &pipeline.function_versions.list;
-    emission.scratch_arena = &arena;
-    emission.allocator = iree_allocator_system();
-    loom_target_emit_artifact_t artifact;
-    IREE_ASSERT_OK(loom_vm_module_emit(&emission, &artifact));
-    iree_byte_span_t image;
-    IREE_ASSERT_OK(iree_byte_sequence_clone(artifact.contents,
-                                            iree_allocator_system(), &image));
+    const loomc_source_options_t source_options = {
+        .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+        .structure_size = sizeof(source_options),
+        .next = nullptr,
+        .format = LOOMC_SOURCE_FORMAT_BYTECODE,
+        .identifier = loomc_make_cstring_view("stripped.loombc"),
+        .contents = loomc_make_byte_span(serialized.data(), serialized.size()),
+        .storage = LOOMC_SOURCE_STORAGE_BORROWED,
+    };
+    loomc_source_t* compiler_source = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_source_create(
+        &source_options, compiler_allocator, &compiler_source)));
+    loomc_module_t* module = nullptr;
+    loomc_result_t* deserialize_result = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_module_deserialize_from_source(
+        compiler_context, workspace, compiler_source, /*options=*/nullptr,
+        compiler_allocator, &module, &deserialize_result)));
+    ASSERT_NE(deserialize_result, nullptr);
+    ASSERT_TRUE(loomc_result_succeeded(deserialize_result));
+    loomc_result_release(deserialize_result);
+
+    const loomc_string_view_t root = loomc_make_cstring_view("captured");
+    const loomc_emit_options_t emit_options = {
+        .type = LOOMC_STRUCTURE_TYPE_EMIT_OPTIONS,
+        .structure_size = sizeof(emit_options),
+        .next = nullptr,
+        .artifact_format = loomc_make_cstring_view(LOOMC_ARTIFACT_FORMAT_VM),
+    };
+    const loomc_compile_artifact_options_t compile_options = {
+        .type = LOOMC_STRUCTURE_TYPE_COMPILE_ARTIFACT_OPTIONS,
+        .structure_size = sizeof(compile_options),
+        .next = nullptr,
+        .roots = &root,
+        .root_count = 1,
+        .excluded_roots = nullptr,
+        .excluded_root_count = 0,
+        .target_profile = profile,
+        .config = nullptr,
+        .emit_options = &emit_options,
+        .artifact_flags = 0,
+    };
+    loomc_result_t* compile_result = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_compile_artifact(
+        compiler, workspace, /*pass_program=*/nullptr, module, &compile_options,
+        compiler_allocator, &compile_result)));
+    ASSERT_NE(compile_result, nullptr);
+    ASSERT_TRUE(loomc_result_succeeded(compile_result));
+    ASSERT_EQ(loomc_result_artifact_count(compile_result), 1u);
+    const loomc_artifact_t* artifact =
+        loomc_result_artifact_at(compile_result, 0);
+    ASSERT_NE(artifact, nullptr);
+    loomc_byte_span_t image = loomc_byte_span_empty();
+    IREE_ASSERT_OK(iree_status_from_loomc(loomc_byte_sequence_clone(
+        artifact->contents, compiler_allocator, &image)));
     out_image->assign(image.data, image.data + image.data_length);
-    iree_allocator_free(iree_allocator_system(), image.data);
-    loom_target_emit_artifact_release(&artifact);
-    loom_compile_pipeline_result_deinitialize(&pipeline);
-    loom_module_free(module);
+    loomc_allocator_free(compiler_allocator, const_cast<uint8_t*>(image.data));
+
+    loomc_result_release(compile_result);
+    loomc_module_release(module);
+    loomc_source_release(compiler_source);
+    loomc_target_profile_release(profile);
+    loomc_compiler_release(compiler);
+    loomc_workspace_release(workspace);
+    loomc_context_release(compiler_context);
+    loomc_target_environment_release(target_environment);
     loom_context_deinitialize(&context);
-    loom_target_environment_deinitialize(&environment);
     iree_arena_deinitialize(&arena);
     iree_arena_block_pool_deinitialize(&pool);
   }

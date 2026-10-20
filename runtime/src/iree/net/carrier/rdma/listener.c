@@ -243,8 +243,13 @@ static void iree_net_rdma_listener_event(void* user_data,
   }
 }
 
-static void iree_net_rdma_listener_events_drained(void* user_data) {
+static void iree_net_rdma_listener_events_drained(void* user_data,
+                                                  iree_status_t status) {
   iree_net_rdma_listener_t* listener = user_data;
+  if (!iree_status_is_ok(status)) {
+    iree_net_rdma_listener_failed(listener, status);
+    return;
+  }
   iree_slim_mutex_lock(&listener->mutex);
   listener->flags |= IREE_NET_RDMA_LISTENER_EVENTS_DRAINED;
   iree_slim_mutex_unlock(&listener->mutex);
@@ -290,7 +295,7 @@ static void iree_net_rdma_listener_free(iree_net_listener_t* base) {
   iree_net_rdma_listener_t* listener = (iree_net_rdma_listener_t*)base;
   IREE_ASSERT(listener->state == IREE_NET_RDMA_LISTENER_STOPPED,
               "RDMA listener freed before callback retirement");
-  iree_net_rdma_connection_events_destroy(listener->events);
+  iree_net_rdma_connection_events_free(listener->events);
   iree_slim_mutex_deinitialize(&listener->mutex);
   iree_async_proactor_release(listener->proactor);
   iree_net_rdma_context_release(listener->context);
@@ -327,7 +332,7 @@ static const iree_net_listener_vtable_t iree_net_rdma_listener_vtable = {
     .query_bound_address = iree_net_rdma_listener_query_bound_address,
 };
 
-iree_status_t iree_net_rdma_listener_create(
+iree_status_t iree_net_rdma_listener_allocate(
     iree_net_rdma_context_t* context, iree_async_proactor_t* proactor,
     const iree_async_address_t* address,
     const iree_net_rdma_connection_options_t* connection_options,
@@ -359,7 +364,7 @@ iree_status_t iree_net_rdma_listener_create(
   }
   const iree_net_rdma_library_t* library =
       iree_net_rdma_context_library(context);
-  iree_status_t status = iree_net_rdma_connection_events_create(
+  iree_status_t status = iree_net_rdma_connection_events_allocate(
       context, proactor, connection_options->control.service_batch_size,
       (iree_net_rdma_connection_events_callbacks_t){
           iree_net_rdma_listener_event, iree_net_rdma_listener_failed,

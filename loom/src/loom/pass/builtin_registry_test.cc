@@ -9,7 +9,7 @@
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 #include "loom/codegen/low/pipeline/pass_environment.h"
-#include "loom/codegen/low/pipeline/pass_requirements.h"
+#include "loom/pass/options.h"
 #include "loom/pass/testing/registry_verify.h"
 #include "loom/target/legalization.h"
 #include "loom/target/pass_environment.h"
@@ -22,10 +22,7 @@ namespace {
 
 static const loom_pass_descriptor_t* LookupBuiltinPass(
     iree_string_view_t name) {
-  const loom_pass_descriptor_t* descriptor = nullptr;
-  IREE_EXPECT_OK(loom_pass_registry_lookup(loom_pass_builtin_registry(), name,
-                                           &descriptor));
-  return descriptor;
+  return loom_pass_registry_lookup(loom_pass_builtin_registry(), name);
 }
 
 static iree_status_t CreateBuiltinPass(const loom_pass_descriptor_t* descriptor,
@@ -36,9 +33,10 @@ static iree_status_t CreateBuiltinPass(const loom_pass_descriptor_t* descriptor,
   iree_arena_allocator_t instance_arena = {};
   iree_arena_initialize(&block_pool, &instance_arena);
 
-  loom_pass_t pass = {};
-  pass.info = descriptor->info();
-  pass.instance_arena = &instance_arena;
+  loom_pass_t pass = {
+      .info = descriptor->info(),
+      .instance_arena = &instance_arena,
+  };
   iree_status_t status = descriptor->create ? descriptor->create(&pass, options)
                                             : iree_ok_status();
   if (iree_status_is_ok(status) && descriptor->destroy) {
@@ -55,9 +53,8 @@ TEST(PassBuiltinRegistryTest, BuiltinRegistryVerifies) {
 }
 
 TEST(PassBuiltinRegistryTest, LookupKnownAndUnknownPasses) {
-  const loom_pass_descriptor_t* descriptor = nullptr;
-  IREE_ASSERT_OK(loom_pass_registry_lookup(
-      loom_pass_builtin_registry(), IREE_SV("canonicalize"), &descriptor));
+  const loom_pass_descriptor_t* descriptor = loom_pass_registry_lookup(
+      loom_pass_builtin_registry(), IREE_SV("canonicalize"));
   ASSERT_NE(descriptor, nullptr);
   EXPECT_TRUE(iree_string_view_equal(descriptor->key, IREE_SV("canonicalize")));
   ASSERT_NE(descriptor->info, nullptr);
@@ -65,11 +62,55 @@ TEST(PassBuiltinRegistryTest, LookupKnownAndUnknownPasses) {
   EXPECT_NE(descriptor->function_run, nullptr);
   EXPECT_NE(descriptor->create, nullptr);
 
-  descriptor = reinterpret_cast<const loom_pass_descriptor_t*>(0x1);
-  IREE_ASSERT_OK(loom_pass_registry_lookup(loom_pass_builtin_registry(),
-                                           IREE_SV("definitely-not-a-pass"),
-                                           &descriptor));
+  descriptor = loom_pass_registry_lookup(loom_pass_builtin_registry(),
+                                         IREE_SV("definitely-not-a-pass"));
   EXPECT_EQ(descriptor, nullptr);
+}
+
+TEST(PassBuiltinRegistryTest, ComposesOptionalExtensionRegistry) {
+  loom_pass_registry_storage_t builtin_storage = {};
+  IREE_ASSERT_OK(loom_pass_registry_storage_initialize_with_builtins(
+      /*extension_registry=*/nullptr, &builtin_storage));
+  const loom_pass_registry_t* builtin_registry =
+      loom_pass_registry_storage_registry(&builtin_storage);
+  EXPECT_EQ(builtin_registry->descriptor_count,
+            loom_pass_builtin_registry()->descriptor_count);
+
+  static const loom_pass_descriptor_t kExtensionDescriptors[] = {
+      {.key = IREE_SVL("zz-test-extension")},
+  };
+  static const loom_pass_registry_t kExtensionRegistry = {
+      .descriptors = kExtensionDescriptors,
+      .descriptor_count = IREE_ARRAYSIZE(kExtensionDescriptors),
+  };
+  loom_pass_registry_storage_t extended_storage = {};
+  IREE_ASSERT_OK(loom_pass_registry_storage_initialize_with_builtins(
+      &kExtensionRegistry, &extended_storage));
+  const loom_pass_registry_t* extended_registry =
+      loom_pass_registry_storage_registry(&extended_storage);
+  EXPECT_EQ(extended_registry->descriptor_count,
+            loom_pass_builtin_registry()->descriptor_count + 1);
+
+  const loom_pass_descriptor_t* descriptor =
+      loom_pass_registry_lookup(extended_registry, IREE_SV("canonicalize"));
+  ASSERT_NE(descriptor, nullptr);
+  descriptor = loom_pass_registry_lookup(extended_registry,
+                                         IREE_SV("zz-test-extension"));
+  ASSERT_NE(descriptor, nullptr);
+}
+
+TEST(PassBuiltinRegistryTest, RejectsBuiltinKeyReplacement) {
+  static const loom_pass_descriptor_t kDuplicateDescriptors[] = {
+      {.key = IREE_SVL("canonicalize")},
+  };
+  static const loom_pass_registry_t kDuplicateRegistry = {
+      .descriptors = kDuplicateDescriptors,
+      .descriptor_count = IREE_ARRAYSIZE(kDuplicateDescriptors),
+  };
+  loom_pass_registry_storage_t storage = {};
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_ALREADY_EXISTS,
+                        loom_pass_registry_storage_initialize_with_builtins(
+                            &kDuplicateRegistry, &storage));
 }
 
 TEST(PassBuiltinRegistryTest, CleanupPassesShareIterationBudget) {

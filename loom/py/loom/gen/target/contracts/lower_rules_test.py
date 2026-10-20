@@ -6,21 +6,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 
 from loom.dialect.scalar import ALL_SCALAR_OPS
 from loom.dialect.scalar import arithmetic as scalar_arithmetic
 from loom.dialect.vector import ALL_VECTOR_OPS
 from loom.dialect.vector import defs as vector
+from loom.dsl import EncodingOperandSummaryDef, Op
 from loom.error.target import ERR_TARGET_003
+from loom.gen.support.string_pool import CStringBank
 from loom.gen.target.contracts.lower_rule_rows import (
     attr_copy_row,
     descriptor_ref_keys,
     diagnostic_has_implicit_target_context,
-    diagnostic_param_row,
     diagnostic_stored_params,
+    diagnostic_value_row,
+    emit_ref_row,
     emit_row,
+    guard_payload_row,
     guard_row,
     rule_row,
     source_memory_address_materializer_row,
@@ -28,16 +32,24 @@ from loom.gen.target.contracts.lower_rule_rows import (
     source_memory_diagnostic_indices,
     source_memory_diagnostics_row,
     source_memory_row,
+    source_memory_shape,
+    source_memory_shape_row,
     source_node_row,
     type_pattern_row,
     value_ref_row,
+    wide_report_key_row,
 )
 from loom.gen.target.contracts.lower_rules import (
+    _collect_report_keys,
     _intern_diagnostic_params,
     _intern_optional_rows,
     _intern_rows,
+    _primary_descriptor_feature_classes,
     _validate_c_table_shape,
+    diagnostic_descriptor_names,
     generate_lower_rule_set,
+    generate_lower_rule_set_from_compiled,
+    required_primary_descriptor_feature_class,
 )
 from loom.target.contracts import (
     LOWER_EMIT_FLAG_BIND_RESULTS_TO_REFS,
@@ -48,6 +60,7 @@ from loom.target.contracts import (
     DescriptorAccumulatorSeed,
     DescriptorAccumulatorTree,
     DescriptorEmitForm,
+    DescriptorOperandMaterialization,
     DescriptorRule,
     EmitDescriptorOp,
     Guard,
@@ -67,6 +80,7 @@ from loom.target.contracts import (
     LowerValueRef,
     RecipeRule,
     Scalar,
+    SignedDivisorMagicKind,
     SourceMemoryAddressBase,
     SourceMemoryAddressCoordinateType,
     SourceMemoryAddressLayout,
@@ -76,17 +90,20 @@ from loom.target.contracts import (
     SourceMemoryDynamicIndexSource,
     SourceMemoryIntegerConversion,
     SourceMemoryOperation,
+    SourceMemoryRejectionReason,
     SourceMemoryRootKind,
     SourceNodeRelation,
     SourceOpProject,
     SourceValueKind,
+    UnsignedDivisorMagicKind,
     ValueProject,
     ValueRef,
     Vector,
     View,
+    compile_lower_rule_set,
 )
 from loom.target.contracts.diagnostics import DiagnosticParamKind
-from loom.target.low_descriptors import Immediate, ImmediateKind
+from loom.target.low_descriptors import Immediate, ImmediateKind, descriptor_stable_id
 from loom.target.test.descriptors import (
     TEST_LOW_ADD_F32_DESCRIPTOR,
     TEST_LOW_ADD_I32_DESCRIPTOR,
@@ -107,6 +124,14 @@ def _expect_value_error(callable_obj: Callable[[], object], message: str) -> Non
         error = exc
     assert error is not None
     assert message in str(error)
+
+
+def _rejection_diagnostic_indices(
+    default: int,
+    overrides: Mapping[SourceMemoryRejectionReason, int] | None = None,
+) -> tuple[int, ...]:
+    overrides = overrides or {}
+    return tuple(overrides.get(reason, default) for reason in SourceMemoryRejectionReason)
 
 
 def test_buffer_type_guard_matches_kind_without_scalar_element_bits() -> None:
@@ -134,6 +159,7 @@ def _compiled_lower_rule_set(
     guards: tuple[LowerGuard, ...] = (),
     attr_copies: tuple[LowerAttrCopy, ...] = (),
     emits: tuple[LowerEmit, ...] = (),
+    literal_data: bytes = b"",
 ) -> CompiledLowerRuleSet:
     return CompiledLowerRuleSet(
         name="test.low.generated_c_shape",
@@ -143,12 +169,29 @@ def _compiled_lower_rule_set(
         type_patterns=type_patterns,
         value_refs=value_refs,
         source_nodes=source_nodes,
+        source_graph_root_op_kinds=(),
         source_memories=source_memories,
         guards=guards,
         attr_copies=attr_copies,
         tied_results=(),
         emits=emits,
         diagnostics=(),
+        literal_data=literal_data,
+    )
+
+
+def _report_key_rule(
+    report_key: str,
+    source_op: Op = scalar_arithmetic.scalar_addi,
+) -> LowerRule:
+    return LowerRule(
+        source_op=source_op,
+        report_key=report_key,
+        temporary_count=0,
+        guard_start=0,
+        guard_count=0,
+        emit_start=0,
+        emit_count=0,
     )
 
 
@@ -190,12 +233,20 @@ def test_validate_c_table_shape_rejects_oversized_table_count() -> None:
     )
 
 
+def test_validate_c_table_shape_accepts_wide_report_key_count() -> None:
+    table = _compiled_lower_rule_set(
+        rules=tuple(_report_key_rule(f"key_{index}") for index in range(0x100)),
+    )
+
+    _validate_c_table_shape(table, _c_shape_contract(), ())
+
+
 def test_validate_c_table_shape_rejects_oversized_rule_field() -> None:
     table = _compiled_lower_rule_set(
         rules=(
             LowerRule(
                 source_op=scalar_arithmetic.scalar_addi,
-                temporary_count=0x10000,
+                temporary_count=0x100,
                 guard_start=0,
                 guard_count=0,
                 emit_start=0,
@@ -206,7 +257,7 @@ def test_validate_c_table_shape_rejects_oversized_rule_field() -> None:
 
     _expect_value_error(
         lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
-        "lower-rule set 'test.low.generated_c_shape' rule 0 temporary count exceeds uint16_t",
+        "lower-rule set 'test.low.generated_c_shape' rule 0 temporary count exceeds uint8_t",
     )
 
 
@@ -254,6 +305,26 @@ def test_validate_c_table_shape_rejects_oversized_alias_count() -> None:
     )
 
 
+def test_validate_c_table_shape_rejects_oversized_rule_guard_count() -> None:
+    table = _compiled_lower_rule_set(
+        rules=(
+            LowerRule(
+                source_op=scalar_arithmetic.scalar_addi,
+                temporary_count=0,
+                guard_start=0,
+                guard_count=256,
+                emit_start=0,
+                emit_count=0,
+            ),
+        ),
+    )
+
+    _expect_value_error(
+        lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
+        "lower-rule set 'test.low.generated_c_shape' rule 0 guard count exceeds uint8_t",
+    )
+
+
 def test_rule_row_overlays_action_range_starts() -> None:
     common = {
         "source_op": scalar_arithmetic.scalar_addi,
@@ -269,6 +340,7 @@ def test_rule_row_overlays_action_range_starts() -> None:
             primary_emit_ordinal=1,
         ),
         {},
+        primary_descriptor_feature_class=3,
     )
     alias_fields = rule_row(
         LowerRule(
@@ -292,11 +364,134 @@ def test_rule_row_overlays_action_range_starts() -> None:
     )
 
     assert ".action.emit_start = 2" in emit_fields
-    assert ".metadata.emit.primary_emit_ordinal = 1" in emit_fields
+    assert (".metadata.emit.primary_emit = LOOM_LOW_LOWER_RULE_PRIMARY_EMIT(1, 3)") in emit_fields
     assert ".action.alias_ref_start = 4" in alias_fields
     assert ".metadata.value.alias_ref_count = 1" in alias_fields
     assert ".action.elide_ref_start = 5" in elide_fields
     assert ".metadata.value.elide_ref_count = 1" in elide_fields
+
+
+def test_rule_row_retains_wide_primary_emit_ordinal() -> None:
+    fields = rule_row(
+        LowerRule(
+            source_op=scalar_arithmetic.scalar_addi,
+            temporary_count=0,
+            guard_start=0,
+            guard_count=0,
+            emit_start=0,
+            emit_count=256,
+            primary_emit_ordinal=255,
+        ),
+        {},
+        primary_descriptor_feature_class=1,
+    )
+
+    assert ".flags = LOOM_LOW_LOWER_RULE_FLAG_WIDE_PRIMARY_EMIT" in fields
+    assert ".metadata.emit.primary_emit = 255" in fields
+
+
+def test_rule_row_uses_sparse_storage_for_wide_report_key_ordinal() -> None:
+    row = _report_key_rule("wide")
+
+    assert ".report_key_ordinal = 254" in rule_row(row, {"wide": 254})
+    assert ".report_key_ordinal = LOOM_LOW_LOWER_RULE_REPORT_KEY_WIDE" in rule_row(row, {"wide": 255})
+    assert wide_report_key_row(19, 257) == [
+        ".rule_index = 19",
+        ".report_key_ordinal = 257",
+    ]
+
+
+def test_primary_descriptor_feature_classes_intern_masks() -> None:
+    feature_one = replace(
+        TEST_LOW_ADD_I32_DESCRIPTOR,
+        feature_mask_words=(1,),
+    )
+    feature_four = replace(
+        TEST_LOW_MUL_I32_DESCRIPTOR,
+        feature_mask_words=(4,),
+    )
+    extended_feature = replace(
+        TEST_LOW_CONST_I32_DESCRIPTOR,
+        feature_mask_words=(0, 1),
+    )
+    table = _compiled_lower_rule_set(
+        rules=tuple(
+            LowerRule(
+                source_op=scalar_arithmetic.scalar_addi,
+                temporary_count=0,
+                guard_start=0,
+                guard_count=0,
+                emit_start=index,
+                emit_count=1,
+                primary_emit_ordinal=0,
+            )
+            for index in range(5)
+        ),
+        emits=tuple(
+            LowerEmit(kind=LowerEmitKind.DESCRIPTOR_OP, descriptor=descriptor)
+            for descriptor in (
+                feature_one,
+                feature_four,
+                feature_one,
+                extended_feature,
+                TEST_LOW_REMATERIALIZE_I32_DESCRIPTOR,
+            )
+        ),
+    )
+
+    masks, classes, has_dynamic_class = _primary_descriptor_feature_classes(table)
+
+    assert masks == (1, 4)
+    assert classes == (1, 2, 1, 0xFF, 0)
+    assert has_dynamic_class
+
+    generated = generate_lower_rule_set_from_compiled(
+        _c_shape_contract(),
+        compiled=table,
+    )
+    assert "static const uint64_t" in generated.source
+    assert "UINT64_C(0x1)" in generated.source
+    assert "UINT64_C(0x4)" in generated.source
+    assert ".primary_descriptor_feature_mask_count = IREE_ARRAYSIZE(" in generated.source
+    assert ".primary_descriptor_feature_masks = " in generated.source
+    assert "LOOM_LOW_LOWER_RULE_SET_FLAG_DYNAMIC_PRIMARY_DESCRIPTOR_FEATURES" in generated.source
+    assert "LOOM_LOW_LOWER_RULE_PRIMARY_EMIT(0, 255)" in generated.source
+
+    assert required_primary_descriptor_feature_class(table) == 0
+
+    uniform_table = replace(
+        table,
+        rules=(table.rules[0], replace(table.rules[1], emit_start=2)),
+    )
+    assert required_primary_descriptor_feature_class(uniform_table) == 1
+
+
+def test_primary_descriptor_feature_classes_ignore_featureless_wide_primary() -> None:
+    descriptor_emit = LowerEmit(
+        kind=LowerEmitKind.DESCRIPTOR_OP,
+        descriptor=TEST_LOW_REMATERIALIZE_I32_DESCRIPTOR,
+    )
+    table = _compiled_lower_rule_set(
+        rules=(
+            LowerRule(
+                source_op=scalar_arithmetic.scalar_addi,
+                temporary_count=0,
+                guard_start=0,
+                guard_count=0,
+                emit_start=0,
+                emit_count=256,
+                primary_emit_ordinal=255,
+            ),
+        ),
+        emits=(descriptor_emit,) * 256,
+    )
+
+    masks, classes, has_dynamic_class = _primary_descriptor_feature_classes(table)
+
+    assert masks == ()
+    assert classes == (0xFF,)
+    assert not has_dynamic_class
+    assert required_primary_descriptor_feature_class(table) == 0
 
 
 def test_validate_c_table_shape_accepts_structural_emit_without_primary() -> None:
@@ -373,23 +568,78 @@ def test_validate_c_table_shape_rejects_structural_primary_emit() -> None:
 
 def test_validate_c_table_shape_rejects_oversized_type_payload() -> None:
     table = _compiled_lower_rule_set(
-        type_patterns=(LowerTypePattern(Vector("i32", lanes=2**63)),),
+        type_patterns=(LowerTypePattern(Vector("i32", lanes=0x10000)),),
     )
 
     _expect_value_error(
         lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
-        "lower-rule set 'test.low.generated_c_shape' type-pattern 0 static lanes exceeds int64_t",
+        "lower-rule set 'test.low.generated_c_shape' type-pattern 0 static lanes exceeds uint16_t",
     )
 
 
 def test_validate_c_table_shape_rejects_oversized_view_dimension() -> None:
     table = _compiled_lower_rule_set(
-        type_patterns=(LowerTypePattern(View("i32", dims=(2**63, 4))),),
+        type_patterns=(LowerTypePattern(View("i32", dims=(0x10000, 4))),),
     )
 
     _expect_value_error(
         lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
-        "lower-rule set 'test.low.generated_c_shape' type-pattern 0 static dim 0 exceeds int64_t",
+        "lower-rule set 'test.low.generated_c_shape' type-pattern 0 static dim 0 exceeds uint16_t",
+    )
+
+
+def test_validate_c_table_shape_rejects_oversized_static_element_range() -> None:
+    table = _compiled_lower_rule_set(
+        type_patterns=(
+            LowerTypePattern(
+                Vector(
+                    "i32",
+                    minimum_static_elements=1,
+                    maximum_static_elements=2**64,
+                )
+            ),
+        ),
+    )
+
+    _expect_value_error(
+        lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
+        "lower-rule set 'test.low.generated_c_shape' type-pattern 0 maximum static elements exceeds uint64_t",
+    )
+
+
+def test_validate_c_table_shape_rejects_oversized_attr_copy_byte_fields() -> None:
+    row = LowerAttrCopy(
+        kind=LowerAttrCopyKind.I64_ARRAY_PACK_ELEMENTS,
+        target_name="value",
+    )
+    for field_name, field_subject in (
+        ("source_node_index", "source-node index"),
+        ("source_attr_index", "source attr index"),
+        ("source_element_count", "source element count"),
+    ):
+        table = _compiled_lower_rule_set(
+            attr_copies=(replace(row, **{field_name: 0x100}),),
+        )
+        _expect_value_error(
+            lambda table=table: _validate_c_table_shape(table, _c_shape_contract(), ()),
+            f"lower-rule set 'test.low.generated_c_shape' attr-copy 0 {field_subject} exceeds uint8_t",
+        )
+
+
+def test_validate_c_table_shape_rejects_source_node_on_non_attr_copy() -> None:
+    table = _compiled_lower_rule_set(
+        attr_copies=(
+            LowerAttrCopy(
+                kind=LowerAttrCopyKind.I64_LITERAL,
+                target_name="value",
+                source_node_index=1,
+            ),
+        ),
+    )
+
+    _expect_value_error(
+        lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
+        "attr-copy 0 kind cannot select a related source node",
     )
 
 
@@ -458,41 +708,171 @@ def test_validate_c_table_shape_rejects_source_memory_diagnostic_indices_oob() -
             vector_lane_byte_stride=4,
             static_byte_offset=0,
         ),
-        diagnostic_index=0xFFFF,
-        dynamic_offset_diagnostic_index=0xFFFF,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(0xFFFF),
     )
 
-    for row, diagnostic_name in (
-        (replace(base_row, address_layout_diagnostic_index=0), "address-layout"),
-        (replace(base_row, address_diagnostic_index=0), "address"),
+    for reason in (
+        SourceMemoryRejectionReason.ADDRESS_LAYOUT,
+        SourceMemoryRejectionReason.ADDRESS_MATERIALIZATION,
     ):
+        row = replace(
+            base_row,
+            rejection_diagnostic_indices=_rejection_diagnostic_indices(
+                0xFFFF,
+                {reason: 0},
+            ),
+        )
         table = _compiled_lower_rule_set(source_memories=(row,))
         _expect_value_error(
             lambda table=table: _validate_c_table_shape(table, _c_shape_contract(), ()),
-            f"lower-rule set 'test.low.generated_c_shape' source-memory 0 {diagnostic_name} diagnostic index references missing diagnostic row",
+            f"lower-rule set 'test.low.generated_c_shape' source-memory 0 {reason.value} diagnostic index references missing diagnostic row",
         )
 
 
-def test_validate_c_table_shape_rejects_oversized_emit_count_field() -> None:
-    attr_copy = LowerAttrCopy(
-        kind=LowerAttrCopyKind.I64_LITERAL,
-        target_name="value",
+def test_validate_c_table_shape_rejects_oversized_source_memory_fields() -> None:
+    constraint = SourceMemoryConstraint(
+        operation=SourceMemoryOperation.LOAD,
+        memory_spaces=("global",),
+        element_byte_count=4,
+        vector_lane_count=1,
+        vector_lane_byte_stride=4,
+        static_byte_offset=0,
     )
+    for field_name, value, subject, storage in (
+        ("element_byte_count", 0x100, "element byte count", "uint8_t"),
+        ("vector_lane_count", 0x10000, "vector lane count", "uint16_t"),
+        ("minimum_alignment", 0x10000, "minimum alignment", "uint16_t"),
+        (
+            "cache_policy_build_flags",
+            0x100,
+            "cache policy build flags",
+            "uint8_t",
+        ),
+    ):
+        row = LowerSourceMemory(
+            constraint=replace(constraint, **{field_name: value}),
+            rejection_diagnostic_indices=_rejection_diagnostic_indices(0xFFFF),
+        )
+        table = _compiled_lower_rule_set(source_memories=(row,))
+        _expect_value_error(
+            lambda table=table: _validate_c_table_shape(table, _c_shape_contract(), ()),
+            f"lower-rule set 'test.low.generated_c_shape' source-memory 0 {subject} exceeds {storage}",
+        )
+
+
+def test_validate_c_table_shape_rejects_oversized_emit_count_fields() -> None:
+    for field_name, subject, bit_count in (
+        ("operand_ref_count", "operand-ref count", 3),
+        ("result_ref_count", "result-ref count", 2),
+        ("attr_copy_count", "attr-copy count", 5),
+        ("tied_result_count", "tied-result count", 2),
+        ("accumulator_operand_index", "accumulator operand index", 2),
+    ):
+        field_value = 1 << bit_count
+        table = _compiled_lower_rule_set(
+            emits=(
+                LowerEmit(
+                    kind=LowerEmitKind.DESCRIPTOR_CONST,
+                    descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
+                    **{field_name: field_value},
+                ),
+            ),
+        )
+
+        _expect_value_error(
+            lambda table=table: _validate_c_table_shape(
+                table,
+                _c_shape_contract(),
+                (),
+            ),
+            f"lower-rule set 'test.low.generated_c_shape' emit 0 {subject} exceeds {bit_count}-bit unsigned storage: {field_value}",
+        )
+
+
+def test_validate_c_table_shape_checks_deferred_resource_storage() -> None:
+    for kind, needs_storage in (
+        (LowerAttrCopyKind.I64_LITERAL, False),
+        (LowerAttrCopyKind.I64_ARRAY_READ_ONLY_ELEMENTS, True),
+        (LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT, True),
+        (LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_WORDS, True),
+        (LowerAttrCopyKind.OPERAND_SEGMENT_EXACT_BITS_READ_ONLY, True),
+        (LowerAttrCopyKind.READ_ONLY_DATA_LITERAL, True),
+    ):
+        emit = LowerEmit(
+            kind=LowerEmitKind.DESCRIPTOR_CONST,
+            descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
+            attr_copy_count=1,
+            has_read_only_data_attributes=needs_storage,
+        )
+        literal_data = b"\x00" if kind is LowerAttrCopyKind.READ_ONLY_DATA_LITERAL else b""
+        table = _compiled_lower_rule_set(
+            attr_copies=(
+                LowerAttrCopy(
+                    kind=kind,
+                    target_name="value",
+                    literal_data_length=len(literal_data),
+                ),
+            ),
+            emits=(emit,),
+            literal_data=literal_data,
+        )
+        _validate_c_table_shape(table, _c_shape_contract(), ())
+        inconsistent_table = replace(
+            table,
+            emits=(replace(emit, has_read_only_data_attributes=not needs_storage),),
+        )
+        _expect_value_error(
+            lambda table=inconsistent_table: _validate_c_table_shape(table, _c_shape_contract(), ()),
+            "read-only data flag does not match its attribute projections",
+        )
+
+
+def test_validate_c_table_shape_rejects_literal_data_range_oob() -> None:
     table = _compiled_lower_rule_set(
-        attr_copies=(attr_copy,) * 256,
-        emits=(
-            LowerEmit(
-                kind=LowerEmitKind.DESCRIPTOR_CONST,
-                descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
-                attr_copy_count=256,
+        attr_copies=(
+            LowerAttrCopy(
+                kind=LowerAttrCopyKind.READ_ONLY_DATA_LITERAL,
+                target_name="value",
+                literal_data_offset=1,
+                literal_data_length=2,
             ),
         ),
+        literal_data=b"\x00\x01",
     )
 
     _expect_value_error(
         lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
-        "lower-rule set 'test.low.generated_c_shape' emit 0 attr-copy count exceeds uint8_t",
+        "attr-copy 0 literal-data range exceeds the generated pool",
     )
+
+
+def test_generate_lower_rule_set_emits_literal_data_pool() -> None:
+    compiled = _compiled_lower_rule_set(
+        attr_copies=(
+            LowerAttrCopy(
+                kind=LowerAttrCopyKind.READ_ONLY_DATA_LITERAL,
+                target_name="value",
+                literal_data_length=3,
+            ),
+        ),
+        emits=(
+            LowerEmit(
+                kind=LowerEmitKind.DESCRIPTOR_CONST,
+                descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
+                attr_copy_count=1,
+                has_read_only_data_attributes=True,
+            ),
+        ),
+        literal_data=b"\x00\x80\xff",
+    )
+
+    generated = generate_lower_rule_set_from_compiled(_c_shape_contract(), compiled=compiled)
+
+    assert "static const uint8_t" in generated.source
+    assert "UINT8_C(0x00)" in generated.source
+    assert "UINT8_C(0x80)" in generated.source
+    assert "UINT8_C(0xFF)" in generated.source
+    assert ".literal_data = " in generated.source
 
 
 def test_validate_c_table_shape_rejects_structural_descriptor_payload() -> None:
@@ -530,7 +910,6 @@ def test_validate_c_table_shape_rejects_descriptor_structural_payload() -> None:
 
 def test_emit_row_overlays_descriptor_table_ranges() -> None:
     row = emit_row(
-        {TEST_LOW_ADD_F32_DESCRIPTOR.key: 1},
         LowerEmit(
             kind=LowerEmitKind.DESCRIPTOR_OP,
             descriptor=TEST_LOW_ADD_F32_DESCRIPTOR,
@@ -545,9 +924,93 @@ def test_emit_row_overlays_descriptor_table_ranges() -> None:
     assert ".payload.descriptor.tied_result_start = 5" in row
 
 
+def test_emit_references_keep_descriptor_identity_out_of_shared_behavior() -> None:
+    descriptor_refs = {TEST_LOW_ADD_I32_DESCRIPTOR.key: 3}
+    descriptor_emit = LowerEmit(
+        kind=LowerEmitKind.DESCRIPTOR_OP,
+        descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
+    )
+    assert emit_ref_row(descriptor_refs, descriptor_emit, 7) == [
+        ".descriptor_ref = 3",
+        ".emit_index = 7",
+    ]
+    assert emit_row(descriptor_emit) == [".kind = LOOM_LOW_LOWER_EMIT_DESCRIPTOR_OP"]
+    for kind in (
+        LowerEmitKind.REGISTER_SLICE,
+        LowerEmitKind.REGISTER_CONCAT,
+        LowerEmitKind.REGISTER_COPY,
+        LowerEmitKind.REGISTER_MOVE,
+    ):
+        assert emit_ref_row({}, LowerEmit(kind=kind), 5) == [
+            ".descriptor_ref = 65535",
+            ".emit_index = 5",
+        ]
+
+
+def test_generated_tables_share_bindings_without_merging_descriptors() -> None:
+    contract = ContractFragment(
+        name="test.low.emit_sharing",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        public_header=_TEST_PUBLIC_HEADER,
+        cases=tuple(
+            DescriptorRule(
+                source_op=source_op,
+                descriptor=descriptor,
+                guards=tuple(Guard.value_type(name, Scalar("i32")) for name in ("lhs", "rhs", "result")),
+                emit=(
+                    EmitDescriptorOp(
+                        descriptor=descriptor,
+                        operands={"lhs": ValueRef.operand("lhs"), "rhs": ValueRef.operand("rhs")},
+                        results={"dst": ValueRef.result("result")},
+                    ),
+                ),
+            )
+            for source_op, descriptor in (
+                (scalar_arithmetic.scalar_addi, TEST_LOW_ADD_I32_DESCRIPTOR),
+                (scalar_arithmetic.scalar_muli, TEST_LOW_MUL_I32_DESCRIPTOR),
+            )
+        ),
+    )
+    compiled = compile_lower_rule_set(contract, dialect_ops={"scalar": ALL_SCALAR_OPS})
+    generated = generate_lower_rule_set_from_compiled(contract, compiled=compiled)
+    emit_rows = generated.source.split("static const loom_low_lower_emit_t ", 1)[1].split("};", 1)[0]
+    emit_refs = generated.source.split("static const loom_low_lower_emit_ref_t ", 1)[1].split("};", 1)[0]
+    assert emit_rows.count(".kind = ") == 1
+    assert ".descriptor_ref" not in emit_rows
+    assert emit_refs.count(".emit_index = 0,") == 2
+    assert emit_refs.count(".descriptor_ref = 0,") == 1
+    assert emit_refs.count(".descriptor_ref = 1,") == 1
+
+    # A different operand-copy contract must retain its own behavior row even
+    # when the descriptor and every other field match an existing emit.
+    copied_case = replace(
+        contract.cases[0],
+        emit=(replace(contract.cases[0].emit[0], copy_operands=("lhs",)),),
+    )
+    changed = replace(contract, cases=(*contract.cases, copied_case))
+    generated = generate_lower_rule_set(changed, dialect_ops={"scalar": ALL_SCALAR_OPS})
+    emit_rows = generated.source.split("static const loom_low_lower_emit_t ", 1)[1].split("};", 1)[0]
+    emit_refs = generated.source.split("static const loom_low_lower_emit_ref_t ", 1)[1].split("};", 1)[0]
+    assert emit_rows.count(".kind = ") == 2
+    assert emit_rows.count(".copy_operand_mask = 1,") == 1
+    assert emit_refs.count(".emit_index = 0,") == 2
+    assert emit_refs.count(".emit_index = 1,") == 1
+
+
+def test_emit_row_spells_target_operand_materialization() -> None:
+    row = emit_row(
+        LowerEmit(
+            kind=LowerEmitKind.DESCRIPTOR_OP,
+            descriptor=TEST_LOW_ADD_F32_DESCRIPTOR,
+            operand_materialization=DescriptorOperandMaterialization.TARGET,
+        ),
+    )
+
+    assert (".operand_materialization = LOOM_LOW_LOWER_OPERAND_MATERIALIZATION_TARGET") in row
+
+
 def test_emit_row_overlays_result_type_ranges() -> None:
     value_ref_row_fields = emit_row(
-        {},
         LowerEmit(
             kind=LowerEmitKind.REGISTER_COPY,
             result_ref_start=2,
@@ -555,7 +1018,6 @@ def test_emit_row_overlays_result_type_ranges() -> None:
         ),
     )
     type_pattern_row_fields = emit_row(
-        {},
         LowerEmit(
             kind=LowerEmitKind.REGISTER_COPY,
             flags=(LOWER_EMIT_FLAG_BIND_RESULTS_TO_REFS | LOWER_EMIT_FLAG_RESULT_TYPE_PATTERN),
@@ -590,7 +1052,6 @@ def test_validate_c_table_shape_requires_type_pattern_bind_range() -> None:
 
 def test_emit_row_overlays_register_slice_payload() -> None:
     row = emit_row(
-        {},
         LowerEmit(
             kind=LowerEmitKind.REGISTER_SLICE,
             structural_offset=2,
@@ -727,6 +1188,23 @@ def test_validate_c_table_shape_rejects_attr_copy_value_ref_index_oob() -> None:
     )
 
 
+def test_validate_c_table_shape_rejects_attr_copy_numerator_ref_index_oob() -> None:
+    table = _compiled_lower_rule_set(
+        value_refs=(LowerValueRef(kind=SourceValueKind.OPERAND, index=1),),
+        attr_copies=(
+            LowerAttrCopy(
+                kind=LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_SHIFT,
+                target_name="i32_value",
+                other_value_ref_index=1,
+            ),
+        ),
+    )
+    _expect_value_error(
+        lambda: _validate_c_table_shape(table, _c_shape_contract(), ()),
+        "attr-copy 0 other value-ref index references missing value-ref row",
+    )
+
+
 def test_validate_c_table_shape_rejects_value_ref_materializer_index_oob() -> None:
     table = _compiled_lower_rule_set(
         value_refs=(
@@ -840,6 +1318,22 @@ def _compiled_source_graph_table() -> CompiledLowerRuleSet:
             ),
         ),
     )
+
+
+def test_generate_lower_rule_set_includes_related_source_node_dialects() -> None:
+    table = _compiled_source_graph_table()
+    table = replace(
+        table,
+        source_nodes=(replace(table.source_nodes[0], source_op=vector.vector_splat),),
+    )
+
+    generated = generate_lower_rule_set_from_compiled(
+        _c_shape_contract(),
+        compiled=table,
+    )
+
+    assert '#include "loom/ops/scalar/ops.h"' in generated.source
+    assert '#include "loom/ops/vector/ops.h"' in generated.source
 
 
 def test_validate_c_table_shape_rejects_nonpreceding_source_node_parent() -> None:
@@ -973,9 +1467,13 @@ def test_generate_lower_rule_set_emits_report_key_ordinals() -> None:
         ],
     )
 
-    generated = generate_lower_rule_set(table, dialect_ops={"scalar": ALL_SCALAR_OPS})
+    compiled = compile_lower_rule_set(
+        table,
+        dialect_ops={"scalar": ALL_SCALAR_OPS},
+    )
+    generated = generate_lower_rule_set_from_compiled(table, compiled=compiled)
 
-    assert "test.scalar_mulf.strategy.native" in generated.source
+    assert [rule.report_key for rule in compiled.rules] == ["test.scalar_mulf.strategy.native"]
     assert "static const loom_string_ref_t" in generated.source
     assert ".report_key_ordinal = 1," in generated.source
     assert ".report_key_string_refs = " in generated.source
@@ -983,6 +1481,110 @@ def test_generate_lower_rule_set_emits_report_key_ordinals() -> None:
     assert "static const loom_low_lower_emit_ref_t" in generated.source
     assert ".emit_refs = " in generated.source
     assert ".emit_ref_count = IREE_ARRAYSIZE(" in generated.source
+    stable_id = descriptor_stable_id(TEST_LOW_ADD_F32_DESCRIPTOR.key)
+    assert f".stable_id = UINT64_C(0x{stable_id:016x})" in generated.source
+    assert ".key_string_ref = " not in generated.source
+    assert TEST_LOW_ADD_F32_DESCRIPTOR.key not in generated.source
+    assert "RuleRootProducerClosureBits" not in generated.source
+    assert ".rule_root_producer_closure_bits = " not in generated.source
+
+
+def test_collect_report_keys_keeps_common_keys_in_compact_ordinals() -> None:
+    rules = (
+        *(_report_key_rule(f"rare_{index}") for index in range(255)),
+        _report_key_rule("common"),
+        _report_key_rule("common", scalar_arithmetic.scalar_subi),
+    )
+
+    report_keys = _collect_report_keys(_compiled_lower_rule_set(rules=rules))
+
+    assert len(report_keys) == 256
+    assert report_keys[0] == "common"
+    assert report_keys[1:] == tuple(f"rare_{index}" for index in range(255))
+
+
+def test_generate_lower_rule_set_emits_sparse_wide_report_key_ordinals() -> None:
+    compiled = _compiled_lower_rule_set(rules=tuple(_report_key_rule(f"key_{index}") for index in range(256)))
+
+    generated = generate_lower_rule_set_from_compiled(_c_shape_contract(), compiled=compiled)
+
+    assert generated.source.count(".report_key_ordinal = LOOM_LOW_LOWER_RULE_REPORT_KEY_WIDE,") == 2
+    assert "static const loom_low_lower_wide_report_key_t" in generated.source
+    assert ".rule_index = 254," in generated.source
+    assert ".report_key_ordinal = 255," in generated.source
+    assert ".rule_index = 255," in generated.source
+    assert ".report_key_ordinal = 256," in generated.source
+    assert ".wide_report_keys = " in generated.source
+    assert ".wide_report_key_count = IREE_ARRAYSIZE(" in generated.source
+
+
+def test_generate_lower_rule_set_indexes_lane_projection_requirements() -> None:
+    table = ContractFragment(
+        name="test.low.lane_projection",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        public_header=_TEST_PUBLIC_HEADER,
+        cases=(
+            DescriptorRule(
+                source_op=vector.vector_mulf,
+                descriptor=TEST_LOW_ADD_F32_DESCRIPTOR,
+                guards=(
+                    Guard.value_type("lhs", Vector("f32", lanes=4)),
+                    Guard.exact_lane_origin_type("lhs", Vector("bf16", lanes=4)),
+                    Guard.value_type("rhs", Vector("f32", lanes=4)),
+                    Guard.value_type("result", Vector("f32", lanes=4)),
+                ),
+                emit=(
+                    EmitDescriptorOp(
+                        descriptor=TEST_LOW_ADD_F32_DESCRIPTOR,
+                        operands={
+                            "lhs": ValueRef.exact_lane_origin_operand("lhs"),
+                            "rhs": ValueRef.operand("rhs"),
+                        },
+                        results={"dst": ValueRef.result("result")},
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    generated = generate_lower_rule_set(table, dialect_ops={"vector": ALL_VECTOR_OPS})
+
+    assert "static const uint64_t" in generated.source
+    assert "RuleRootProducerClosureBits[] = {" in generated.source
+    assert "UINT64_C(0x1)" in generated.source
+    assert ".rule_root_producer_closure_bits = " in generated.source
+
+
+def test_descriptor_identity_preserves_unavailable_descriptor_diagnostic() -> None:
+    descriptor = TEST_LOW_ADD_I32_DESCRIPTOR
+    table = ContractFragment(
+        name="test.low.descriptor_identity",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        public_header=_TEST_PUBLIC_HEADER,
+        cases=(
+            RecipeRule(
+                source_op=scalar_arithmetic.scalar_addi,
+                guards=(Guard.descriptor_available(descriptor),),
+            ),
+        ),
+    )
+
+    compiled = compile_lower_rule_set(table, dialect_ops={"scalar": ALL_SCALAR_OPS})
+    generated = generate_lower_rule_set_from_compiled(table, compiled=compiled)
+
+    stable_id = descriptor_stable_id(descriptor.key)
+    assert f".stable_id = UINT64_C(0x{stable_id:016x})" in generated.source
+    assert ".key_string_ref = " not in generated.source
+    assert descriptor.key in generated.source
+    assert ".string_value_ref = " in generated.source
+
+    names = diagnostic_descriptor_names(compiled)
+    assert names == frozenset({descriptor.key})
+    bank = CStringBank.build(names, symbol="test_instruction_strings", header="test/instruction_strings.h")
+    shared = generate_lower_rule_set_from_compiled(table, compiled=compiled, shared_strings=bank)
+    assert '#include "test/instruction_strings.h"' in shared.source
+    assert "test_instruction_strings}" in shared.source
+    assert descriptor.key not in shared.source
 
 
 def test_validate_c_table_shape_rejects_invalid_report_key() -> None:
@@ -1040,8 +1642,11 @@ def test_generate_lower_rule_set_emits_value_ref_for_float_equals_guard() -> Non
     guard_start = generated.source.index("LOOM_LOW_LOWER_GUARD_VALUE_FLOAT_EQUALS")
     guard_end = generated.source.index("},", guard_start)
     guard_text = generated.source[guard_start:guard_end]
-    assert ".value_ref_index = 1," in guard_text
-    assert ".payload = {.u64 = UINT64_C(0)" in guard_text
+    assert ".selector.value.value_ref_index = 1," in guard_text
+    assert ".payload_ordinal = 1," in guard_text
+    assert ".u64 = UINT64_C(0)," in generated.source
+    assert ".guard_payloads = " in generated.source
+    assert ".guard_payload_count = IREE_ARRAYSIZE(" in generated.source
 
 
 def test_guard_row_preserves_power_of_two_addend() -> None:
@@ -1052,8 +1657,16 @@ def test_guard_row_preserves_power_of_two_addend() -> None:
         (2**63 - 1, "INT64_C(9223372036854775807)"),
     ):
         row = LowerGuard(kind=GuardKind.VALUE_EXACT_POWER_OF_TWO_I64, addend=addend)
-        fields = guard_row({}, row)
-        assert f".payload = {{.addend = {literal}}}" in fields
+        assert guard_payload_row(row) == [f".addend = {literal}"]
+
+
+def test_guard_row_preserves_float_power_of_two_exponent_range() -> None:
+    row = LowerGuard(
+        kind=GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT,
+        minimum_i64=-149,
+        maximum_i64=127,
+    )
+    assert guard_payload_row(row) == [".i64_range = {.minimum = (-INT64_C(149)), .maximum = INT64_C(127)}"]
 
 
 def test_generate_lower_rule_set_emits_storage_element_format_guard() -> None:
@@ -1091,8 +1704,67 @@ def test_generate_lower_rule_set_emits_storage_element_format_guard() -> None:
     guard_start = generated.source.index("LOOM_LOW_LOWER_GUARD_VALUE_STORAGE_ELEMENT_FORMAT")
     guard_end = generated.source.index("},", guard_start)
     guard_text = generated.source[guard_start:guard_end]
-    assert ".value_ref_index = 0," in guard_text
-    assert ".payload = {.u64 = LOOM_VALUE_FACT_NUMERIC_FORMAT_U8" in guard_text
+    assert ".selector.value.value_ref_index = 0," in guard_text
+    assert ".payload_ordinal = 1," in guard_text
+    assert ".u64 = LOOM_VALUE_FACT_NUMERIC_FORMAT_U8," in generated.source
+
+
+def test_generate_lower_rule_set_emits_exact_storage_operand_schema_guard() -> None:
+    schema = EncodingOperandSummaryDef(
+        element_format=0x20,
+        scale_format=0x40,
+        secondary_scale_format=0x80,
+        payload_packing=0x2,
+        scale_topology=0x4,
+        affine_policy=0x8,
+        rounding_policy=0x10,
+        codebook_policy=0x20,
+        sparsity_policy=0x40,
+        zero_scale_fallback=True,
+        sparsity_group_nonzero_element_count=2,
+        sparsity_group_element_count=4,
+        payload_register_count=2,
+        payload_element_count=8,
+        scale_group_shape=(8,),
+        scale_operand_count=1,
+    )
+    table = ContractFragment(
+        name="test.low.exact_storage_schema",
+        descriptor_set=TEST_LOW_CORE_DESCRIPTOR_SET,
+        public_header=_TEST_PUBLIC_HEADER,
+        cases=[
+            DescriptorRule(
+                source_op=vector.vector_fragment_load,
+                descriptor=TEST_LOW_ADD_F32_DESCRIPTOR,
+                guards=(
+                    Guard.value_storage_operand_schema("view", schema),
+                    Guard.value_type("result", Vector("f32", lanes=4)),
+                ),
+                emit=(
+                    EmitDescriptorOp(
+                        descriptor=TEST_LOW_ADD_F32_DESCRIPTOR,
+                        operands={
+                            "lhs": ValueRef.result("result"),
+                            "rhs": ValueRef.result("result"),
+                        },
+                        results={"dst": ValueRef.result("result")},
+                    ),
+                ),
+            )
+        ],
+    )
+
+    generated = generate_lower_rule_set(table, dialect_ops={"vector": ALL_VECTOR_OPS})
+
+    assert "static const loom_encoding_operand_summary_t" in generated.source
+    assert ".element_format = UINT64_C(32)" in generated.source
+    assert ".secondary_scale_format = UINT64_C(128)" in generated.source
+    assert ".flags = LOOM_VALUE_FACT_ENCODED_OPERAND_FLAG_ZERO_SCALE_FALLBACK" in generated.source
+    assert ".scale_group = {.element_count = 8, .shape = {8}}" in generated.source
+    assert "LOOM_LOW_LOWER_GUARD_VALUE_STORAGE_OPERAND_SCHEMA" in generated.source
+    assert ".selector.value.parameter_index = 0" in generated.source
+    assert ".storage_operand_schemas = " in generated.source
+    assert ".storage_operand_schema_count = IREE_ARRAYSIZE(" in generated.source
 
 
 def test_generate_lower_rule_set_emits_packed_integer_storage_guard() -> None:
@@ -1122,17 +1794,17 @@ def test_generate_lower_rule_set_emits_packed_integer_storage_guard() -> None:
     guard_start = generated.source.index("LOOM_LOW_LOWER_GUARD_VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD")
     guard_end = generated.source.index("},", guard_start)
     guard_text = generated.source[guard_start:guard_end]
-    assert ".value_ref_index = 0," in guard_text
-    assert ".other_value_ref_index = 1," in guard_text
-    assert ".attr_index = 0," in guard_text
-    assert ".storage_payload_multiple = UINT32_C(16)" in guard_text
-    assert ".storage_unit_bit_count = UINT32_C(32)" in guard_text
-    assert ".maximum_lane_count = UINT32_C(32)" in guard_text
+    assert ".selector.value.value_ref_index = 0," in guard_text
+    assert ".selector.value.other_value_ref_index = 1," in guard_text
+    assert ".selector.value.parameter_index = 0," in guard_text
+    assert ".payload_ordinal = 1," in guard_text
+    assert ".storage_payload_multiple = UINT32_C(16)" in generated.source
+    assert ".storage_unit_bit_count = UINT32_C(32)" in generated.source
+    assert ".maximum_lane_count = UINT32_C(32)" in generated.source
 
 
 def test_guard_row_emits_portable_signed_i64_bounds() -> None:
-    fields = guard_row(
-        {},
+    fields = guard_payload_row(
         LowerGuard(
             kind=GuardKind.I64_RANGE,
             minimum_i64=-(1 << 31),
@@ -1140,22 +1812,81 @@ def test_guard_row_emits_portable_signed_i64_bounds() -> None:
         ),
     )
 
-    assert (".payload = {.i64_range = {.minimum = (-INT64_C(2147483648)), .maximum = INT64_C(2147483647)}}") in fields
+    assert (".i64_range = {.minimum = (-INT64_C(2147483648)), .maximum = INT64_C(2147483647)}") in fields
+
+
+def test_guard_row_emits_i64_attr_sum_relation() -> None:
+    row = LowerGuard(
+        kind=GuardKind.I64_ATTRS_SUM_EQUALS,
+        attr_index=2,
+        other_attr_index=3,
+        literal_i64=-(1 << 63),
+    )
+
+    fields = guard_row({}, row, payload_ordinal=1)
+
+    assert ".selector.attribute.attr_index = 2" in fields
+    assert ".selector.attribute.other_attr_index = 3" in fields
+    assert ".payload_ordinal = 1" in fields
+    assert guard_payload_row(row) == [".i64 = INT64_MIN"]
+
+
+def test_guard_row_emits_low_value_representation_payload() -> None:
+    row = LowerGuard(
+        kind=GuardKind.LOW_VALUE_REPRESENTATION,
+        value_ref_index=3,
+        u64=17,
+    )
+
+    fields = guard_row({}, row, payload_ordinal=1)
+
+    assert ".kind = LOOM_LOW_LOWER_GUARD_LOW_VALUE_REPRESENTATION" in fields
+    assert ".selector.value.value_ref_index = 3" in fields
+    assert ".payload_ordinal = 1" in fields
+    assert guard_payload_row(row) == [".u64 = UINT64_C(17)"]
+
+
+def test_subgroup_cluster_guards_share_inline_attribute_selectors() -> None:
+    for kind in (GuardKind.TARGET_WHOLE_SUBGROUP, GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER):
+        row = LowerGuard(kind=kind, attr_index=1, other_attr_index=2)
+        fields = guard_row({}, row)
+        assert ".selector.attribute.attr_index = 1" in fields
+        assert ".selector.attribute.other_attr_index = 2" in fields
+        assert not any("payload_ordinal" in field for field in fields)
+        assert guard_payload_row(row) == []
+
+
+def test_guard_row_emits_exact_operand_segment_payload() -> None:
+    row = LowerGuard(
+        kind=GuardKind.OPERAND_SEGMENT_EXACT_BITS,
+        attr_index=2,
+        u64=32,
+    )
+
+    fields = guard_row({}, row, payload_ordinal=1)
+
+    assert ".kind = LOOM_LOW_LOWER_GUARD_OPERAND_SEGMENT_EXACT_BITS" in fields
+    assert ".selector.attribute.attr_index = 2" in fields
+    assert ".payload_ordinal = 1" in fields
+    assert guard_payload_row(row) == [".u64 = UINT64_C(32)"]
 
 
 def test_guard_row_overlays_array_element_index_and_range() -> None:
+    row = LowerGuard(
+        kind=GuardKind.I64_ARRAY_ELEMENT_RANGE,
+        u64=3,
+        minimum_i64=-4,
+        maximum_i64=7,
+    )
     fields = guard_row(
         {},
-        LowerGuard(
-            kind=GuardKind.I64_ARRAY_ELEMENT_RANGE,
-            u64=3,
-            minimum_i64=-4,
-            maximum_i64=7,
-        ),
+        row,
+        payload_ordinal=1,
     )
 
-    assert ".index = {.element_index = 3}" in fields
-    assert (".payload = {.i64_range = {.minimum = (-INT64_C(4)), .maximum = INT64_C(7)}}") in fields
+    assert ".selector.attribute.element_index = 3" in fields
+    assert ".payload_ordinal = 1" in fields
+    assert guard_payload_row(row) == [".i64_range = {.minimum = (-INT64_C(4)), .maximum = INT64_C(7)}"]
 
 
 def test_guard_row_emits_static_element_count_value_refs() -> None:
@@ -1168,8 +1899,8 @@ def test_guard_row_emits_static_element_count_value_refs() -> None:
         ),
     )
 
-    assert ".value_ref_index = 2" in fields
-    assert ".other_value_ref_index = 3" in fields
+    assert ".selector.value.value_ref_index = 2" in fields
+    assert ".selector.value.other_value_ref_index = 3" in fields
 
 
 def test_guard_row_emits_value_memory_space_mask() -> None:
@@ -1181,8 +1912,47 @@ def test_guard_row_emits_value_memory_space_mask() -> None:
         ),
     )
 
-    assert ".value_ref_index = 0" in fields
-    assert (".payload = {.u64 = LOOM_LOW_LOWER_MEMORY_SPACE_UNKNOWN | LOOM_LOW_LOWER_MEMORY_SPACE_GLOBAL | LOOM_LOW_LOWER_MEMORY_SPACE_DESCRIPTOR}") in fields
+    assert ".selector.value.value_ref_index = 0" in fields
+    assert guard_payload_row(
+        LowerGuard(
+            kind=GuardKind.VALUE_MEMORY_SPACE,
+            memory_spaces=("unknown", "global", "descriptor"),
+        )
+    ) == [".u64 = LOOM_LOW_LOWER_MEMORY_SPACE_UNKNOWN | LOOM_LOW_LOWER_MEMORY_SPACE_GLOBAL | LOOM_LOW_LOWER_MEMORY_SPACE_DESCRIPTOR"]
+
+
+def test_guard_row_emits_target_subgroup_size_range() -> None:
+    fields = guard_row(
+        {},
+        LowerGuard(
+            kind=GuardKind.TARGET_SUBGROUP_SIZE_RANGE,
+            minimum_i64=1,
+            maximum_i64=64,
+        ),
+    )
+
+    assert ".kind = LOOM_LOW_LOWER_GUARD_TARGET_SUBGROUP_SIZE_RANGE" in fields
+    assert guard_payload_row(
+        LowerGuard(
+            kind=GuardKind.TARGET_SUBGROUP_SIZE_RANGE,
+            minimum_i64=1,
+            maximum_i64=64,
+        )
+    ) == [".i64_range = {.minimum = INT64_C(1), .maximum = INT64_C(64)}"]
+
+
+def test_guard_row_emits_value_equal_to_target_subgroup_size() -> None:
+    row = LowerGuard(
+        kind=GuardKind.VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE,
+        value_ref_index=3,
+    )
+
+    fields = guard_row({}, row)
+
+    assert ".kind = LOOM_LOW_LOWER_GUARD_VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE" in fields
+    assert ".selector.value.value_ref_index = 3" in fields
+    assert not any("payload_ordinal" in field for field in fields)
+    assert guard_payload_row(row) == []
 
 
 def test_attr_copy_row_emits_portable_signed_i64_literal() -> None:
@@ -1199,6 +1969,21 @@ def test_attr_copy_row_emits_portable_signed_i64_literal() -> None:
     assert ".literal_i64 = (-INT64_C(2147483648))" in fields
 
 
+def test_attr_copy_row_emits_related_source_node() -> None:
+    fields = attr_copy_row(
+        LowerAttrCopy(
+            kind=LowerAttrCopyKind.DIRECT,
+            target_name="predicate",
+            source_node_index=2,
+            source_attr_index=3,
+        ),
+        target_name_string_ref="TEST_STRING_PREDICATE",
+    )
+
+    assert ".source_node_index = 2" in fields
+    assert ".source_attr_index = 3" in fields
+
+
 def test_attr_copy_row_emits_attr_minus_literal_payload() -> None:
     fields = attr_copy_row(
         LowerAttrCopy(
@@ -1213,6 +1998,40 @@ def test_attr_copy_row_emits_attr_minus_literal_payload() -> None:
     assert ".target_name_string_ref = TEST_STRING_SHIFT" in fields
     assert ".source_attr_index = 2" in fields
     assert ".literal_i64 = INT64_C(32)" in fields
+
+
+def test_attr_copy_row_emits_exact_operand_segment_projection() -> None:
+    fields = attr_copy_row(
+        LowerAttrCopy(
+            kind=LowerAttrCopyKind.OPERAND_SEGMENT_EXACT_BITS_READ_ONLY,
+            target_name="data",
+            source_operand_field_index=3,
+            source_element_bit_width=16,
+        ),
+        target_name_string_ref="TEST_STRING_DATA",
+    )
+
+    assert ".kind = LOOM_LOW_LOWER_ATTR_COPY_OPERAND_SEGMENT_EXACT_BITS_READ_ONLY" in fields
+    assert ".source_operand_field_index = 3" in fields
+    assert ".source_element_bit_width = 16" in fields
+    assert not any("source_attr_index" in field for field in fields)
+
+
+def test_attr_copy_row_emits_read_only_data_literal_slice() -> None:
+    fields = attr_copy_row(
+        LowerAttrCopy(
+            kind=LowerAttrCopyKind.READ_ONLY_DATA_LITERAL,
+            target_name="data",
+            literal_data_offset=17,
+            literal_data_length=4,
+        ),
+        target_name_string_ref="TEST_STRING_DATA",
+    )
+
+    assert ".kind = LOOM_LOW_LOWER_ATTR_COPY_READ_ONLY_DATA_LITERAL" in fields
+    assert ".literal_data_offset = 17" in fields
+    assert ".literal_data_length = 4" in fields
+    assert not any("source_attr_index" in field for field in fields)
 
 
 def test_attr_copy_row_emits_source_memory_offset_literal_payload() -> None:
@@ -1249,9 +2068,26 @@ def test_attr_copy_row_emits_static_dimension_projection_payload() -> None:
     assert ".literal_i64 = INT64_C(64)" in fields
     assert not any("source_attr_index" in field for field in fields)
 
+    mask_fields = attr_copy_row(
+        LowerAttrCopy(
+            kind=LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK,
+            target_name="mask",
+            value_ref_index=3,
+            source_element_index=1,
+            source_element_count=1,
+            literal_i64=-1,
+        ),
+        target_name_string_ref="TEST_STRING_MASK",
+    )
+    assert ".kind = LOOM_LOW_LOWER_ATTR_COPY_VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK" in mask_fields
+    assert ".value_ref_index = 3" in mask_fields
+    assert ".source_element_index = 1" in mask_fields
+    assert ".source_element_count = 1" in mask_fields
+    assert ".literal_i64 = (-INT64_C(1))" in mask_fields
 
-def test_diagnostic_param_row_emits_portable_signed_i64_literal() -> None:
-    fields = diagnostic_param_row(
+
+def test_diagnostic_value_row_emits_portable_signed_i64_literal() -> None:
+    fields = diagnostic_value_row(
         LowerDiagnosticParam(
             name="value",
             kind=DiagnosticParamKind.I64_LITERAL,
@@ -1259,7 +2095,26 @@ def test_diagnostic_param_row_emits_portable_signed_i64_literal() -> None:
         )
     )
 
-    assert ".value = {.i64_value = (-INT64_C(2147483648))}" in fields
+    assert fields == [".i64_value = (-INT64_C(2147483648))"]
+
+
+def test_diagnostic_value_rows_preserve_native_payloads() -> None:
+    cases = (
+        (LowerDiagnosticParam("minimum", DiagnosticParamKind.I64_LITERAL, i64_value=-(1 << 63)), ".i64_value = INT64_MIN"),
+        (LowerDiagnosticParam("maximum", DiagnosticParamKind.I64_LITERAL, i64_value=(1 << 63) - 1), ".i64_value = INT64_C(9223372036854775807)"),
+        (LowerDiagnosticParam("unsigned", DiagnosticParamKind.U64_LITERAL, u64_value=(1 << 64) - 1), ".u64_value = UINT64_C(18446744073709551615)"),
+        (LowerDiagnosticParam("count", DiagnosticParamKind.U32_LITERAL, u32_value=(1 << 32) - 1), ".u32_value = 4294967295"),
+        (LowerDiagnosticParam("enabled", DiagnosticParamKind.BOOL_LITERAL, bool_value=True), ".bool_value = true"),
+        (LowerDiagnosticParam("disabled", DiagnosticParamKind.BOOL_LITERAL), ".bool_value = false"),
+        (LowerDiagnosticParam("value_type", DiagnosticParamKind.VALUE_TYPE, value_ref_index=7), ".value_ref_index = 7"),
+        (LowerDiagnosticParam("subject", DiagnosticParamKind.STRING_LITERAL, string_value="subject"), ".string_value_ref = TEST_STRING_SUBJECT"),
+    )
+    payload_kinds = set()
+    for row, expected in cases:
+        assert diagnostic_value_row(row, string_value_ref="TEST_STRING_SUBJECT") == [expected], row.kind
+        payload_kinds.add(row.kind)
+    for kind in set(DiagnosticParamKind) - payload_kinds:
+        assert diagnostic_value_row(LowerDiagnosticParam("projection", kind)) == []
 
 
 def test_generated_tables_intern_guards_and_diagnostic_params() -> None:
@@ -1272,23 +2127,22 @@ def test_generated_tables_intern_guards_and_diagnostic_params() -> None:
     assert unique_guards == (guards[0], guards[2])
     assert guard_refs == (0, 0, 1)
 
-    emits = (
-        LowerEmit(
-            kind=LowerEmitKind.DESCRIPTOR_OP,
-            descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
-        ),
-        LowerEmit(
-            kind=LowerEmitKind.DESCRIPTOR_OP,
-            descriptor=TEST_LOW_ADD_I32_DESCRIPTOR,
-        ),
-        LowerEmit(
-            kind=LowerEmitKind.DESCRIPTOR_OP,
-            descriptor=TEST_LOW_MUL_I32_DESCRIPTOR,
-        ),
+    payload_candidates = tuple(
+        tuple(fields) if fields else None
+        for guard in (
+            LowerGuard(kind=GuardKind.VALUE_TYPE),
+            LowerGuard(kind=GuardKind.ENUM_ATTR_EQUALS, u64=7),
+            LowerGuard(kind=GuardKind.INSTANCE_FLAGS_HAS_ALL, u64=7),
+            LowerGuard(kind=GuardKind.ENUM_ATTR_EQUALS, u64=9),
+        )
+        for fields in (guard_payload_row(guard),)
     )
-    unique_emits, emit_refs = _intern_rows(emits)
-    assert unique_emits == (emits[0], emits[2])
-    assert emit_refs == (0, 0, 1)
+    unique_payloads, payload_ordinals = _intern_optional_rows(payload_candidates)
+    assert unique_payloads == (
+        (".u64 = UINT64_C(7)",),
+        (".u64 = UINT64_C(9)",),
+    )
+    assert payload_ordinals == (0, 1, 1, 2)
 
     params = (
         LowerDiagnosticParam(
@@ -1311,6 +2165,37 @@ def test_generated_tables_intern_guards_and_diagnostic_params() -> None:
     assert tuple(row for row, _ in unique_params) == (params[0], params[2])
     assert tuple(source_index for _, source_index in unique_params) == (0, 2)
     assert param_refs == (0, 0, 1)
+
+
+def test_generated_tables_intern_source_memory_shapes() -> None:
+    constraint = SourceMemoryConstraint(
+        operation=SourceMemoryOperation.LOAD,
+        memory_spaces=("global",),
+        element_byte_count=4,
+        vector_lane_count=8,
+        vector_lane_byte_stride=4,
+        static_byte_offset_minimum=-16,
+        static_byte_offset_maximum=16,
+        dynamic_term_count=1,
+        dynamic_index_source=SourceMemoryDynamicIndexSource.VALUE,
+        dynamic_byte_stride=4,
+    )
+    rows = tuple(
+        LowerSourceMemory(
+            constraint=replace(constraint, **fields),
+            rejection_diagnostic_indices=_rejection_diagnostic_indices(0xFFFF),
+        )
+        for fields in (
+            {},
+            {"operation": SourceMemoryOperation.STORE},
+            {"vector_lane_byte_stride": 8},
+        )
+    )
+
+    unique_shapes, shape_indices = _intern_rows(tuple(source_memory_shape(row) for row in rows))
+
+    assert unique_shapes == (source_memory_shape(rows[0]), source_memory_shape(rows[2]))
+    assert shape_indices == (0, 0, 1)
 
 
 def test_diagnostic_rows_use_recorded_target_context() -> None:
@@ -1376,6 +2261,27 @@ def test_generate_lower_rule_set_elides_authored_target_context_rows() -> None:
     assert "LOOM_LOW_LOWER_DIAGNOSTIC_PARAM_CONFIG_KEY" not in generated.source
     assert "LOOM_LOW_LOWER_DIAGNOSTIC_PARAM_FUNCTION_NAME" not in generated.source
     assert "LOOM_LOW_LOWER_DIAGNOSTIC_PARAM_SOURCE_OP_NAME" not in generated.source
+    kinds = generated.source.split("DiagnosticParamKinds[] = {\n", 1)[1].split("\n};", 1)[0]
+    values = generated.source.split("DiagnosticParamValues[] = {\n", 1)[1].split("\n};", 1)[0]
+    assert kinds.splitlines() == [
+        "    LOOM_LOW_LOWER_DIAGNOSTIC_PARAM_STRING_LITERAL,",
+        "    LOOM_LOW_LOWER_DIAGNOSTIC_PARAM_VALUE_TYPE,",
+        "    LOOM_LOW_LOWER_DIAGNOSTIC_PARAM_STRING_LITERAL,",
+    ]
+    assert values.count(".string_value_ref = ") == 2
+    assert values.count(".value_ref_index = ") == 1
+    assert ".diagnostic_params = {.kinds = " in generated.source
+    assert "DiagnosticParamKinds, .values = " in generated.source
+    assert "DiagnosticParamValues, .count = IREE_ARRAYSIZE(" in generated.source
+    assert "DiagnosticParamKinds)}" in generated.source
+
+
+def test_generate_empty_lower_rules_omit_diagnostic_columns() -> None:
+    generated = generate_lower_rule_set(_c_shape_contract(), dialect_ops={"scalar": ALL_SCALAR_OPS})
+
+    assert "DiagnosticParamKinds" not in generated.source
+    assert "DiagnosticParamValues" not in generated.source
+    assert ".diagnostic_params = " not in generated.source
 
 
 def test_generate_lower_rule_set_emits_static_element_count_type_pattern() -> None:
@@ -1407,15 +2313,19 @@ def test_generate_lower_rule_set_emits_static_element_count_type_pattern() -> No
     type_pattern_start = generated.source.index("LOOM_LOW_LOWER_TYPE_PATTERN_FLAG_STATIC_ELEMENT_COUNT_RANGE")
     type_pattern_end = generated.source.index("},", type_pattern_start)
     type_pattern_text = generated.source[type_pattern_start:type_pattern_end]
-    assert ".shape.static_element_count_range.minimum = 1," in type_pattern_text
-    assert ".shape.static_element_count_range.maximum = 8," in type_pattern_text
+    assert ".shape.range_ref = 1," in type_pattern_text
+    range_start = generated.source.index("static const loom_low_lower_type_pattern_range_t")
+    range_end = generated.source.index("};", range_start)
+    range_text = generated.source[range_start:range_end]
+    assert ".minimum = 1," in range_text
+    assert ".maximum = 8," in range_text
 
     guard_start = generated.source.index("LOOM_LOW_LOWER_GUARD_VECTOR_EXTRACT_SHAPE")
     guard_end = generated.source.index("},", guard_start)
     guard_text = generated.source[guard_start:guard_end]
-    assert ".value_ref_index = 0," in guard_text
-    assert ".other_value_ref_index = 1," in guard_text
-    assert ".attr_index = 0," in guard_text
+    assert ".selector.value.value_ref_index = 0," in guard_text
+    assert ".selector.value.other_value_ref_index = 1," in guard_text
+    assert ".selector.value.parameter_index = 0," in guard_text
 
 
 def test_generate_lower_rule_set_emits_exact_view_shape_type_pattern() -> None:
@@ -1472,10 +2382,14 @@ def test_generate_lower_rule_set_emits_source_instance_flags_projection() -> Non
         ],
     )
 
-    generated = generate_lower_rule_set(table, dialect_ops={"scalar": ALL_SCALAR_OPS})
+    compiled = compile_lower_rule_set(
+        table,
+        dialect_ops={"scalar": ALL_SCALAR_OPS},
+    )
+    generated = generate_lower_rule_set_from_compiled(table, compiled=compiled)
 
     assert "LOOM_LOW_LOWER_ATTR_COPY_SOURCE_OP_INSTANCE_FLAGS" in generated.source
-    assert "fast_math_flags" in generated.source
+    assert [attr_copy.target_name for attr_copy in compiled.attr_copies] == ["fast_math_flags"]
     assert ".target_name_string_ref = " in generated.source
 
 
@@ -1569,31 +2483,44 @@ def test_generate_lower_rule_set_emits_divisor_magic_projection() -> None:
                     Guard.value_type("lhs", Scalar("i32")),
                     Guard.value_type("rhs", Scalar("i32")),
                     Guard.value_type("result", Scalar("i32")),
-                    Guard.value_u32_divisor_magic_is_add("rhs", False),
+                    Guard.value_u32_divisor_magic_kind("lhs", "rhs", UnsignedDivisorMagicKind.MULTIPLY_SHIFT),
+                    Guard.value_i32_divisor_magic_kind("rhs", SignedDivisorMagicKind.MULTIPLY_SUBTRACT_SHIFT),
                 ),
                 emit=(
                     EmitDescriptorOp(
                         descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
                         results={"dst": ValueRef.result("result")},
-                        immediates={"i32_value": ValueProject.u32_divisor_magic_multiplier("rhs")},
+                        immediates={"i32_value": ValueProject.u32_divisor_magic_multiplier("lhs", "rhs")},
                     ),
                     EmitDescriptorOp(
                         descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
                         results={"dst": ValueRef.temporary("shift")},
                         result_types={"dst": ValueRef.result("result")},
-                        immediates={"i32_value": ValueProject.u32_divisor_magic_shift("rhs", product_bit_width=64)},
+                        immediates={"i32_value": ValueProject.u32_divisor_magic_shift("lhs", "rhs", product_bit_width=64)},
                     ),
                     EmitDescriptorOp(
                         descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
                         results={"dst": ValueRef.temporary("signed_multiplier")},
                         result_types={"dst": ValueRef.result("result")},
-                        immediates={"i32_value": ValueProject.u32_divisor_magic_multiplier_as_i32("rhs")},
+                        immediates={"i32_value": ValueProject.u32_divisor_magic_multiplier_as_i32("lhs", "rhs")},
                     ),
                     EmitDescriptorOp(
                         descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
                         results={"dst": ValueRef.temporary("mask")},
                         result_types={"dst": ValueRef.result("result")},
                         immediates={"i32_value": ValueProject.exact_i64_minus_one("rhs")},
+                    ),
+                    EmitDescriptorOp(
+                        descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
+                        results={"dst": ValueRef.temporary("signed_magic")},
+                        result_types={"dst": ValueRef.result("result")},
+                        immediates={"i32_value": ValueProject.i32_divisor_magic_multiplier("rhs")},
+                    ),
+                    EmitDescriptorOp(
+                        descriptor=TEST_LOW_CONST_I32_DESCRIPTOR,
+                        results={"dst": ValueRef.temporary("signed_shift")},
+                        result_types={"dst": ValueRef.result("result")},
+                        immediates={"i32_value": ValueProject.i32_divisor_magic_shift("rhs")},
                     ),
                 ),
             )
@@ -1602,10 +2529,13 @@ def test_generate_lower_rule_set_emits_divisor_magic_projection() -> None:
 
     generated = generate_lower_rule_set(table, dialect_ops={"scalar": ALL_SCALAR_OPS})
 
-    assert "LOOM_LOW_LOWER_GUARD_VALUE_U32_DIVISOR_MAGIC_IS_ADD" in generated.source
+    assert "LOOM_LOW_LOWER_GUARD_VALUE_U32_DIVISOR_MAGIC_KIND" in generated.source
     assert "LOOM_LOW_LOWER_ATTR_COPY_VALUE_U32_DIVISOR_MAGIC_MULTIPLIER" in generated.source
     assert "LOOM_LOW_LOWER_ATTR_COPY_VALUE_U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32" in generated.source
     assert "LOOM_LOW_LOWER_ATTR_COPY_VALUE_U32_DIVISOR_MAGIC_SHIFT" in generated.source
+    assert "LOOM_LOW_LOWER_GUARD_VALUE_I32_DIVISOR_MAGIC_KIND" in generated.source
+    assert "LOOM_LOW_LOWER_ATTR_COPY_VALUE_I32_DIVISOR_MAGIC_MULTIPLIER" in generated.source
+    assert "LOOM_LOW_LOWER_ATTR_COPY_VALUE_I32_DIVISOR_MAGIC_SHIFT" in generated.source
     assert ".literal_i64 = INT64_C(32)" in generated.source
     assert "LOOM_LOW_LOWER_ATTR_COPY_VALUE_EXACT_I64_MINUS_ONE" in generated.source
 
@@ -1625,12 +2555,15 @@ def test_source_memory_row_emits_dynamic_byte_stride_any_flag() -> None:
             dynamic_index_source=SourceMemoryDynamicIndexSource.VALUE,
             dynamic_byte_stride=None,
         ),
-        diagnostic_index=3,
-        dynamic_offset_diagnostic_index=4,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(
+            3,
+            {SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH: 4},
+        ),
     )
 
     fields = source_memory_row(
         row,
+        shape_index=0,
         byte_offset_materializer_ordinal=0,
         address_materializer_ordinal=0,
         diagnostics_index=0,
@@ -1653,12 +2586,15 @@ def test_source_memory_row_emits_cache_policy_any_flag() -> None:
             static_byte_offset=0,
             cache_policy_build_flags=None,
         ),
-        diagnostic_index=3,
-        dynamic_offset_diagnostic_index=4,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(
+            3,
+            {SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH: 4},
+        ),
     )
 
     fields = source_memory_row(
         row,
+        shape_index=0,
         byte_offset_materializer_ordinal=0,
         address_materializer_ordinal=0,
         diagnostics_index=0,
@@ -1679,13 +2615,18 @@ def test_source_memory_row_emits_compact_address_layout() -> None:
             vector_lane_byte_stride=4,
             static_byte_offset=0,
         ),
-        diagnostic_index=3,
-        dynamic_offset_diagnostic_index=4,
-        address_layout_diagnostic_index=5,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(
+            3,
+            {
+                SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH: 4,
+                SourceMemoryRejectionReason.ADDRESS_LAYOUT: 5,
+            },
+        ),
     )
 
     fields = source_memory_row(
         row,
+        shape_index=0,
         byte_offset_materializer_ordinal=0,
         address_materializer_ordinal=0,
         diagnostics_index=0,
@@ -1694,7 +2635,7 @@ def test_source_memory_row_emits_compact_address_layout() -> None:
 
     assert (".address_layout = LOOM_LOW_LOWER_SOURCE_MEMORY_ADDRESS_LAYOUT_COMPACT_ROW_MAJOR") in fields
     assert ".diagnostics_index = 0" in fields
-    assert ".address_layout_diagnostic_index = 5" in diagnostic_fields
+    assert (".rejection_diagnostic_indices[LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_LAYOUT] = 5") in diagnostic_fields
 
 
 def test_source_memory_row_emits_preserve_source_index_flag() -> None:
@@ -1712,12 +2653,15 @@ def test_source_memory_row_emits_preserve_source_index_flag() -> None:
             dynamic_view_base_term_count=0,
             preserve_source_index=True,
         ),
-        diagnostic_index=3,
-        dynamic_offset_diagnostic_index=4,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(
+            3,
+            {SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH: 4},
+        ),
     )
 
     fields = source_memory_row(
         row,
+        shape_index=0,
         byte_offset_materializer_ordinal=0,
         address_materializer_ordinal=0,
         diagnostics_index=0,
@@ -1739,12 +2683,15 @@ def test_source_memory_row_emits_any_positive_dynamic_term_count() -> None:
             dynamic_term_count=None,
             dynamic_term_count_minimum=1,
         ),
-        diagnostic_index=3,
-        dynamic_offset_diagnostic_index=4,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(
+            3,
+            {SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH: 4},
+        ),
     )
 
     fields = source_memory_row(
         row,
+        shape_index=0,
         byte_offset_materializer_ordinal=0,
         address_materializer_ordinal=0,
         diagnostics_index=0,
@@ -1755,7 +2702,7 @@ def test_source_memory_row_emits_any_positive_dynamic_term_count() -> None:
     assert (".dynamic_view_base_term_count = LOOM_LOW_LOWER_SOURCE_MEMORY_DYNAMIC_VIEW_BASE_TERM_COUNT_ANY") in fields
 
 
-def test_source_memory_row_emits_portable_signed_i64_values() -> None:
+def test_source_memory_shape_row_emits_portable_signed_i64_values() -> None:
     row = LowerSourceMemory(
         constraint=SourceMemoryConstraint(
             operation=SourceMemoryOperation.LOAD,
@@ -1769,16 +2716,10 @@ def test_source_memory_row_emits_portable_signed_i64_values() -> None:
             dynamic_index_source=SourceMemoryDynamicIndexSource.VALUE,
             dynamic_byte_stride=-(1 << 31),
         ),
-        diagnostic_index=0xFFFF,
-        dynamic_offset_diagnostic_index=0xFFFF,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(0xFFFF),
     )
 
-    fields = source_memory_row(
-        row,
-        byte_offset_materializer_ordinal=0,
-        address_materializer_ordinal=0,
-        diagnostics_index=0,
-    )
+    fields = source_memory_shape_row(source_memory_shape(row))
 
     assert ".vector_lane_byte_stride = (-INT64_C(2147483648))" in fields
     assert ".static_byte_offset_minimum = INT64_MIN" in fields
@@ -1801,12 +2742,15 @@ def test_source_memory_row_emits_dynamic_stride_values_flag() -> None:
             dynamic_byte_stride=None,
             allow_dynamic_stride_values=True,
         ),
-        diagnostic_index=3,
-        dynamic_offset_diagnostic_index=4,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(
+            3,
+            {SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH: 4},
+        ),
     )
 
     fields = source_memory_row(
         row,
+        shape_index=0,
         byte_offset_materializer_ordinal=0,
         address_materializer_ordinal=0,
         diagnostics_index=0,
@@ -1841,9 +2785,13 @@ def test_source_memory_rows_split_complete_address_materializer() -> None:
             static_byte_offset_maximum=(2**31) - 1,
             dynamic_term_count=None,
         ),
-        diagnostic_index=3,
-        dynamic_offset_diagnostic_index=4,
-        address_diagnostic_index=5,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(
+            3,
+            {
+                SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH: 4,
+                SourceMemoryRejectionReason.ADDRESS_MATERIALIZATION: 5,
+            },
+        ),
         address_materializer=materializer,
     )
     descriptor_refs = {
@@ -1854,6 +2802,7 @@ def test_source_memory_rows_split_complete_address_materializer() -> None:
 
     fields = source_memory_row(
         row,
+        shape_index=0,
         byte_offset_materializer_ordinal=0,
         address_materializer_ordinal=1,
         diagnostics_index=0,
@@ -1867,7 +2816,7 @@ def test_source_memory_rows_split_complete_address_materializer() -> None:
     )
 
     assert ".diagnostics_index = 0" in fields
-    assert ".address_diagnostic_index = 5" in diagnostic_fields
+    assert (".rejection_diagnostic_indices[LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION] = 5") in diagnostic_fields
     assert ".root_kind = LOOM_LOW_LOWER_SOURCE_MEMORY_ROOT_ALLOCA" in fields
     assert ".address_materializer_ordinal = 1" in fields
     assert (".base_kind = LOOM_LOW_LOWER_SOURCE_MEMORY_ADDRESS_BASE_VIEW") in materializer_fields
@@ -1912,7 +2861,40 @@ def test_source_memory_rows_split_byte_offset_materializer() -> None:
     assert ".constant_descriptor_ref = 0" in materializer_fields
     assert ".add_descriptor_ref = 1" in materializer_fields
     assert ".multiply_descriptor_ref = 2" in materializer_fields
+    assert ".multiply_add_descriptor_ref = 65535" in materializer_fields
+    assert ".static_bias_descriptor_ref = 65535" in materializer_fields
     assert ".shift_left_descriptor_ref = 65535" in materializer_fields
+
+
+def test_source_memory_rows_emit_optional_byte_offset_descriptors() -> None:
+    multiply_add = replace(TEST_LOW_ADD_I32_DESCRIPTOR, key="test.multiply_add.i32")
+    static_bias = replace(TEST_LOW_CONST_I32_DESCRIPTOR, key="test.static_bias.i32")
+    materializer = SourceMemoryByteOffsetMaterializer(
+        constant=TEST_LOW_CONST_I32_DESCRIPTOR,
+        add=TEST_LOW_ADD_I32_DESCRIPTOR,
+        multiply=TEST_LOW_MUL_I32_DESCRIPTOR,
+        shift_left=None,
+        multiply_add=multiply_add,
+        static_bias=static_bias,
+        constant_immediate="i32_value",
+    )
+    descriptor_refs = {
+        TEST_LOW_CONST_I32_DESCRIPTOR.key: 0,
+        TEST_LOW_ADD_I32_DESCRIPTOR.key: 1,
+        TEST_LOW_MUL_I32_DESCRIPTOR.key: 2,
+        multiply_add.key: 3,
+        static_bias.key: 4,
+    }
+
+    materializer_fields = source_memory_byte_offset_materializer_row(
+        descriptor_refs,
+        materializer,
+        immediate_string_ref="TEST_STRING_I32_VALUE",
+        conversion_immediate_string_refs={},
+    )
+
+    assert ".multiply_add_descriptor_ref = 3" in materializer_fields
+    assert ".static_bias_descriptor_ref = 4" in materializer_fields
 
 
 def test_source_memory_conversion_rows_keep_source_kind_and_selector() -> None:
@@ -1982,8 +2964,7 @@ def test_source_memory_conversion_rows_keep_source_kind_and_selector() -> None:
             dynamic_term_count=None,
             dynamic_term_count_minimum=1,
         ),
-        diagnostic_index=0xFFFF,
-        dynamic_offset_diagnostic_index=0xFFFF,
+        rejection_diagnostic_indices=_rejection_diagnostic_indices(0xFFFF),
         byte_offset_materializer=materializer,
     )
     table = _compiled_lower_rule_set(source_memories=(row,))

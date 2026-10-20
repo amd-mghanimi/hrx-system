@@ -11,6 +11,21 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    loomc_trace
+  HDRS
+    "loomc_trace.h"
+  SRCS
+    "loomc_trace.c"
+  DEPS
+    ::trace_cli
+    iree::base
+    loom::binding::c::loomc
+    loom::util::stream
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     trace_cli
   HDRS
     "trace_cli.h"
@@ -19,8 +34,8 @@ loom_cc_library(
   DEPS
     iree::base
     iree::base::tooling::flags
-    loom::pass::trace
     loom::tooling::io::file
+    loom::util::stream
   PUBLIC
 )
 

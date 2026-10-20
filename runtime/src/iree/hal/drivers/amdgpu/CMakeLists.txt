@@ -12,6 +12,41 @@ iree_add_all_subdirs()
 if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_library(
   NAME
+    host_memory_pools
+  HDRS
+    "host_memory_pools.h"
+  SRCS
+    "host_memory_pools.c"
+  DEPS
+    iree::base
+    iree::hal::drivers::amdgpu::util::libhsa
+  PUBLIC
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_test(
+  NAME
+    host_memory_pools_test
+  SRCS
+    "host_memory_pools_test.cc"
+  DEPS
+    ::host_memory_pools
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_library(
+  NAME
     queue_execution_resources
   HDRS
     "queue_execution_resources.h"
@@ -214,6 +249,7 @@ iree_cc_library(
   DEPS
     iree::base
     iree::base::internal
+    iree::base::threading
     iree::hal
     iree::hal::drivers::amdgpu::util::loaded_code_object
   PUBLIC
@@ -223,10 +259,48 @@ endif()
 if(IREE_HAL_DRIVER_AMDGPU)
 iree_cc_library(
   NAME
+    hsa_queue
+  HDRS
+    "hsa_queue.h"
+  SRCS
+    "hsa_queue.c"
+  DEPS
+    iree::base
+    iree::hal::drivers::amdgpu::util::libhsa
+  PUBLIC
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_test(
+  NAME
+    hsa_queue_test
+  SRCS
+    "hsa_queue_test.cc"
+  DEPS
+    ::hsa_queue
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_library(
+  NAME
     amdgpu
   HDRS
+    "allocator.h"
     "api.h"
   SRCS
+    "allocation_queue.c"
+    "allocation_queue.h"
     "allocator.c"
     "allocator.h"
     "aql_atomic.c"
@@ -305,10 +379,10 @@ iree_cc_library(
     "host_queue_waits.h"
     "hostcall_provider.c"
     "hostcall_provider.h"
-    "hsa_queue.c"
-    "hsa_queue.h"
     "logical_device.c"
     "logical_device.h"
+    "memory_backend.c"
+    "memory_backend.h"
     "physical_device.c"
     "physical_device.h"
     "physical_device_capabilities.c"
@@ -352,6 +426,7 @@ iree_cc_library(
     "transient_buffer.h"
     "tsan_state.c"
     "tsan_state.h"
+    "virtual_buffer.c"
     "virtual_memory.c"
     "virtual_memory.h"
   DEPS
@@ -364,6 +439,8 @@ iree_cc_library(
     ::executable_global_resolver
     ::executable_metadata
     ::executable_metadata_hsaco
+    ::host_memory_pools
+    ::hsa_queue
     ::kernarg_layout
     ::profile_events
     ::queue_execution_resources
@@ -410,13 +487,16 @@ iree_cc_library(
     iree::hal::drivers::amdgpu::util::shadow_map
     iree::hal::drivers::amdgpu::util::topology
     iree::hal::drivers::amdgpu::util::vmem
+    iree::hal::memory::asan_pool
     iree::hal::memory::passthrough_pool
+    iree::hal::memory::slab_cache
     iree::hal::memory::slab_provider
     iree::hal::memory::tlsf_pool
     iree::hal::memory::tracing
     iree::hal::utils::elf_format
     iree::hal::utils::files
     iree::hal::utils::resource_set
+    iree::hal::utils::submitted_signal
   PUBLIC
 )
 endif()
@@ -464,6 +544,7 @@ iree_cc_library(
     "host_queue_waits.h"
     "hostcall_provider.h"
     "logical_device.h"
+    "memory_backend.h"
     "physical_device.h"
     "physical_device_capabilities.h"
     "pm4_command_buffer.h"
@@ -483,6 +564,8 @@ iree_cc_library(
     "virtual_memory.h"
   DEPS
     ::dispatch_concurrency
+    ::host_memory_pools
+    ::kernarg_layout
     ::profile_events
     iree::base
     iree::base::internal
@@ -511,6 +594,7 @@ iree_cc_library(
     iree::hal::drivers::amdgpu::util::vmem
     iree::hal::memory::slab_provider
     iree::hal::memory::tracing
+    iree::hal::utils::submitted_signal
   PUBLIC
 )
 endif()
@@ -655,6 +739,7 @@ iree_cc_test(
     ::headers
     iree::base
     iree::hal
+    iree::hal::cts::util::pool_test_util
     iree::hal::cts::util::test_base
     iree::hal::drivers::amdgpu::util::info
     iree::hal::drivers::amdgpu::util::topology
@@ -795,6 +880,7 @@ iree_cc_test(
   NAME
     host_queue_atomic_test
   SRCS
+    "buffer_test.cc"
     "host_queue_atomic_test.cc"
     "host_queue_command_buffer_packet.h"
     "host_queue_command_buffer_test_util.h"
@@ -809,6 +895,29 @@ iree_cc_test(
     iree::hal::drivers::amdgpu::target::selection
     iree::hal::drivers::amdgpu::util::packet
     iree::hal::drivers::amdgpu::util::pm4_atomic
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_test(
+  NAME
+    driver_test
+  SRCS
+    "driver_test.cc"
+  DEPS
+    ::amdgpu
+    ::headers
+    iree::base
+    iree::hal
+    iree::hal::cts::util::test_base
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS
@@ -980,6 +1089,7 @@ iree_cc_test(
     ::headers
     iree::base
     iree::hal
+    iree::hal::cts::util::pool_test_util
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
     iree::hal::drivers::amdgpu::cts::testdata_amdgpu
@@ -990,6 +1100,36 @@ iree_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     iree::testing::temp_file
+  LABELS
+    "iree-build-requirement=runtime.hal.amdgpu"
+    "iree-run-requirement=runtime.resource.amd_gpu"
+    "runtime-resource=amd-gpu"
+  RESOURCE_GROUP
+    gpu-device
+)
+endif()
+
+if(IREE_HAL_DRIVER_AMDGPU)
+iree_cc_test(
+  NAME
+    indirect_dispatch_test
+  SRCS
+    "host_queue_command_buffer_packet.h"
+    "host_queue_command_buffer_profiling_test_util.h"
+    "host_queue_command_buffer_test_util.h"
+    "indirect_dispatch_test.cc"
+  DEPS
+    ::amdgpu
+    ::headers
+    iree::base
+    iree::hal
+    iree::hal::cts::util::registry
+    iree::hal::cts::util::test_base
+    iree::hal::drivers::amdgpu::cts::testdata_amdgpu
+    iree::hal::drivers::amdgpu::target::selection
+    iree::hal::drivers::amdgpu::util::packet
+    iree::testing::gtest
+    iree::testing::gtest_main
   LABELS
     "iree-build-requirement=runtime.hal.amdgpu"
     "iree-run-requirement=runtime.resource.amd_gpu"
@@ -1043,11 +1183,13 @@ iree_cc_test(
     ::headers
     iree::base
     iree::hal
+    iree::hal::cts::util::pool_test_util
     iree::hal::cts::util::registry
     iree::hal::cts::util::test_base
     iree::hal::drivers::amdgpu::cts::testdata_amdgpu
     iree::hal::drivers::amdgpu::target::selection
     iree::hal::drivers::amdgpu::util::packet
+    iree::hal::memory::tlsf_pool
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS
@@ -1210,6 +1352,7 @@ iree_cc_test(
     iree::base::internal
     iree::base::threading
     iree::hal
+    iree::hal::cts::util::pool_test_util
     iree::hal::cts::util::test_base
     iree::hal::drivers::amdgpu::util::packet
     iree::hal::memory::fixed_block_pool
@@ -1235,6 +1378,7 @@ iree_cc_test(
     ::amdgpu
     ::headers
     iree::base
+    iree::base::threading
     iree::hal
     iree::hal::cts::util::test_base
     iree::hal::drivers::amdgpu::util::packet
@@ -1282,6 +1426,7 @@ iree_cc_test(
     ::headers
     iree::base
     iree::hal
+    iree::hal::cts::util::pool_test_util
     iree::hal::cts::util::test_base
     iree::hal::drivers::amdgpu::util::libhsa
     iree::hal::drivers::amdgpu::util::packet
@@ -1330,8 +1475,10 @@ iree_cc_test(
   DEPS
     ::amdgpu
     ::headers
+    iree::async
     iree::base
     iree::hal
+    iree::hal::cts::util::pool_test_util
     iree::hal::cts::util::test_base
     iree::hal::drivers::amdgpu::util::packet
     iree::io::file_handle
@@ -1514,7 +1661,9 @@ iree_cc_test(
   SRCS
     "slab_provider_test.cc"
   DEPS
+    ::access_policy
     ::amdgpu
+    ::atomic_memory
     ::headers
     iree::async
     iree::base

@@ -109,6 +109,13 @@ alias(
 )
 
 alias(
+    name = "linux_udmabuf_uapi",
+    actual = "//build_tools/third_party/linux_uapi:linux_udmabuf_uapi",
+    tags = ["manual"],
+    visibility = [":libamdf_users"],
+)
+
+alias(
     name = "linux_drm_uapi",
     actual = "//build_tools/third_party/linux_uapi:linux_drm_uapi",
     tags = ["manual"],
@@ -130,6 +137,16 @@ alias(
 )
 
 alias(
+    name = "linux_io_uapi",
+    actual = "//build_tools/third_party/linux_uapi:linux_io_uapi",
+    tags = ["manual"],
+    visibility = [
+        ":libamdf_users",
+        "//runtime/src/iree/async:__pkg__",
+    ],
+)
+
+alias(
     name = "linux_xdna_uapi",
     actual = "//build_tools/third_party/linux_uapi:linux_xdna_uapi",
     tags = ["manual"],
@@ -143,10 +160,77 @@ alias(
 )
 
 alias(
+    name = "mimalloc",
+    actual = "@mimalloc",
+    visibility = [":runtime_users"],
+)
+
+# Executable link policy selects the C++ ABI adapter through --custom_malloc.
+# Sanitizers retain the standard allocation boundary even when mimalloc was
+# also requested.
+alias(
+    name = "allocator_new_delete",
+    actual = select({
+        "//runtime/config/base:allocator_system_mimalloc": "//build_tools/third_party/mimalloc:new_delete",
+        "//conditions:default": "@bazel_tools//tools/cpp:malloc",
+    }),
+    visibility = ["//visibility:public"],
+)
+
+alias(
     name = "zstd",
     actual = "//build_tools/third_party/zstd",
     visibility = [":libhrx_users"],
 )
+
+alias(
+    name = "giflib",
+    actual = select({
+        "//loom/config/serve:gif": "@giflib//:giflib",
+        "//conditions:default": ":empty_image_codec",
+    }),
+    visibility = [":loom_users"],
+)
+
+alias(
+    name = "libjpeg_turbo",
+    actual = select({
+        "//loom/config/serve:jpeg": "@libjpeg_turbo//:jpeg",
+        "//conditions:default": ":empty_image_codec",
+    }),
+    visibility = [":loom_users"],
+)
+
+alias(
+    name = "libpng",
+    actual = select({
+        "//loom/config/serve:png": "@libpng//:png",
+        "//conditions:default": ":empty_image_codec",
+    }),
+    visibility = [":loom_users"],
+)
+
+alias(
+    name = "libwebp",
+    actual = select({
+        "//loom/config/serve:webp": "@libwebp//:webpdecoder",
+        "//conditions:default": ":empty_image_codec",
+    }),
+    visibility = [":loom_users"],
+)
+
+filegroup(name = "empty_image_codec")
+
+alias(
+    name = "miniaudio",
+    actual = select({
+        "//loom/config/serve:audio_decoding": "@miniaudio//:decoder",
+        "//conditions:default": ":empty_audio_codec",
+    }),
+    visibility = [":loom_users"],
+)
+
+filegroup(name = "empty_audio_codec")
 
 filegroup(
     name = "empty_aqlprofile_sdk_headers",

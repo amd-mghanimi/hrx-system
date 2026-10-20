@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import hashlib
 import io
 import json
@@ -75,6 +76,12 @@ class WindowsDiagnosticsTest(unittest.TestCase):
             (build / "link.rsp").write_bytes(
                 '"common source.obj" common.lib'.encode("utf-16")
             )
+            # The graph fits alone but competes with the actual failed-link
+            # inputs for the capture budget, as in large generated CMake builds.
+            (build / "build.ninja").write_bytes(b"graph" * 20)
+            capture_budget = sum(len(contents) for contents in objects.values())
+            capture_budget += (build / "CMakeCache.txt").stat().st_size
+            capture_budget += (build / "link.rsp").stat().st_size
             (artifacts / "output.log").write_text(
                 "FAILED: [code=4294967295] test with spaces.exe test.pdb\n"
             )
@@ -98,14 +105,20 @@ class WindowsDiagnosticsTest(unittest.TestCase):
 
             # The native graph query and symbol reader are dependencies. The
             # collector, filesystem snapshots, and manifest writer all run.
-            with mock.patch.object(subprocess, "run", side_effect=native_tool):
-                diagnostics.capture_failure(artifacts, root, {}, build)
+            with (
+                mock.patch.object(subprocess, "run", side_effect=native_tool),
+                mock.patch.object(diagnostics, "MAX_CAPTURE_BYTES", capture_budget),
+            ):
+                diagnostics.capture_failure(
+                    artifacts, root, {}, build, started_at=dt.datetime.now(dt.UTC)
+                )
             manifest = json.loads((artifacts / "manifest.json").read_text())
             records = {
                 Path(record["path"]).name: record for record in manifest["files"]
             }
             for name, contents in objects.items():
                 (build / name).write_bytes(b"rebuild replaced the original")
+                self.assertIn("copy", records[name], records[name])
                 self.assertEqual(
                     (artifacts / records[name]["copy"]).read_bytes(), contents
                 )
@@ -117,6 +130,9 @@ class WindowsDiagnosticsTest(unittest.TestCase):
                 (build / "link.rsp").read_bytes(),
             )
             self.assertNotIn("sdk.lib", records)
+            self.assertEqual(
+                records["build.ninja"]["error"], "capture byte limit exceeded"
+            )
             self.assertEqual(
                 sum("--print-armap" in tool["argv"] for tool in manifest["tools"]), 3
             )
@@ -145,6 +161,7 @@ class WindowsDiagnosticsTest(unittest.TestCase):
                 root,
                 {"Include": str(sdk), "A_SECRET": "not captured", "PATH": ""},
                 None,
+                started_at=dt.datetime.now(dt.UTC),
             )
             manifest_text = (artifacts / "manifest.json").read_text()
             manifest = json.loads(manifest_text)
@@ -166,6 +183,54 @@ class WindowsDiagnosticsTest(unittest.TestCase):
             )
             self.assertNotIn("A_SECRET", manifest_text)
             self.assertNotIn("not captured", manifest_text)
+
+    def test_policy_capture_failure_preserves_command_and_other_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            denied = "Failed to open log. Access is denied.\r\n".encode("utf-16")
+            policies = b'{"Policies": [{"PolicyID": "blocked-policy"}]}\r\n'
+
+            def native_tool(argv, **kwargs):
+                if argv[0] == "wevtutil.exe":
+                    kwargs["stdout"].write(denied)
+                    return subprocess.CompletedProcess(argv, 5)
+                kwargs["stdout"].write(policies)
+                return subprocess.CompletedProcess(argv, 0)
+
+            # Only native diagnostic tools are substituted. The failed child,
+            # log capture, command timestamps, and artifact writing are real.
+            with (
+                mock.patch.object(subprocess, "run", side_effect=native_tool),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                result = diagnostics.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; print('CreateProcessW failed (error: 4551)'); "
+                        "sys.exit(3)",
+                    ],
+                    cwd=root,
+                    env=None,
+                    artifact_dir=root / "artifacts",
+                    label="Test",
+                )
+            self.assertEqual(result, 3)
+            phase = next((root / "artifacts").iterdir())
+            command = json.loads((phase / "command.json").read_text())
+            manifest = json.loads((phase / "manifest.json").read_text())
+            events, policy_list = manifest["tools"]
+            self.assertEqual(events["returncode"], 5)
+            self.assertEqual((phase / events["output"]).read_bytes(), denied)
+            self.assertEqual(policy_list["returncode"], 0)
+            self.assertEqual((phase / policy_list["output"]).read_bytes(), policies)
+            started_at = dt.datetime.fromisoformat(command["started_at"])
+            timestamp = started_at.isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            )
+            self.assertIn(
+                f"TimeCreated[@SystemTime >= '{timestamp}']", events["argv"][3]
+            )
 
     def test_unreadable_files_and_limits_are_explicit(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -22,4 +22,48 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_library(
+  NAME
+    loomc_options
+  HDRS
+    "loomc_options.h"
+  SRCS
+    "loomc_options.c"
+  DEPS
+    iree::base
+    loom::binding::c::loomc
+    loom::config::text_binding
+    loom::sanitizer::options
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    loomc_result
+  HDRS
+    "loomc_result.h"
+  SRCS
+    "loomc_result.c"
+  DEPS
+    iree::base
+    loom::binding::c::loomc
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    loomc_diagnostic_json
+  HDRS
+    "loomc_diagnostic_json.h"
+  SRCS
+    "loomc_diagnostic_json.c"
+  DEPS
+    iree::base
+    loom::binding::c::loomc
+    loom::error::error_defs
+    loom::util::json
+    loom::util::stream
+  PUBLIC
+)
+
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

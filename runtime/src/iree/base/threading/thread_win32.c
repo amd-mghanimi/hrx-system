@@ -102,8 +102,6 @@ static void iree_thread_set_name(HANDLE handle, const char* name) {
 }
 
 static DWORD WINAPI iree_thread_start_routine(LPVOID param) {
-  // NOTE: we own a reference to the thread handle so that the creation
-  // thread can't delete this out from under us.
   iree_thread_t* thread = (iree_thread_t*)param;
 
   // Set the thread name used by tracy (which must be called on the thread).
@@ -119,7 +117,8 @@ static DWORD WINAPI iree_thread_start_routine(LPVOID param) {
   // Call the user thread entry point function.
   // Note that this can be a tail-call which saves a stack frame in all threads
   // (which is really just to make call stacks in debuggers much cleaner).
-  return (DWORD)entry(entry_arg);
+  // Failed startup resumes the native thread with no user entry to invoke.
+  return entry ? (DWORD)entry(entry_arg) : 0;
 }
 
 iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
@@ -127,6 +126,7 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
                                  iree_allocator_t allocator,
                                  iree_thread_t** out_thread) {
   IREE_TRACE_ZONE_BEGIN(z0);
+  *out_thread = NULL;
 
   // Allocate our thread struct; we'll use it to shuttle params into the thread
   // (including the user-specified entry_arg).
@@ -143,44 +143,44 @@ iree_status_t iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
   thread->entry_arg = entry_arg;
   strncpy_s(thread->name, IREE_ARRAYSIZE(thread->name), params.name.data,
             min(params.name.size, IREE_ARRAYSIZE(thread->name) - 1));
-  iree_atomic_store(&thread->is_suspended, params.create_suspended ? 1 : 0,
-                    iree_memory_order_relaxed);
+  iree_atomic_store(&thread->is_suspended, 1, iree_memory_order_relaxed);
   iree_thread_override_list_initialize(iree_thread_set_priority_class,
                                        params.priority_class, thread->allocator,
                                        &thread->qos_override_list);
 
-  *out_thread = thread;
-
-  // Create the thread either suspended or running as the user requested.
-  {
-    IREE_TRACE_ZONE_BEGIN_NAMED(z1, "CreateThread");
-    thread->handle = CreateThread(
-        NULL, params.stack_size, iree_thread_start_routine, thread,
-        params.create_suspended ? CREATE_SUSPENDED : 0, &thread->id);
-    IREE_TRACE_ZONE_END(z1);
-  }
-  if (thread->handle == INVALID_HANDLE_VALUE) {
-    iree_thread_release(thread);  // for self
-    *out_thread = NULL;
-    IREE_TRACE_ZONE_END(z0);
-    return iree_make_status(IREE_STATUS_INTERNAL,
-                            "thread creation failed with %lu", GetLastError());
-  }
-
-  // Immediately set thread properties before resuming (so that we don't
-  // start on the wrong core/at the wrong priority).
-  if (!iree_string_view_is_empty(params.name)) {
-    iree_thread_set_name(thread->handle, thread->name);
-  }
-  if (params.priority_class != IREE_THREAD_PRIORITY_CLASS_NORMAL) {
-    iree_thread_set_priority_class(thread, params.priority_class);
-  }
-  if (!iree_thread_affinity_is_unspecified(params.initial_affinity)) {
-    iree_thread_request_affinity(thread, params.initial_affinity);
+  // Configure affinity before allowing the native thread to invoke user code.
+  thread->handle =
+      CreateThread(NULL, params.stack_size, iree_thread_start_routine, thread,
+                   CREATE_SUSPENDED, &thread->id);
+  if (!thread->handle) {
+    DWORD error = GetLastError();
+    status = iree_make_status(iree_status_code_from_win32_error(error),
+                              "thread creation failed with %lu", error);
+  } else {
+    if (!iree_string_view_is_empty(params.name)) {
+      iree_thread_set_name(thread->handle, thread->name);
+    }
+    if (params.priority_class != IREE_THREAD_PRIORITY_CLASS_NORMAL) {
+      iree_thread_set_priority_class(thread, params.priority_class);
+    }
+    status = iree_thread_request_affinity(thread, params.initial_affinity);
   }
 
+  if (iree_status_is_ok(status)) {
+    *out_thread = thread;
+    if (!params.create_suspended) {
+      iree_thread_resume(thread);
+    }
+  } else if (thread->handle) {
+    thread->entry = NULL;
+    thread->entry_arg = NULL;
+    iree_thread_release(thread);
+  } else {
+    iree_thread_override_list_deinitialize(&thread->qos_override_list);
+    iree_allocator_free(allocator, thread);
+  }
   IREE_TRACE_ZONE_END(z0);
-  return iree_ok_status();
+  return status;
 }
 
 static void iree_thread_delete(iree_thread_t* thread) {
@@ -262,60 +262,48 @@ void iree_thread_override_end(iree_thread_override_t* override) {
   IREE_TRACE_ZONE_END(z0);
 }
 
-void iree_thread_request_affinity(iree_thread_t* thread,
-                                  iree_thread_affinity_t affinity) {
-  IREE_TRACE_ZONE_BEGIN(z0);
-#if IREE_TRACING_FEATURES & IREE_TRACING_FEATURE_INSTRUMENTATION
-  char affinity_desc[64];
-  int affinity_desc_length =
-      iree_snprintf(affinity_desc, IREE_ARRAYSIZE(affinity_desc),
-                    "group_any=%u, group=%u, id_assigned=%u, id=%u, smt=%u",
-                    affinity.group_any, affinity.group, affinity.id_assigned,
-                    affinity.id, affinity.smt);
-  IREE_TRACE_ZONE_APPEND_TEXT(z0, affinity_desc, affinity_desc_length);
-#endif  // IREE_TRACING_FEATURES & IREE_TRACING_FEATURE_INSTRUMENTATION
-
-  // TODO(benvanik): switch to the Windows 11 APIs when available (dynamically)
-  // for specifying groups with more than 64 processors. Prior to the new APIs
-  // each group was limited to 64 logical processors and that resulted in groups
-  // being sharded. We need to update our task topology code (which is the
-  // primary caller of this function) as well as others to assign the newer
-  // group IDs and this code to do the same.
-  //
-  // See:
-  // https://learn.microsoft.com/en-us/windows/win32/procthread/numa-support
-  // KeQueryNodeActiveAffinity2
-  // (probably SetThreadSelectedCpuSets?)
-
-  GROUP_AFFINITY group_affinity;
-  memset(&group_affinity, 0, sizeof(group_affinity));
-  group_affinity.Group = affinity.group;
+iree_status_t iree_thread_request_affinity(iree_thread_t* thread,
+                                           iree_thread_affinity_t affinity) {
+  if (iree_thread_affinity_is_unspecified(affinity)) {
+    return iree_ok_status();
+  }
+  GROUP_AFFINITY group_affinity = {0};
+  if (affinity.group > UINT16_MAX) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "affinity group %u exceeds Windows node/group IDs",
+                            affinity.group);
+  }
   if (affinity.group_any) {
-    group_affinity.Mask = (KAFFINITY)UINTPTR_MAX;
-  } else if (affinity.id_assigned) {
-    KAFFINITY affinity_mask = 1ull << affinity.id;
-    if (affinity.smt) {
-      affinity_mask |= 1ull << (affinity.id + 1);
+    // NUMA node IDs and processor group IDs are different namespaces. A node
+    // spanning several groups uses its primary group's node-local processors.
+    if (!GetNumaNodeProcessorMaskEx((USHORT)affinity.group, &group_affinity)) {
+      DWORD error = GetLastError();
+      return iree_make_status(iree_status_code_from_win32_error(error),
+                              "cannot resolve NUMA node %u CPUs: %lu",
+                              affinity.group, error);
     }
-    group_affinity.Mask = affinity_mask;
+    if (!group_affinity.Mask) {
+      return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                              "NUMA node %u has no CPUs", affinity.group);
+    }
   } else {
-    // No specific processor requested; allow the platform to place the thread
-    // on any processor.
-    group_affinity.Mask = (KAFFINITY)UINTPTR_MAX;
+    if (affinity.id + affinity.smt >= sizeof(KAFFINITY) * 8) {
+      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "CPU %u exceeds Windows processor group mask",
+                              affinity.id);
+    }
+    group_affinity.Group = (WORD)affinity.group;
+    group_affinity.Mask = (KAFFINITY)1 << affinity.id;
+    if (affinity.smt) {
+      group_affinity.Mask |= (KAFFINITY)1 << (affinity.id + 1);
+    }
   }
-  SetThreadGroupAffinity(thread->handle, &group_affinity, NULL);
-
-  // Only set an ideal processor when a specific processor id was assigned.
-  // If no id was assigned we must not bias the scheduler toward CPU 0.
-  if (affinity.id_assigned) {
-    PROCESSOR_NUMBER ideal_processor;
-    memset(&ideal_processor, 0, sizeof(ideal_processor));
-    ideal_processor.Group = affinity.group;
-    ideal_processor.Number = affinity.id;
-    SetThreadIdealProcessorEx(thread->handle, &ideal_processor, NULL);
+  if (!SetThreadGroupAffinity(thread->handle, &group_affinity, NULL)) {
+    DWORD error = GetLastError();
+    return iree_make_status(iree_status_code_from_win32_error(error),
+                            "cannot apply thread affinity: %lu", error);
   }
-
-  IREE_TRACE_ZONE_END(z0);
+  return iree_ok_status();
 }
 
 void iree_thread_resume(iree_thread_t* thread) {

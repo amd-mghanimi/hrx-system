@@ -13,8 +13,10 @@
 #include "iree/hal/api.h"
 #include "iree/hal/drivers/init.h"
 #include "loom/binding/c/example/cxx/kernels.h"
+#include "loomc/compile.h"
 #include "loomc/import/cxx.h"
 #include "loomc/iree.h"
+#include "loomc/launch_config.h"
 #include "loomc/target/amdgpu.h"
 #include "loomc/target/amdgpu/iree_hal.h"
 
@@ -27,6 +29,8 @@ typedef struct jit_state_t {
   iree_async_frontier_tracker_t* frontier_tracker;
   // Queue group owning registration with the completion tracker.
   iree_hal_device_group_t* device_group;
+  // Explicit storage shared by the dispatch and transfer families.
+  iree_hal_pool_t* pool;
   // Physical execution device and allocator owner.
   iree_hal_device_t* device;
   // Borrowed provisioned dispatch queue.
@@ -43,6 +47,8 @@ typedef struct jit_state_t {
   loomc_workspace_t* workspace;
   // Target facts obtained from the selected live device.
   loomc_target_profile_t* profile;
+  // Exact HAL executable target paired with the compiler profile.
+  const iree_hal_executable_target_t* executable_target;
   // Prepared compiler reusable across source submissions.
   loomc_compiler_t* compiler;
   // Prepared lowering pipeline reusable across source submissions.
@@ -71,6 +77,7 @@ static void deinitialize(jit_state_t* state) {
   loomc_workspace_release(state->workspace);
   loomc_context_release(state->context);
   loomc_target_environment_release(state->target_environment);
+  iree_hal_pool_release(state->pool);
   iree_hal_device_group_release(state->device_group);
   iree_hal_device_release(state->device);
   iree_async_frontier_tracker_release(state->frontier_tracker);
@@ -138,6 +145,31 @@ static iree_status_t initialize(jit_state_t* state, const char* device_uri) {
     return iree_make_status(IREE_STATUS_UNAVAILABLE,
                             "device needs dispatch and transfer queues");
   }
+  iree_hal_pool_family_access_t family_accesses[2] = {
+      {
+          .family = iree_hal_queue_family(state->dispatch_queue),
+          .usage = IREE_HAL_BUFFER_USAGE_STORAGE,
+      },
+  };
+  iree_host_size_t family_access_count = 1;
+  if (iree_hal_queue_family(state->transfer_queue) ==
+      family_accesses[0].family) {
+    family_accesses[0].usage |= IREE_HAL_BUFFER_USAGE_TRANSFER;
+  } else {
+    family_accesses[family_access_count++] = (iree_hal_pool_family_access_t){
+        .family = iree_hal_queue_family(state->transfer_queue),
+        .usage = IREE_HAL_BUFFER_USAGE_TRANSFER,
+    };
+  }
+  const iree_hal_pool_scope_t pool_scope = {
+      .family_count = family_access_count,
+      .families = family_accesses,
+  };
+  iree_hal_slab_pool_options_t pool_options;
+  iree_hal_slab_pool_options_initialize(&pool_options);
+  pool_options.trace_name = iree_make_cstring_view("loom.jit_amdgpu");
+  IREE_RETURN_IF_ERROR(iree_hal_slab_pool_create(
+      state->device_group, pool_scope, &pool_options, allocator, &state->pool));
   IREE_RETURN_IF_ERROR(
       iree_status_from_loomc(loomc_target_environment_create_amdgpu(
           loomc_allocator_system(), &state->target_environment)));
@@ -150,14 +182,17 @@ static iree_status_t initialize(jit_state_t* state, const char* device_uri) {
       &context_options, loomc_allocator_system(), &state->context)));
   IREE_RETURN_IF_ERROR(iree_status_from_loomc(loomc_workspace_create(
       NULL, loomc_allocator_system(), &state->workspace)));
-  const loomc_amdgpu_iree_hal_profile_options_t profile_options = {
+  const loomc_amdgpu_iree_hal_target_options_t hal_target_options = {
       .device = state->device,
       .physical_device_affinity = state->physical_affinity,
   };
+  loomc_iree_hal_target_selection_t selection = {0};
   IREE_RETURN_IF_ERROR(
-      iree_status_from_loomc(loomc_target_profile_create_amdgpu_iree_hal(
-          state->target_environment, &profile_options, loomc_allocator_system(),
-          &state->profile, &state->result)));
+      iree_status_from_loomc(loomc_target_select_amdgpu_iree_hal(
+          state->target_environment, &hal_target_options,
+          loomc_allocator_system(), &selection, &state->result)));
+  state->profile = selection.target_profile;
+  state->executable_target = selection.executable_target;
   IREE_RETURN_IF_ERROR(check_result(state));
   reset_result(state);
   IREE_RETURN_IF_ERROR(iree_status_from_loomc(loomc_compiler_create(
@@ -279,19 +314,6 @@ static iree_status_t compile_source(jit_state_t* state,
   if (!hsaco) {
     return iree_make_status(IREE_STATUS_NOT_FOUND, "HSACO artifact is absent");
   }
-  const iree_hal_executable_target_selection_t selection = {
-      .family = IREE_SVL("amdgpu"),
-      .kind_flags = IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_EXACT,
-      .physical_device_affinity = state->physical_affinity,
-  };
-  const iree_hal_executable_target_selection_result_t selected =
-      iree_hal_device_spec_select_executable_target(
-          iree_hal_device_spec(state->device), &selection);
-  if (selected.outcome !=
-      IREE_HAL_EXECUTABLE_TARGET_SELECTION_OUTCOME_SELECTED) {
-    return iree_make_status(IREE_STATUS_UNAVAILABLE,
-                            "device needs one unambiguous AMDGPU load target");
-  }
   loomc_byte_span_t contents = loomc_byte_span_empty();
   IREE_RETURN_IF_ERROR(iree_status_from_loomc(loomc_byte_sequence_clone(
       hsaco->contents, loomc_allocator_system(), &contents)));
@@ -299,9 +321,9 @@ static iree_status_t compile_source(jit_state_t* state,
   iree_hal_executable_load_params_initialize(&load);
   load.executable_data =
       iree_make_const_byte_span(contents.data, contents.data_length);
-  status =
-      iree_hal_executable_load(iree_hal_queue_family(state->dispatch_queue),
-                               selected.target, &load, &state->executable);
+  status = iree_hal_executable_load(
+      iree_hal_queue_family(state->dispatch_queue), state->executable_target,
+      &load, &state->executable);
   if (iree_status_is_ok(status)) {
     printf("C++ -> Loom -> HSACO: %zu bytes; two kernels\n",
            contents.data_length);
@@ -336,17 +358,17 @@ static iree_status_t execute_kernel(jit_state_t* state, const char* name,
   iree_hal_buffer_t* input_buffer = NULL;
   iree_hal_buffer_t* output_buffer = NULL;
   iree_hal_semaphore_t* semaphore = NULL;
-  const iree_hal_buffer_params_t buffer_params = {
-      .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-      .usage = IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER,
-  };
-  iree_status_t status = iree_hal_allocator_allocate_buffer(
-      iree_hal_device_allocator(state->device), buffer_params, sizeof(input),
-      &input_buffer);
+  iree_status_t status =
+      iree_hal_pool_allocate_buffer(state->pool,
+                                    iree_hal_make_pool_reservation_request(
+                                        sizeof(input), iree_alignof(float)),
+                                    iree_infinite_timeout(), &input_buffer);
   if (iree_status_is_ok(status)) {
-    status = iree_hal_allocator_allocate_buffer(
-        iree_hal_device_allocator(state->device), buffer_params, sizeof(output),
-        &output_buffer);
+    status =
+        iree_hal_pool_allocate_buffer(state->pool,
+                                      iree_hal_make_pool_reservation_request(
+                                          sizeof(output), iree_alignof(float)),
+                                      iree_infinite_timeout(), &output_buffer);
   }
   if (iree_status_is_ok(status)) {
     status = iree_hal_semaphore_create(
@@ -369,9 +391,9 @@ static iree_status_t execute_kernel(jit_state_t* state, const char* name,
                     .target_buffer = output_buffer,
                     .length = sizeof(output)}},
     };
-    status = iree_hal_queue_transfer(state->transfer_queue,
-                                     iree_hal_semaphore_list_empty(), uploaded,
-                                     IREE_ARRAYSIZE(operations), operations);
+    status = iree_hal_queue_transfer(
+        state->transfer_queue, iree_hal_semaphore_list_empty(), uploaded,
+        IREE_ARRAYSIZE(operations), operations, /*barriers=*/NULL);
     if (iree_status_is_ok(status)) {
       completion = upload;
     }
@@ -391,15 +413,16 @@ static iree_status_t execute_kernel(jit_state_t* state, const char* name,
         iree_hal_make_static_dispatch_config(launch.workgroup_count.x,
                                              launch.workgroup_count.y,
                                              launch.workgroup_count.z),
-        iree_const_byte_span_empty(), bindings, IREE_HAL_DISPATCH_FLAG_NONE);
+        iree_const_byte_span_empty(), bindings, /*barriers=*/NULL,
+        IREE_HAL_DISPATCH_FLAG_NONE);
     if (iree_status_is_ok(status)) {
       completion = dispatch;
     }
   }
   if (iree_status_is_ok(status)) {
-    status =
-        iree_hal_queue_download(state->transfer_queue, dispatched, downloaded,
-                                output_buffer, 0, output, sizeof(output));
+    status = iree_hal_queue_download(state->transfer_queue, dispatched,
+                                     downloaded, output_buffer, 0, output,
+                                     sizeof(output), /*barriers=*/NULL);
     if (iree_status_is_ok(status)) {
       completion = download;
     }

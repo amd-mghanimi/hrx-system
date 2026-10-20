@@ -1,0 +1,62 @@
+// Authored-Loom control for nvfp4_matrix_providers.cxx. The imported C++ root
+// links against either provider library so both paths exercise the same
+// template selection, target lowering, and execution machinery.
+amdgpu.target<gfx11-generic> @nvfp4_wave32_target
+
+amdgpu.target<gfx9-4-generic> @nvfp4_wave64_target
+
+func.def public inline @nvfp4_schema() -> (encoding<schema>) {
+  %schema = encoding.define #encoding.f4e2m1<affine=scale_only, payload_elements=16, payload_packing=little_endian_nibbles, payload_registers=2, scale_format=f8e4m3fn, scale_group_elements=16, scale_operands=1, scale_topology=block_1d, zero_scale_fallback=true> : encoding<schema>
+  func.return %schema : encoding<schema>
+}
+
+template.decl device @model.nvfp4.matrix_tile(%lhs_payload: vector<2xi32>, %lhs_scale: vector<1xi32>, %rhs_payload: vector<2xi32>, %rhs_scale: vector<1xi32>, %output: buffer, %output_byte_offset: offset)
+
+template.def<@model.nvfp4.matrix_tile> device target(@nvfp4_wave32_target) requires [#target.subgroup.size<32>] priority(20) @nvfp4_matrix_tile_wave32(%lhs_payload: vector<2xi32>, %lhs_scale: vector<1xi32>, %rhs_payload: vector<2xi32>, %rhs_scale: vector<1xi32>, %output: buffer, %output_byte_offset: offset) {
+  %schema = func.call pure @nvfp4_schema() : () -> (encoding<schema>)
+  %lhs_data = vector.decode %lhs_payload using %schema {scale = %lhs_scale : vector<1xi32>} : vector<2xi32>, encoding<schema> -> vector<16xf16>
+  %rhs_data = vector.decode %rhs_payload using %schema {scale = %rhs_scale : vector<1xi32>} : vector<2xi32>, encoding<schema> -> vector<16xf16>
+  %tile_extent = index.constant 16 : index
+  %lhs = vector.fragment<lhs> %lhs_data shape [%tile_extent, %tile_extent] : vector<16xf16>
+  %rhs = vector.fragment<rhs> %rhs_data shape [%tile_extent, %tile_extent] : vector<16xf16>
+  %initial_values = vector.constant 0.0 : vector<8xf32>
+  %init = vector.fragment<init> %initial_values shape [%tile_extent, %tile_extent] : vector<8xf32>
+  %result = vector.mma %lhs, %rhs, %init : vector<16xf16>, vector<16xf16>, vector<8xf32>
+  %output_view = buffer.view %output[%output_byte_offset] : buffer -> view<16x16xf32>
+  %output_origin = index.constant 0 : index
+  vector.fragment.store<result> %result, %output_view[%output_origin, %output_origin] shape [%tile_extent, %tile_extent] : vector<8xf32>, view<16x16xf32>
+  template.return
+}
+
+template.def<@model.nvfp4.matrix_tile> device target(@nvfp4_wave64_target) requires [#target.subgroup.size<64>] priority(20) @nvfp4_matrix_tile_wave64(%lhs_payload: vector<2xi32>, %lhs_scale: vector<1xi32>, %rhs_payload: vector<2xi32>, %rhs_scale: vector<1xi32>, %output: buffer, %output_byte_offset: offset) {
+  %schema = encoding.define #encoding.f4e2m1<affine=scale_only, payload_elements=8, payload_packing=little_endian_nibbles, payload_registers=1, scale_format=f8e4m3fn, scale_group_elements=8, scale_operands=1, scale_topology=block_1d, zero_scale_fallback=true> : encoding<schema>
+  %tile_extent = index.constant 16 : index
+  %lane_index = kernel.subgroup.lane.id : index
+  %lane = index.cast %lane_index : index to i32
+  // Each 16-lane group supplies one packed 16-bit quarter of the logical payload to the wave64 MFMA's four f16 values per lane.
+  %c0 = index.constant 0 : index
+  %word_shift = scalar.constant 5 : i32
+  %shift_mask = scalar.constant 16 : i32
+  %payload_word_i32 = scalar.shrui %lane, %word_shift : i32
+  %payload_word = index.cast %payload_word_i32 : i32 to index
+  %payload_shift = scalar.andi %lane, %shift_mask : i32
+  %lhs_word = vector.extract %lhs_payload[%payload_word] : vector<2xi32> -> i32
+  %lhs_shifted = scalar.shrui %lhs_word, %payload_shift : i32
+  %lhs_selected = vector.splat %lhs_shifted : vector<1xi32>
+  %rhs_word = vector.extract %rhs_payload[%payload_word] : vector<2xi32> -> i32
+  %rhs_shifted = scalar.shrui %rhs_word, %payload_shift : i32
+  %rhs_selected = vector.splat %rhs_shifted : vector<1xi32>
+  %lhs_decoded = vector.decode %lhs_selected using %schema {scale = %lhs_scale : vector<1xi32>} : vector<1xi32>, encoding<schema> -> vector<8xf16>
+  %rhs_decoded = vector.decode %rhs_selected using %schema {scale = %rhs_scale : vector<1xi32>} : vector<1xi32>, encoding<schema> -> vector<8xf16>
+  %lhs_data = vector.slice %lhs_decoded[%c0] : vector<8xf16> -> vector<4xf16>
+  %rhs_data = vector.slice %rhs_decoded[%c0] : vector<8xf16> -> vector<4xf16>
+  %lhs = vector.fragment<lhs> %lhs_data shape [%tile_extent, %tile_extent] : vector<4xf16>
+  %rhs = vector.fragment<rhs> %rhs_data shape [%tile_extent, %tile_extent] : vector<4xf16>
+  %initial_values = vector.constant 0.0 : vector<4xf32>
+  %initial = vector.fragment<init> %initial_values shape [%tile_extent, %tile_extent] : vector<4xf32>
+  %result = vector.mma %lhs, %rhs, %initial : vector<4xf16>, vector<4xf16>, vector<4xf32>
+  %output_view = buffer.view %output[%output_byte_offset] : buffer -> view<16x16xf32>
+  %output_origin = index.constant 0 : index
+  vector.fragment.store<result> %result, %output_view[%output_origin, %output_origin] shape [%tile_extent, %tile_extent] : vector<4xf32>, view<16x16xf32>
+  template.return
+}

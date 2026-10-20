@@ -170,9 +170,9 @@ kernel.def target(@hip_mcpu_gfx9_4_generic) export("batched_transpose_kernel") @
   %c32 = index.constant 32 : index
   %div = index.div %thread_id, %c32 : index
   %rem = index.rem %thread_id, %c32 : index
-  %shape_x_assumed = scalar.assume %shape_x [mul(%shape_x, 128)] : i32
-  %shape_y_assumed = scalar.assume %shape_y [mul(%shape_y, 128)] : i32
-  %stride_x_assumed = scalar.assume %stride_x [mul(%stride_x, 4)] : i32
+  %shape_x_assumed = scalar.assume %shape_x [multiple_of(%shape_x, 128)] : i32
+  %shape_y_assumed = scalar.assume %shape_y [multiple_of(%shape_y, 128)] : i32
+  %stride_x_assumed = scalar.assume %stride_x [multiple_of(%stride_x, 4)] : i32
   %c0 = index.constant 0 : index
   %c4 = index.constant 4 : index
   %c1 = index.constant 1 : index

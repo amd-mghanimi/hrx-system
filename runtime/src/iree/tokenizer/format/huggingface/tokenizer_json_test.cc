@@ -6,6 +6,12 @@
 
 #include "iree/tokenizer/format/huggingface/tokenizer_json.h"
 
+#include <algorithm>
+#include <array>
+#include <memory>
+#include <string>
+#include <vector>
+
 #include "iree/base/api.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
@@ -15,6 +21,76 @@ namespace {
 class TokenizerJsonTest : public ::testing::Test {
  protected:
   iree_allocator_t allocator_ = iree_allocator_system();
+
+  void ExpectDecodedAcrossCredit(const std::string& json,
+                                 const std::vector<int32_t>& tokens,
+                                 const std::string& expected) {
+    iree_tokenizer_t* tokenizer = nullptr;
+    IREE_ASSERT_OK(iree_tokenizer_from_huggingface_json(
+        iree_make_string_view(json.data(), json.size()), allocator_,
+        &tokenizer));
+    std::unique_ptr<iree_tokenizer_t, decltype(&iree_tokenizer_free)> owner(
+        tokenizer, iree_tokenizer_free);
+    std::vector<char> output(expected.size() + 64);
+    iree_host_size_t written = 0;
+    IREE_ASSERT_OK(iree_tokenizer_decode(
+        tokenizer, {tokens.size(), tokens.data()},
+        IREE_TOKENIZER_DECODE_FLAG_SKIP_SPECIAL_TOKENS,
+        iree_make_mutable_string_view(output.data(), expected.size()),
+        allocator_, &written));
+    EXPECT_EQ(std::string(output.data(), written), expected);
+    for (size_t batch = 1; batch <= std::max(tokens.size(), size_t{1});
+         ++batch) {
+      SCOPED_TRACE(batch);
+      iree_host_size_t size = 0;
+      IREE_ASSERT_OK(
+          iree_tokenizer_decode_state_calculate_size(tokenizer, &size));
+      std::vector<uint8_t> storage(size);
+      iree_tokenizer_decode_state_t* state = nullptr;
+      IREE_ASSERT_OK(iree_tokenizer_decode_state_initialize(
+          tokenizer, IREE_TOKENIZER_DECODE_FLAG_SKIP_SPECIAL_TOKENS,
+          iree_make_byte_span(storage.data(), storage.size()), &state));
+      std::unique_ptr<iree_tokenizer_decode_state_t,
+                      decltype(&iree_tokenizer_decode_state_deinitialize)>
+          state_owner(state, iree_tokenizer_decode_state_deinitialize);
+      const size_t credits[] = {0, 1, 2, 3, 4, 7, output.size()};
+      size_t cursor = 0;
+      size_t turn = 0;
+      std::string actual;
+      while (cursor < tokens.size()) {
+        const size_t count = std::min(batch, tokens.size() - cursor);
+        const size_t capacity = credits[turn++ % IREE_ARRAYSIZE(credits)];
+        iree_host_size_t consumed = 0;
+        IREE_ASSERT_OK(iree_tokenizer_decode_state_feed(
+            state, {count, tokens.data() + cursor},
+            iree_make_mutable_string_view(output.data(), capacity), &consumed,
+            &written));
+        if (capacity == output.size()) {
+          ASSERT_GT(consumed + written, 0u);
+        }
+        cursor += consumed;
+        actual.append(output.data(), written);
+        EXPECT_EQ(expected.substr(0, actual.size()), actual);
+      }
+      bool complete = false;
+      while (!complete) {
+        const size_t capacity = credits[turn++ % IREE_ARRAYSIZE(credits)];
+        iree_status_t status = iree_tokenizer_decode_state_finalize(
+            state, iree_make_mutable_string_view(output.data(), capacity),
+            &written);
+        complete = iree_status_is_ok(status);
+        if (!complete) {
+          IREE_EXPECT_STATUS_IS(IREE_STATUS_RESOURCE_EXHAUSTED, status);
+          if (capacity == output.size()) {
+            ASSERT_GT(written, 0u);
+          }
+        }
+        actual.append(output.data(), written);
+        EXPECT_EQ(expected.substr(0, actual.size()), actual);
+      }
+      EXPECT_EQ(actual, expected);
+    }
+  }
 };
 
 //===----------------------------------------------------------------------===//
@@ -195,6 +271,80 @@ TEST_F(TokenizerJsonTest, InferUnigramFromUnkId) {
   iree_tokenizer_builder_deinitialize(&builder);
 }
 
+TEST_F(TokenizerJsonTest, UnigramReferencePaths) {
+  // Exact IDs from tokenizers 0.23.3 cover score precision, unknown transition
+  // costs, byte expansion, and models with no configured unknown ID.
+  const struct {
+    // Serialized model with the score boundary under test.
+    const char* json;
+    // Input whose competing paths differ at that boundary.
+    const char* text;
+    // Complete expected token sequence.
+    std::vector<int32_t> expected;
+    // Whether encoding succeeds after the model imports successfully.
+    bool success = true;
+  } cases[] = {
+      {R"({"model":{"type":"Unigram","unk_id":0,"vocab":[
+        ["<unk>",0],["a",-1],["b",-1],["ab",-2.00000001]]}})",
+       "ab",
+       {1, 2}},
+      {R"({"model":{"type":"Unigram","unk_id":0,"vocab":[
+        ["<unk>",0],["a",-16777216],["b",-1],["c",-1],["bc",-2]]}})",
+       "abc",
+       {1, 4}},
+      {R"({"model":{"type":"Unigram","unk_id":0,"byte_fallback":true,
+          "vocab":[["<unk>",0],["ab",-1],["<0x61>",0],["<0x62>",0]]}})",
+       "ab",
+       {1}},
+      {R"({"model":{"type":"Unigram","unk_id":0,"byte_fallback":false,
+          "vocab":[["<unk>",0],["ab",-1],["bc",-2],["a",-10]]}})",
+       "abc",
+       {3, 2}},
+      {R"({"model":{"type":"Unigram","unk_id":null,"byte_fallback":false,
+          "vocab":[["a",-1]]}})",
+       "a",
+       {0}},
+      {R"({"model":{"type":"Unigram","unk_id":null,"byte_fallback":true,
+          "vocab":[["a",-1]]}})",
+       "x",
+       {},
+       false},
+      {R"({"model":{"type":"Unigram","unk_id":0,"byte_fallback":true,
+          "vocab":[["<unk>",0],["<0xC3>",0],["<0xA9>",0]]}})",
+       "é𐐀",
+       {0}},
+      {R"({"model":{"type":"Unigram","unk_id":0,"byte_fallback":false,
+          "vocab":[["<unk>",100],["a",90],["ac",100]]},
+          "added_tokens":[{"id":3,"content":"<extra>","special":true,
+          "single_word":false,"lstrip":false,"rstrip":false,"normalized":false}]})",
+       "ac",
+       {1, 0}},
+  };
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.text);
+    iree_tokenizer_t* tokenizer = nullptr;
+    IREE_ASSERT_OK(iree_tokenizer_from_huggingface_json(
+        iree_make_cstring_view(test.json), allocator_, &tokenizer));
+    std::unique_ptr<iree_tokenizer_t, decltype(&iree_tokenizer_free)> owner(
+        tokenizer, iree_tokenizer_free);
+    int32_t tokens[3];
+    iree_host_size_t count = 0;
+    iree_status_t status = iree_tokenizer_encode(
+        tokenizer, iree_make_cstring_view(test.text),
+        IREE_TOKENIZER_ENCODE_FLAG_NONE,
+        iree_tokenizer_make_token_output(tokens, nullptr, nullptr,
+                                         IREE_ARRAYSIZE(tokens)),
+        allocator_, &count);
+    if (test.success) {
+      IREE_ASSERT_OK(status);
+      EXPECT_EQ(std::vector<int32_t>(tokens, tokens + count), test.expected);
+    } else {
+      IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT, status);
+      EXPECT_EQ(count, 0u);
+    }
+  }
+}
+
 TEST_F(TokenizerJsonTest, CannotInferTypeError) {
   // No type field and cannot infer from structure.
   iree_string_view_t json = IREE_SV(R"({
@@ -363,9 +513,202 @@ TEST_F(TokenizerJsonTest, NullDecoder) {
   iree_tokenizer_builder_initialize(allocator_, &builder);
 
   IREE_ASSERT_OK(iree_tokenizer_parse_huggingface_json(json, &builder));
-  EXPECT_EQ(builder.decoder, nullptr);
+  EXPECT_NE(builder.decoder, nullptr);
 
   iree_tokenizer_builder_deinitialize(&builder);
+}
+
+TEST_F(TokenizerJsonTest, DefaultAndExplicitJoiningDecodeAcrossCredit) {
+  struct Case {
+    // Optional complete decoder field, including its comma.
+    const char* field;
+    // Whether the format joins logical tokens with spaces.
+    bool spaced;
+  };
+  const Case cases[] = {
+      {"", true},
+      {R"(,"decoder":null)", true},
+      {R"(,"decoder":{"type":"Fuse"})", false},
+      {R"(,"decoder":{"type":"Sequence","decoders":[]})", false},
+      {R"(,"decoder":{"type":"Sequence","decoders":[{"type":"Fuse"}]})", false},
+  };
+  const std::array<int32_t, 7> tokens = {4, 0, 1, 4, 0, 3, 2};
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.field);
+    std::string json =
+        R"({"model":{"type":"BPE","vocab":{"":0,"a":1,"b":2,"\ud83d\udc08":3,"[skip]":4},"merges":[]},)"
+        R"("added_tokens":[{"id":4,"content":"[skip]","single_word":false,"lstrip":false,"rstrip":false,"normalized":false,"special":true}])";
+    json += test.field;
+    json += "}";
+    iree_tokenizer_t* tokenizer = nullptr;
+    IREE_ASSERT_OK(iree_tokenizer_from_huggingface_json(
+        iree_make_string_view(json.data(), json.size()), allocator_,
+        &tokenizer));
+    std::unique_ptr<iree_tokenizer_t, decltype(&iree_tokenizer_free)> owner(
+        tokenizer, iree_tokenizer_free);
+    const std::string expected = test.spaced ? " a  \xf0\x9f\x90\x88 b"
+                                             : "a\xf0\x9f\x90\x88"
+                                               "b";
+    char output[128];
+    iree_host_size_t written = 0;
+    IREE_ASSERT_OK(iree_tokenizer_decode(
+        tokenizer, {tokens.size(), tokens.data()},
+        IREE_TOKENIZER_DECODE_FLAG_SKIP_SPECIAL_TOKENS,
+        iree_make_mutable_string_view(output, sizeof(output)), allocator_,
+        &written));
+    EXPECT_EQ(std::string(output, written), expected);
+
+    for (size_t batch_size = 1; batch_size <= tokens.size(); ++batch_size) {
+      SCOPED_TRACE(batch_size);
+      iree_host_size_t state_size = 0;
+      IREE_ASSERT_OK(
+          iree_tokenizer_decode_state_calculate_size(tokenizer, &state_size));
+      std::vector<uint8_t> storage(state_size);
+      iree_tokenizer_decode_state_t* state = nullptr;
+      IREE_ASSERT_OK(iree_tokenizer_decode_state_initialize(
+          tokenizer, IREE_TOKENIZER_DECODE_FLAG_SKIP_SPECIAL_TOKENS,
+          iree_make_byte_span(storage.data(), storage.size()), &state));
+      const size_t credits[] = {0, 1, 5, 6, sizeof(output)};
+      size_t cursor = 0;
+      size_t turn = 0;
+      std::string actual;
+      while (cursor < tokens.size()) {
+        const size_t count = std::min(batch_size, tokens.size() - cursor);
+        const size_t capacity = credits[turn++ % IREE_ARRAYSIZE(credits)];
+        iree_host_size_t consumed = 0;
+        IREE_ASSERT_OK(iree_tokenizer_decode_state_feed(
+            state, {count, tokens.data() + cursor},
+            iree_make_mutable_string_view(output, capacity), &consumed,
+            &written));
+        cursor += consumed;
+        actual.append(output, written);
+        if (capacity == sizeof(output)) {
+          ASSERT_EQ(consumed, count);
+        }
+      }
+      IREE_ASSERT_OK(iree_tokenizer_decode_state_finalize(
+          state, iree_make_mutable_string_view(output, sizeof(output)),
+          &written));
+      actual.append(output, written);
+      iree_tokenizer_decode_state_deinitialize(state);
+      EXPECT_EQ(actual, expected);
+    }
+  }
+}
+
+TEST_F(TokenizerJsonTest, FusedStripPreservesInteriorTokenSpaces) {
+  const std::string json = R"({
+    "model":{"type":"BPE","vocab":{
+      "":0,"\u2581Good":1,"\u2581day":2,".":3,
+      "<0x20>":4,"<0xC3>":5,"<0xA9>":6,"[skip]":7},"merges":[]},
+    "added_tokens":[{"id":7,"content":"[skip]","single_word":false,
+      "lstrip":false,"rstrip":false,"normalized":false,"special":true}],
+    "decoder":{"type":"Sequence","decoders":[
+      {"type":"Replace","pattern":{"String":"\u2581"},"content":" "},
+      {"type":"ByteFallback"},
+      {"type":"Sequence","decoders":[{"type":"Fuse"},
+        {"type":"Strip","content":" ","start":1,"stop":0}]},
+      {"type":"Fuse"}]}})";
+  ExpectDecodedAcrossCredit(json, {7, 0, 1, 0, 7, 2, 3}, "Good day.");
+  ExpectDecodedAcrossCredit(json, {0, 4, 5, 6, 2}, "é day");
+  ExpectDecodedAcrossCredit(json, {0, 7}, "");
+}
+
+TEST_F(TokenizerJsonTest, FusedStripCountsAndReplacementCrossTokenBoundaries) {
+  const std::string json = R"({
+    "model":{"type":"BPE","vocab":{
+      "":0," ":1,"Good ":2,"da":3,"y ":4},"merges":[]},
+    "decoder":{"type":"Sequence","decoders":[
+      {"type":"Fuse"},
+      {"type":"Strip","content":" ","start":2,"stop":2},
+      {"type":"Replace","pattern":{"String":"day"},"content":"sunny day"}]}})";
+  ExpectDecodedAcrossCredit(json, {0, 1, 0, 1, 2, 3, 4, 1, 1},
+                            "Good sunny day ");
+  ExpectDecodedAcrossCredit(json, {0, 1, 1, 1}, "");
+}
+
+TEST_F(TokenizerJsonTest, FusedTransformRetainsLongTokensAndFinalUtf8Repair) {
+  const std::string long_token = std::string(600, 'x');
+  const std::string json =
+      R"({"model":{"type":"BPE","vocab":{"<0xC3>":0,")" + long_token +
+      R"(":1},"merges":[]},"decoder":{"type":"Sequence","decoders":[
+        {"type":"ByteFallback"},{"type":"Fuse"},
+        {"type":"Replace","pattern":{"String":"�"},"content":"repaired"}]}})";
+  ExpectDecodedAcrossCredit(json, {1, 0}, long_token + "repaired");
+}
+
+TEST_F(TokenizerJsonTest, FusedDecoderFamilyUsesOneLogicalString) {
+  struct Case {
+    // Authored decoder program after an explicit Fuse.
+    const char* decoder;
+    // Token IDs split at semantic boundaries of the transform.
+    std::vector<int32_t> tokens;
+    // Exact final UTF-8 output from the reference composition.
+    const char* expected;
+  };
+  const Case cases[] = {
+      {R"({"type":"Metaspace","replacement":"\u2581","prepend_scheme":"always"})",
+       {1, 2},
+       "Goodday"},
+      {R"({"type":"Metaspace","replacement":"\u2581","prepend_scheme":"first"})",
+       {1, 2},
+       "Goodday"},
+      {R"({"type":"Metaspace","replacement":"\u2581","prepend_scheme":"never"})",
+       {1, 2},
+       " Good day"},
+      {R"({"type":"WordPiece","prefix":"##","cleanup":false})",
+       {14, 3},
+       "##Good ."},
+      {R"({"type":"WordPiece","prefix":"##","cleanup":true})",
+       {14, 4, 5, 3, 15},
+       "##Good don't.!"},
+      {R"({"type":"CTC","pad_token":"<pad>","word_delimiter_token":"|","cleanup":false})",
+       {12, 9, 9, 13, 16, 17},
+       "xx|"},
+      {R"({"type":"CTC","pad_token":"<pad>","word_delimiter_token":"|","cleanup":true})",
+       {12, 9, 9, 13, 16, 17},
+       "xx "},
+      {R"({"type":"ByteFallback"})", {6, 7}, "a"},
+      {R"({"type":"ByteFallback"})", {6, 8}, "�"},
+      {R"({"type":"ByteFallback"})", {6, 7, 9}, "<0x61>x"},
+      {R"({"type":"ByteFallback"})", {6, 7, 6, 8}, "<0x61><0xC3>"},
+      {R"({"type":"ByteFallback"})", {6}, "<0x"},
+      {R"({"type":"ByteFallback"})", {0}, ""},
+      {R"({"type":"Sequence","decoders":[{"type":"ByteFallback"},
+        {"type":"Strip","content":" ","start":1,"stop":0}]})",
+       {6, 20},
+       ""},
+      {R"({"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false})",
+       {10, 11},
+       "é"},
+      {R"({"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false})",
+       {10},
+       "�"},
+      {R"({"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false})",
+       {18, 19},
+       " Good day"},
+  };
+  const std::string prefix = R"({
+    "model":{"type":"BPE","vocab":{
+      "":0,"\u2581Good":1,"\u2581day":2," .":3," do ":4,"not":5,
+      "<0x":6,"61>":7,"C3>":8,"x":9,"Ã":10,"©":11,"<pad>":12,
+      "|":13,"##Good":14," !":15,"<pa":16,"d>":17,
+      "ĠGood":18,"Ġday":19,"20>":20},"merges":[]},
+    "decoder":{"type":"Sequence","decoders":[{"type":"Fuse"},)";
+  for (const auto& test : cases) {
+    SCOPED_TRACE(test.decoder);
+    ExpectDecodedAcrossCredit(prefix + test.decoder + "]}}", test.tokens,
+                              test.expected);
+  }
+}
+
+TEST_F(TokenizerJsonTest, ByteLevelIntroducesFusionWithoutExplicitFuse) {
+  ExpectDecodedAcrossCredit(R"({
+    "model":{"type":"BPE","vocab":{"ĠGood":0,"Ġday":1},"merges":[]},
+    "decoder":{"type":"Sequence","decoders":[
+      {"type":"ByteLevel","add_prefix_space":false,"trim_offsets":false},
+      {"type":"Strip","content":" ","start":1,"stop":0}]}})",
+                            {0, 1}, "Good day");
 }
 
 TEST_F(TokenizerJsonTest, DecoderSuccess) {
@@ -399,6 +742,58 @@ TEST_F(TokenizerJsonTest, DecoderErrorPropagation) {
 //===----------------------------------------------------------------------===//
 // Added Token Flag Tests
 //===----------------------------------------------------------------------===//
+
+TEST_F(TokenizerJsonTest, NonSpecialRawAddedTokens) {
+  // Qwen reasoning markers are added tokens without either the special or
+  // normalized flag. They match before segmentation but survive decode's
+  // special-token filtering.
+  const iree_string_view_t json = IREE_SV(R"({
+    "model": {
+      "type": "BPE",
+      "vocab": {"a": 0, "b": 1, "<": 2, ">": 3, "/": 4,
+                "t": 5, "h": 6, "i": 7, "n": 8, "k": 9},
+      "merges": []
+    },
+    "added_tokens": [
+      {"id": 10, "content": "<think>", "special": false,
+       "normalized": false, "single_word": false,
+       "lstrip": false, "rstrip": false},
+      {"id": 11, "content": "</think>", "special": false,
+       "normalized": false, "single_word": false,
+       "lstrip": false, "rstrip": false},
+      {"id": 12, "content": "<end>", "special": true,
+       "normalized": false, "single_word": false,
+       "lstrip": false, "rstrip": false}
+    ],
+    "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false,
+                      "trim_offsets": false, "use_regex": true},
+    "decoder": {"type": "ByteLevel", "add_prefix_space": false,
+                "trim_offsets": false, "use_regex": true}
+  })");
+  iree_tokenizer_t* tokenizer = nullptr;
+  IREE_ASSERT_OK(
+      iree_tokenizer_from_huggingface_json(json, allocator_, &tokenizer));
+  int32_t tokens[32] = {};
+  iree_host_size_t count = 0;
+  IREE_EXPECT_OK(iree_tokenizer_encode(
+      tokenizer, IREE_SV("a<think>b</think><end>"),
+      IREE_TOKENIZER_ENCODE_FLAG_NONE,
+      iree_tokenizer_make_token_output(tokens, nullptr, nullptr, 32),
+      allocator_, &count));
+  EXPECT_EQ(count, 5u);
+  const int32_t expected[] = {0, 10, 1, 11, 12};
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(expected); ++i) {
+    EXPECT_EQ(tokens[i], expected[i]);
+  }
+  char text[64] = {};
+  iree_host_size_t length = 0;
+  IREE_EXPECT_OK(iree_tokenizer_decode(
+      tokenizer, iree_tokenizer_make_token_id_list(expected, 5),
+      IREE_TOKENIZER_DECODE_FLAG_SKIP_SPECIAL_TOKENS,
+      iree_make_mutable_string_view(text, sizeof(text)), allocator_, &length));
+  EXPECT_EQ(std::string(text, length), "a<think>b</think>");
+  iree_tokenizer_free(tokenizer);
+}
 
 // Tests that added_token flags (lstrip, rstrip, single_word) load successfully.
 // These flags control matching behavior for special tokens.
@@ -979,7 +1374,8 @@ TEST_F(TokenizerJsonTest, StreamingNewlinesBeforeText) {
       iree_make_byte_span(state_storage.data(), state_storage.size()),
       iree_make_byte_span(transform_buffer.data(), transform_buffer.size()),
       iree_tokenizer_offset_run_list_empty(),
-      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &state));
+      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+      &state));
 
   // Feed the full input, collecting tokens.
   iree_string_view_t input = IREE_SVL("\n\nA");
@@ -1022,14 +1418,17 @@ TEST_F(TokenizerJsonTest, StreamingNewlinesBeforeText) {
 }
 
 //===----------------------------------------------------------------------===//
-// Pending Token Bound Tests
+// Streaming Completion Tests
 //===----------------------------------------------------------------------===//
 
 // Helper: creates a streaming encode state for a tokenizer.
 // Returns allocated state; caller must deinitialize + free storage vectors.
 struct StreamingEncodeContext {
+  // Stream state borrowing the storage below.
   iree_tokenizer_encode_state_t* state;
+  // Owned storage for the encoder and component state.
   std::vector<uint8_t> state_storage;
+  // Owned intermediate normalized bytes.
   std::vector<uint8_t> transform_buffer;
 };
 
@@ -1049,7 +1448,8 @@ StreamingEncodeContext CreateStreamingState(
       iree_make_byte_span(ctx.state_storage.data(), ctx.state_storage.size()),
       iree_make_byte_span(ctx.transform_buffer.data(),
                           ctx.transform_buffer.size()),
-      iree_tokenizer_offset_run_list_empty(), flags, &ctx.state));
+      iree_tokenizer_offset_run_list_empty(), flags, iree_allocator_system(),
+      &ctx.state));
   return ctx;
 }
 
@@ -1078,153 +1478,47 @@ iree_host_size_t FeedAll(iree_tokenizer_encode_state_t* state,
   return total_tokens;
 }
 
-// Test 1: pending_token_bound >= actual finalize count (key invariant).
-TEST_F(TokenizerJsonTest, PendingTokenBoundAfterFeedMatchesFinalize) {
+TEST_F(TokenizerJsonTest, StreamingCompletionWithOneTokenCredit) {
   iree_tokenizer_t* tokenizer = nullptr;
   IREE_ASSERT_OK(iree_tokenizer_from_huggingface_json(
       iree_make_cstring_view(kMinimalGPT2Config), allocator_, &tokenizer));
-  ASSERT_NE(tokenizer, nullptr);
-
-  const char* texts[] = {"\n\nA", "\nA", "A\nB\nA", "A", "AB", "A\n\n\nA"};
-  for (const char* text : texts) {
-    auto ctx = CreateStreamingState(tokenizer, strlen(text),
+  struct Case {
+    // Complete input through the actual loaded GPT-2 pipeline.
+    const char* input;
+    // Exact independently determined token sequence.
+    std::vector<int32_t> expected;
+  } cases[] = {{"\n\nA", {0, 0, 2}},
+               {"\nA", {0, 2}},
+               {"A\nB\nA", {2, 0, 3, 0, 2}},
+               {"A", {2}},
+               {"AB", {2, 3}}};
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.input);
+    auto ctx = CreateStreamingState(tokenizer, strlen(test_case.input),
                                     IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START);
-
     int32_t token_buffer[256];
-    iree_host_size_t feed_tokens =
-        FeedAll(ctx.state, iree_make_cstring_view(text), token_buffer, 256);
-
-    // Query the bound BEFORE finalize.
-    iree_host_size_t bound =
-        iree_tokenizer_encode_state_pending_token_bound(ctx.state);
-
-    // Finalize and count actual tokens.
-    iree_host_size_t finalize_count = 0;
-    IREE_ASSERT_OK(iree_tokenizer_encode_state_finalize(
-        ctx.state,
-        iree_tokenizer_make_token_output(token_buffer + feed_tokens, NULL, NULL,
-                                         256 - feed_tokens),
-        &finalize_count));
-
-    // Key invariant: bound must be >= actual finalize count.
-    EXPECT_GE(bound, finalize_count)
-        << "pending_token_bound (" << bound << ") < actual finalize count ("
-        << finalize_count << ") for text: \"" << text << "\"";
-
+    iree_host_size_t feed_tokens = FeedAll(
+        ctx.state, iree_make_cstring_view(test_case.input), token_buffer, 256);
+    std::vector<int32_t> actual(token_buffer, token_buffer + feed_tokens);
+    do {
+      int32_t token = -1;
+      iree_host_size_t count = 0;
+      IREE_ASSERT_OK(iree_tokenizer_encode_state_finalize(
+          ctx.state,
+          iree_tokenizer_make_token_output(&token, nullptr, nullptr, 1),
+          &count));
+      ASSERT_TRUE(count || !iree_tokenizer_encode_state_has_pending(ctx.state));
+      if (count) {
+        actual.push_back(token);
+      }
+    } while (iree_tokenizer_encode_state_has_pending(ctx.state));
+    EXPECT_EQ(actual, test_case.expected);
     iree_tokenizer_encode_state_deinitialize(ctx.state);
   }
-
   iree_tokenizer_free(tokenizer);
 }
 
-// Test 2: pending_token_bound decreases as more tokens are emitted via feed.
-TEST_F(TokenizerJsonTest, PendingTokenBoundDecreasesAfterFeed) {
-  iree_tokenizer_t* tokenizer = nullptr;
-  IREE_ASSERT_OK(iree_tokenizer_from_huggingface_json(
-      iree_make_cstring_view(kMinimalGPT2Config), allocator_, &tokenizer));
-  ASSERT_NE(tokenizer, nullptr);
-
-  // Use a multi-segment text that will emit tokens during feed.
-  // "A\nB\nA" produces segments [A, \n, B, \n] emitted + [A] pending.
-  const char* text = "A\nB\nA";
-  auto ctx = CreateStreamingState(tokenizer, strlen(text),
-                                  IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START);
-
-  int32_t token_buffer[256];
-
-  // Feed first chunk.
-  iree_string_view_t chunk1 = iree_make_cstring_view("A\n");
-  iree_host_size_t bytes_consumed1 = 0;
-  iree_host_size_t token_count1 = 0;
-  IREE_ASSERT_OK(iree_tokenizer_encode_state_feed(
-      ctx.state, chunk1,
-      iree_tokenizer_make_token_output(token_buffer, NULL, NULL, 256),
-      &bytes_consumed1, &token_count1));
-
-  iree_host_size_t bound_after_first =
-      iree_tokenizer_encode_state_pending_token_bound(ctx.state);
-
-  // Feed second chunk — should emit more tokens, reducing pending.
-  iree_string_view_t chunk2 = iree_make_cstring_view("B\nA");
-  iree_host_size_t total_feed_tokens = token_count1;
-  iree_host_size_t bytes_consumed2 = 0;
-  iree_host_size_t token_count2 = 0;
-  while (chunk2.size > 0) {
-    IREE_ASSERT_OK(iree_tokenizer_encode_state_feed(
-        ctx.state, chunk2,
-        iree_tokenizer_make_token_output(token_buffer + total_feed_tokens, NULL,
-                                         NULL, 256 - total_feed_tokens),
-        &bytes_consumed2, &token_count2));
-    total_feed_tokens += token_count2;
-    chunk2.data += bytes_consumed2;
-    chunk2.size -= bytes_consumed2;
-    if (bytes_consumed2 == 0 && token_count2 == 0) {
-      break;
-    }
-  }
-
-  iree_host_size_t bound_after_second =
-      iree_tokenizer_encode_state_pending_token_bound(ctx.state);
-
-  // After feeding more text and emitting tokens, the bound should not be
-  // greater than after the first chunk (we've consumed more of the pipeline).
-  // Note: the bound may not strictly decrease because feeding also adds new
-  // data, but after all text is fed and tokens emitted, the final bound should
-  // be less than or equal to the initial bound.
-  EXPECT_LE(bound_after_second, bound_after_first)
-      << "Bound after feeding all text (" << bound_after_second
-      << ") should not exceed bound after first chunk (" << bound_after_first
-      << ")";
-
-  iree_tokenizer_encode_state_deinitialize(ctx.state);
-  iree_tokenizer_free(tokenizer);
-}
-
-// Test 3: pending_token_bound is 0 (or very small) when feed consumed all
-// tokens and nothing remains in the pipeline.
-TEST_F(TokenizerJsonTest, PendingTokenBoundZeroAfterFullConsumption) {
-  iree_tokenizer_t* tokenizer = nullptr;
-  IREE_ASSERT_OK(iree_tokenizer_from_huggingface_json(
-      iree_make_cstring_view(kMinimalGPT2Config), allocator_, &tokenizer));
-  ASSERT_NE(tokenizer, nullptr);
-
-  // With ByteLevel and the GPT-2 regex, segments are emitted on boundaries.
-  // Feed the text, then check that the bound is small.
-  // The trailing segment may be pending. The key test is that the bound is
-  // at least as large as what finalize actually produces.
-  const char* text = "A\nB";
-  auto ctx = CreateStreamingState(tokenizer, strlen(text),
-                                  IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START);
-
-  int32_t token_buffer[256];
-  iree_host_size_t feed_tokens =
-      FeedAll(ctx.state, iree_make_cstring_view(text), token_buffer, 256);
-
-  iree_host_size_t bound =
-      iree_tokenizer_encode_state_pending_token_bound(ctx.state);
-
-  // Finalize to get actual count.
-  iree_host_size_t finalize_count = 0;
-  IREE_ASSERT_OK(iree_tokenizer_encode_state_finalize(
-      ctx.state,
-      iree_tokenizer_make_token_output(token_buffer + feed_tokens, NULL, NULL,
-                                       256 - feed_tokens),
-      &finalize_count));
-
-  // The bound should be >= finalize_count (invariant) and reasonably small.
-  EXPECT_GE(bound, finalize_count);
-
-  // If finalize produced 0 tokens, the bound should also be 0.
-  if (finalize_count == 0) {
-    EXPECT_EQ(bound, 0u) << "Expected bound=0 when finalize produced 0 tokens";
-  }
-
-  iree_tokenizer_encode_state_deinitialize(ctx.state);
-  iree_tokenizer_free(tokenizer);
-}
-
-// Test 4: pending_token_bound includes special tokens from postprocessor.
-TEST_F(TokenizerJsonTest, PendingTokenBoundWithSpecialTokens) {
+TEST_F(TokenizerJsonTest, StreamingCompletionPreservesSpecialTokenOrder) {
   // Build a tokenizer with BOS/EOS postprocessor. Uses the minimal GPT-2 vocab
   // (Ċ=0, ĊĊ=1, A=2, B=3) plus BOS (4) and EOS (5) special tokens.
   const char* json = R"({
@@ -1277,41 +1571,20 @@ TEST_F(TokenizerJsonTest, PendingTokenBoundWithSpecialTokens) {
   iree_host_size_t feed_tokens =
       FeedAll(ctx.state, iree_make_cstring_view("AB"), token_buffer, 256);
 
-  iree_host_size_t bound =
-      iree_tokenizer_encode_state_pending_token_bound(ctx.state);
-
-  // Finalize.
-  iree_host_size_t finalize_count = 0;
-  IREE_ASSERT_OK(iree_tokenizer_encode_state_finalize(
-      ctx.state,
-      iree_tokenizer_make_token_output(token_buffer + feed_tokens, NULL, NULL,
-                                       256 - feed_tokens),
-      &finalize_count));
-
-  // Key invariant holds.
-  EXPECT_GE(bound, finalize_count)
-      << "pending_token_bound (" << bound << ") < actual finalize count ("
-      << finalize_count << ") with special tokens";
-
-  // The bound should account for the postprocessor special tokens (BOS, EOS).
-  // With add_special_tokens, max_special_token_count is 2 (BOS + EOS).
-  iree_host_size_t max_special =
-      iree_tokenizer_max_special_token_count(tokenizer);
-  EXPECT_EQ(max_special, 2u);
-
-  // The total tokens (feed + finalize) should include BOS and EOS.
-  iree_host_size_t total = feed_tokens + finalize_count;
-  bool has_bos = false, has_eos = false;
-  for (iree_host_size_t i = 0; i < total; ++i) {
-    if (token_buffer[i] == 4) {
-      has_bos = true;
-    }
-    if (token_buffer[i] == 5) {
-      has_eos = true;
-    }
-  }
-  EXPECT_TRUE(has_bos) << "Expected BOS token (4) in output";
-  EXPECT_TRUE(has_eos) << "Expected EOS token (5) in output";
+  iree_host_size_t total = feed_tokens;
+  do {
+    iree_host_size_t count = 0;
+    IREE_ASSERT_OK(iree_tokenizer_encode_state_finalize(
+        ctx.state,
+        iree_tokenizer_make_token_output(token_buffer + total, nullptr, nullptr,
+                                         1),
+        &count));
+    ASSERT_TRUE(count || !iree_tokenizer_encode_state_has_pending(ctx.state));
+    total += count;
+  } while (iree_tokenizer_encode_state_has_pending(ctx.state));
+  EXPECT_EQ(std::vector<int32_t>(token_buffer, token_buffer + total),
+            (std::vector<int32_t>{4, 2, 3, 5}));
+  EXPECT_EQ(iree_tokenizer_max_special_token_count(tokenizer), 2u);
 
   iree_tokenizer_encode_state_deinitialize(ctx.state);
   iree_tokenizer_free(tokenizer);

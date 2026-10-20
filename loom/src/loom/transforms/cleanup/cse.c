@@ -47,7 +47,10 @@ iree_status_t loom_cse_run(loom_pass_t* pass, loom_module_t* module,
     }
     iree_arena_reset(&arena);
     loom_expression_walk_t* walk = NULL;
-    status = loom_expression_walk_create(module, region, &arena, &walk);
+    status =
+        loom_expression_walk_allocate(module, region,
+                                      /*identity_policy=*/NULL,
+                                      /*maximum_entry_count=*/0, &arena, &walk);
     loom_expression_barriers_t barriers = {0};
     while (iree_status_is_ok(status)) {
       loom_expression_cursor_t cursor;
@@ -55,8 +58,14 @@ iree_status_t loom_cse_run(loom_pass_t* pass, loom_module_t* module,
       if (!iree_status_is_ok(status) || !cursor.op) {
         break;
       }
-      const uint32_t minimum_epoch =
+      uint32_t minimum_epoch =
           loom_expression_observe_barriers(&cursor, &barriers);
+      // Source SSA values retain their meaning across collective execution.
+      // Convergence constrains the collective itself, not a dominating pure
+      // expression. Masked machine definitions have a separate Low CSE policy.
+      if (iree_any_bit_set(cursor.traits, LOOM_TRAIT_PURE)) {
+        minimum_epoch = 0;
+      }
       if (!loom_expression_is_reusable(&cursor) ||
           loom_op_requires_source_context(module, cursor.op)) {
         continue;
@@ -68,7 +77,7 @@ iree_status_t loom_cse_run(loom_pass_t* pass, loom_module_t* module,
               : LOOM_EXPRESSION_LOOKUP_FLAG_STATEFUL;
       loom_expression_entry_t* existing =
           loom_expression_scope_find(&cursor, hash, flags);
-      if (existing && existing->epoch >= minimum_epoch) {
+      if (existing && existing->metadata >= minimum_epoch) {
         status = loom_expression_replace(module, cursor.op, existing->op);
         if (iree_status_is_ok(status)) {
           loom_pass_mark_changed(pass);
@@ -78,7 +87,7 @@ iree_status_t loom_cse_run(loom_pass_t* pass, loom_module_t* module,
         loom_expression_scope_insert(&cursor, (loom_expression_entry_t){
                                                   .op = cursor.op,
                                                   .hash = hash,
-                                                  .epoch = cursor.epoch,
+                                                  .metadata = cursor.epoch,
                                               });
       }
     }

@@ -13,7 +13,12 @@ from loom.target.arch.amd.xdna.aie2p.contracts.integer_division import (
     _high_bit_rule,
     _magic_rule,
 )
-from loom.target.contracts import Scalar, ValueProject, ValueRef
+from loom.target.contracts import (
+    Scalar,
+    UnsignedDivisorMagicKind,
+    ValueProject,
+    ValueRef,
+)
 from loom.target.contracts.immediates import ValueProjectKind
 
 _MASK = (1 << 32) - 1
@@ -59,35 +64,35 @@ def _evaluate(rule, numerator, divisor, multiplier=0, shift=0):
     return values[ValueRef.result("result")]
 
 
-def _numerators(divisor):
-    values = [0, 1, 0xFFFF, 0x10000, 0x7FFFFFFF, 0x80000000, _MASK]
-    for quotient in (1, 2, 3, 0xFFFF, _MASK // divisor):
+def _numerators(divisor, maximum=_MASK):
+    values = [0, 1, 0xFFFF, 0x10000, 0x7FFFFFFF, 0x80000000, maximum]
+    for quotient in (1, 2, 3, 0xFFFF, maximum // divisor):
         values.extend(
             quotient * divisor + delta
             for delta in (-1, 0, 1)
-            if 0 <= quotient * divisor + delta <= _MASK
+            if 0 <= quotient * divisor + delta <= maximum
         )
     randomizer = random.Random(divisor)
-    values.extend(randomizer.getrandbits(32) for _ in range(1024))
-    return values
+    values.extend(randomizer.randint(0, maximum) for _ in range(1024))
+    return [value for value in values if value <= maximum]
 
 
 def test_constant_unsigned_division_descriptor_programs():
-    for divisor, multiplier, shift, is_add in (
-        (3, 0xAAAAAAAB, 1, False),
-        (7, 0x24924925, 2, True),
-        (20, 0xCCCCCCCD, 4, False),
-        (31, 0x08421085, 4, True),
-        (0x7FFFFFFF, 3, 30, True),
+    for divisor, multiplier, shift, kind, maximum in (
+        (3, 0x55555556, 0, UnsignedDivisorMagicKind.MULTIPLY, 255),
+        (7, 0x24924925, 0, UnsignedDivisorMagicKind.MULTIPLY, 65535),
+        (3, 0xAAAAAAAB, 1, UnsignedDivisorMagicKind.MULTIPLY_SHIFT, _MASK),
+        (7, 0x24924925, 2, UnsignedDivisorMagicKind.MULTIPLY_ADD_SHIFT, _MASK),
+        (20, 0xCCCCCCCD, 4, UnsignedDivisorMagicKind.MULTIPLY_SHIFT, _MASK),
+        (31, 0x08421085, 4, UnsignedDivisorMagicKind.MULTIPLY_ADD_SHIFT, _MASK),
+        (0x7FFFFFFF, 3, 30, UnsignedDivisorMagicKind.MULTIPLY_ADD_SHIFT, _MASK),
     ):
         for source_op, remainder in (
             (scalar_arithmetic.scalar_divui, False),
             (scalar_arithmetic.scalar_remui, True),
         ):
-            rule = _magic_rule(
-                source_op, Scalar("i32"), is_add=is_add, remainder=remainder
-            )
-            for numerator in _numerators(divisor):
+            rule = _magic_rule(source_op, Scalar("i32"), kind=kind, remainder=remainder)
+            for numerator in _numerators(divisor, maximum):
                 expected = numerator % divisor if remainder else numerator // divisor
                 assert (
                     _evaluate(rule, numerator, divisor, multiplier, shift) == expected

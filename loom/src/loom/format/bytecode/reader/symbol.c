@@ -806,7 +806,8 @@ loom_bytecode_symbol_decode(loom_bytecode_symbol_validator_t* reader,
         LOOM_BYTECODE_SYMBOL_FLAG_DECLARATION |
         LOOM_BYTECODE_SYMBOL_FLAG_TEST_ONLY |
         LOOM_BYTECODE_SYMBOL_FLAG_PREDICATES |
-        LOOM_BYTECODE_SYMBOL_FLAG_EXPORT)) {
+        LOOM_BYTECODE_SYMBOL_FLAG_EXPORT |
+        LOOM_BYTECODE_SYMBOL_FLAG_LINK_ONCE)) {
     return loom_bytecode_reader_emit_invalid_field(
         &reader->decoder, IREE_SV("SYMBOLS"), IREE_SV("symbol"), symbol_index,
         IREE_SV("flags"), kind_offset + 2,
@@ -825,6 +826,15 @@ loom_bytecode_symbol_decode(loom_bytecode_symbol_validator_t* reader,
         &reader->decoder, IREE_SV("SYMBOLS"), IREE_SV("symbol"), symbol_index,
         IREE_SV("flags"), kind_offset + 2,
         IREE_SV("predicates_flag_requires_function_symbol_kind"));
+  }
+  if (iree_any_bit_set(flags, LOOM_BYTECODE_SYMBOL_FLAG_LINK_ONCE) &&
+      (kind != LOOM_BYTECODE_SYMBOL_FUNC_DEF ||
+       iree_any_bit_set(flags, LOOM_BYTECODE_SYMBOL_FLAG_DECLARATION |
+                                   LOOM_BYTECODE_SYMBOL_FLAG_IMPORT))) {
+    return loom_bytecode_reader_emit_invalid_field(
+        &reader->decoder, IREE_SV("SYMBOLS"), IREE_SV("symbol"), symbol_index,
+        IREE_SV("flags"), kind_offset + 2,
+        IREE_SV("link_once_flag_requires_concrete_function_definition"));
   }
   const bool is_import =
       iree_any_bit_set(flags, LOOM_BYTECODE_SYMBOL_FLAG_IMPORT);
@@ -933,11 +943,11 @@ loom_bytecode_symbol_decode(loom_bytecode_symbol_validator_t* reader,
         loom_bytecode_reader_cursor_absolute_position(&table->cursor);
     IREE_RETURN_IF_ERROR(loom_bytecode_reader_read_u8(
         &reader->decoder, &table->cursor, &calling_convention));
-    uint8_t purity = 0;
-    uint64_t purity_offset =
+    uint8_t effect_contract = 0;
+    uint64_t effect_contract_offset =
         loom_bytecode_reader_cursor_absolute_position(&table->cursor);
-    IREE_RETURN_IF_ERROR(loom_bytecode_reader_read_u8(&reader->decoder,
-                                                      &table->cursor, &purity));
+    IREE_RETURN_IF_ERROR(loom_bytecode_reader_read_u8(
+        &reader->decoder, &table->cursor, &effect_contract));
     const loom_func_like_vtable_t* func_like = unused_vtable->func_like;
     if (func_like->body_region_index != LOOM_REGION_INDEX_NONE) {
       symbol_metadata->body_region_index_plus_one =
@@ -950,8 +960,8 @@ loom_bytecode_symbol_decode(loom_bytecode_symbol_validator_t* reader,
         IREE_SV("calling_convention"), calling_convention, cc_offset));
     IREE_RETURN_IF_ERROR(loom_bytecode_symbol_validate_func_enum(
         &reader->decoder, symbol_index, unused_vtable,
-        func_like->purity_attr_index, IREE_SV("purity"), purity,
-        purity_offset));
+        func_like->effect_contract_attr_index, IREE_SV("effect_contract"),
+        effect_contract, effect_contract_offset));
     uint64_t workload_count_offset =
         loom_bytecode_reader_cursor_absolute_position(&table->cursor);
     uint64_t workload_arg_count = 0;
@@ -979,7 +989,7 @@ loom_bytecode_symbol_decode(loom_bytecode_symbol_validator_t* reader,
           IREE_SV("ordinary_function_has_kernel_workload_arguments"));
     }
     symbol_metadata->calling_convention = calling_convention;
-    symbol_metadata->purity = purity;
+    symbol_metadata->effect_contract = effect_contract;
     symbol_metadata->kernel_workload_argument_count =
         (uint16_t)workload_arg_count;
     symbol_metadata->argument_count = (uint16_t)arg_count;

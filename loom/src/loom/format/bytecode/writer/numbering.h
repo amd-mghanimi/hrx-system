@@ -18,6 +18,17 @@ extern "C" {
 // Maximum supported serialized region nesting depth.
 #define LOOM_BYTECODE_WRITER_MAX_REGION_DEPTH 256
 
+// One multiblock region's wire order, retained by the numbering walk. Nested
+// regions follow in serialized preorder; single-block regions need no entry.
+typedef struct loom_bytecode_region_order_t {
+  // Next multiblock region in serialized preorder, or NULL at the end.
+  struct loom_bytecode_region_order_t* next;
+  // Original block index per wire position, or NULL for identity order.
+  const uint16_t* indices;
+  // Wire position per original block index, or NULL for identity order.
+  const uint16_t* positions;
+} loom_bytecode_region_order_t;
+
 // Dense body-local SSA namespace constructed in definition order.
 typedef struct loom_bytecode_value_numbering_t {
   // Invocation-wide catalogs and direct module-value index.
@@ -28,6 +39,13 @@ typedef struct loom_bytecode_value_numbering_t {
   uint32_t next_number;
   // Number of completed bound types in this scope.
   uint32_t binding_count;
+  // Retained multiblock orders shared by value numbering and body emission.
+  struct {
+    // Next order to consume during body emission.
+    loom_bytecode_region_order_t* next;
+    // Last order appended by numbering, or NULL when no order is needed.
+    loom_bytecode_region_order_t* last;
+  } regions;
 } loom_bytecode_value_numbering_t;
 
 // Number of ordered module value IDs stored in each closure chunk.
@@ -75,8 +93,8 @@ static inline loom_bytecode_global_value_iterator_t
 loom_bytecode_global_value_iterator_begin(
     const loom_bytecode_global_value_list_t* list) {
   return (loom_bytecode_global_value_iterator_t){
-      .list = list,
-      .chunk = list->first,
+      /*.list=*/list,
+      /*.chunk=*/list->first,
   };
 }
 

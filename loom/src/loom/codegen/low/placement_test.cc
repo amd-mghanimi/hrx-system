@@ -34,6 +34,64 @@ TEST(LowPlacementTest, ClassifiesEdgeCauses) {
       LOOM_LOW_PLACEMENT_CAUSE_LOW_SCF_CONDITION));
   EXPECT_FALSE(loom_low_placement_cause_is_edge(
       LOOM_LOW_PLACEMENT_CAUSE_SCHEDULE_PAIR_AFFINITY));
+  EXPECT_FALSE(loom_low_placement_cause_is_edge(
+      LOOM_LOW_PLACEMENT_CAUSE_EDGE_PAIR_AFFINITY));
+}
+
+TEST(LowPlacementTest, ComposedRelationHasNoDirectSourceOperand) {
+  loom_low_placement_relation_t source_to_intermediate = {
+      .result_ordinal = 1,
+      .source_ordinal = 0,
+      .result_unit_offset = 2,
+      .source_unit_offset = 4,
+      .unit_count = 3,
+      .source_operand_index = 1,
+  };
+  loom_low_placement_relation_t intermediate_to_result = {
+      .result_ordinal = 2,
+      .source_ordinal = 1,
+      .result_unit_offset = 8,
+      .source_unit_offset = 3,
+      .unit_count = 3,
+      .source_operand_index = 2,
+  };
+
+  loom_low_placement_relation_t composed = {};
+  ASSERT_TRUE(loom_low_placement_relation_compose(
+      &source_to_intermediate, &intermediate_to_result, &composed));
+  EXPECT_EQ(composed.source_ordinal, 0u);
+  EXPECT_EQ(composed.result_ordinal, 2u);
+  EXPECT_EQ(composed.source_unit_offset, 5u);
+  EXPECT_EQ(composed.result_unit_offset, 8u);
+  EXPECT_EQ(composed.unit_count, 2u);
+  EXPECT_EQ(composed.source_operand_index,
+            LOOM_LOW_PLACEMENT_SOURCE_OPERAND_NONE);
+}
+
+TEST(LowPlacementTest, StorageCompositionDoesNotImplyBitIdentity) {
+  loom_low_placement_relation_t write = {
+      .result_ordinal = 1,
+      .source_ordinal = 0,
+      .unit_count = 2,
+      .cause = LOOM_LOW_PLACEMENT_CAUSE_TIED_RESULT,
+      .flags = LOOM_LOW_PLACEMENT_RELATION_FLAG_HARD |
+               LOOM_LOW_PLACEMENT_RELATION_FLAG_CAN_ALIAS_STORAGE |
+               LOOM_LOW_PLACEMENT_RELATION_FLAG_WRITES_STORAGE,
+  };
+  loom_low_placement_relation_t edge = {
+      .result_ordinal = 2,
+      .source_ordinal = 1,
+      .unit_count = 2,
+      .cause = LOOM_LOW_PLACEMENT_CAUSE_LOW_BRANCH,
+      .flags = LOOM_LOW_PLACEMENT_RELATION_FLAG_CAN_ALIAS_STORAGE |
+               LOOM_LOW_PLACEMENT_RELATION_FLAG_IDENTITY_EDGE,
+  };
+
+  loom_low_placement_relation_t composed = {};
+  ASSERT_TRUE(loom_low_placement_relation_compose(&write, &edge, &composed));
+  EXPECT_EQ(composed.source_ordinal, 0u);
+  EXPECT_EQ(composed.result_ordinal, 2u);
+  EXPECT_EQ(composed.flags, LOOM_LOW_PLACEMENT_RELATION_FLAG_CAN_ALIAS_STORAGE);
 }
 
 }  // namespace

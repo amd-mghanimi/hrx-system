@@ -21,6 +21,39 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_library(
+  NAME
+    cast
+  HDRS
+    "cast.h"
+  SRCS
+    "cast.c"
+  DEPS
+    iree::base
+    iree::base::internal
+    loom::ir
+    loom::ir::facts
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    comparison
+  HDRS
+    "carrier.h"
+    "compare.h"
+  SRCS
+    "carrier.c"
+    "compare.c"
+  DEPS
+    ::op_defs
+    loom::ir
+    loom::ir::facts
+    loom::target::facts
+    loom::util::fact_table_api
+  PUBLIC
+)
+
 loom_generated_cc_library(
   NAME
     index
@@ -28,9 +61,8 @@ loom_generated_cc_library(
     loom::py::loom::gen::ops::c_tables_index_generator
   SRCS
     "canonicalize.c"
-    "carrier.c"
-    "compare.c"
     "facts.c"
+    "traits.c"
     "verify.c"
   TEXTUAL_HDRS
     "ops.inc"
@@ -51,10 +83,13 @@ loom_generated_cc_library(
   EXTRA_OUTPUTS
     "ops.inc"
   DEPS
+    ::cast
+    ::comparison
     ::op_defs
     iree::base::internal
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
     loom::ops::op_defs

@@ -6,13 +6,28 @@
 
 #include "loom/codegen/low/lower/call_predicates.h"
 
+#include <string.h>
+
 #include "loom/analysis/condition_facts.h"
+#include "loom/analysis/integer_relation.h"
 #include "loom/analysis/symbolic_expr_proof.h"
 #include "loom/codegen/low/lower/context.h"
 #include "loom/decision/predicate.h"
 #include "loom/error/error_catalog.h"
 #include "loom/ir/module.h"
 #include "loom/ops/low/ops.h"
+#include "loom/rewrite/remap.h"
+
+// Predicate rows are followed by one original formal value ID per argument.
+// These IDs are remapping keys; emission never queries their definitions.
+struct loom_low_call_argument_contract_t {
+  // Number of arguments at the verified invocation boundary.
+  uint16_t argument_count;
+  // Number of proved preconditions in the trailing array.
+  uint16_t predicate_count;
+  // Copied helper predicates, with their original formal parameter identities.
+  loom_predicate_t predicates[];
+};
 
 static iree_status_t loom_low_call_emit_contract_error(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
@@ -60,44 +75,6 @@ static bool loom_low_call_find_argument(const loom_value_id_t* callee_arguments,
       *out_argument_index = i;
     }
     return true;
-  }
-  return false;
-}
-
-static bool loom_low_call_predicate_integer_relation(
-    uint8_t predicate_kind,
-    loom_symbolic_integer_relation_t* out_integer_relation) {
-  switch ((loom_predicate_kind_t)predicate_kind) {
-    case LOOM_PREDICATE_EQ:
-      *out_integer_relation = LOOM_SYMBOLIC_INTEGER_RELATION_EQ;
-      return true;
-    case LOOM_PREDICATE_NE:
-      *out_integer_relation = LOOM_SYMBOLIC_INTEGER_RELATION_NE;
-      return true;
-    case LOOM_PREDICATE_LT:
-      *out_integer_relation = LOOM_SYMBOLIC_INTEGER_RELATION_LT;
-      return true;
-    case LOOM_PREDICATE_LE:
-      *out_integer_relation = LOOM_SYMBOLIC_INTEGER_RELATION_LE;
-      return true;
-    case LOOM_PREDICATE_GT:
-      *out_integer_relation = LOOM_SYMBOLIC_INTEGER_RELATION_GT;
-      return true;
-    case LOOM_PREDICATE_GE:
-    case LOOM_PREDICATE_MIN:
-      *out_integer_relation = LOOM_SYMBOLIC_INTEGER_RELATION_GE;
-      return true;
-    case LOOM_PREDICATE_MAX:
-      *out_integer_relation = LOOM_SYMBOLIC_INTEGER_RELATION_LE;
-      return true;
-    case LOOM_PREDICATE_MUL:
-    case LOOM_PREDICATE_POW2:
-    case LOOM_PREDICATE_RANGE:
-    case LOOM_PREDICATE_NOT_NAN:
-    case LOOM_PREDICATE_NOT_INF:
-    case LOOM_PREDICATE_FINITE:
-    case LOOM_PREDICATE_COUNT_:
-      return false;
   }
   return false;
 }
@@ -213,8 +190,8 @@ static iree_status_t loom_low_call_caller_contract_proves_relation(
     const loom_predicate_t* caller_predicate = &caller_predicates[i];
     loom_condition_integer_relation_t known_relation = {0};
     if (caller_predicate->arg_count != 2 ||
-        !loom_low_call_predicate_integer_relation(caller_predicate->kind,
-                                                  &known_relation.relation) ||
+        !loom_symbolic_integer_relation_from_predicate_kind(
+            caller_predicate->kind, &known_relation.relation) ||
         !loom_low_call_caller_predicate_operand_as_integer(
             caller_predicate, 0, caller_arguments, caller_argument_count,
             &known_relation.left) ||
@@ -276,8 +253,8 @@ static iree_status_t loom_low_call_prove_predicate(
   }
 
   loom_condition_integer_relation_t queried_relation = {0};
-  if (!loom_low_call_predicate_integer_relation(predicate_kind,
-                                                &queried_relation.relation) ||
+  if (!loom_symbolic_integer_relation_from_predicate_kind(
+          predicate_kind, &queried_relation.relation) ||
       !loom_low_call_decision_operand_as_integer(&predicate_operands[0],
                                                  &queried_relation.left) ||
       !loom_low_call_decision_operand_as_integer(&predicate_operands[1],
@@ -386,6 +363,9 @@ static iree_status_t loom_low_call_prove_argument_contract(
           context, source_op, callee_name, predicate, argument_index,
           callee_arguments, callee_argument_count, source_operands,
           &predicate_operands[argument_index]));
+      if (context->result->error_count != 0) {
+        return iree_ok_status();
+      }
     }
     loom_decision_truth_t proof_result = LOOM_DECISION_TRUTH_UNKNOWN;
     IREE_RETURN_IF_ERROR(loom_low_call_prove_predicate(
@@ -399,11 +379,13 @@ static iree_status_t loom_low_call_prove_argument_contract(
   return iree_ok_status();
 }
 
-iree_status_t loom_low_materialize_call_argument_contract(
+iree_status_t loom_low_plan_call_argument_contract(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     iree_string_view_t callee_name, loom_func_like_t callee,
     const loom_value_id_t* callee_arguments, uint16_t callee_argument_count,
-    loom_value_slice_t source_operands, loom_ir_remap_t* remap) {
+    loom_value_slice_t source_operands,
+    const loom_low_call_argument_contract_t** out_contract) {
+  *out_contract = NULL;
   uint16_t predicate_count = 0;
   const loom_predicate_t* predicates =
       loom_func_like_predicates(callee, &predicate_count);
@@ -414,34 +396,70 @@ iree_status_t loom_low_materialize_call_argument_contract(
   IREE_RETURN_IF_ERROR(loom_low_call_prove_argument_contract(
       context, source_op, callee_name, predicates, predicate_count,
       callee_arguments, callee_argument_count, source_operands));
+  if (context->result->error_count != 0) {
+    return iree_ok_status();
+  }
+
+  loom_low_call_argument_contract_t* contract = NULL;
+  IREE_RETURN_IF_ERROR(loom_low_lower_allocate_plan_data(
+      context,
+      sizeof(*contract) + predicate_count * sizeof(*predicates) +
+          callee_argument_count * sizeof(*callee_arguments),
+      (void**)&contract));
+  contract->argument_count = callee_argument_count;
+  contract->predicate_count = predicate_count;
+  memcpy(contract->predicates, predicates,
+         predicate_count * sizeof(*predicates));
+  if (callee_argument_count != 0) {
+    memcpy(contract->predicates + predicate_count, callee_arguments,
+           callee_argument_count * sizeof(*callee_arguments));
+  }
+  *out_contract = contract;
+  return iree_ok_status();
+}
+
+iree_status_t loom_low_materialize_call_argument_contract(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_low_call_argument_contract_t* contract,
+    loom_value_id_t* low_operands) {
+  if (contract == NULL) {
+    return iree_ok_status();
+  }
+  loom_ir_remap_t remap = {0};
+  IREE_RETURN_IF_ERROR(loom_ir_remap_initialize(
+      context->module, context->module,
+      loom_low_lower_context_emission_arena(context), NULL, &remap));
+  IREE_RETURN_IF_ERROR(loom_ir_remap_map_values(
+      &remap,
+      (const loom_value_id_t*)(contract->predicates +
+                               contract->predicate_count),
+      low_operands, contract->argument_count));
 
   loom_predicate_t* remapped_predicates = NULL;
   IREE_RETURN_IF_ERROR(loom_ir_remap_predicate_list(
-      remap, predicates, predicate_count, &remapped_predicates));
+      &remap, contract->predicates, contract->predicate_count,
+      &remapped_predicates));
 
-  loom_value_id_t* low_arguments = NULL;
   loom_type_t* low_argument_types = NULL;
   IREE_RETURN_IF_ERROR(loom_low_lower_allocate_emission_array(
-      context, callee_argument_count, sizeof(*low_arguments),
-      (void**)&low_arguments));
-  IREE_RETURN_IF_ERROR(loom_low_lower_allocate_emission_array(
-      context, callee_argument_count, sizeof(*low_argument_types),
+      context, contract->argument_count, sizeof(*low_argument_types),
       (void**)&low_argument_types));
-  for (uint16_t i = 0; i < callee_argument_count; ++i) {
-    IREE_RETURN_IF_ERROR(loom_ir_remap_resolve_value(remap, callee_arguments[i],
-                                                     &low_arguments[i]));
+  for (uint16_t i = 0; i < contract->argument_count; ++i) {
     low_argument_types[i] = loom_module_value_type(
-        loom_low_lower_context_module(context), low_arguments[i]);
+        loom_low_lower_context_module(context), low_operands[i]);
   }
 
   loom_op_t* assume_op = NULL;
   IREE_RETURN_IF_ERROR(loom_low_assume_build(
-      loom_low_lower_context_builder(context), low_arguments,
-      callee_argument_count, remapped_predicates, predicate_count,
-      low_argument_types, callee_argument_count, source_op->location,
+      loom_low_lower_context_builder(context), low_operands,
+      contract->argument_count, remapped_predicates, contract->predicate_count,
+      low_argument_types, contract->argument_count, source_op->location,
       &assume_op));
   const loom_value_slice_t assumed_arguments =
       loom_low_assume_results(assume_op);
-  return loom_ir_remap_map_values(
-      remap, callee_arguments, assumed_arguments.values, callee_argument_count);
+  if (contract->argument_count != 0) {
+    memcpy(low_operands, assumed_arguments.values,
+           contract->argument_count * sizeof(*low_operands));
+  }
+  return iree_ok_status();
 }

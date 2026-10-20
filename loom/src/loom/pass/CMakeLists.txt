@@ -18,6 +18,7 @@ loom_cc_library(
     "environment.c"
   DEPS
     iree::base
+  LINKABLE_MORE_THAN_ONCE
   PUBLIC
 )
 
@@ -30,7 +31,6 @@ loom_cc_library(
     iree::base
     iree::base::internal::arena
     loom::error::emitter
-    loom::ir
   PUBLIC
 )
 
@@ -46,8 +46,10 @@ loom_cc_library(
     iree::base
     iree::base::internal::arena
     loom::analysis::conditioned_value_facts
+    loom::analysis::symbol_facts
     loom::ir
     loom::ops::op_defs
+    loom::ops::target
     loom::ops::type_registry
     loom::util::fact_table
   PUBLIC
@@ -63,6 +65,37 @@ loom_cc_library(
   DEPS
     iree::base
   PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    pipeline_snapshot
+  HDRS
+    "pipeline_snapshot.h"
+  SRCS
+    "pipeline_snapshot.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::link::linker
+    loom::ops::pass
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    pipeline_snapshot_test
+  SRCS
+    "pipeline_snapshot_test.cc"
+  DEPS
+    ::pipeline_snapshot
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::pass
+    loom::pass::test::harness
 )
 
 loom_cc_library(
@@ -117,6 +150,7 @@ loom_cc_library(
   DEPS
     ::types
     iree::base
+    loom::ir
   PUBLIC
 )
 
@@ -128,10 +162,24 @@ loom_cc_library(
   SRCS
     "registry.c"
   DEPS
-    ::environment
-    ::pipeline
     ::types
     iree::base
+  LINKABLE_MORE_THAN_ONCE
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    options
+  HDRS
+    "options.h"
+  SRCS
+    "options.c"
+  DEPS
+    ::pipeline
+    ::registry
+    iree::base
+    iree::base::internal::arena
     loom::ir
   PUBLIC
 )
@@ -144,6 +192,7 @@ loom_cc_library(
   SRCS
     "invocation.c"
   DEPS
+    ::options
     ::registry
     iree::base
     loom::ir
@@ -180,6 +229,7 @@ loom_cc_library(
   DEPS
     ::environment
     ::invocation
+    ::options
     ::registry
     ::verify
     iree::base
@@ -198,12 +248,12 @@ loom_cc_library(
     "report.c"
   DEPS
     ::environment
-    ::program
     ::registry
     ::types
     iree::base
     loom::util::json
     loom::util::stream
+  LINKABLE_MORE_THAN_ONCE
   PUBLIC
 )
 
@@ -296,7 +346,6 @@ loom_cc_library(
   DEPS
     ::registry
     loom::codegen::low::pipeline::pass_environment
-    loom::codegen::low::pipeline::pass_requirements
     loom::codegen::low::transforms::allocation
     loom::codegen::low::transforms::cfg_tuple_decomposition
     loom::codegen::low::transforms::cse
@@ -323,14 +372,15 @@ loom_cc_library(
     loom::transforms::cleanup::strip_hints
     loom::transforms::encoding::layout_transport
     loom::transforms::func::locations
-    loom::transforms::kernel::kernel_async_legality
     loom::transforms::kernel::kernel_resources
+    loom::transforms::kernel::kernel_synchronization_legality
     loom::transforms::kernel::promote_private_fragments
     loom::transforms::kernel::stage_loop_carried_fragments
     loom::transforms::loop::licm
     loom::transforms::loop::loop_fusion
     loom::transforms::math::legalize
     loom::transforms::ownership::ownership_lifetime
+    loom::transforms::pipeline::outline
     loom::transforms::scf::scf_pipeline
     loom::transforms::scf::scf_to_cfg
     loom::transforms::scf::scf_unroll
@@ -355,6 +405,7 @@ loom_cc_test(
     "invocation_test.cc"
   DEPS
     ::invocation
+    ::options
     iree::testing::gtest
     iree::testing::gtest_main
     loom::ops::pass
@@ -386,10 +437,33 @@ loom_cc_test(
     ::interpreter
     ::program
     ::report
+    ::trace
     iree::testing::gtest
     iree::testing::gtest_main
-    loom::error::error_defs
+    loom::error::parameter
+    loom::ir
+    loom::ops::op_defs
+    loom::ops::test
     loom::pass::test::harness
+    loom::rewrite::rewriter
+    loom::util::stream
+)
+
+loom_cc_test(
+  NAME
+    target_scope_test
+  SRCS
+    "target_scope_test.cc"
+  DEPS
+    ::value_facts
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::op_registry
+    loom::ops::pipeline
+    loom::ops::target
+    loom::ops::test
+    loom::rewrite::rewriter
 )
 
 loom_cc_test(
@@ -442,6 +516,7 @@ loom_cc_test(
   SRCS
     "program_test.cc"
   DEPS
+    ::options
     ::program
     iree::testing::gtest
     iree::testing::gtest_main
@@ -456,11 +531,11 @@ loom_cc_test(
     "builtin_registry_test.cc"
   DEPS
     ::builtin_registry
+    ::options
     ::registry
     iree::testing::gtest
     iree::testing::gtest_main
     loom::codegen::low::pipeline::pass_environment
-    loom::codegen::low::pipeline::pass_requirements
     loom::pass::testing::registry_verify
     loom::target::legalization
     loom::target::pass_environment

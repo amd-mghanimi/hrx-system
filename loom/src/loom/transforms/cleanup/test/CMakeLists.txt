@@ -17,8 +17,14 @@ loom_check_test_suite(
     "combine_legalize.loom-test"
     "conversion_phases.loom-test"
     "dce.loom-test"
+    "fact_refinement.loom-test"
     "hint_lifetime.loom-test"
+    "integer_division.loom-test"
+    "parameter_domains.loom-test"
+    "redundant_assumptions.loom-test"
+    "value_equality.loom-test"
     "value_facts.loom-test"
+    "value_identity.loom-test"
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

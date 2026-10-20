@@ -9,12 +9,25 @@
 
 iree_add_all_subdirs()
 
-iree_cc_test(
+iree_cc_library(
   NAME
-    collective_trial_tests
+    backend
   SRCS
     "backend.cc"
   DEPS
+    iree::net::carrier::shm::factory
+    iree::net::cts::transport_backend
+    iree::testing::temp_file
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    collective_trial_tests
+  DEPS
+    ::backend
     iree::async::cts::util::platform_backends
     iree::async::cts::util::test_main
     iree::net::carrier::shm::factory
@@ -25,10 +38,25 @@ iree_cc_test(
 
 iree_cc_test(
   NAME
-    transfer_trial_tests
-  SRCS
-    "backend.cc"
+    collective_trial_stress_tests
   DEPS
+    ::backend
+    iree::async::cts::util::platform_backends
+    iree::async::cts::util::test_main
+    iree::net::carrier::shm::factory
+    iree::net::cts::collective_trial_stress_tests
+    iree::net::cts::transport_backend
+    iree::testing::temp_file
+  LABELS
+    "manual"
+    "stress"
+)
+
+iree_cc_test(
+  NAME
+    transfer_trial_tests
+  DEPS
+    ::backend
     iree::async::cts::util::platform_backends
     iree::async::cts::util::test_main
     iree::net::carrier::shm::factory
@@ -40,9 +68,8 @@ iree_cc_test(
 iree_cc_test(
   NAME
     transport_tests
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::net::carrier::shm::factory
     iree::net::cts::transport_backend
     iree::net::cts::transport_tests
@@ -53,9 +80,8 @@ iree_cc_test(
 iree_cc_binary_benchmark(
   NAME
     collective_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async::cts::util::benchmark_main
     iree::async::cts::util::platform_backends
     iree::net::carrier::shm::factory
@@ -63,15 +89,16 @@ iree_cc_binary_benchmark(
     iree::net::cts::transport_backend
     iree::testing::temp_file
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^(TensorAllReduce/.*/ranks:2/tensor_bytes:8192/block_bytes:4096/window:1/rounds:32/|Pipeline/.*/stages:2/activation_bytes:8192/block_bytes:4096/window:1/microbatches:32/depth:1/)"
   TESTONLY
 )
 
 iree_cc_binary_benchmark(
   NAME
     expert_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async::cts::util::benchmark_main
     iree::async::cts::util::platform_backends
     iree::net::carrier::shm::factory
@@ -79,15 +106,16 @@ iree_cc_binary_benchmark(
     iree::net::cts::transport_backend
     iree::testing::temp_file
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^ExpertRoundTrip/.*/ranks:4/tokens:1/"
   TESTONLY
 )
 
 iree_cc_binary_benchmark(
   NAME
     gather_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async::cts::util::benchmark_main
     iree::async::cts::util::platform_backends
     iree::net::carrier::shm::factory
@@ -95,15 +123,16 @@ iree_cc_binary_benchmark(
     iree::net::cts::transport_backend
     iree::testing::temp_file
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^RetainedGather/.*/ranks:2/shard_bytes:8192/block_bytes:4096/window:1/depth:1/gathers:16/"
   TESTONLY
 )
 
 iree_cc_binary_benchmark(
   NAME
     pipeline_round_trip_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async::cts::util::benchmark_main
     iree::async::cts::util::platform_backends
     iree::net::carrier::shm::factory
@@ -111,15 +140,16 @@ iree_cc_binary_benchmark(
     iree::net::cts::transport_backend
     iree::testing::temp_file
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^BidirectionalPipeline/.*/stages:2/activation_bytes:8192/gradient_bytes:4096/block_bytes:4096/window:1/depth:1/microbatches:16/"
   TESTONLY
 )
 
 iree_cc_binary_benchmark(
   NAME
     transfer_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async::cts::util::benchmark_main
     iree::async::cts::util::platform_backends
     iree::net::carrier::shm::factory
@@ -127,7 +157,18 @@ iree_cc_binary_benchmark(
     iree::net::cts::transport_backend
     iree::testing::temp_file
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^CheckedTransfer/.*/peers:1/bytes:64/batch:32/window:128/sg:1/records:2048/"
   TESTONLY
+)
+
+iree_cc_test(
+  NAME
+    receive_tests
+  DEPS
+    ::backend
+    iree::net::cts::receive_tests
+    iree::testing::gtest_main
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

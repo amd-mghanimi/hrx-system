@@ -11,9 +11,6 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
-#include "loom/tooling/compile/options.h"
-#include "loom/tooling/compile/report_capture.h"
-#include "loom/tooling/execution/session.h"
 #include "loom/tooling/testbench/executor.h"
 #include "loom/tools/iree-benchmark-loom/context.h"
 #include "loom/tools/iree-benchmark-loom/event.h"
@@ -39,14 +36,8 @@ typedef struct iree_benchmark_loom_hal_setup_options_t {
   const iree_benchmark_loom_options_t* benchmark_options;
   // Shared HAL context used by work items with kernel launches.
   iree_benchmark_loom_hal_context_t* hal_context;
-  // Shared Loom run session used for candidate compilation.
-  loom_run_session_t* session;
-  // Canonical parsed module used for candidate compilation.
-  const loom_run_module_t* run_module;
-  // Structured compile-report capture policy.
-  const loom_compile_report_capture_options_t* compile_report_options;
-  // Structured artifact-manifest sidecar policy.
-  const loom_compile_artifact_manifest_options_t* artifact_manifest_options;
+  // Public compiler inputs shared by all HAL candidates in this run.
+  const iree_benchmark_loom_hal_compilation_options_t* compilation;
   // Base case execution options for correctness checks.
   const loom_testbench_case_execution_options_t* case_execution_options;
   // Arena reused for prepared correctness executors.
@@ -58,10 +49,8 @@ typedef struct iree_benchmark_loom_hal_setup_options_t {
 } iree_benchmark_loom_hal_setup_options_t;
 
 typedef struct iree_benchmark_loom_hal_compile_context_t {
-  // True once this compile item has been initialized or skipped.
+  // True once this compile item has been initialized.
   bool initialized;
-  // True when target requirements skip every work item using this compile item.
-  bool skipped;
   // True when this compile item executes a multi-actual sequence.
   bool uses_sequence;
   // Compiled multi-actual sequence reused by all work items in the compile

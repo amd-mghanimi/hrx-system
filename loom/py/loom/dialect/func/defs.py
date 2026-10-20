@@ -41,6 +41,7 @@ from loom.assembly import (
     TypesOf,
     kw,
 )
+from loom.dialect.symbol import Linkage
 from loom.dialect.target.defs import ExportAbiKind
 from loom.dsl import (
     ANY,
@@ -106,12 +107,20 @@ CallingConv = EnumDef(
     doc="Function calling convention. Absent (0) means host.",
 )
 
-Purity = EnumDef(
-    "Purity",
+EffectContract = EnumDef(
+    "EffectContract",
     [
         EnumCase("pure", 1, doc="No memory effects, deterministic."),
+        EnumCase(
+            "readonly",
+            2,
+            doc="May deterministically read memory but has no other effects.",
+        ),
     ],
-    doc="Function purity. Absent (0) means unspecified (conservative).",
+    doc=("Callable effect contract. Absent (0) means unspecified (conservative)."),
+    c_type="loom_callable_effect_contract_t",
+    c_const_prefix="LOOM_CALLABLE_EFFECT_CONTRACT",
+    c_include="loom/ir/ir.h",
 )
 
 Temperature = EnumDef(
@@ -157,9 +166,10 @@ _RETAIN_ATTR = AttrDef("retain", "enum", enum_def=Retain, optional=True)
 #   func.def public pure @name(...)
 _MODIFIER_FORMAT: list[FormatElement] = [
     OptionalGroup([Attr("visibility")], anchor="visibility"),
+    OptionalGroup([Attr("linkage")], anchor="linkage"),
     OptionalGroup([Attr("retain")], anchor="retain"),
     OptionalGroup([Attr("cc")], anchor="cc"),
-    OptionalGroup([Attr("purity")], anchor="purity"),
+    OptionalGroup([Attr("effect_contract")], anchor="effect_contract"),
     OptionalGroup([Attr("temperature")], anchor="temperature"),
     OptionalGroup([Attr("inline_policy")], anchor="inline_policy"),
 ]
@@ -242,8 +252,9 @@ _SIGNATURE_FORMAT: list[FormatElement] = [
 _MODIFIER_ATTRS = [
     AttrDef("callee", "symbol"),
     AttrDef("visibility", "enum", enum_def=Visibility, optional=True),
+    AttrDef("linkage", "enum", enum_def=Linkage, optional=True),
     AttrDef("cc", "enum", enum_def=CallingConv, optional=True),
-    AttrDef("purity", "enum", enum_def=Purity, optional=True),
+    AttrDef("effect_contract", "enum", enum_def=EffectContract, optional=True),
     AttrDef("temperature", "enum", enum_def=Temperature, optional=True),
     AttrDef("inline_policy", "enum", enum_def=InlinePolicyAttr, optional=True),
     AttrDef("predicates", "predicate_list", optional=True),
@@ -275,7 +286,7 @@ _DECL_ATTRS = [
     AttrDef("import_module", "string", optional=True),
     AttrDef("import_symbol", "string", optional=True),
     AttrDef("cc", "enum", enum_def=CallingConv, optional=True),
-    AttrDef("purity", "enum", enum_def=Purity, optional=True),
+    AttrDef("effect_contract", "enum", enum_def=EffectContract, optional=True),
     AttrDef("temperature", "enum", enum_def=Temperature, optional=True),
     AttrDef("inline_policy", "enum", enum_def=InlinePolicyAttr, optional=True),
     *_CONTRACT_ATTRS,
@@ -292,7 +303,7 @@ _FUNC_LIKE_COMMON: dict[str, Any] = dict(
     callee="callee",
     visibility="visibility",
     cc="cc",
-    purity="purity",
+    effect_contract="effect_contract",
     temperature="temperature",
     inline_policy="inline_policy",
     predicates="predicates",
@@ -335,6 +346,7 @@ func_def = Op(
         interfaces=["func_like", "callable"],
         bytecode_kind="LOOM_SYMBOL_FUNC_DEF",
         fact_domain="loom_func_symbol_fact_domain",
+        linkage="linkage",
         retain="retain",
     ),
     results=[Result("results", ANY, variadic=True)],
@@ -386,7 +398,7 @@ func_decl = Op(
         OptionalGroup([Attr("retain")], anchor="retain"),
         *_IMPORT_FORMAT,
         OptionalGroup([Attr("cc")], anchor="cc"),
-        OptionalGroup([Attr("purity")], anchor="purity"),
+        OptionalGroup([Attr("effect_contract")], anchor="effect_contract"),
         OptionalGroup([Attr("temperature")], anchor="temperature"),
         OptionalGroup([Attr("inline_policy")], anchor="inline_policy"),
         *_TARGET_FORMAT,
@@ -421,7 +433,7 @@ func_call = Op(
             "symbol",
             symbol_ref=SymbolReference("function", ["callable"]),
         ),
-        AttrDef("purity", "enum", enum_def=Purity, optional=True),
+        AttrDef("effect_contract", "enum", enum_def=EffectContract, optional=True),
         AttrDef("temperature", "enum", enum_def=Temperature, optional=True),
         AttrDef("inline_policy", "enum", enum_def=InlinePolicyAttr, optional=True),
     ],
@@ -432,7 +444,7 @@ func_call = Op(
             callee="callee",
             operands="operands",
             results="results",
-            purity="purity",
+            effect_contract="effect_contract",
             temperature="temperature",
             inline_policy="inline_policy",
             kind=CallLikeKind.SEMANTIC,
@@ -441,8 +453,9 @@ func_call = Op(
     verify="loom_func_call_verify",
     canonicalize="loom_func_call_canonicalize",
     effective_traits="loom_func_call_effective_traits",
+    facts="loom_func_call_facts",
     format=[
-        OptionalGroup([Attr("purity")], anchor="purity"),
+        OptionalGroup([Attr("effect_contract")], anchor="effect_contract"),
         OptionalGroup([Attr("temperature")], anchor="temperature"),
         OptionalGroup([Attr("inline_policy")], anchor="inline_policy"),
         SymbolRef("callee"),
@@ -466,6 +479,7 @@ func_call = Op(
         "%r = func.call inline @specific_template(%a, %b) : (f32, f32) -> (f32)",
         "%out, %count = func.call @process(%a, %b) : (tensor<[%M]xf32>, index) -> (%a as tensor<[%M]xf32>, index)",
     ],
+    eager_execution_cost=0,
 )
 
 # ============================================================================

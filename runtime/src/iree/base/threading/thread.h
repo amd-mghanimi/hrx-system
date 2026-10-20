@@ -69,7 +69,8 @@ typedef struct iree_thread_create_params_t {
   // see that for more information.
   iree_thread_priority_class_t priority_class;
 
-  // Initial thread affinity.
+  // Initial thread affinity, applied before the entry routine can run.
+  // Creation fails if the platform rejects the affinity request.
   // This may be changed later via iree_thread_request_affinity; see that for
   // more information.
   iree_thread_affinity_t initial_affinity;
@@ -86,6 +87,7 @@ typedef int (*iree_thread_entry_t)(void* entry_arg);
 // suspended and must be resumed with iree_thread_resume. Otherwise, the thread
 // may already be inside of the |entry| function by the time the function
 // returns.
+// On failure |out_thread| is NULL and |entry| is never called.
 //
 // |entry_arg| lifetime is not managed and unless the caller is waiting for the
 // thread to start must not be stack-allocated.
@@ -97,7 +99,9 @@ iree_thread_create(iree_thread_entry_t entry, void* entry_arg,
 // Retains the given |thread| for the caller.
 IREE_API_EXPORT void iree_thread_retain(iree_thread_t* thread);
 
-// Releases the given |thread| from the caller.
+// Releases the given |thread| from the caller. A final release from another
+// thread waits for |thread| to return. A final release by |thread| itself
+// detaches its native handle so resources are reclaimed when it returns.
 IREE_API_EXPORT void iree_thread_release(iree_thread_t* thread);
 
 // Returns a platform-defined thread ID for the given |thread|.
@@ -129,18 +133,15 @@ IREE_API_EXPORT void iree_thread_override_end(
 // etc). Users wanting to ensure threads have specific affinities may want to
 // request updates whenever new large amounts of work are about to be performed.
 //
-// NOTE: thread affinities are just a hint. The OS scheduler is free to do
-// whatever it wants up to and including entirely ignoring the specified
-// affinity. In many cases where cores are oversubscribed setting an affinity
-// mask can pessimize battery/thermals/performance as the OS will sometimes try
-// to shuffle around threads to disable physical cores/etc.
+// Returns an error if the platform cannot apply the requested affinity.
+// An unspecified affinity leaves the current placement unchanged.
+// Linux and Windows restrict execution to the requested CPUs. NUMA-node
+// affinity selects eligible CPUs within that node; it does not bind memory.
 //
-// Compatibility warning: Apple/darwin only support affinity groups, with each
-// unique affinity sharing time with all others of the same value. This means
-// that trying to get clever with several thread sets with overlapping
-// affinities will likely not work as expected. Try to stick with threads that
-// run only on a single processor.
-IREE_API_EXPORT void iree_thread_request_affinity(
+// Darwin CPU IDs are advisory cache-affinity tags, not CPU bindings. On Apple
+// Silicon these tags have no effect; the SMT bit still selects background QoS
+// at creation. NUMA affinity is supported only for the sole memory domain (0).
+IREE_API_EXPORT iree_status_t iree_thread_request_affinity(
     iree_thread_t* thread, iree_thread_affinity_t affinity);
 
 // Resumes |thread| if it was created suspended.

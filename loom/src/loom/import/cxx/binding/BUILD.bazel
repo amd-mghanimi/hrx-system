@@ -24,6 +24,15 @@ loom_generated_cc_library(
 )
 
 loom_cc_library(
+    name = "combining",
+    srcs = ["combining.cc"],
+    hdrs = ["combining.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = ["//loom/src/loom/ops:combining"],
+)
+
+loom_cc_library(
     name = "assembly",
     srcs = ["assembly.cc"],
     hdrs = ["assembly.h"],
@@ -32,6 +41,7 @@ loom_cc_library(
     deps = [
         "//loom/src/loom/error:source",
         "//loom/src/loom/format/text:parser",
+        "//loom/src/loom/import/cxx/source",
         "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/source:error",
         "//loom/src/loom/import/cxx/symbol:names",
@@ -44,12 +54,29 @@ loom_cc_library(
 )
 
 loom_cc_library(
+    name = "async",
+    srcs = ["async.cc"],
+    hdrs = ["async.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ops:cache",
+        "//loom/src/loom/ops/kernel",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
     name = "atomic",
     srcs = ["atomic.cc"],
     hdrs = ["atomic.h"],
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":index_values",
         "//loom/src/loom/import/cxx/source:constants",
         "//loom/src/loom/import/cxx/source:error",
         "//loom/src/loom/import/cxx/value:storage",
@@ -63,14 +90,109 @@ loom_cc_library(
 )
 
 loom_cc_library(
+    name = "buffer",
+    srcs = ["buffer.cc"],
+    hdrs = ["buffer.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:storage",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
     name = "assumptions",
     srcs = ["assumptions.cc"],
     hdrs = ["assumptions.h"],
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":predicates",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "predicates",
+    srcs = ["predicates.cc"],
+    hdrs = ["predicates.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
         "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/source:constants",
+        "//loom/src/loom/import/cxx/source:expressions",
+        "//loom/src/loom/ir",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "function_contracts",
+    srcs = ["function_contracts.cc"],
+    hdrs = ["function_contracts.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":predicates",
+        ":target_requirements",
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/source:expressions",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ir",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "function_imports",
+    srcs = ["function_imports.cc"],
+    hdrs = ["function_imports.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "fastmath",
+    srcs = ["fastmath.cc"],
+    hdrs = ["fastmath.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":scalar_bindings",
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/ops/scalar",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "target_requirements",
+    srcs = ["target_requirements.cc"],
+    hdrs = ["target_requirements.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:constants",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/source:expressions",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/target",
         "//third_party:cxx_parser",
     ],
 )
@@ -82,6 +204,8 @@ loom_cc_library(
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":predicates",
+        "//loom/src/loom/analysis:symbol_value_constraints",
         "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/source:error",
         "//loom/src/loom/import/cxx/source:locations",
@@ -96,15 +220,177 @@ loom_cc_library(
 )
 
 loom_cc_library(
+    name = "constexpr",
+    srcs = ["constexpr.cc"],
+    hdrs = ["constexpr.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/source:locations",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "constant_attributes",
+    srcs = ["constant_attributes.cc"],
+    hdrs = ["constant_attributes.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/ir",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "decode",
+    srcs = ["decode.cc"],
+    hdrs = ["decode.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/encoding",
+        "//loom/src/loom/ops/vector",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "target_definitions",
+    srcs = ["target_definitions.cc"],
+    hdrs = ["target_definitions.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":constant_attributes",
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/source:locations",
+        "//loom/src/loom/import/cxx/symbol:names",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
+        "//runtime/src/iree/base",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "encoding",
+    srcs = ["encoding.cc"],
+    hdrs = ["encoding.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":constant_attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/encoding",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "fragment",
+    srcs = ["fragment.cc"],
+    hdrs = ["fragment.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":index_values",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/encoding",
+        "//loom/src/loom/ops/vector",
+        "//runtime/src/iree/base",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
     name = "shaped",
     srcs = ["shaped.cc"],
     hdrs = ["shaped.h"],
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":combining",
+        ":index_values",
+        ":scalar_bindings",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ops:combining",
+        "//loom/src/loom/ops/vector",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "template_apply",
+    srcs = ["template_apply.cc"],
+    hdrs = ["template_apply.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":function_contracts",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/symbol:names",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:signature",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops/template",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "template_definitions",
+    srcs = ["template_definitions.cc"],
+    hdrs = ["template_definitions.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/source:error",
         "//loom/src/loom/import/cxx/value:types",
-        "//loom/src/loom/ops/vector",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "index_values",
+    srcs = ["index_values.cc"],
+    hdrs = ["index_values.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
         "//third_party:cxx_parser",
     ],
 )
@@ -116,17 +402,74 @@ loom_cc_library(
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":index_values",
         "//loom/src/loom/import/cxx/source",
         "//loom/src/loom/import/cxx/source:error",
         "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:storage",
         "//loom/src/loom/import/cxx/value:types",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/buffer",
         "//loom/src/loom/ops/encoding",
         "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/view",
         "//runtime/src/iree/base",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "vector_arithmetic",
+    srcs = ["vector_arithmetic.cc"],
+    hdrs = ["vector_arithmetic.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":scalar_bindings",
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ops/vector",
+        "//runtime/src/iree/base",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "numeric_conversion",
+    srcs = ["numeric_conversion.cc"],
+    hdrs = ["numeric_conversion.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:scalar",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/import/cxx/value:vector",
+        "//runtime/src/iree/base",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "vector_memory",
+    srcs = ["vector_memory.cc"],
+    hdrs = ["vector_memory.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":index_values",
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:representation",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ops/vector",
         "//third_party:cxx_parser",
     ],
 )
@@ -138,6 +481,7 @@ loom_cc_library(
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":launch",
         "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/value:types",
         "//third_party:cxx_parser",
@@ -151,12 +495,29 @@ loom_cc_library(
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":combining",
         "//loom/src/loom/import/cxx/source:error",
         "//loom/src/loom/import/cxx/value:types",
         "//loom/src/loom/ir:facts",
         "//loom/src/loom/ops:atomic",
+        "//loom/src/loom/ops:combining",
         "//loom/src/loom/ops/index",
         "//loom/src/loom/ops/kernel",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "target",
+    srcs = ["target.cc"],
+    hdrs = ["target.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/target",
         "//third_party:cxx_parser",
     ],
 )
@@ -169,16 +530,32 @@ loom_cc_library(
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
         ":assembly",
+        ":async",
         ":atomic",
+        ":buffer",
         ":check",
+        ":decode",
+        ":encoding",
+        ":fragment",
+        ":function_contracts",
+        ":index_values",
         ":kernel",
+        ":launch",
+        ":numeric_conversion",
         ":scalar_bindings",
         ":shaped",
+        ":target",
+        ":template_apply",
+        ":vector_arithmetic",
+        ":vector_memory",
         ":view",
         "//loom/src/loom/import/cxx/source",
         "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/source:locations",
+        "//loom/src/loom/import/cxx/symbol:names",
         "//loom/src/loom/import/cxx/value:types",
+        "//loom/src/loom/ir",
         "//third_party:cxx_parser",
     ],
 )
@@ -194,6 +571,7 @@ loom_cc_library(
         "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/source:error",
         "//loom/src/loom/import/cxx/symbol:names",
+        "//loom/src/loom/import/cxx/value:types",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/config",
@@ -232,6 +610,7 @@ loom_cc_library(
         "//loom/src/loom/import/cxx/source",
         "//loom/src/loom/import/cxx/source:attributes",
         "//loom/src/loom/import/cxx/source:error",
+        "//loom/src/loom/import/cxx/value:types",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/index",
         "//loom/src/loom/ops/scalar",
@@ -270,6 +649,38 @@ loom_cc_test(
 )
 
 loom_cc_test(
+    name = "predicates_test",
+    srcs = ["predicates_test.cc"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":predicates",
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_test(
+    name = "target_requirements_test",
+    srcs = ["target_requirements_test.cc"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":target_requirements",
+        "//loom/src/loom/import/cxx/source",
+        "//loom/src/loom/import/cxx/source:attributes",
+        "//loom/src/loom/import/cxx/source:error",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_test(
     name = "config_test",
     srcs = ["config_test.cc"],
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
@@ -280,6 +691,21 @@ loom_cc_test(
         "//loom/src/loom/import/cxx/value:builder_test",
         "//loom/src/loom/ops/config",
         "//loom/src/loom/ops/scalar",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_test(
+    name = "encoding_test",
+    srcs = ["encoding_test.cc"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":encoding",
+        "//loom/src/loom/import/cxx/value:builder_test",
+        "//loom/src/loom/ops/encoding",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
         "//third_party:cxx_parser",

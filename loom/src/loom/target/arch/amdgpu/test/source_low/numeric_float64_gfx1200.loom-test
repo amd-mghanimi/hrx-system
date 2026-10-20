@@ -1,0 +1,21 @@
+// RUN: emit source-low target=amdgpu:gfx1200 output=low
+
+// Scalar addition, numerical extrema, and ordered/unordered predicates.
+func.def @float64_add_extrema(%lhs: f64, %rhs: f64) -> (f64, f64, f64, f64, f64) {
+  %addf = scalar.addf %lhs, %rhs : f64
+  %minimumf = scalar.minimumf %lhs, %rhs : f64
+  %maximumf = scalar.maximumf %lhs, %rhs : f64
+  %minnumf = scalar.minnumf %lhs, %rhs : f64
+  %maxnumf = scalar.maxnumf %lhs, %rhs : f64
+  func.return %addf, %minimumf, %maximumf, %minnumf, %maxnumf : f64, f64, f64, f64, f64
+}
+
+// ----
+low.func.def target<amdgpu.rdna4.core> abi(hal_kernel) @float64_add_extrema(%lhs: reg<amdgpu.vgpr x2>, %rhs: reg<amdgpu.vgpr x2>) -> (reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>, reg<amdgpu.vgpr x2>) asm {
+  %addf = v_add_f64 %lhs, %rhs
+  %minimumf = v_minimum_f64 %lhs, %rhs
+  %maximumf = v_maximum_f64 %lhs, %rhs
+  %minnumf = v_min_num_f64 %lhs, %rhs
+  %maxnumf = v_max_num_f64 %lhs, %rhs
+  return %addf, %minimumf, %maximumf, %minnumf, %maxnumf
+}

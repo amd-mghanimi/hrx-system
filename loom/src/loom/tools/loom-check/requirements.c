@@ -6,6 +6,25 @@
 
 #include "loom/tools/loom-check/requirements.h"
 
+iree_status_t loom_check_require_declared_requirement(
+    const loom_test_case_t* test_case, iree_string_view_t requirement,
+    loom_check_result_t* result, bool* out_continue_execution) {
+  for (iree_host_size_t i = 0; i < test_case->requirement_count; ++i) {
+    if (iree_string_view_equal(test_case->requirements[i], requirement)) {
+      return iree_ok_status();
+    }
+  }
+  *out_continue_execution = false;
+  result->raw_outcome = LOOM_CHECK_FAIL;
+  result->final_outcome = LOOM_CHECK_FAIL;
+  return iree_string_builder_append_format(
+      &result->detail,
+      "RUN: emit %.*s requires '// REQUIRES: %.*s'; external tool "
+      "dependencies must be declared even when they are available\n",
+      (int)test_case->emit_target.size, test_case->emit_target.data,
+      (int)requirement.size, requirement.data);
+}
+
 static const loom_check_requirement_provider_t*
 loom_check_lookup_requirement_provider(
     const loom_check_environment_t* environment,
@@ -110,13 +129,14 @@ static iree_status_t loom_check_require_emit_tool_declarations(
   iree_string_view_t emit_target =
       iree_string_view_trim(test_case->emit_target);
   iree_string_view_t target_name = iree_string_view_empty();
-  iree_string_view_split(emit_target, ' ', &target_name, NULL);
-  target_name = iree_string_view_trim(target_name);
+  iree_string_view_t target_options = iree_string_view_empty();
+  iree_string_view_split(emit_target, ' ', &target_name, &target_options);
+  target_options = iree_string_view_trim(target_options);
   const loom_check_emit_provider_t* provider =
       loom_check_environment_lookup_emit_provider(environment, target_name);
   if (provider != NULL && provider->check_requirements != NULL) {
-    return provider->check_requirements(provider, test_case, result,
-                                        out_continue_execution);
+    return provider->check_requirements(provider, test_case, target_options,
+                                        result, out_continue_execution);
   }
 
   return iree_ok_status();

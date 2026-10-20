@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "iree/base/api.h"
+#include "iree/base/threading/numa.h"
 #include "iree/base/threading/thread.h"
 #include "iree/task/affinity_set.h"
 #include "iree/task/tuning.h"
@@ -21,21 +22,22 @@ extern "C" {
 #endif  // __cplusplus
 
 //===----------------------------------------------------------------------===//
-// NUMA queries
+// Worker placement domains
 //===----------------------------------------------------------------------===//
 
-// A NUMA node or processor group ordinal.
+// A platform-specific worker placement domain: a CPU cluster, package, or
+// NUMA node. This identifier is not a physical memory-node identifier.
 typedef uint32_t iree_task_topology_node_id_t;
 
-// Use any NUMA node (usually the first).
+// Select workers without restricting their placement domain.
 #define IREE_TASK_TOPOLOGY_NODE_ID_ANY ((iree_task_topology_node_id_t) - 1)
 
-// Returns the total number of NUMA nodes in the system or 1 if the query is
+// Returns the number of worker placement domains, or 1 if the query is
 // not available on the platform.
 iree_host_size_t iree_task_topology_query_node_count(void);
 
-// Returns the NUMA node ID of the currently executing thread or 0 if the query
-// is not available on the platform.
+// Returns the placement domain of the currently executing thread or 0 if the
+// query is not available on the platform.
 iree_task_topology_node_id_t iree_task_topology_query_current_node(void);
 
 //===----------------------------------------------------------------------===//
@@ -115,12 +117,18 @@ void iree_task_topology_group_initialize(uint8_t group_index,
 // We can add the more common heuristics over time to the core and leave the
 // edge cases for applications to construct.
 typedef struct iree_task_topology_t {
-  // NUMA node this topology was created for, or
-  // IREE_TASK_TOPOLOGY_NODE_ID_ANY if unspecified.
-  iree_task_topology_node_id_t node_id;
+  // Number of populated worker groups.
   iree_host_size_t group_count;
+  // Worker placement and cache-sharing descriptions.
   iree_task_topology_group_t groups[IREE_TASK_TOPOLOGY_MAX_GROUP_COUNT];
 } iree_task_topology_t;
+
+// Resolves the common physical NUMA node of the topology's worker affinities.
+// Returns IREE_NUMA_NODE_ANY when placement is unknown or spans memory nodes.
+// This may query the platform topology and belongs on construction paths.
+// The result describes CPU placement, not the placement of worker allocations.
+iree_numa_node_id_t iree_task_topology_query_numa_node(
+    const iree_task_topology_t* topology);
 
 // Initializes an empty task topology.
 void iree_task_topology_initialize(iree_task_topology_t* out_topology);
@@ -213,9 +221,8 @@ typedef enum iree_task_topology_performance_level_e {
 } iree_task_topology_performance_level_t;
 
 // Strategy for distributing cores across cache domains (CCXs) within the
-// selected NUMA node(s). NUMA locality is controlled by the node_id parameter -
-// use IREE_TASK_TOPOLOGY_NODE_ID_ANY to select cores from any node, or specify
-// a specific node_id to limit cores to that NUMA node.
+// selected worker placement domain(s). The node_id parameter selects the
+// platform-specific domain; IREE_TASK_TOPOLOGY_NODE_ID_ANY permits any domain.
 typedef enum iree_task_topology_distribution_e {
   // Fill cache domains sequentially before moving to the next.
   // Maximizes L3 cache locality - best for compute-intensive workloads where
@@ -230,9 +237,9 @@ typedef enum iree_task_topology_distribution_e {
 } iree_task_topology_distribution_t;
 
 // Initializes a topology with one group for each physical core with the given
-// NUMA |node_id| (usually package or cluster). Up to |max_core_count| physical
-// cores will be selected from the node and distributed according to
-// |distribution| strategy across cache domains.
+// placement domain |node_id| (usually package or cluster). Up to
+// |max_core_count| physical cores will be selected from the node and
+// distributed according to |distribution| strategy across cache domains.
 iree_status_t iree_task_topology_initialize_from_physical_cores(
     iree_task_topology_node_id_t node_id,
     iree_task_topology_performance_level_t performance_level,

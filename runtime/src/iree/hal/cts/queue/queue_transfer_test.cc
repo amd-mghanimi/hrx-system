@@ -61,9 +61,10 @@ class QueueTransferTest : public CtsTestBase<> {
                         iree_host_size_t pattern_length) {
     SemaphoreList signal(device_, {0}, {1});
     SemaphoreList empty_wait;
-    IREE_ASSERT_OK(iree_hal_queue_fill(
-        transfer_queue_, empty_wait, signal, target_buffer, target_offset,
-        length, pattern, pattern_length, IREE_HAL_FILL_FLAG_NONE));
+    IREE_ASSERT_OK(
+        iree_hal_queue_fill(transfer_queue_, empty_wait, signal, target_buffer,
+                            target_offset, length, pattern, pattern_length,
+                            /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
     IREE_ASSERT_OK(iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
                                                 IREE_ASYNC_WAIT_FLAG_NONE));
   }
@@ -78,7 +79,8 @@ class QueueTransferTest : public CtsTestBase<> {
     SemaphoreList empty_wait;
     IREE_ASSERT_OK(iree_hal_queue_update(
         transfer_queue_, empty_wait, signal, source_buffer, source_offset,
-        target_buffer, target_offset, length, IREE_HAL_UPDATE_FLAG_NONE));
+        target_buffer, target_offset, length, /*barriers=*/NULL,
+        IREE_HAL_UPDATE_FLAG_NONE));
     IREE_ASSERT_OK(iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
                                                 IREE_ASYNC_WAIT_FLAG_NONE));
   }
@@ -91,9 +93,10 @@ class QueueTransferTest : public CtsTestBase<> {
                         iree_device_size_t length) {
     SemaphoreList signal(device_, {0}, {1});
     SemaphoreList empty_wait;
-    IREE_ASSERT_OK(iree_hal_queue_copy(
-        transfer_queue_, empty_wait, signal, source_buffer, source_offset,
-        target_buffer, target_offset, length, IREE_HAL_COPY_FLAG_NONE));
+    IREE_ASSERT_OK(
+        iree_hal_queue_copy(transfer_queue_, empty_wait, signal, source_buffer,
+                            source_offset, target_buffer, target_offset, length,
+                            /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
     IREE_ASSERT_OK(iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
                                                 IREE_ASYNC_WAIT_FLAG_NONE));
   }
@@ -155,9 +158,20 @@ TEST_P(QueueTransferTest, TransferExecutesMixedBatch) {
 
   SemaphoreList empty_wait;
   SemaphoreList signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_transfer(transfer_queue_, empty_wait, signal,
-                                         IREE_ARRAYSIZE(operations),
-                                         operations));
+  {
+    iree_hal_barrier_t before = {
+        .flags = IREE_HAL_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE,
+    };
+    iree_hal_barrier_t after = {
+        .flags = IREE_HAL_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE,
+    };
+    const iree_hal_barrier_list_t before_list = {1, &before};
+    const iree_hal_barrier_list_t after_list = {1, &after};
+    const iree_hal_queue_barriers_t barriers = {&before_list, &after_list};
+    IREE_ASSERT_OK(iree_hal_queue_transfer(transfer_queue_, empty_wait, signal,
+                                           IREE_ARRAYSIZE(operations),
+                                           operations, &barriers));
+  }
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
                                               IREE_ASYNC_WAIT_FLAG_NONE));
 
@@ -172,35 +186,54 @@ TEST_P(QueueTransferTest, TransferExecutesMixedBatch) {
 }
 
 TEST_P(QueueTransferTest, BufferViewStagingRoundTrip) {
-  const iree_hal_queue_family_ordinal_t transfer_family_ordinal =
-      iree_hal_queue_family_ordinal(iree_hal_queue_family(transfer_queue_));
-  const iree_hal_queue_family_affinity_t transfer_family_affinity =
-      iree_hal_make_queue_family_affinity(transfer_family_ordinal);
   const iree_hal_dim_t shape[] = {2, 2};
   int32_t source_values[] = {1, 2, 3, 4};
 
-  const iree_hal_buffer_params_t staging_params = {
-      /*.usage=*/IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE,
-      /*.access=*/IREE_HAL_MEMORY_ACCESS_ALL,
-      /*.type=*/
-      IREE_HAL_MEMORY_TYPE_HOST_LOCAL | IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE,
-      /*.queue_family_affinity=*/transfer_family_affinity,
+  const iree_hal_pool_family_access_t staging_family = {
+      .family = iree_hal_queue_family(transfer_queue_),
+      .usage = IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE,
   };
+  const iree_hal_pool_scope_t staging_scope = {
+      .family_count = 1,
+      .families = &staging_family,
+      .host =
+          {
+              .access =
+                  IREE_HAL_MEMORY_ACCESS_READ | IREE_HAL_MEMORY_ACCESS_WRITE,
+              .modes = IREE_HAL_MAPPING_MODE_SCOPED,
+          },
+  };
+  iree_hal_slab_pool_options_t staging_options;
+  iree_hal_slab_pool_options_initialize(&staging_options);
+  Ref<iree_hal_pool_t> staging_pool;
+  IREE_ASSERT_OK(
+      iree_hal_slab_pool_create(device_group_, staging_scope, &staging_options,
+                                iree_allocator_system(), staging_pool.out()));
+
   Ref<iree_hal_buffer_view_t> staging_view;
   IREE_ASSERT_OK(iree_hal_buffer_view_generate(
-      device_allocator_, staging_params, IREE_ARRAYSIZE(shape), shape,
+      staging_pool, /*min_alignment=*/0, IREE_ARRAYSIZE(shape), shape,
       IREE_HAL_ELEMENT_TYPE_INT_32, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
       GenerateI32Contents, source_values, staging_view.out()));
 
-  const iree_hal_buffer_params_t device_params = {
-      /*.usage=*/IREE_HAL_BUFFER_USAGE_TRANSFER,
-      /*.access=*/IREE_HAL_MEMORY_ACCESS_ALL,
-      /*.type=*/IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-      /*.queue_family_affinity=*/transfer_family_affinity,
+  const iree_hal_pool_family_access_t device_family = {
+      .family = iree_hal_queue_family(transfer_queue_),
+      .usage = IREE_HAL_BUFFER_USAGE_TRANSFER,
   };
+  const iree_hal_pool_scope_t device_scope = {
+      .family_count = 1,
+      .families = &device_family,
+  };
+  iree_hal_slab_pool_options_t device_options;
+  iree_hal_slab_pool_options_initialize(&device_options);
+  Ref<iree_hal_pool_t> device_pool;
+  IREE_ASSERT_OK(
+      iree_hal_slab_pool_create(device_group_, device_scope, &device_options,
+                                iree_allocator_system(), device_pool.out()));
+
   Ref<iree_hal_buffer_view_t> device_view;
   IREE_ASSERT_OK(iree_hal_buffer_view_create_uninitialized_like(
-      device_allocator_, device_params, staging_view, device_view.out()));
+      device_pool, /*min_alignment=*/0, staging_view, device_view.out()));
 
   SemaphoreList empty_wait;
   SemaphoreList copy_signal(device_, {0}, {1});
@@ -208,14 +241,15 @@ TEST_P(QueueTransferTest, BufferViewStagingRoundTrip) {
       transfer_queue_, empty_wait, copy_signal,
       iree_hal_buffer_view_buffer(staging_view),
       /*source_offset=*/0, iree_hal_buffer_view_buffer(device_view),
-      /*target_offset=*/0, sizeof(source_values), IREE_HAL_COPY_FLAG_NONE));
+      /*target_offset=*/0, sizeof(source_values), /*barriers=*/NULL,
+      IREE_HAL_COPY_FLAG_NONE));
 
   int32_t downloaded_values[IREE_ARRAYSIZE(source_values)] = {0};
   SemaphoreList download_signal(device_, {0}, {1});
   IREE_ASSERT_OK(iree_hal_queue_download(
       transfer_queue_, copy_signal, download_signal,
       iree_hal_buffer_view_buffer(device_view), /*source_offset=*/0,
-      downloaded_values, sizeof(downloaded_values)));
+      downloaded_values, sizeof(downloaded_values), /*barriers=*/NULL));
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       download_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
 
@@ -239,7 +273,7 @@ TEST_P(QueueTransferTest, UploadReadsSourceAfterWaitResolves) {
   SemaphoreList upload_signal(device_, {0}, {1});
   IREE_ASSERT_OK(iree_hal_queue_upload(transfer_queue_, upload_wait,
                                        upload_signal, source.data(), target, 0,
-                                       kBufferSize));
+                                       kBufferSize, /*barriers=*/NULL));
   std::fill(source.begin(), source.end(), 0xE7);
   IREE_ASSERT_OK(iree_hal_semaphore_signal(upload_wait.semaphores[0], 1,
                                            /*frontier=*/nullptr));
@@ -259,9 +293,9 @@ TEST_P(QueueTransferTest, DownloadWritesBeforeSignaling) {
 
   SemaphoreList download_wait(device_, {0}, {1});
   SemaphoreList download_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_download(transfer_queue_, download_wait,
-                                         download_signal, source, 0,
-                                         target.data(), kBufferSize));
+  IREE_ASSERT_OK(iree_hal_queue_download(
+      transfer_queue_, download_wait, download_signal, source, 0, target.data(),
+      kBufferSize, /*barriers=*/NULL));
 
   uint64_t signal_value = 0;
   IREE_ASSERT_OK(
@@ -286,11 +320,12 @@ TEST_P(QueueTransferTest, BorrowedHostRangesRequireSignalSemaphore) {
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_INVALID_ARGUMENT,
       iree_hal_queue_upload(transfer_queue_, empty_list, empty_list,
-                            host_data.data(), buffer, 0, kBufferSize));
-  IREE_EXPECT_STATUS_IS(
-      IREE_STATUS_INVALID_ARGUMENT,
-      iree_hal_queue_download(transfer_queue_, empty_list, empty_list, buffer,
-                              0, host_data.data(), kBufferSize));
+                            host_data.data(), buffer, 0, kBufferSize,
+                            /*barriers=*/NULL));
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        iree_hal_queue_download(
+                            transfer_queue_, empty_list, empty_list, buffer, 0,
+                            host_data.data(), kBufferSize, /*barriers=*/NULL));
 }
 
 TEST_P(QueueTransferTest, ValidationFailureRejectsCompleteBatch) {
@@ -317,7 +352,8 @@ TEST_P(QueueTransferTest, ValidationFailureRejectsCompleteBatch) {
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_OUT_OF_RANGE,
       iree_hal_queue_transfer(transfer_queue_, empty_wait, signal,
-                              IREE_ARRAYSIZE(operations), operations));
+                              IREE_ARRAYSIZE(operations), operations,
+                              /*barriers=*/NULL));
 
   uint64_t signal_value = 0;
   IREE_ASSERT_OK(iree_hal_semaphore_query(signal.semaphores[0], &signal_value));
@@ -345,9 +381,9 @@ TEST_P(QueueTransferTest, ZeroLengthEntriesFormBarrier) {
 
   SemaphoreList barrier_wait(device_, {0}, {1});
   SemaphoreList barrier_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(
-      iree_hal_queue_transfer(transfer_queue_, barrier_wait, barrier_signal,
-                              IREE_ARRAYSIZE(operations), operations));
+  IREE_ASSERT_OK(iree_hal_queue_transfer(
+      transfer_queue_, barrier_wait, barrier_signal, IREE_ARRAYSIZE(operations),
+      operations, /*barriers=*/NULL));
 
   uint64_t signal_value = 0;
   IREE_ASSERT_OK(
@@ -358,6 +394,47 @@ TEST_P(QueueTransferTest, ZeroLengthEntriesFormBarrier) {
                                            /*frontier=*/nullptr));
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       barrier_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
+}
+
+TEST_P(QueueTransferTest, EmptyTransferValidatesAndCapturesBoundaries) {
+  SemaphoreList empty;
+  SemaphoreList wait(device_, {0}, {1});
+  SemaphoreList signal(device_, {0}, {1});
+  iree_hal_barrier_t action = {};
+  const iree_hal_barrier_list_t list = {1, &action};
+  const iree_hal_barrier_list_t no_actions = {};
+  const iree_hal_queue_barriers_t barriers = {&list, &no_actions};
+
+  action.effects.bits = IREE_HAL_MEMORY_EFFECT_UNSUPPORTED;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_UNAVAILABLE,
+                        iree_hal_queue_transfer(transfer_queue_, empty, signal,
+                                                0, nullptr, &barriers));
+  action.effects.bits = IREE_HAL_MEMORY_EFFECT_HOST_FLUSH;
+  const auto missing_host_operand_status =
+      iree_any_bit_set(iree_hal_queue_family(transfer_queue_)->spec->flags,
+                       IREE_HAL_QUEUE_FAMILY_SPEC_FLAG_HOST_MEMORY_BARRIERS)
+          ? IREE_STATUS_INVALID_ARGUMENT
+          : IREE_STATUS_UNIMPLEMENTED;
+  IREE_EXPECT_STATUS_IS(missing_host_operand_status,
+                        iree_hal_queue_transfer(transfer_queue_, empty, signal,
+                                                0, nullptr, &barriers));
+  action.effects.bits = 0;
+  action.source_stage_mask = 1u << 31;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        iree_hal_queue_transfer(transfer_queue_, empty, signal,
+                                                0, nullptr, &barriers));
+  action.source_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER;
+  action.flags = IREE_HAL_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE;
+  IREE_ASSERT_OK(iree_hal_queue_transfer(transfer_queue_, wait, signal, 0,
+                                         nullptr, &barriers));
+  // Changing the original descriptor cannot change an accepted operation.
+  action.effects.bits = IREE_HAL_MEMORY_EFFECT_UNSUPPORTED;
+  uint64_t value = UINT64_MAX;
+  IREE_ASSERT_OK(iree_hal_semaphore_query(signal.semaphores[0], &value));
+  EXPECT_EQ(value, 0u);
+  IREE_ASSERT_OK(iree_hal_semaphore_signal(wait.semaphores[0], 1, nullptr));
+  IREE_ASSERT_OK(iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
+                                              IREE_ASYNC_WAIT_FLAG_NONE));
 }
 
 //===----------------------------------------------------------------------===//
@@ -459,50 +536,138 @@ TEST_P(QueueTransferTest, FillSizeAlignmentAndPatternClasses) {
     uint32_t pattern = 0;
   };
   const FillCase cases[] = {
-      {/*.pattern_length=*/1, /*.target_offset=*/0,
-       /*.fill_length=*/4, /*.pattern=*/0x000000A5u},
-      {/*.pattern_length=*/1, /*.target_offset=*/0,
-       /*.fill_length=*/8, /*.pattern=*/0x0000005Bu},
-      {/*.pattern_length=*/1, /*.target_offset=*/3,
-       /*.fill_length=*/31, /*.pattern=*/0x0000005Au},
-      {/*.pattern_length=*/1, /*.target_offset=*/17,
-       /*.fill_length=*/32, /*.pattern=*/0x000000C3u},
-      {/*.pattern_length=*/1, /*.target_offset=*/1,
-       /*.fill_length=*/33, /*.pattern=*/0x0000003Cu},
-      {/*.pattern_length=*/1, /*.target_offset=*/16,
-       /*.fill_length=*/64, /*.pattern=*/0x000000D7u},
-      {/*.pattern_length=*/1, /*.target_offset=*/7,
-       /*.fill_length=*/1024, /*.pattern=*/0x00000019u},
-      {/*.pattern_length=*/1, /*.target_offset=*/31,
-       /*.fill_length=*/64 * 1024, /*.pattern=*/0x000000E1u},
-      {/*.pattern_length=*/2, /*.target_offset=*/0,
-       /*.fill_length=*/4, /*.pattern=*/0x0000BEEFu},
-      {/*.pattern_length=*/2, /*.target_offset=*/0,
-       /*.fill_length=*/8, /*.pattern=*/0x00001234u},
-      {/*.pattern_length=*/2, /*.target_offset=*/2,
-       /*.fill_length=*/30, /*.pattern=*/0x0000CAFEu},
-      {/*.pattern_length=*/2, /*.target_offset=*/6,
-       /*.fill_length=*/32, /*.pattern=*/0x00001234u},
-      {/*.pattern_length=*/2, /*.target_offset=*/18,
-       /*.fill_length=*/34, /*.pattern=*/0x0000A1B2u},
-      {/*.pattern_length=*/2, /*.target_offset=*/4,
-       /*.fill_length=*/1024, /*.pattern=*/0x00000F0Eu},
-      {/*.pattern_length=*/2, /*.target_offset=*/14,
-       /*.fill_length=*/64 * 1024, /*.pattern=*/0x000055AAu},
-      {/*.pattern_length=*/4, /*.target_offset=*/0,
-       /*.fill_length=*/4, /*.pattern=*/0xDEADCAFEu},
-      {/*.pattern_length=*/4, /*.target_offset=*/0,
-       /*.fill_length=*/8, /*.pattern=*/0xF00DCAFEu},
-      {/*.pattern_length=*/4, /*.target_offset=*/4,
-       /*.fill_length=*/28, /*.pattern=*/0xCAFEF00Du},
-      {/*.pattern_length=*/4, /*.target_offset=*/8,
-       /*.fill_length=*/32, /*.pattern=*/0x12345678u},
-      {/*.pattern_length=*/4, /*.target_offset=*/20,
-       /*.fill_length=*/36, /*.pattern=*/0xA5A55A5Au},
-      {/*.pattern_length=*/4, /*.target_offset=*/4,
-       /*.fill_length=*/1024, /*.pattern=*/0x0F1E2D3Cu},
-      {/*.pattern_length=*/4, /*.target_offset=*/12,
-       /*.fill_length=*/64 * 1024, /*.pattern=*/0x55AA33CCu},
+      {
+          .pattern_length = 1,
+          .target_offset = 0,
+          .fill_length = 4,
+          .pattern = 0x000000A5u,
+      },
+      {
+          .pattern_length = 1,
+          .target_offset = 0,
+          .fill_length = 8,
+          .pattern = 0x0000005Bu,
+      },
+      {
+          .pattern_length = 1,
+          .target_offset = 3,
+          .fill_length = 31,
+          .pattern = 0x0000005Au,
+      },
+      {
+          .pattern_length = 1,
+          .target_offset = 17,
+          .fill_length = 32,
+          .pattern = 0x000000C3u,
+      },
+      {
+          .pattern_length = 1,
+          .target_offset = 1,
+          .fill_length = 33,
+          .pattern = 0x0000003Cu,
+      },
+      {
+          .pattern_length = 1,
+          .target_offset = 16,
+          .fill_length = 64,
+          .pattern = 0x000000D7u,
+      },
+      {
+          .pattern_length = 1,
+          .target_offset = 7,
+          .fill_length = 1024,
+          .pattern = 0x00000019u,
+      },
+      {
+          .pattern_length = 1,
+          .target_offset = 31,
+          .fill_length = 64 * 1024,
+          .pattern = 0x000000E1u,
+      },
+      {
+          .pattern_length = 2,
+          .target_offset = 0,
+          .fill_length = 4,
+          .pattern = 0x0000BEEFu,
+      },
+      {
+          .pattern_length = 2,
+          .target_offset = 0,
+          .fill_length = 8,
+          .pattern = 0x00001234u,
+      },
+      {
+          .pattern_length = 2,
+          .target_offset = 2,
+          .fill_length = 30,
+          .pattern = 0x0000CAFEu,
+      },
+      {
+          .pattern_length = 2,
+          .target_offset = 6,
+          .fill_length = 32,
+          .pattern = 0x00001234u,
+      },
+      {
+          .pattern_length = 2,
+          .target_offset = 18,
+          .fill_length = 34,
+          .pattern = 0x0000A1B2u,
+      },
+      {
+          .pattern_length = 2,
+          .target_offset = 4,
+          .fill_length = 1024,
+          .pattern = 0x00000F0Eu,
+      },
+      {
+          .pattern_length = 2,
+          .target_offset = 14,
+          .fill_length = 64 * 1024,
+          .pattern = 0x000055AAu,
+      },
+      {
+          .pattern_length = 4,
+          .target_offset = 0,
+          .fill_length = 4,
+          .pattern = 0xDEADCAFEu,
+      },
+      {
+          .pattern_length = 4,
+          .target_offset = 0,
+          .fill_length = 8,
+          .pattern = 0xF00DCAFEu,
+      },
+      {
+          .pattern_length = 4,
+          .target_offset = 4,
+          .fill_length = 28,
+          .pattern = 0xCAFEF00Du,
+      },
+      {
+          .pattern_length = 4,
+          .target_offset = 8,
+          .fill_length = 32,
+          .pattern = 0x12345678u,
+      },
+      {
+          .pattern_length = 4,
+          .target_offset = 20,
+          .fill_length = 36,
+          .pattern = 0xA5A55A5Au,
+      },
+      {
+          .pattern_length = 4,
+          .target_offset = 4,
+          .fill_length = 1024,
+          .pattern = 0x0F1E2D3Cu,
+      },
+      {
+          .pattern_length = 4,
+          .target_offset = 12,
+          .fill_length = 64 * 1024,
+          .pattern = 0x55AA33CCu,
+      },
   };
 
   for (const FillCase& test_case : cases) {
@@ -640,7 +805,8 @@ TEST_P(QueueTransferTest, UpdateCapturesSourceBeforeWaitResolves) {
   SemaphoreList update_signal(device_, {0}, {1});
   IREE_ASSERT_OK(iree_hal_queue_update(
       transfer_queue_, update_wait, update_signal, source.data(), source_offset,
-      buffer, target_offset, update_length, IREE_HAL_UPDATE_FLAG_NONE));
+      buffer, target_offset, update_length, /*barriers=*/NULL,
+      IREE_HAL_UPDATE_FLAG_NONE));
 
   std::fill(source.begin(), source.end(), 0xEE);
   IREE_ASSERT_OK(iree_hal_semaphore_signal(update_wait.semaphores[0], 1,
@@ -659,12 +825,12 @@ TEST_P(QueueTransferTest, UpdateSizeAndAlignmentClasses) {
     iree_device_size_t update_length = 0;
   };
   const UpdateCase cases[] = {
-      {/*.source_offset=*/0, /*.target_offset=*/0, /*.update_length=*/4},
-      {/*.source_offset=*/3, /*.target_offset=*/0, /*.update_length=*/8},
-      {/*.source_offset=*/5, /*.target_offset=*/4, /*.update_length=*/8},
-      {/*.source_offset=*/1, /*.target_offset=*/1, /*.update_length=*/4},
-      {/*.source_offset=*/0, /*.target_offset=*/0, /*.update_length=*/16},
-      {/*.source_offset=*/7, /*.target_offset=*/9, /*.update_length=*/528},
+      {.source_offset = 0, .target_offset = 0, .update_length = 4},
+      {.source_offset = 3, .target_offset = 0, .update_length = 8},
+      {.source_offset = 5, .target_offset = 4, .update_length = 8},
+      {.source_offset = 1, .target_offset = 1, .update_length = 4},
+      {.source_offset = 0, .target_offset = 0, .update_length = 16},
+      {.source_offset = 7, .target_offset = 9, .update_length = 528},
   };
 
   for (const UpdateCase& test_case : cases) {
@@ -770,10 +936,10 @@ TEST_P(QueueTransferTest, CopySizeAndAlignmentClasses) {
     iree_device_size_t target_offset = 0;
   };
   const AlignmentCase alignment_cases[] = {
-      {/*.name=*/"aligned16", /*.source_offset=*/0, /*.target_offset=*/0},
-      {/*.name=*/"aligned8_not16", /*.source_offset=*/8, /*.target_offset=*/8},
-      {/*.name=*/"aligned4_not8", /*.source_offset=*/4, /*.target_offset=*/4},
-      {/*.name=*/"byte_misaligned", /*.source_offset=*/1, /*.target_offset=*/2},
+      {.name = "aligned16", .source_offset = 0, .target_offset = 0},
+      {.name = "aligned8_not16", .source_offset = 8, .target_offset = 8},
+      {.name = "aligned4_not8", .source_offset = 4, .target_offset = 4},
+      {.name = "byte_misaligned", .source_offset = 1, .target_offset = 2},
   };
   const iree_device_size_t common_sizes[] = {
       4, 8, 16, 31, 32, 33, 64, 128, 256, 1024, 4 * 1024, 16 * 1024, 64 * 1024,
@@ -840,7 +1006,7 @@ TEST_P(QueueTransferTest, BurstCopySubmit) {
                                 std::vector<uint64_t>{1});
       IREE_ASSERT_OK(iree_hal_queue_copy(
           transfer_queue_, empty_wait, copy_signals.back(), source, 0, target,
-          kBurstCopySize * submit_ordinal, kBurstCopySize,
+          kBurstCopySize * submit_ordinal, kBurstCopySize, /*barriers=*/NULL,
           IREE_HAL_COPY_FLAG_NONE))
           << "iteration " << iteration << " submit " << submit_ordinal;
     }
@@ -885,14 +1051,14 @@ TEST_P(QueueTransferTest, FillAndCopyHostQueueEventProfiling) {
   SemaphoreList empty_wait;
   SemaphoreList fill_signal(device_, {0}, {1});
   uint32_t pattern = 0xA5A5A5A5u;
-  IREE_ASSERT_OK(iree_hal_queue_fill(transfer_queue_, empty_wait, fill_signal,
-                                     source, 0, buffer_size, &pattern,
-                                     sizeof(pattern), IREE_HAL_FILL_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_fill(
+      transfer_queue_, empty_wait, fill_signal, source, 0, buffer_size,
+      &pattern, sizeof(pattern), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
 
   SemaphoreList copy_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_copy(transfer_queue_, fill_signal, copy_signal,
-                                     source, 0, target, 0, buffer_size,
-                                     IREE_HAL_COPY_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_copy(
+      transfer_queue_, fill_signal, copy_signal, source, 0, target, 0,
+      buffer_size, /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       copy_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
 
@@ -967,16 +1133,16 @@ TEST_P(QueueTransferTest, ChainedFillThenCopy) {
   SemaphoreList fill_signal(device_, {0}, {1});
   SemaphoreList empty_wait;
   uint32_t pattern = 0x11223344;
-  IREE_ASSERT_OK(iree_hal_queue_fill(transfer_queue_, empty_wait, fill_signal,
-                                     source, 0, buffer_size, &pattern,
-                                     sizeof(pattern), IREE_HAL_FILL_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_fill(
+      transfer_queue_, empty_wait, fill_signal, source, 0, buffer_size,
+      &pattern, sizeof(pattern), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
 
   // Copy waits on fill completion (value 1), signals at value 1 on its own
   // semaphore.
   SemaphoreList copy_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_copy(transfer_queue_, fill_signal, copy_signal,
-                                     source, 0, target, 0, buffer_size,
-                                     IREE_HAL_COPY_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_copy(
+      transfer_queue_, fill_signal, copy_signal, source, 0, target, 0,
+      buffer_size, /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
 
   // Only wait on the copy's signal — if ordering is correct, the fill has
   // completed by the time the copy reads from source.
@@ -1005,13 +1171,13 @@ TEST_P(QueueTransferTest, ChainedUpdateThenCopy) {
   SemaphoreList empty_wait;
   IREE_ASSERT_OK(iree_hal_queue_update(
       transfer_queue_, empty_wait, update_signal, host_data.data(), 0, source,
-      0, buffer_size, IREE_HAL_UPDATE_FLAG_NONE));
+      0, buffer_size, /*barriers=*/NULL, IREE_HAL_UPDATE_FLAG_NONE));
 
   // Copy waits on update, signals its own semaphore.
   SemaphoreList copy_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_copy(transfer_queue_, update_signal,
-                                     copy_signal, source, 0, target, 0,
-                                     buffer_size, IREE_HAL_COPY_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_copy(
+      transfer_queue_, update_signal, copy_signal, source, 0, target, 0,
+      buffer_size, /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
 
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       copy_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
@@ -1036,20 +1202,20 @@ TEST_P(QueueTransferTest, ChainedFillCopyFill) {
   uint8_t pattern1 = 0xAA;
   IREE_ASSERT_OK(iree_hal_queue_fill(
       transfer_queue_, empty_wait, step1_signal, buffer_a, 0, buffer_size,
-      &pattern1, sizeof(pattern1), IREE_HAL_FILL_FLAG_NONE));
+      &pattern1, sizeof(pattern1), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
 
   // Step 2: copy buffer_a → buffer_b (waits on step 1).
   SemaphoreList step2_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_copy(transfer_queue_, step1_signal,
-                                     step2_signal, buffer_a, 0, buffer_b, 0,
-                                     buffer_size, IREE_HAL_COPY_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_copy(
+      transfer_queue_, step1_signal, step2_signal, buffer_a, 0, buffer_b, 0,
+      buffer_size, /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
 
   // Step 3: fill buffer_a with 0xBB (waits on step 2, so copy has read a).
   SemaphoreList step3_signal(device_, {0}, {1});
   uint8_t pattern3 = 0xBB;
   IREE_ASSERT_OK(iree_hal_queue_fill(
       transfer_queue_, step2_signal, step3_signal, buffer_a, 0, buffer_size,
-      &pattern3, sizeof(pattern3), IREE_HAL_FILL_FLAG_NONE));
+      &pattern3, sizeof(pattern3), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
 
   // Wait for the full chain.
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
@@ -1074,7 +1240,8 @@ TEST_P(QueueTransferTest, BarrierSignals) {
   SemaphoreList empty_wait;
   IREE_ASSERT_OK(iree_hal_queue_transfer(transfer_queue_, empty_wait, signal,
                                          /*operation_count=*/0,
-                                         /*operations=*/nullptr));
+                                         /*operations=*/nullptr,
+                                         /*barriers=*/NULL));
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
                                               IREE_ASYNC_WAIT_FLAG_NONE));
 }
@@ -1092,22 +1259,22 @@ TEST_P(QueueTransferTest, BarrierPreservesOrdering) {
   // Fill source.
   SemaphoreList fill_signal(device_, {0}, {1});
   uint32_t pattern = 0xBAADF00D;
-  IREE_ASSERT_OK(iree_hal_queue_fill(transfer_queue_, empty_wait, fill_signal,
-                                     source, 0, buffer_size, &pattern,
-                                     sizeof(pattern), IREE_HAL_FILL_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_fill(
+      transfer_queue_, empty_wait, fill_signal, source, 0, buffer_size,
+      &pattern, sizeof(pattern), /*barriers=*/NULL, IREE_HAL_FILL_FLAG_NONE));
 
   // Barrier between fill and copy.
   SemaphoreList barrier_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_transfer(transfer_queue_, fill_signal,
-                                         barrier_signal,
-                                         /*operation_count=*/0,
-                                         /*operations=*/nullptr));
+  IREE_ASSERT_OK(
+      iree_hal_queue_transfer(transfer_queue_, fill_signal, barrier_signal,
+                              /*operation_count=*/0,
+                              /*operations=*/nullptr, /*barriers=*/NULL));
 
   // Copy waits on barrier.
   SemaphoreList copy_signal(device_, {0}, {1});
-  IREE_ASSERT_OK(iree_hal_queue_copy(transfer_queue_, barrier_signal,
-                                     copy_signal, source, 0, target, 0,
-                                     buffer_size, IREE_HAL_COPY_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_queue_copy(
+      transfer_queue_, barrier_signal, copy_signal, source, 0, target, 0,
+      buffer_size, /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE));
 
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       copy_signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));

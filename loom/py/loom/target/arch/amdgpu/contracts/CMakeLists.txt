@@ -16,11 +16,13 @@ iree_py_library(
     "__init__.py"
     "arithmetic.py"
     "async.py"
+    "bfloat.py"
     "buffer.py"
     "compare.py"
     "config.py"
     "dispatch_ownership.py"
     "dot.py"
+    "index_bitwise.py"
     "integer.py"
     "integer_division.py"
     "materializers.py"
@@ -34,10 +36,12 @@ iree_py_library(
     loom::py::loom::core
     loom::py::loom::dialect::buffer::buffer
     loom::py::loom::dialect::config::config
+    loom::py::loom::dialect::globals::globals
     loom::py::loom::dialect::index::index
     loom::py::loom::dialect::kernel::kernel
     loom::py::loom::dialect::sanitizer::sanitizer
     loom::py::loom::dialect::scalar::scalar
+    loom::py::loom::dialect::scf::scf
     loom::py::loom::dialect::vector::vector
     loom::py::loom::dialect::view::view
     loom::py::loom::target::contract_fragments
@@ -52,10 +56,12 @@ iree_py_test(
     "../../../../tools/pytest_style_runner.py"
   SRCS
     "arithmetic_test.py"
+    "compare_test.py"
     "dispatch_ownership_test.py"
     "../../../../tools/pytest_style_runner.py"
   ARGS
     "loom.target.arch.amdgpu.contracts.arithmetic_test"
+    "loom.target.arch.amdgpu.contracts.compare_test"
     "loom.target.arch.amdgpu.contracts.dispatch_ownership_test"
   DATA
     "${PROJECT_SOURCE_DIR}/loom/src/loom/target/arch/amdgpu/lower/registry.c"

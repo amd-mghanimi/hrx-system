@@ -14,6 +14,8 @@
 #include "loom/analysis/liveness.h"
 #include "loom/codegen/low/function.h"
 #include "loom/codegen/low/memory_access.h"
+#include "loom/codegen/low/representation_binding.h"
+#include "loom/codegen/low/schedule/dependency_incoming.h"
 #include "loom/codegen/low/schedule/dependency_index.h"
 #include "loom/codegen/low/schedule/resource_calendar.h"
 #include "loom/codegen/low/schedule/setup_order.h"
@@ -30,6 +32,11 @@ extern "C" {
 #endif
 
 #define LOOM_LOW_SCHEDULE_PAIR_AFFINITY_RECORD_NONE UINT32_MAX
+
+typedef struct loom_low_allocation_target_constraints_t
+    loom_low_allocation_target_constraints_t;
+typedef struct loom_low_schedule_call_pressure_table_t
+    loom_low_schedule_call_pressure_table_t;
 
 typedef struct loom_low_schedule_dependency_endpoint_t {
   // Descriptor-local attachment row, or LOOM_LOW_ID_NONE.
@@ -161,30 +168,54 @@ enum loom_low_schedule_value_flag_bits_e {
   LOOM_LOW_SCHEDULE_VALUE_FLAG_ACTIVE_PRESSURE_ALIAS = 1u << 4,
   // Value ordinal is present in the pressure state's touched-value list.
   LOOM_LOW_SCHEDULE_VALUE_FLAG_PRESSURE_TOUCHED = 1u << 5,
+  // Storage survives the block through a live-out value or branch payload.
+  LOOM_LOW_SCHEDULE_VALUE_FLAG_FORWARDED = 1u << 6,
+  // At least one occurrence in the current candidate reads after result writes.
+  LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_LATE_READ = 1u << 7,
+  // Allocation requires this value to remain in physical register storage.
+  LOOM_LOW_SCHEDULE_VALUE_FLAG_REQUIRES_REGISTER = 1u << 8,
+  // Definition creates independent storage before its input reads complete.
+  LOOM_LOW_SCHEDULE_VALUE_FLAG_EARLY_WRITE = 1u << 9,
 };
 typedef uint16_t loom_low_schedule_value_flags_t;
 
+// Selected local exit for one value in a bounded unspillable pressure domain.
+typedef struct loom_low_schedule_unspillable_completion_path_t {
+  // Additional live units needed to reach the exit from the value producer.
+  uint32_t activation_units;
+  // Exit node, or LOOM_LOW_SCHEDULE_NODE_NONE when no local exit is reachable.
+  uint32_t sink;
+} loom_low_schedule_unspillable_completion_path_t;
+
+// Mutable scheduling facts indexed by function-local value ordinal. The
+// acquired value domain owns the corresponding module value IDs.
 typedef struct loom_low_schedule_value_record_t {
-  // Module value represented by this local record.
-  loom_value_id_t value_id;
-  // Defining node index, or NONE for block arguments/external definitions.
-  uint32_t producer_node;
   // First same-class architectural-state writer after the producer.
   loom_low_schedule_state_access_t state_next_write;
   // Register units contributed to the pressure model.
   uint32_t unit_count;
   // Live units currently charged to this value in the pressure model.
   uint32_t live_unit_count;
-  // Remaining operand uses in the current simulated block schedule.
+  // Units inherited before result writes while scoring the current candidate.
+  uint32_t candidate_transferred_units;
+  // Remaining local operands plus one retained use for a block live-out.
   uint32_t remaining_use_count;
+  // Least expensive local exit for a compiler-produced unspillable value.
+  loom_low_schedule_unspillable_completion_path_t unspillable_completion;
   // Descriptor-set-local register class, or LOOM_LOW_REG_CLASS_NONE.
   uint16_t register_class_id;
   // Mutable per-schedule flags.
   loom_low_schedule_value_flags_t flags;
 } loom_low_schedule_value_record_t;
 
-typedef struct loom_low_schedule_alias_pressure_limit_t {
-  // Hard live-unit limit shared by the alias set.
+static inline bool loom_low_schedule_value_requires_register(
+    const loom_low_schedule_value_record_t* value) {
+  return iree_any_bit_set(value->flags,
+                          LOOM_LOW_SCHEDULE_VALUE_FLAG_REQUIRES_REGISTER);
+}
+
+typedef struct loom_low_schedule_pressure_set_limit_t {
+  // Hard live-unit limit shared by the pressure set.
   uint32_t live_unit_limit;
   // Representative descriptor register class used by diagnostics.
   uint16_t representative_reg_class_id;
@@ -192,15 +223,22 @@ typedef struct loom_low_schedule_alias_pressure_limit_t {
   uint16_t unspillable_completion_domain_id;
   // True when every register class sharing the limit is unspillable.
   uint8_t all_classes_unspillable;
-} loom_low_schedule_alias_pressure_limit_t;
+  // True when values or architectural state use multiple member classes.
+  uint8_t has_multiple_active_reg_classes;
+} loom_low_schedule_pressure_set_limit_t;
 
 // One bounded unspillable register-pressure domain.
 typedef struct loom_low_schedule_completion_domain_t {
-  // Hard live-unit capacity, including any shared register alias set.
+  // Hard live-unit capacity, including any shared register pressure set.
   uint32_t capacity;
-  // Representative class selecting the live register or alias-set counter.
+  // Representative class selecting the class or shared pressure counter.
   uint16_t reg_class_id;
 } loom_low_schedule_completion_domain_t;
+
+enum loom_low_schedule_active_reg_class_flag_bits_e {
+  LOOM_LOW_SCHEDULE_ACTIVE_REG_CLASS_FLAG_PRESENT = 1u << 0,
+  LOOM_LOW_SCHEDULE_ACTIVE_REG_CLASS_FLAG_STRUCTURAL_RESULT = 1u << 1,
+};
 
 typedef struct loom_low_schedule_build_state_t {
   // Result-arena block pressure contributions, dense by block then class.
@@ -227,10 +265,16 @@ typedef struct loom_low_schedule_build_state_t {
   loom_low_register_type_resolver_t register_type_resolver;
   // Active function-local value domain for this scheduling run.
   const loom_local_value_domain_t* value_domain;
+  // Canonical physical-storage identities borrowed from function preparation.
+  const loom_value_ordinal_t* storage_origins;
   // Shared read-only control-flow graph for the function body.
   const loom_cfg_graph_t* cfg_graph;
+  // Canonical block-boundary liveness borrowed from the function model.
+  const loom_liveness_dataflow_t* liveness_dataflow;
   // Dense per-local-value scheduler records indexed by value ordinal.
   loom_low_schedule_value_record_t* values;
+  // Defining schedule node indexed by local value ordinal.
+  uint32_t* value_producer_nodes;
   // Schedule block records indexed by region block ordinal.
   loom_low_schedule_block_t* blocks;
   // Schedule node records indexed by scheduler node ordinal.
@@ -249,6 +293,11 @@ typedef struct loom_low_schedule_build_state_t {
   loom_low_schedule_scopes_t scopes;
   // Stable dependency graph accumulated while building the schedule DAG.
   loom_low_schedule_dependency_graph_t dependencies;
+  // New dependency segment storage. Effect construction uses result storage;
+  // other phases use scratch unless full inspection retains the graph.
+  iree_arena_allocator_t* dependency_arena;
+  // Contiguous effect dependencies produced by effect-frontier construction.
+  loom_low_schedule_dependency_range_t effect_dependencies;
   // Producer-retained setup fan-out for exclusive storage and allocation
   // repair.
   loom_low_schedule_setup_order_t setup_order;
@@ -260,6 +309,8 @@ typedef struct loom_low_schedule_build_state_t {
   iree_host_size_t storage_relation_count;
   // Compact producer/consumer groups used by list scheduling.
   loom_low_schedule_dependency_index_t dependency_index;
+  // Same-block dependency groups indexed by consumer for reverse traversals.
+  loom_low_schedule_dependency_incoming_index_t dependency_incoming_index;
   // Node indices in final scheduled order.
   uint32_t* scheduled_node_indices;
   // Contiguous node groups sharing an abstract issue cycle.
@@ -270,6 +321,8 @@ typedef struct loom_low_schedule_build_state_t {
   loom_low_schedule_candidate_decision_t* candidate_decisions;
   // Descriptor effects in scheduled order.
   loom_low_schedule_effect_use_t* effect_uses;
+  // Exact cross-block memory completions retained for target consumers.
+  loom_low_schedule_memory_completion_edge_t* memory_completion_edges;
   // Descriptor hazard rows in scheduled order.
   loom_low_schedule_hazard_use_t* hazard_uses;
   // Minimum-distance hazard gaps in scheduled order.
@@ -280,8 +333,8 @@ typedef struct loom_low_schedule_build_state_t {
   loom_low_schedule_resource_calendar_t resource_calendar;
   // Earliest issue cycle allowed by each node's latency-bearing dependencies.
   uint32_t* node_ready_issue_cycles;
-  // Target-provided issue cost for completion waits required by each node.
-  uint16_t* node_completion_wait_cycles;
+  // Incremental completion-wait costs for resource-stall candidate scoring.
+  uint16_t* node_completion_cost_cycles;
   // Completion latency opened by counter-tracked memory-effect producers.
   uint16_t* node_opened_completion_latency_cycles;
   // Maximum same-block producer latency consumed by each node.
@@ -292,6 +345,9 @@ typedef struct loom_low_schedule_build_state_t {
   uint32_t* node_pressure_demand_units;
   // Maximum downstream register width needed to advance each node's value.
   uint32_t* node_pressure_activation_units;
+  // Downstream activation footprint indexed by schedule node then bounded
+  // unspillable completion domain.
+  uint32_t* node_unspillable_activation_units;
   // Per-node packing facts retained by the reverse priority analysis. Each
   // table is indexed by schedule node then register-packing resource.
   struct {
@@ -306,27 +362,43 @@ typedef struct loom_low_schedule_build_state_t {
   loom_low_schedule_hazard_state_t* hazard_states;
   // Descriptor register-class state read/write bits, dense by register class.
   uint8_t* reg_class_state_flags;
+  // Function-local register-class presence bits used by packing resources.
+  uint8_t* active_reg_class_flags;
+  // Bitset of descriptors that have contributed their state classes.
+  uint64_t* indexed_descriptor_bits;
   // Hard register-pressure limits used while scoring candidates.
   struct {
-    // Live-unit limits indexed by descriptor register-class ID. Classes in an
-    // alias set use alias_sets instead.
+    // Live-unit limits indexed by descriptor register-class ID. Classes in a
+    // shared pressure set use pressure_sets instead.
     uint32_t* by_reg_class;
-    // Shared limits indexed by one-based register alias-set ID.
-    loom_low_schedule_alias_pressure_limit_t* alias_sets;
-    // Highest dense one-based alias-set ID, or zero when none are present.
-    uint16_t alias_set_count;
+    // Shared limits indexed by one-based register pressure-set ID.
+    loom_low_schedule_pressure_set_limit_t* pressure_sets;
+    // Highest active shared pressure-set ID, or zero when none are present.
+    uint16_t pressure_set_count;
     // Hard limits and live-counter identities indexed by completion domain.
     loom_low_schedule_completion_domain_t* unspillable_completion_domains;
     // Completion-domain IDs indexed by descriptor register-class ID.
     uint16_t* unspillable_completion_domain_ids_by_reg_class;
     // Number of bounded-unspillable completion domains.
     uint16_t unspillable_completion_domain_count;
+    // Effective capacities indexed by descriptor packing-resource ID.
+    // UINT32_MAX marks a resource duplicating direct register pressure.
+    uint32_t* register_packing_resource_capacities;
+    // Number of packing resources carrying an independent pressure signal.
+    uint16_t active_register_packing_resource_count;
   } pressure_limits;
+  // Resolved allocation limits shared by pressure-domain construction.
+  const loom_low_allocation_target_constraints_t* allocation_constraints;
+  // Sparse capacities observed by values crossing retained calls.
+  const loom_low_schedule_call_pressure_table_t* call_pressure;
   // Most recent architectural-state writer, dense by register class.
   loom_low_schedule_state_access_t* state_last_writes;
   // First architectural-state writer in the current block, dense by register
   // class.
   loom_low_schedule_state_access_t* state_first_writes;
+  // Current-block observations or replacements requiring ordered state writes,
+  // dense by register class. Zero permits commutative write reordering.
+  uint8_t* state_requires_write_order;
   // Most recent non-writing state-ordering access, dense by register class.
   loom_low_schedule_state_access_t* state_ordering_frontiers;
   // Readers retained until the next actual writer, dense by register class.
@@ -358,7 +430,8 @@ typedef struct loom_low_schedule_build_state_t {
   } descriptor_operands;
   // Per-block readers of values whose storage may be consumed by tied ops.
   struct {
-    // Outstanding read lists, dense by local value ordinal.
+    // Outstanding read lists, dense by canonical physical-storage ordinal.
+    // Only canonical identities own lists and enter touched_ordinals.
     uint32_t* heads;
     // Read records used by heads.
     loom_low_schedule_storage_read_record_t* records;
@@ -384,7 +457,7 @@ typedef struct loom_low_schedule_build_state_t {
   // Scratch outstanding effect writes, reused for each block.
   loom_low_schedule_effect_frontier_entry_t* effect_write_entries;
   // Optional source-derived memory access records for the function.
-  const loom_low_memory_access_record_t* memory_access_records;
+  const loom_low_memory_access_map_t* memory_accesses;
   // Per-resource aggregate resource pressure, dense by descriptor resource id
   // until compacted after scheduling.
   loom_low_schedule_resource_summary_t* resource_summaries;
@@ -406,6 +479,8 @@ typedef struct loom_low_schedule_build_state_t {
   iree_host_size_t resource_use_count;
   // Number of populated effect_uses entries.
   iree_host_size_t effect_use_count;
+  // Number of populated memory_completion_edges entries.
+  iree_host_size_t memory_completion_edge_count;
   // Number of populated hazard_uses entries.
   iree_host_size_t hazard_use_count;
   // Number of populated hazard_gaps entries.
@@ -437,10 +512,6 @@ typedef struct loom_low_schedule_build_state_t {
   iree_host_size_t effect_read_capacity;
   // Allocated effect-frontier write scratch capacity.
   iree_host_size_t effect_write_capacity;
-  // Number of rows in |memory_access_records|.
-  iree_host_size_t memory_access_record_count;
-  // Next memory access record to bind while walking function-order nodes.
-  iree_host_size_t memory_access_record_bind_index;
   // Allocated effect-use record capacity.
   iree_host_size_t effect_use_capacity;
   // Allocated hazard-use record capacity.
@@ -456,6 +527,19 @@ typedef struct loom_low_schedule_build_state_t {
   // Pending visible descriptor node that can start a target pair.
   uint32_t pending_pair_affinity_node;
 } loom_low_schedule_build_state_t;
+
+// Returns the pressure set shared by active function classes, or zero when the
+// class can use its class-local counter for this schedule.
+static inline uint16_t loom_low_schedule_reg_class_pressure_set_id(
+    const loom_low_schedule_build_state_t* state, uint16_t reg_class_id) {
+  const uint16_t pressure_set_id = loom_low_reg_class_pressure_set_id(
+      &state->target.descriptor_set->reg_classes[reg_class_id]);
+  return pressure_set_id != 0 && state->pressure_limits.pressure_sets != NULL &&
+                 state->pressure_limits.pressure_sets[pressure_set_id]
+                     .has_multiple_active_reg_classes
+             ? pressure_set_id
+             : 0;
+}
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -12,7 +12,7 @@ kernel.def export("i32_memory_chain") @i32_memory_chain() {
   %loop_begin = index.constant 0 : index
   %loop_step = index.constant 1 : index
   %operation_count = config.get @benchmark.operation_count : index
-  %byte_offset_aligned = index.assume %byte_offset [mul(%byte_offset, 4)] : offset
+  %byte_offset_aligned = index.assume %byte_offset [multiple_of(%byte_offset, 4)] : offset
   %input_aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
   %output_aligned = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
   %input_view = buffer.view %input_aligned[%byte_offset_aligned] : buffer -> view<1xi32>

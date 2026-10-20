@@ -6,7 +6,8 @@
 
 #include "loom/codegen/low/pipeline/pass_environment.h"
 
-#include "loom/codegen/low/pipeline/pass_requirements.h"
+#include "loom/codegen/low/lower/lower.h"
+#include "loom/target/facts.h"
 
 static bool loom_low_pass_capability_satisfies_requirement(
     const loom_pass_environment_capability_t* capability,
@@ -96,4 +97,64 @@ loom_low_pass_capability_legalizer_registry(
 loom_target_compile_report_t* loom_low_pass_capability_compile_report(
     const loom_low_pass_capability_t* capability) {
   return capability ? capability->compile_report : NULL;
+}
+
+static const loom_low_lower_policy_t*
+loom_low_pass_capability_lower_policy_for_target_facts(
+    const loom_low_pass_capability_t* capability,
+    const loom_target_facts_t* target_facts) {
+  if (capability == NULL || capability->lower_policy_registry == NULL ||
+      target_facts == NULL) {
+    return NULL;
+  }
+  return loom_low_lower_policy_registry_lookup_for_bundle(
+      capability->lower_policy_registry,
+      loom_target_facts_bundle(target_facts));
+}
+
+const loom_target_vector_packet_policy_t*
+loom_low_pass_capability_vector_packet_policy(
+    const loom_low_pass_capability_t* capability,
+    const loom_target_facts_t* target_facts) {
+  const loom_low_lower_policy_t* policy =
+      loom_low_pass_capability_lower_policy_for_target_facts(capability,
+                                                             target_facts);
+  return policy != NULL ? policy->vector_packet_policy : NULL;
+}
+
+bool loom_low_pass_capability_source_vector_carrier_supported(
+    const loom_low_pass_capability_t* capability,
+    const loom_target_facts_t* target_facts, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t type) {
+  const loom_low_lower_policy_t* policy =
+      loom_low_pass_capability_lower_policy_for_target_facts(capability,
+                                                             target_facts);
+  if (policy == NULL) {
+    return false;
+  }
+  const loom_target_vector_carrier_supported_callback_t callback =
+      policy->source_vector_carrier_supported;
+  return callback.fn == NULL ||
+         callback.fn(callback.user_data, module, fact_table, value_id, type);
+}
+
+bool loom_low_pass_capability_source_function_vector_carrier_supported(
+    const loom_low_pass_capability_t* capability,
+    const loom_target_facts_t* target_facts, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t type) {
+  const loom_low_lower_policy_t* policy =
+      loom_low_pass_capability_lower_policy_for_target_facts(capability,
+                                                             target_facts);
+  if (policy == NULL) {
+    return false;
+  }
+  loom_target_vector_carrier_supported_callback_t callback =
+      policy->source_function_vector_carrier_supported;
+  if (callback.fn == NULL) {
+    callback = policy->source_vector_carrier_supported;
+  }
+  return callback.fn == NULL ||
+         callback.fn(callback.user_data, module, fact_table, value_id, type);
 }

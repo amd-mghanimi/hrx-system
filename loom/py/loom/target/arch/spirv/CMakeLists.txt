@@ -66,6 +66,37 @@ iree_py_library(
     loom::py::loom::target::arch::spirv::features
 )
 
+iree_py_library(
+  NAME
+    barrier
+  SRCS
+    "__init__.py"
+    "barrier.py"
+)
+
+iree_py_test(
+  NAME
+    barrier_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "barrier_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.spirv.barrier_test"
+  DEPS
+    loom::py::loom::target::arch::spirv::barrier
+    loom::py::loom::target::arch::spirv::descriptors
+    loom::py::loom::dialect::kernel::kernel
+    loom::py::loom::target::low_descriptors
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+  TIMEOUT
+    60
+)
+
 iree_py_test(
   NAME
     atomic_test
@@ -94,6 +125,18 @@ iree_py_library(
   SRCS
     "__init__.py"
     "builtins.py"
+  DEPS
+    loom::py::loom::target::arch::spirv::features
+)
+
+iree_py_library(
+  NAME
+    extended_math
+  SRCS
+    "extended_math.py"
+  DEPS
+    loom::py::loom::target::arch::spirv::features
+    loom::py::loom::target::arch::spirv::ordinary_vector
 )
 
 iree_py_library(
@@ -104,18 +147,21 @@ iree_py_library(
     "descriptors.py"
   DEPS
     loom::py::loom::target::arch::spirv::atomic
+    loom::py::loom::target::arch::spirv::barrier
     loom::py::loom::target::arch::spirv::builtins
     loom::py::loom::target::arch::spirv::cooperative_matrix
+    loom::py::loom::target::arch::spirv::extended_math
     loom::py::loom::target::arch::spirv::features
     loom::py::loom::target::arch::spirv::ordinary_vector
     loom::py::loom::target::arch::spirv::ordinary_vector_bit_layout
+    loom::py::loom::target::arch::spirv::ordinary_vector_conversion
     loom::py::loom::target::arch::spirv::ordinary_vector_float
     loom::py::loom::target::arch::spirv::ordinary_vector_integer
-    loom::py::loom::target::arch::spirv::ordinary_vector_integer_conversion
     loom::py::loom::target::arch::spirv::scalar_alu
     loom::py::loom::target::arch::spirv::scalar_constant
     loom::py::loom::target::arch::spirv::scalar_conversion
     loom::py::loom::target::arch::spirv::scalar_memory
+    loom::py::loom::target::arch::spirv::subgroup
     loom::py::loom::core
     loom::py::loom::target::low_descriptors
     loom::py::loom::target::arch::package
@@ -143,18 +189,21 @@ iree_py_test(
     "loom.target.arch.spirv.descriptors_test"
   DEPS
     loom::py::loom::target::arch::spirv::atomic
+    loom::py::loom::target::arch::spirv::barrier
     loom::py::loom::target::arch::spirv::builtins
     loom::py::loom::target::arch::spirv::cooperative_matrix
     loom::py::loom::target::arch::spirv::descriptors
+    loom::py::loom::target::arch::spirv::extended_math
     loom::py::loom::target::arch::spirv::ordinary_vector
     loom::py::loom::target::arch::spirv::ordinary_vector_bit_layout
+    loom::py::loom::target::arch::spirv::ordinary_vector_conversion
     loom::py::loom::target::arch::spirv::ordinary_vector_float
     loom::py::loom::target::arch::spirv::ordinary_vector_integer
-    loom::py::loom::target::arch::spirv::ordinary_vector_integer_conversion
     loom::py::loom::target::arch::spirv::scalar_alu
     loom::py::loom::target::arch::spirv::scalar_constant
     loom::py::loom::target::arch::spirv::scalar_conversion
     loom::py::loom::target::arch::spirv::scalar_memory
+    loom::py::loom::target::arch::spirv::subgroup
     loom::py::loom::core
     loom::py::loom::target::low_descriptors
   PACKAGE_DIRS
@@ -252,8 +301,8 @@ iree_py_test(
   DEPS
     loom::py::loom::target::arch::spirv::ordinary_vector
     loom::py::loom::target::arch::spirv::ordinary_vector_bit_layout
+    loom::py::loom::target::arch::spirv::ordinary_vector_conversion
     loom::py::loom::target::arch::spirv::ordinary_vector_integer
-    loom::py::loom::target::arch::spirv::ordinary_vector_integer_conversion
     loom::py::loom::target::arch::spirv::scalar_conversion
   PACKAGE_DIRS
     "${PROJECT_SOURCE_DIR}/loom/py"
@@ -298,10 +347,10 @@ iree_py_test(
 
 iree_py_library(
   NAME
-    ordinary_vector_integer_conversion
+    ordinary_vector_conversion
   SRCS
     "__init__.py"
-    "ordinary_vector_integer_conversion.py"
+    "ordinary_vector_conversion.py"
   DEPS
     loom::py::loom::target::arch::spirv::ordinary_vector
     loom::py::loom::target::arch::spirv::ordinary_vector_integer
@@ -311,18 +360,18 @@ iree_py_library(
 
 iree_py_test(
   NAME
-    ordinary_vector_integer_conversion_test
+    ordinary_vector_conversion_test
   MAIN
     "../../../tools/pytest_style_runner.py"
   SRCS
-    "ordinary_vector_integer_conversion_test.py"
+    "ordinary_vector_conversion_test.py"
     "../../../tools/pytest_style_runner.py"
   ARGS
-    "loom.target.arch.spirv.ordinary_vector_integer_conversion_test"
+    "loom.target.arch.spirv.ordinary_vector_conversion_test"
   DEPS
     loom::py::loom::target::arch::spirv::ordinary_vector
+    loom::py::loom::target::arch::spirv::ordinary_vector_conversion
     loom::py::loom::target::arch::spirv::ordinary_vector_integer
-    loom::py::loom::target::arch::spirv::ordinary_vector_integer_conversion
     loom::py::loom::target::arch::spirv::scalar_conversion
   PACKAGE_DIRS
     "${PROJECT_SOURCE_DIR}/loom/py"
@@ -340,6 +389,39 @@ iree_py_library(
     "scalar_memory.py"
   DEPS
     loom::py::loom::target::arch::spirv::features
+)
+
+iree_py_library(
+  NAME
+    subgroup
+  SRCS
+    "subgroup.py"
+  DEPS
+    loom::py::loom::target::arch::spirv::features
+    loom::py::loom::target::arch::spirv::ordinary_vector
+    loom::py::loom::target::arch::spirv::ordinary_vector_integer
+)
+
+iree_py_test(
+  NAME
+    subgroup_test
+  MAIN
+    "../../../tools/pytest_style_runner.py"
+  SRCS
+    "subgroup_test.py"
+    "../../../tools/pytest_style_runner.py"
+  ARGS
+    "loom.target.arch.spirv.subgroup_test"
+  DEPS
+    loom::py::loom::target::arch::spirv::features
+    loom::py::loom::target::arch::spirv::ordinary_vector
+    loom::py::loom::target::arch::spirv::subgroup
+  PACKAGE_DIRS
+    "${PROJECT_SOURCE_DIR}/loom/py"
+    "${PROJECT_BINARY_DIR}/loom/py"
+    "${PROJECT_SOURCE_DIR}"
+  TIMEOUT
+    60
 )
 
 iree_py_library(

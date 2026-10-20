@@ -16,6 +16,8 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
+#include "loom/analysis/cfg_condition_derivation.h"
+#include "loom/analysis/cfg_condition_relation_anchors.h"
 #include "loom/analysis/cfg_value_identity.h"
 #include "loom/analysis/condition_facts.h"
 #include "loom/analysis/condition_relation_matrix.h"
@@ -62,6 +64,9 @@ typedef struct loom_cfg_condition_relation_table_t {
 
   // Number of entries in edge_view_indices.
   uint32_t edge_count;
+
+  // Number of sparse derived-anchor entries stored after operand_domain.
+  uint32_t derived_anchor_count;
 } loom_cfg_condition_relation_table_t;
 
 // Visits one strongest retained relation incident to an anchored operand.
@@ -72,15 +77,33 @@ typedef bool (*loom_cfg_condition_relation_visit_fn_t)(
 // Computes complete block-entry and predecessor-edge condition facts for
 // |graph| with finite monotone propagation. The local value domain and exact
 // identity table must cover the graph and remain valid for the returned table
-// lifetime. Construction scratch is released before returning; only compact
-// immutable views remain in |arena|.
+// lifetime. When provided, |anchor_provider| is queried once per SSA relation
+// operand and the table retains direct incidence from each emitted anchor to
+// the original operand. Construction scratch is released before returning;
+// only compact immutable views remain in |arena|.
 iree_status_t loom_cfg_condition_relation_table_compute(
     const loom_module_t* module, const loom_cfg_graph_t* graph,
     const loom_value_fact_table_t* fact_table,
     const loom_dominance_info_t* dominance,
     loom_local_value_domain_t* value_domain,
     const loom_cfg_value_identity_table_t* identities,
+    const loom_cfg_condition_relation_anchor_provider_t* anchor_provider,
     iree_arena_allocator_t* arena,
+    loom_cfg_condition_relation_table_t* out_table);
+
+// Computes the same retained relation table from shared edge derivations.
+// |edge_facts| contains graph->edge_count entries and is borrowed only during
+// the call. Consumers projecting other compact facts can share those inputs
+// without repeating condition-expression traversal or retaining proof scratch.
+iree_status_t loom_cfg_condition_relation_table_compute_from_edges(
+    const loom_module_t* module, const loom_cfg_graph_t* graph,
+    const loom_value_fact_table_t* fact_table,
+    const loom_dominance_info_t* dominance,
+    loom_local_value_domain_t* value_domain,
+    const loom_cfg_value_identity_table_t* identities,
+    const loom_cfg_condition_relation_anchor_provider_t* anchor_provider,
+    const loom_cfg_condition_edge_facts_t* edge_facts,
+    iree_arena_allocator_t* scratch_arena, iree_arena_allocator_t* arena,
     loom_cfg_condition_relation_table_t* out_table);
 
 // Returns the immutable facts at |block_index|, or NULL when unavailable.
@@ -104,7 +127,7 @@ bool loom_cfg_condition_relation_view_query_boolean(
 // Returns the comparison outcomes excluded by |view| for an ordered operand
 // pair. Exact ambient integer facts participate in operand identity so an SSA
 // constant and its literal value query the same retained relation.
-loom_condition_relation_outcome_bits_t
+loom_integer_order_outcome_bits_t
 loom_cfg_condition_relation_view_query_excluded_outcomes(
     const loom_cfg_condition_relation_table_t* table,
     const loom_cfg_condition_relation_view_t* view,

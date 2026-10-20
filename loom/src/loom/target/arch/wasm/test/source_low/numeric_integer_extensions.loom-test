@@ -1,0 +1,122 @@
+// RUN: emit source-low target=wasm:simd128 output=low
+
+func.def @extend_byte_lanes(%input_buffer: buffer) -> (vector<8xi16>, vector<8xi16>, vector<4xi32>, vector<4xi32>, vector<2xi64>, vector<2xi64>) {
+  %base = index.constant 0 : offset
+  %byte8_view = buffer.view %input_buffer[%base] : buffer -> view<8xi8>
+  %byte4_view = buffer.view %input_buffer[%base] : buffer -> view<4xi8>
+  %byte2_view = buffer.view %input_buffer[%base] : buffer -> view<2xi8>
+  %byte8 = vector.load %byte8_view[0] : view<8xi8> -> vector<8xi8>
+  %byte4 = vector.load %byte4_view[0] : view<4xi8> -> vector<4xi8>
+  %byte2 = vector.load %byte2_view[0] : view<2xi8> -> vector<2xi8>
+  %signed16 = vector.extsi %byte8 : vector<8xi8> to vector<8xi16>
+  %unsigned16 = vector.extui %byte8 : vector<8xi8> to vector<8xi16>
+  %signed32 = vector.extsi %byte4 : vector<4xi8> to vector<4xi32>
+  %unsigned32 = vector.extui %byte4 : vector<4xi8> to vector<4xi32>
+  %signed64 = vector.extsi %byte2 : vector<2xi8> to vector<2xi64>
+  %unsigned64 = vector.extui %byte2 : vector<2xi8> to vector<2xi64>
+  func.return %signed16, %unsigned16, %signed32, %unsigned32, %signed64, %unsigned64 : vector<8xi16>, vector<8xi16>, vector<4xi32>, vector<4xi32>, vector<2xi64>, vector<2xi64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @extend_byte_lanes(%input_buffer: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %42 = i64.load %input_buffer
+  %byte8 = i64x2.splat %42
+  %44 = i32.load %input_buffer
+  %byte4 = i32x4.splat %44
+  %46 = i32.load16_u %input_buffer
+  %byte2 = i16x8.splat %46
+  %signed16 = i16x8.extend_low_i8x16_s %byte8
+  %unsigned16 = i16x8.extend_low_i8x16_u %byte8
+  %50 = i16x8.extend_low_i8x16_s %byte4
+  %signed32 = i32x4.extend_low_i16x8_s %50
+  %52 = i16x8.extend_low_i8x16_u %byte4
+  %unsigned32 = i32x4.extend_low_i16x8_u %52
+  %54 = i16x8.extend_low_i8x16_s %byte2
+  %55 = i32x4.extend_low_i16x8_s %54
+  %signed64 = i64x2.extend_low_i32x4_s %55
+  %57 = i16x8.extend_low_i8x16_u %byte2
+  %58 = i32x4.extend_low_i16x8_u %57
+  %unsigned64 = i64x2.extend_low_i32x4_u %58
+  return %signed16, %unsigned16, %signed32, %unsigned32, %signed64, %unsigned64
+}
+
+// ====
+
+func.def @extend_word_lanes(%word_buffer: buffer, %dword_buffer: buffer) -> (vector<4xi32>, vector<4xi32>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>) {
+  %base = index.constant 0 : offset
+  %word4_view = buffer.view %word_buffer[%base] : buffer -> view<4xi16>
+  %word2_view = buffer.view %word_buffer[%base] : buffer -> view<2xi16>
+  %dword2_view = buffer.view %dword_buffer[%base] : buffer -> view<2xi32>
+  %word4 = vector.load %word4_view[0] : view<4xi16> -> vector<4xi16>
+  %word2 = vector.load %word2_view[0] : view<2xi16> -> vector<2xi16>
+  %dword2 = vector.load %dword2_view[0] : view<2xi32> -> vector<2xi32>
+  %signed32 = vector.extsi %word4 : vector<4xi16> to vector<4xi32>
+  %unsigned32 = vector.extui %word4 : vector<4xi16> to vector<4xi32>
+  %signed64_from16 = vector.extsi %word2 : vector<2xi16> to vector<2xi64>
+  %unsigned64_from16 = vector.extui %word2 : vector<2xi16> to vector<2xi64>
+  %signed64_from32 = vector.extsi %dword2 : vector<2xi32> to vector<2xi64>
+  %unsigned64_from32 = vector.extui %dword2 : vector<2xi32> to vector<2xi64>
+  func.return %signed32, %unsigned32, %signed64_from16, %unsigned64_from16, %signed64_from32, %unsigned64_from32 : vector<4xi32>, vector<4xi32>, vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @extend_word_lanes(%word_buffer: reg<wasm.i32>, %dword_buffer: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %44 = i64.load %word_buffer
+  %word4 = i64x2.splat %44
+  %46 = i32.load %word_buffer
+  %word2 = i32x4.splat %46
+  %48 = i64.load %dword_buffer
+  %dword2 = i64x2.splat %48
+  %signed32 = i32x4.extend_low_i16x8_s %word4
+  %unsigned32 = i32x4.extend_low_i16x8_u %word4
+  %52 = i32x4.extend_low_i16x8_s %word2
+  %signed64_from16 = i64x2.extend_low_i32x4_s %52
+  %54 = i32x4.extend_low_i16x8_u %word2
+  %unsigned64_from16 = i64x2.extend_low_i32x4_u %54
+  %signed64_from32 = i64x2.extend_low_i32x4_s %dword2
+  %unsigned64_from32 = i64x2.extend_low_i32x4_u %dword2
+  return %signed32, %unsigned32, %signed64_from16, %unsigned64_from16, %signed64_from32, %unsigned64_from32
+}
+
+// ====
+
+func.def @packetized_byte_to_dword(%input_buffer: buffer) -> (vector<4xi32>, vector<4xi32>) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input_buffer[%base] : buffer -> view<8xi8>
+  %input = vector.load %input_view[0] : view<8xi8> -> vector<8xi8>
+  %extended = vector.extui %input : vector<8xi8> to vector<8xi32>
+  %extended0 = vector.slice %extended[0] : vector<8xi32> -> vector<4xi32>
+  %extended1 = vector.slice %extended[4] : vector<8xi32> -> vector<4xi32>
+  func.return %extended0, %extended1 : vector<4xi32>, vector<4xi32>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @packetized_byte_to_dword(%input_buffer: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.v128>) asm {
+  %22 = i64.load %input_buffer
+  %input = i64x2.splat %22
+  %24 = i16x8.extend_low_i8x16_u %input
+  %25 = i32x4.extend_low_i16x8_u %24
+  %26 = i8x16.shuffle %input, %input, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  %27 = i16x8.extend_low_i8x16_u %26
+  %28 = i32x4.extend_low_i16x8_u %27
+  return %25, %28
+}
+
+// ====
+
+func.def @native_add_then_packetized_dword_to_qword(%lhs: vector<4xi32>, %rhs: vector<4xi32>) -> (vector<2xi64>, vector<2xi64>) {
+  %sum = vector.addi %lhs, %rhs : vector<4xi32>
+  %result = vector.extsi %sum : vector<4xi32> to vector<4xi64>
+  %result0 = vector.slice %result[0] : vector<4xi64> -> vector<2xi64>
+  %result1 = vector.slice %result[2] : vector<4xi64> -> vector<2xi64>
+  func.return %result0, %result1 : vector<2xi64>, vector<2xi64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @native_add_then_packetized_dword_to_qword(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>) -> (reg<wasm.v128>, reg<wasm.v128>) asm {
+  %sum = i32x4.add %lhs, %rhs
+  %18 = i64x2.extend_low_i32x4_s %sum
+  %19 = i8x16.shuffle %sum, %sum, 8, 9, 10, 11, 12, 13, 14, 15, 0, 0, 0, 0, 0, 0, 0, 0
+  %20 = i64x2.extend_low_i32x4_s %19
+  return %18, %20
+}

@@ -17,6 +17,7 @@
 #include "loom/ops/scf/ops.h"
 #include "loom/rewrite/rewriter.h"
 #include "loom/transforms/cleanup/patterns.h"
+#include "loom/util/predicate_facts.h"
 #include "loom/util/walk.h"
 
 //===----------------------------------------------------------------------===//
@@ -135,6 +136,17 @@ static iree_status_t loom_branch_facts_edge_assume_set_append_predicate(
     return iree_ok_status();
   }
   if (loom_branch_facts_value_exact_integer(rewriter->fact_table, source)) {
+    return iree_ok_status();
+  }
+
+  // The existing input carrier already makes this predicate durable. Creating
+  // another copy would oppose redundant-identity cleanup and requeue this
+  // branch indefinitely. Ambient edge facts do not establish this contract.
+  const loom_value_t* value = loom_module_value(rewriter->module, source);
+  if (!loom_value_is_block_arg(value) &&
+      loom_value_fact_table_carrier_implies_predicate(
+          rewriter->fact_table, rewriter->module, loom_value_def_op(value),
+          &predicate)) {
     return iree_ok_status();
   }
 
@@ -368,7 +380,8 @@ static bool loom_branch_facts_value_has_type_sensitive_use(
     if (!vtable) {
       return true;
     }
-    if (iree_any_bit_set(vtable->traits, LOOM_TRAIT_TERMINATOR)) {
+    if (iree_any_bit_set(vtable->traits, LOOM_TRAIT_TERMINATOR |
+                                             LOOM_TRAIT_CALLABLE_BOUNDARY)) {
       return true;
     }
     if (loom_branch_facts_op_type_constraints_mention_operand(
@@ -377,6 +390,17 @@ static bool loom_branch_facts_value_has_type_sensitive_use(
     }
   }
   return false;
+}
+
+// A callable or region edge owns its dependent tuple as one contract. Replacing
+// a dimension or encoding operand alone cannot rebind the other tuple values.
+// The retained type-use index identifies these bindings without inspecting the
+// signature; ordinary scalar operands remain eligible for edge refinement.
+static bool loom_branch_facts_operand_binds_boundary_type(
+    const loom_module_t* module, const loom_op_t* op, loom_value_id_t operand) {
+  return iree_any_bit_set(op->traits, LOOM_TRAIT_CALLABLE_BOUNDARY |
+                                          LOOM_TRAIT_TERMINATOR) &&
+         loom_module_value_has_type_uses(module, operand);
 }
 
 static bool loom_branch_facts_can_rewrite_edge_type_refs_for_result(
@@ -550,6 +574,10 @@ static iree_status_t loom_branch_facts_scan_region_uses(
   const loom_value_id_t* operands = loom_op_const_operands(op);
   for (uint16_t operand_index = 0; operand_index < op->operand_count;
        ++operand_index) {
+    if (loom_branch_facts_operand_binds_boundary_type(
+            scan->module, op, operands[operand_index])) {
+      continue;
+    }
     IREE_RETURN_IF_ERROR(
         loom_branch_facts_scan_edge_value_use(scan, operands[operand_index]));
   }
@@ -698,6 +726,10 @@ static iree_status_t loom_branch_facts_replace_region_uses(
   for (uint16_t operand_index = 0; operand_index < op->operand_count;
        ++operand_index) {
     loom_value_id_t operand = operands[operand_index];
+    if (loom_branch_facts_operand_binds_boundary_type(
+            replacement->rewriter->module, op, operand)) {
+      continue;
+    }
     for (uint16_t candidate_count = replacement->assume_set->candidate_count;
          candidate_count > 0; --candidate_count) {
       const loom_branch_facts_edge_assume_candidate_t* candidate =
@@ -711,6 +743,138 @@ static iree_status_t loom_branch_facts_replace_region_uses(
     }
   }
   return loom_branch_facts_replace_result_type_refs(replacement, op);
+}
+
+static bool loom_branch_facts_candidate_exact_integer(
+    loom_rewriter_t* rewriter,
+    const loom_branch_facts_edge_assume_candidate_t* candidate,
+    int64_t* out_value) {
+  return candidate->replacement != LOOM_VALUE_ID_INVALID &&
+         loom_value_facts_as_exact_i64(
+             loom_rewriter_value_facts(rewriter, candidate->replacement),
+             out_value);
+}
+
+static bool loom_branch_facts_source_exact_integer(
+    loom_rewriter_t* rewriter,
+    const loom_branch_facts_edge_assume_set_t* assume_set,
+    loom_value_id_t source, int64_t* out_value) {
+  for (uint16_t i = assume_set->candidate_count; i > 0; --i) {
+    const loom_branch_facts_edge_assume_candidate_t* candidate =
+        &assume_set->candidates[i - 1];
+    if (candidate->source == source &&
+        loom_branch_facts_candidate_exact_integer(rewriter, candidate,
+                                                  out_value)) {
+      return true;
+    }
+  }
+  return loom_value_facts_as_exact_i64(
+      loom_rewriter_value_facts(rewriter, source), out_value);
+}
+
+static iree_status_t loom_branch_facts_set_predicates(
+    loom_rewriter_t* rewriter,
+    loom_branch_facts_edge_assume_candidate_t* candidate,
+    const loom_predicate_t* predicates, uint16_t predicate_count) {
+  loom_predicate_t* storage = NULL;
+  IREE_RETURN_IF_ERROR(loom_builder_copy_predicate_list_attr_storage(
+      &rewriter->builder, predicates, predicate_count,
+      IREE_SV("branch fact predicates"), &storage));
+  return loom_rewriter_set_attr(
+      rewriter, candidate->assume_op, 0,
+      loom_attr_predicate_list(storage, predicate_count));
+}
+
+// Branch candidates describe one simultaneous edge fact set. Rewrite references
+// to candidates proven exact as literals before ordinary folding can erase the
+// identities that established those path-local values.
+static iree_status_t loom_branch_facts_normalize_exact_assumes(
+    loom_rewriter_t* rewriter,
+    loom_branch_facts_edge_assume_set_t* assume_set) {
+  for (uint16_t iteration = 0; iteration <= assume_set->candidate_count;
+       ++iteration) {
+    bool changed = false;
+    for (uint16_t candidate_index = 0;
+         candidate_index < assume_set->candidate_count; ++candidate_index) {
+      loom_branch_facts_edge_assume_candidate_t* candidate =
+          &assume_set->candidates[candidate_index];
+      if (candidate->kind != LOOM_BRANCH_FACTS_EDGE_ASSUME_PREDICATES ||
+          !candidate->assume_op) {
+        continue;
+      }
+      const loom_attribute_t source =
+          loom_op_const_attrs(candidate->assume_op)[0];
+      loom_predicate_t predicates[LOOM_BRANCH_FACTS_EDGE_PREDICATE_CAPACITY];
+      memcpy(predicates, source.predicate_list,
+             source.count * sizeof(*predicates));
+      bool candidate_changed = false;
+      for (uint16_t predicate_index = 0; predicate_index < source.count;
+           ++predicate_index) {
+        loom_predicate_t* predicate = &predicates[predicate_index];
+        for (uint8_t argument_index = 0; argument_index < predicate->arg_count;
+             ++argument_index) {
+          if (predicate->arg_tags[argument_index] != LOOM_PRED_ARG_VALUE ||
+              predicate->args[argument_index] < 0) {
+            continue;
+          }
+          const loom_value_id_t referenced =
+              (loom_value_id_t)predicate->args[argument_index];
+          if (argument_index == 0) {
+            predicate->args[argument_index] = candidate->materialized_input;
+            candidate_changed |= referenced != candidate->materialized_input;
+            continue;
+          }
+          int64_t exact_value = 0;
+          if (loom_branch_facts_source_exact_integer(
+                  rewriter, assume_set, referenced, &exact_value)) {
+            predicate->arg_tags[argument_index] = LOOM_PRED_ARG_CONST;
+            predicate->args[argument_index] = exact_value;
+            candidate_changed = true;
+          }
+        }
+      }
+      if (candidate_changed) {
+        IREE_RETURN_IF_ERROR(loom_branch_facts_set_predicates(
+            rewriter, candidate, predicates, source.count));
+        changed = true;
+      }
+    }
+    if (!changed) {
+      break;
+    }
+  }
+
+  for (uint16_t candidate_index = 0;
+       candidate_index < assume_set->candidate_count; ++candidate_index) {
+    loom_branch_facts_edge_assume_candidate_t* candidate =
+        &assume_set->candidates[candidate_index];
+    if (candidate->kind != LOOM_BRANCH_FACTS_EDGE_ASSUME_PREDICATES ||
+        !candidate->assume_op) {
+      continue;
+    }
+    int64_t exact_value = 0;
+    if (!loom_branch_facts_candidate_exact_integer(rewriter, candidate,
+                                                   &exact_value)) {
+      continue;
+    }
+    const loom_predicate_t exact_predicate = {
+        .kind = LOOM_PREDICATE_EQ,
+        .arg_count = 2,
+        .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST,
+                     LOOM_PRED_ARG_NONE},
+        .args = {candidate->materialized_input, exact_value, 0},
+    };
+    const loom_attribute_t predicates =
+        loom_op_const_attrs(candidate->assume_op)[0];
+    if (predicates.count == 1 &&
+        loom_branch_facts_predicate_equal(&predicates.predicate_list[0],
+                                          &exact_predicate)) {
+      continue;
+    }
+    IREE_RETURN_IF_ERROR(loom_branch_facts_set_predicates(rewriter, candidate,
+                                                          &exact_predicate, 1));
+  }
+  return iree_ok_status();
 }
 
 static iree_status_t loom_branch_facts_materialize_edge_assumes(
@@ -732,7 +896,7 @@ static iree_status_t loom_branch_facts_materialize_edge_assumes(
   IREE_RETURN_IF_ERROR(loom_walk_region(
       rewriter->module, region, LOOM_WALK_PRE_ORDER,
       (loom_walk_callback_t){loom_branch_facts_scan_region_uses, &scan},
-      rewriter->arena, &walk_result));
+      &walk_result));
 
   loom_block_t* entry_block = loom_region_entry_block(region);
   if (!entry_block || !entry_block->first_op) {
@@ -834,6 +998,8 @@ static iree_status_t loom_branch_facts_materialize_edge_assumes(
   if (!*out_changed) {
     return iree_ok_status();
   }
+  IREE_RETURN_IF_ERROR(
+      loom_branch_facts_normalize_exact_assumes(rewriter, assume_set));
   loom_branch_facts_region_replacement_t replacement = {
       .rewriter = rewriter,
       .assume_set = assume_set,
@@ -842,7 +1008,7 @@ static iree_status_t loom_branch_facts_materialize_edge_assumes(
       rewriter->module, region, LOOM_WALK_PRE_ORDER,
       (loom_walk_callback_t){loom_branch_facts_replace_region_uses,
                              &replacement},
-      rewriter->arena, &walk_result);
+      &walk_result);
 }
 
 static iree_status_t loom_branch_facts_materialize_condition_facts_in_region(

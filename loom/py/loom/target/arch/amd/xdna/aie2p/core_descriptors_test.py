@@ -4,18 +4,16 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+"""AIE2P register geometry, operand ownership, and encoding contracts."""
+
 from __future__ import annotations
 
 from dataclasses import replace
-from itertools import combinations
+from itertools import product
 
 import pytest
 
-from loom.target.arch.amd.xdna.aie.machine import MachineOperandKind, has_property
-from loom.target.arch.amd.xdna.aie.schedule import (
-    PipelineStageKind,
-    pipeline_uses,
-)
+from loom.target.arch.amd.xdna.aie.machine import MachineOperandKind
 from loom.target.arch.amd.xdna.aie2p.core_descriptor_constraints import (
     descriptor_constraints,
     descriptor_register_outputs,
@@ -26,22 +24,11 @@ from loom.target.arch.amd.xdna.aie2p.core_descriptor_specs import (
     _MACHINE_FORMS,
 )
 from loom.target.arch.amd.xdna.aie2p.core_descriptors import (
-    _BUNDLE_SLOT_EXCLUSIONS,
-    _INSTRUCTION_ENCODINGS,
-    _SCHEDULE_CLASS_NAMES,
-    _SLOT_RESOURCE_KINDS,
     AIE2P_CORE_DESCRIPTOR_SET,
-    _bundle_exclusion_resource_name,
-    _itinerary,
     _low_register_class_name,
-    _memory_event_name,
-    _pipeline_resource_name,
-    _slot_resource_name,
-    _validate_control_issue_timing,
+    _register_packing_members,
 )
-from loom.target.arch.amd.xdna.aie2p.core_encoding_data import CORE_ENCODING_TABLE
 from loom.target.arch.amd.xdna.aie2p.core_machine_data import CORE_MACHINE_TABLE
-from loom.target.arch.amd.xdna.aie2p.core_schedule_data import CORE_SCHEDULE_TABLE
 from loom.target.low_descriptors import (
     Constraint,
     ConstraintKind,
@@ -50,14 +37,10 @@ from loom.target.low_descriptors import (
     EffectKind,
     ImmediateFlag,
     ImmediateKind,
-    InstructionClass,
-    IssueUseKind,
     OperandFlag,
     OperandRole,
     RegClassAltFlag,
     RegClassFlag,
-    ResourceKind,
-    ScheduleClassFlag,
 )
 
 
@@ -74,55 +57,25 @@ def test_native_immediates_match_canonical_attribute_positions() -> None:
             assert set(immediate.flags) <= {ImmediateFlag.SYMBOLIC}
 
 
-def test_control_timing_requires_issue_stage_only_return_resources() -> None:
-    descriptor_set = AIE2P_CORE_DESCRIPTOR_SET
-    returned = next(
-        row for row in descriptor_set.descriptors if row.key.endswith(".return")
-    )
-    changed = tuple(
-        replace(
-            row, issue_uses=(replace(row.issue_uses[0], stage=1), *row.issue_uses[1:])
-        )
-        if row.name == returned.schedule_class
-        else row
-        for row in descriptor_set.schedule_classes
-    )
-    with pytest.raises(
-        ValueError, match="RET sharing requires issue-stage-only resources"
-    ):
-        _validate_control_issue_timing(
-            replace(descriptor_set, schedule_classes=changed)
-        )
-
-
-def test_control_window_covers_its_outgoing_register_events() -> None:
-    descriptor_set = AIE2P_CORE_DESCRIPTOR_SET
-    returned = next(
-        row for row in descriptor_set.descriptors if row.key.endswith(".return")
-    )
-    event = returned.operands[0].read_event
-    changed = tuple(
-        replace(row, minimum_issue_separation_cycles=7)
-        if row.producer_event == event
-        else row
-        for row in descriptor_set.event_separations
-    )
-    with pytest.raises(
-        ValueError, match="control window does not cover its outgoing events"
-    ):
-        _validate_control_issue_timing(
-            replace(descriptor_set, event_separations=changed)
-        )
-
-
 def test_core_descriptor_closure_is_complete() -> None:
     descriptor_set = AIE2P_CORE_DESCRIPTOR_SET
-    assert tuple(row.name for row in descriptor_set.physical_registers) == tuple(
-        row.name for row in CORE_MACHINE_TABLE.physical_registers
-    )
+    machine_register_count = len(CORE_MACHINE_TABLE.physical_registers)
     assert tuple(
-        row.atomic_units for row in descriptor_set.physical_registers
+        row.name for row in descriptor_set.physical_registers[:machine_register_count]
+    ) == tuple(row.name for row in CORE_MACHINE_TABLE.physical_registers)
+    assert tuple(
+        row.atomic_units
+        for row in descriptor_set.physical_registers[:machine_register_count]
     ) == tuple(row.atomic_units for row in CORE_MACHINE_TABLE.physical_registers)
+    assert {
+        row.name: row.atomic_units
+        for row in descriptor_set.physical_registers[machine_register_count:]
+    } == {
+        "predicate_pair0": (128, 129, 130, 131),
+        "predicate_pair1": (133, 134, 135, 136),
+        "predicate_pair2": (137, 138, 139, 140),
+        "predicate_pair3": (141, 142, 144, 145),
+    }
     assert {
         (view.physical_register, view.reg_class): view.units
         for view in descriptor_set.physical_register_views
@@ -177,12 +130,19 @@ def test_core_descriptor_closure_is_complete() -> None:
             )
             for index in range(6)
         },
+        **{
+            (f"predicate_pair{pair_index}", "aie2p.elpredicate"): (
+                f"l{register_index}",
+                f"l{register_index + 1}",
+            )
+            for pair_index, register_index in enumerate(range(8, 16, 2))
+        },
     }
 
     assert [
         (
             resource.name,
-            resource.capacity,
+            resource.capacity_register_class,
             tuple(
                 (
                     member.register_class,
@@ -196,12 +156,12 @@ def test_core_descriptor_closure_is_complete() -> None:
     ] == [
         (
             "amd.xdna.aie2p.register.x.pairs",
-            12,
-            (("aie2p.vec256", 2, 1),),
+            "aie2p.vec256",
+            (("aie2p.vec256", 2, 1), ("aie2p.mexa", 1, 1)),
         ),
         (
             "amd.xdna.aie2p.register.scalar.units",
-            32,
+            "aie2p.er",
             (
                 ("aie2p.elpredicate", 1, 2),
                 ("aie2p.er", 1, 1),
@@ -219,6 +179,71 @@ def test_core_descriptor_closure_is_complete() -> None:
             ),
         ),
     ]
+
+
+@pytest.mark.parametrize(
+    ("resource_name", "pool_class", "resource_unit_atom_count"),
+    [
+        ("register.x.pairs", "mXm", 2),
+        ("register.scalar.units", "eR", 1),
+    ],
+)
+def test_register_packing_covers_physical_aliases(
+    resource_name: str, pool_class: str, resource_unit_atom_count: int
+) -> None:
+    descriptor_set = AIE2P_CORE_DESCRIPTOR_SET
+    registers = {
+        register.name: set(register.atomic_units)
+        for register in CORE_MACHINE_TABLE.physical_registers
+    }
+    classes = {
+        register_class.name: register_class
+        for register_class in CORE_MACHINE_TABLE.register_classes
+    }
+    pool = set().union(*(registers[name] for name in classes[pool_class].candidates))
+    resource = next(
+        resource
+        for resource in descriptor_set.register_packing_resources
+        if resource.name == f"amd.xdna.aie2p.{resource_name}"
+    )
+    members = {member.register_class: member for member in resource.members}
+    expected_members = set()
+    for register_class in descriptor_set.reg_classes:
+        overlap_counts = {
+            len(registers[name] & pool) for name in register_class.physical_registers
+        }
+        if not any(overlap_counts):
+            continue
+        expected_members.add(register_class.name)
+        member = members[register_class.name]
+        assert {count * member.register_unit_count for count in overlap_counts} == {
+            member.resource_unit_count * resource_unit_atom_count
+        }
+    assert members.keys() == expected_members
+    capacity_class = next(
+        register_class
+        for register_class in descriptor_set.reg_classes
+        if register_class.name == resource.capacity_register_class
+    )
+    capacity_member = members[resource.capacity_register_class]
+    capacity_units = len(capacity_class.physical_registers)
+    assert capacity_units % capacity_member.register_unit_count == 0
+    capacity = (
+        capacity_units // capacity_member.register_unit_count
+    ) * capacity_member.resource_unit_count
+    assert capacity * resource_unit_atom_count == len(pool)
+
+
+def test_register_packing_rejects_nonuniform_candidate_costs() -> None:
+    vector_unit = next(
+        register
+        for register in CORE_MACHINE_TABLE.physical_registers
+        if register.name == "wl0"
+    )
+    with pytest.raises(ValueError, match="overlap must be uniform"):
+        _register_packing_members(
+            frozenset(vector_unit.atomic_units), resource_unit_atom_count=1
+        )
 
 
 def test_native_numeric_descriptors_have_report_semantic_categories() -> None:
@@ -241,161 +266,38 @@ def test_native_numeric_descriptors_have_report_semantic_categories() -> None:
         assert semantic_tag.startswith(f"{expected_category}.")
 
 
-def test_complete_schedule_domain_drives_selected_low_descriptors() -> None:
+@pytest.mark.parametrize(
+    ("key", "register_class"),
+    [
+        ("accumulator512", "aie2p.mbms"),
+        ("vec256", "aie2p.vec256"),
+        ("bfp576", "aie2p.mexa"),
+    ],
+)
+def test_vector_allocation_move_routes_reuse_typed_descriptors(
+    key: str, register_class: str
+) -> None:
     descriptor_set = AIE2P_CORE_DESCRIPTOR_SET
-    assert {
-        resource.name
-        for resource in descriptor_set.resources
-        if resource.kind is ResourceKind.PIPELINE
-    } == {
-        *(_slot_resource_name(slot) for slot in _SLOT_RESOURCE_KINDS),
-        *(
-            _pipeline_resource_name(resource)
-            for resource in CORE_SCHEDULE_TABLE.resources
-        ),
-        *(
-            _bundle_exclusion_resource_name(exclusion)
-            for exclusion in _BUNDLE_SLOT_EXCLUSIONS
-        ),
-    }
-
-    schedule_classes = {
-        schedule_class.name: schedule_class
-        for schedule_class in descriptor_set.schedule_classes
-    }
-    for spec in _DESCRIPTOR_SPECS:
-        schedule_class = schedule_classes[
-            _SCHEDULE_CLASS_NAMES[(spec.form_name, spec.itinerary)]
-        ]
-        slot = _INSTRUCTION_ENCODINGS[spec.form_name].slot
-        assert schedule_class.issue_uses[0].resource == _slot_resource_name(slot)
-        assert schedule_class.issue_uses[0].stage == 0
-        assert schedule_class.issue_uses[0].cycles == 1
-        assert schedule_class.issue_uses[0].kind is IssueUseKind.REQUIRED
-        expected_exclusions = tuple(
-            exclusion for exclusion in _BUNDLE_SLOT_EXCLUSIONS if slot in exclusion
+    classes = {row.name: row for row in descriptor_set.reg_classes}
+    routes = [
+        (
+            move.key,
+            classes[move.operands[0].reg_alts[0].reg_class].physical_registers,
+            classes[move.operands[1].reg_alts[0].reg_class].physical_registers,
         )
-        exclusion_uses = schedule_class.issue_uses[1 : 1 + len(expected_exclusions)]
-        assert tuple(use.resource for use in exclusion_uses) == tuple(
-            _bundle_exclusion_resource_name(exclusion)
-            for exclusion in expected_exclusions
-        )
-        assert all(use.stage == 0 for use in exclusion_uses)
-        assert all(use.cycles == 1 for use in exclusion_uses)
-        assert all(use.units == 1 for use in exclusion_uses)
-        assert all(use.kind is IssueUseKind.REQUIRED for use in exclusion_uses)
-        expected_pipeline_uses = pipeline_uses(_itinerary(spec))
-        assert len(schedule_class.issue_uses) == (
-            len(expected_pipeline_uses) + len(expected_exclusions) + 1
-        )
-        for actual, expected in zip(
-            schedule_class.issue_uses[1 + len(expected_exclusions) :],
-            expected_pipeline_uses,
-            strict=True,
-        ):
-            assert len(expected.resources) == 1
-            assert actual.resource == _pipeline_resource_name(expected.resources[0])
-            assert actual.stage == expected.start_cycle
-            assert actual.cycles == expected.cycles
-            assert actual.units == 1
-            assert actual.kind is (
-                IssueUseKind.REQUIRED
-                if expected.kind is PipelineStageKind.REQUIRED
-                else IssueUseKind.RESERVED
-            )
-
-
-def test_scalar_memory_forms_use_storage_specialized_itineraries() -> None:
-    specifications = {spec.key: spec for spec in _DESCRIPTOR_SPECS}
-    expected_itineraries = {
-        "i8": (
-            "II_LDA_u8_idx_imm",
-            "II_LDA_u8_idx",
-            "II_ST_s8_idx_imm",
-            "II_ST_s8_idx",
-        ),
-        "i16": (
-            "II_LDA_u16_idx_imm",
-            "II_LDA_u16_idx",
-            "II_ST_s16_idx_imm",
-            "II_ST_s16_idx",
-        ),
-        "i32": (
-            "II_LDA_dms_lda_idx_imm_eR",
-            "II_LDA_dms_lda_idx_eR",
-            "II_ST_dms_sts_idx_imm_eR",
-            "II_ST_dms_sts_idx_eR",
-        ),
-    }
-    for element_type, expected in expected_itineraries.items():
-        assert (
-            tuple(
-                specifications[
-                    f"amd.xdna.aie2p.{operation}.scalar.{element_type}.indexed.{address}"
-                ].itinerary
-                for operation, address in (
-                    ("load", "immediate"),
-                    ("load", "register"),
-                    ("store", "immediate"),
-                    ("store", "register"),
-                )
-            )
-            == expected
-        )
-    assert (
-        specifications["amd.xdna.aie2p.move.to.address-index"].itinerary
-        == "II_MOVS_eDJ_eR"
-    )
-
-
-def test_direct_branch_forms_retain_exact_control_contracts() -> None:
-    descriptors = {
-        descriptor.key: descriptor
-        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
-    }
-    specifications = {spec.key: spec for spec in _DESCRIPTOR_SPECS}
-    schedule_classes = {
-        schedule_class.name: schedule_class
-        for schedule_class in AIE2P_CORE_DESCRIPTOR_SET.schedule_classes
-    }
-    expected = {
-        "amd.xdna.aie2p.branch.direct": ("J_lng", "II_J_lng", "j", 0),
-        "amd.xdna.aie2p.branch.nonzero": ("JNZ", "II_JNZ", "jnz", 1),
-        "amd.xdna.aie2p.branch.zero": ("JZ", "II_JZ", "jz", 1),
-    }
-    for key, (form_name, itinerary, mnemonic, operand_count) in expected.items():
-        specification = specifications[key]
-        descriptor = descriptors[key]
-        assert specification.form_name == form_name
-        assert specification.itinerary == itinerary
-        assert descriptor.mnemonic == mnemonic
-        assert descriptor.asm_forms[0].mnemonic == mnemonic
-        assert len(descriptor.operands) == operand_count
-        assert descriptor.asm_forms[0].results == ()
-        assert descriptor.asm_forms[0].operands == tuple(
-            operand.field_name for operand in descriptor.operands
-        )
-        assert len(descriptor.immediates) == 1
-        immediate = descriptor.immediates[0]
-        assert immediate.field_name == "i"
-        assert immediate.kind is ImmediateKind.ORDINAL
-        assert immediate.flags == (ImmediateFlag.SYMBOLIC,)
-        assert immediate.bit_width == 20
-        assert immediate.value_step == 1
-        assert immediate.signed_min == 0
-        assert immediate.unsigned_max == (1 << 20) - 1
-        assert immediate.encoding_field_id != 0
-        assert immediate.encoding_id != 0
-        assert descriptor.asm_forms[0].immediates[0].field_name == "i"
-        assert descriptor.effects[0].kind is EffectKind.CONTROL
-        assert descriptor.instruction_classes == (InstructionClass.CONTROL,)
-        assert DescriptorFlag.SIDE_EFFECTING in descriptor.flags
-        assert DescriptorFlag.TERMINATOR in descriptor.flags
-        assert DescriptorFlag.DEAD_REMOVABLE not in descriptor.flags
-        schedule_class = schedule_classes[descriptor.schedule_class]
-        assert schedule_class.flags == (ScheduleClassFlag.CONTROL,)
-        assert schedule_class.instruction_classes == (InstructionClass.CONTROL,)
-        assert _INSTRUCTION_ENCODINGS[form_name].delay_slot_count == 5
+        for move in descriptor_set.descriptors
+        if DescriptorFlag.ALLOCATION_MOVE in move.flags
+    ]
+    # Generated route masks consume these same class memberships and descriptor
+    # ordinals; every concrete pair has exactly the typed move above.
+    for destination, source in product(
+        classes[register_class].physical_registers, repeat=2
+    ):
+        assert [
+            move_key
+            for move_key, destinations, sources in routes
+            if destination in destinations and source in sources
+        ] == [f"amd.xdna.aie2p.move.{key}"]
 
 
 def test_lock_forms_retain_counting_semaphore_contracts() -> None:
@@ -447,67 +349,6 @@ def test_lock_forms_retain_counting_semaphore_contracts() -> None:
             assert lock_id.unsigned_max == 63
 
 
-def test_lock_memory_timing_matches_aie2p_stall_and_resume_oracle() -> None:
-    descriptors = {
-        descriptor.key: descriptor
-        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
-    }
-    separations = {
-        (row.producer_event, row.consumer_event): row.minimum_issue_separation_cycles
-        for row in AIE2P_CORE_DESCRIPTOR_SET.event_separations
-    }
-    assert _LOCK_EFFECT.producer_event is not None
-    assert _LOCK_EFFECT.consumer_event is not None
-    assert separations[_LOCK_EFFECT.producer_event, _LOCK_EFFECT.consumer_event] == 4
-
-    # The pinned AIE2P model uses memory cycles 5 for normal accesses, 6 for
-    # FIFO stores, 7 for SRS stores, 8 for converting FIFO stores, and 5/11 for
-    # partword read-modify-write stores. Core resume at 8 and stall at 2 require
-    # these forward/backward issue separations.
-    expected_separations_by_cycles = {
-        (5,): (4, 4),
-        (6,): (3, 5),
-        (7,): (2, 6),
-        (8,): (1, 7),
-        (5, 11): (4, 10),
-    }
-
-    memory_spec_count = 0
-    read_modify_write_spec_count = 0
-    for spec in _DESCRIPTOR_SPECS:
-        form = _MACHINE_FORMS[spec.form_name]
-        may_load = has_property(form, "mayLoad")
-        may_store = has_property(form, "mayStore")
-        if not may_load and not may_store:
-            continue
-        memory_spec_count += 1
-        read_modify_write_spec_count += int(may_load and may_store)
-        memory = _itinerary(spec).memory
-        assert memory is not None
-        expected_resume_separation, expected_stall_separation = (
-            expected_separations_by_cycles[memory.cycles]
-        )
-        descriptor = descriptors[spec.key]
-        for effect in descriptor.effects:
-            if effect.kind not in (EffectKind.READ, EffectKind.WRITE):
-                continue
-            access = "read" if effect.kind is EffectKind.READ else "write"
-            memory_event = _memory_event_name(access, memory)
-            assert effect.producer_event == memory_event
-            assert effect.consumer_event == memory_event
-            assert (
-                separations[_LOCK_EFFECT.producer_event, memory_event]
-                == expected_resume_separation
-            )
-            assert (
-                separations[memory_event, _LOCK_EFFECT.consumer_event]
-                == expected_stall_separation
-            )
-
-    assert memory_spec_count != 0
-    assert read_modify_write_spec_count != 0
-
-
 def test_scalar_stream_family_covers_native_forms_and_register_domains() -> None:
     native_forms = {
         form.name: form
@@ -541,77 +382,6 @@ def test_scalar_stream_family_covers_native_forms_and_register_domains() -> None
                 form.name,
                 operand.name,
             )
-
-
-def test_scalar_stream_transfers_preserve_protocol_and_status_dependencies() -> None:
-    descriptors = {row.key: row for row in AIE2P_CORE_DESCRIPTOR_SET.descriptors}
-    classes = {row.name: row for row in AIE2P_CORE_DESCRIPTOR_SET.reg_classes}
-    separations = {
-        (row.producer_event, row.consumer_event): row.minimum_issue_separation_cycles
-        for row in AIE2P_CORE_DESCRIPTOR_SET.event_separations
-    }
-    source_adapter = next(
-        row
-        for row in CORE_MACHINE_TABLE.register_adapters
-        if row.name == "OP_mMvSclSrc"
-    )
-    source_encodings = dict(source_adapter.effective_register_encodings)
-    for spec in _DESCRIPTOR_SPECS:
-        form = _MACHINE_FORMS[spec.form_name]
-        status_registers = {"srMS0", "srSS0"} & set(form.implicit_defs)
-        if not status_registers:
-            continue
-        descriptor = descriptors[spec.key]
-        assert DescriptorFlag.SIDE_EFFECTING in descriptor.flags
-        assert DescriptorFlag.DEAD_REMOVABLE not in descriptor.flags
-        assert [effect.kind for effect in descriptor.effects] == [EffectKind.BARRIER]
-        assert _itinerary(spec).memory is None
-        register = next(iter(status_registers))
-        direction = "read" if register == "srSS0" else "write"
-        state_write = descriptor.operands[-1]
-        assert state_write.flags == (OperandFlag.IMPLICIT, OperandFlag.STATE_WRITE)
-        state_class = state_write.reg_alts[0].reg_class
-        assert classes[state_class].physical_registers == (register,)
-        status = descriptors[f"amd.xdna.aie2p.stream.{direction}.status"]
-        state_read = status.operands[-1]
-        assert state_read.flags == (OperandFlag.IMPLICIT, OperandFlag.STATE_READ)
-        assert state_read.reg_alts[0].reg_class == state_class
-        assert status.asm_forms[0].operands == ()
-        assert status.encoding_field_values[0].value == source_encodings[register]
-        assert separations[state_write.write_event, state_read.read_event] == (
-            8 if direction == "read" else 3
-        )
-
-
-def test_cascade_transfers_preserve_protocol_and_enable_dependencies() -> None:
-    descriptors = {row.key: row for row in AIE2P_CORE_DESCRIPTOR_SET.descriptors}
-    classes = {row.name: row for row in AIE2P_CORE_DESCRIPTOR_SET.reg_classes}
-    separations = {
-        (row.producer_event, row.consumer_event): row.minimum_issue_separation_cycles
-        for row in AIE2P_CORE_DESCRIPTOR_SET.event_separations
-    }
-    for direction, port, register in (
-        ("read", "scd", "crSCDEn"),
-        ("write", "mcd", "crMCDEn"),
-    ):
-        enable = descriptors[f"amd.xdna.aie2p.state.{port}-enable.immediate"]
-        state_write = enable.operands[0]
-        assert state_write.flags == (OperandFlag.IMPLICIT, OperandFlag.STATE_WRITE)
-        for payload in ("vector", "accumulator"):
-            transfer = descriptors[f"amd.xdna.aie2p.cascade.{direction}.{payload}.512"]
-            assert DescriptorFlag.SIDE_EFFECTING in transfer.flags
-            assert DescriptorFlag.DEAD_REMOVABLE not in transfer.flags
-            assert [effect.kind for effect in transfer.effects] == [EffectKind.BARRIER]
-            value, state_read = transfer.operands
-            assert (
-                value.unit_count * classes[value.reg_alts[0].reg_class].alloc_unit_bits
-                == 512
-            )
-            assert state_read.flags == (OperandFlag.IMPLICIT, OperandFlag.STATE_READ)
-            state_class = state_read.reg_alts[0].reg_class
-            assert classes[state_class].physical_registers == (register,)
-            assert state_write.reg_alts[0].reg_class == state_class
-            assert (state_write.write_event, state_read.read_event) in separations
 
 
 def test_cascade_expansion_retains_complete_results_and_selector_updates() -> None:
@@ -700,7 +470,11 @@ def test_fused_cascade_arithmetic_preserves_accumulator_and_selector_state() -> 
                 if payload == "floating":
                     expected.update(
                         crFPMask=(OperandFlag.IMPLICIT, OperandFlag.STATE_READ),
-                        srFPFlags=(OperandFlag.IMPLICIT, OperandFlag.STATE_WRITE),
+                        srFPFlags=(
+                            OperandFlag.IMPLICIT,
+                            OperandFlag.STATE_WRITE,
+                            OperandFlag.COMMUTATIVE_STATE_UPDATE,
+                        ),
                     )
                 assert states == expected
 
@@ -761,32 +535,6 @@ def test_cascade_matrix_preserves_native_operand_ownership() -> None:
                     for name, operand in base_operands.items():
                         if OperandFlag.IMPLICIT in operand.flags:
                             assert operands[name] == operand
-
-
-def test_bundle_resources_exactly_model_every_extendable_physical_slot_set() -> None:
-    descriptor_set = AIE2P_CORE_DESCRIPTOR_SET
-    resources = {resource.name: resource for resource in descriptor_set.resources}
-    for exclusion in _BUNDLE_SLOT_EXCLUSIONS:
-        resource = resources[_bundle_exclusion_resource_name(exclusion)]
-        assert resource.capacity_per_cycle == len(exclusion) - 1
-        assert resource.kind is ResourceKind.PIPELINE
-
-    legal_signatures = {
-        frozenset(field.slot for field in bundle_format.fields)
-        for bundle_format in CORE_ENCODING_TABLE.bundle_formats
-    }
-    slots = tuple(sorted(_SLOT_RESOURCE_KINDS))
-    for slot_count in range(1, len(slots) + 1):
-        for candidate in combinations(slots, slot_count):
-            admitted_by_resources = all(
-                len(set(candidate).intersection(exclusion)) < len(exclusion)
-                for exclusion in _BUNDLE_SLOT_EXCLUSIONS
-            )
-            extendable_to_bundle = any(
-                frozenset(candidate).issubset(signature)
-                for signature in legal_signatures
-            )
-            assert admitted_by_resources == extendable_to_bundle
 
 
 def test_low_register_classes_retain_machine_candidate_order() -> None:
@@ -854,6 +602,47 @@ def test_aggregate_updates_require_coindexed_unencoded_components() -> None:
             )
 
 
+def test_descriptor_updates_require_unique_known_operands() -> None:
+    spec = next(
+        spec
+        for spec in _DESCRIPTOR_SPECS
+        if spec.key == "amd.xdna.aie2p.predicate.and.low32.rhs_tied"
+    )
+    form = _MACHINE_FORMS[spec.form_name]
+    operand_names = tuple(operand.name for operand in (*form.outputs, *form.inputs))
+    with pytest.raises(ValueError, match="tied update names unknown operands"):
+        descriptor_constraints(
+            replace(
+                spec,
+                destructive_updates=(),
+                tied_updates=(("d0", "unknown"),),
+            ),
+            form,
+            operand_names,
+        )
+    with pytest.raises(ValueError, match="destructive update names unknown operands"):
+        descriptor_constraints(
+            replace(spec, destructive_updates=(("unknown", "s1"),)),
+            form,
+            operand_names,
+        )
+    with pytest.raises(ValueError, match="update pairs must be unique"):
+        descriptor_constraints(
+            replace(
+                spec,
+                destructive_updates=(("d0", "s1"), ("d0", "s1")),
+            ),
+            form,
+            operand_names,
+        )
+    with pytest.raises(ValueError, match="already imply same-storage ties"):
+        descriptor_constraints(
+            replace(spec, tied_updates=(("d0", "s1"),)),
+            form,
+            operand_names,
+        )
+
+
 def test_vector_encoding_roles_share_one_low_storage_class() -> None:
     descriptors = {
         descriptor.key: descriptor
@@ -890,6 +679,65 @@ def test_vector_encoding_roles_share_one_low_storage_class() -> None:
             }
         )
         == 5
+    )
+
+
+def test_floating_packet_descriptors_retain_complete_destination_clobbers() -> None:
+    descriptors = {
+        descriptor.key: descriptor
+        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
+    }
+    for operation in ("add", "sub"):
+        packet = descriptors[f"amd.xdna.aie2p.{operation}.f32x16.configured"]
+        complete = descriptors[f"amd.xdna.aie2p.{operation}.f32x64.configured"]
+        assert [operand.field_name for operand in packet.operands[:4]] == [
+            "dst",
+            "acc1",
+            "acc2",
+            "acc",
+        ]
+        assert [operand.reg_alts[0].reg_class for operand in packet.operands[:4]] == [
+            "aie2p.mbms",
+            "aie2p.ebmll",
+            "aie2p.ebmll",
+            "aie2p.er",
+        ]
+        assert [operand.unit_count for operand in packet.operands[:4]] == [4, 1, 1, 1]
+        assert packet.operands[0] == complete.operands[0]
+        assert all(operand.encoding_adapter_id != 0 for operand in packet.operands[1:3])
+
+    packet = descriptors["amd.xdna.aie2p.accumulate.bf16x16.configured"]
+    complete = descriptors["amd.xdna.aie2p.accumulate.bf16x32.configured"]
+    assert packet.operands[0] == complete.operands[0]
+    assert packet.operands[0].unit_count == 4
+    assert packet.operands[1].reg_alts[0].reg_class == "aie2p.ebmll"
+    assert packet.operands[1].unit_count == 1
+    assert packet.operands[1].encoding_adapter_id != 0
+    assert packet.operands[1].read_event == complete.operands[1].read_event
+    assert packet.operands[2:] == complete.operands[2:]
+
+    low_move = descriptors["amd.xdna.aie2p.move.vector512.to.accumulator512.low"]
+    assert [operand.reg_alts[0].reg_class for operand in low_move.operands] == [
+        "aie2p.ebmll",
+        "aie2p.vec256",
+    ]
+    assert [operand.unit_count for operand in low_move.operands] == [1, 2]
+
+    classes = {row.name: row for row in CORE_MACHINE_TABLE.register_classes}
+    registers = {row.name: row for row in CORE_MACHINE_TABLE.physical_registers}
+    adapters = {row.name: row for row in CORE_MACHINE_TABLE.register_adapters}
+    quarter_adapter = adapters["LOOM_eBMLL_eDM"]
+    assert quarter_adapter.register_class == "eBMLL"
+    assert quarter_adapter.effective_register_encodings == tuple(
+        (
+            quarter_name,
+            registers[complete_name].hardware_encoding,
+        )
+        for quarter_name, complete_name in zip(
+            classes["eBMLL"].candidates,
+            classes["eDM"].candidates,
+            strict=True,
+        )
     )
 
 
@@ -994,8 +842,6 @@ def test_descriptor_encoding_ids_and_adapters_are_materialized() -> None:
     assert Constraint(ConstraintKind.REMATERIALIZABLE, 0) in static_offset.constraints
 
     for name in (
-        "splat.i16x32",
-        "splat.i32x16",
         "accumulator.clear.i32x64",
         "accumulator.clear.f32x64",
         "move.vector512.to.accumulator512",
@@ -1006,12 +852,17 @@ def test_descriptor_encoding_ids_and_adapters_are_materialized() -> None:
     local_address = descriptors["amd.xdna.aie2p.materialize.local-address.i32"]
     assert local_address.semantic_tag == "memory.materialize.local-address.i32"
     assert local_address.asm_forms[0].mnemonic == "mov.local-address"
+    assert len(local_address.operands) == 1
     assert local_address.operands[0].reg_alts[0].reg_class == "aie2p.ep"
     assert local_address.operands[0].unit_count == 1
     assert local_address.operands[0].encoding_field_id != 0
     assert local_address.operands[0].encoding_adapter_id != 0
     assert local_address.immediates[0].field_name == "i"
     assert local_address.immediates[0].bit_width == 32
+    assert local_address.immediates[0].kind is ImmediateKind.ORDINAL
+    assert local_address.immediates[0].flags == (ImmediateFlag.SYMBOLIC,)
+    assert local_address.effects == ()
+    assert Constraint(ConstraintKind.REMATERIALIZABLE, 0) in local_address.constraints
 
     short_constant = descriptors["amd.xdna.aie2p.constant.i32.short"]
     full_constant = descriptors["amd.xdna.aie2p.constant.i32"]
@@ -1163,6 +1014,58 @@ def test_descriptor_encoding_ids_and_adapters_are_materialized() -> None:
             )
 
 
+def test_state_free_vector_broadcasts_can_rematerialize() -> None:
+    descriptors = {
+        descriptor.key: descriptor
+        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
+    }
+    integer_shapes = ((8, 64), (16, 32), (32, 16), (64, 8))
+    keys = (
+        *(f"amd.xdna.aie2p.splat.i{width}x{lanes}" for width, lanes in integer_shapes),
+        *(
+            f"amd.xdna.aie2p.broadcast.i{width}x{lanes}.from-vector"
+            for width, lanes in integer_shapes
+        ),
+        "amd.xdna.aie2p.broadcast.bf16x8.to.bf16x32",
+    )
+    rematerializable = Constraint(ConstraintKind.REMATERIALIZABLE, 0)
+    for key in keys:
+        descriptor = descriptors[key]
+        assert descriptor.op_kind is DescriptorOpKind.OP
+        assert descriptor.effects == ()
+        assert DescriptorFlag.DEAD_REMOVABLE in descriptor.flags
+        assert [operand.role for operand in descriptor.operands] == [
+            OperandRole.RESULT,
+            OperandRole.OPERAND,
+        ]
+        assert all(
+            OperandFlag.IMPLICIT not in operand.flags for operand in descriptor.operands
+        )
+        assert rematerializable in descriptor.constraints
+
+
+def test_state_free_vector_bitwise_results_can_rematerialize() -> None:
+    descriptors = {
+        descriptor.key: descriptor
+        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
+    }
+    rematerializable = Constraint(ConstraintKind.REMATERIALIZABLE, 0)
+    for operation in ("and", "or"):
+        descriptor = descriptors[f"amd.xdna.aie2p.{operation}.bits512"]
+        assert descriptor.op_kind is DescriptorOpKind.OP
+        assert descriptor.effects == ()
+        assert DescriptorFlag.DEAD_REMOVABLE in descriptor.flags
+        assert [operand.role for operand in descriptor.operands] == [
+            OperandRole.RESULT,
+            OperandRole.OPERAND,
+            OperandRole.OPERAND,
+        ]
+        assert all(
+            OperandFlag.IMPLICIT not in operand.flags for operand in descriptor.operands
+        )
+        assert rematerializable in descriptor.constraints
+
+
 def test_scalar_address_descriptors_expose_fixed_register_state() -> None:
     descriptors = {
         descriptor.key: descriptor
@@ -1246,34 +1149,134 @@ def test_vector_predicates_use_one_partially_addressable_el_value() -> None:
         descriptor.key: descriptor
         for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
     }
+    low_constant = descriptors["amd.xdna.aie2p.constant.i32.predicate.low32"]
+    assert low_constant.op_kind is DescriptorOpKind.CONST
+    assert low_constant.operands[0].reg_alts[0].reg_class == "aie2p.elpredicate"
+    assert (
+        low_constant.operands[0].reg_alts[0].register_part == "aie2p.elpredicate.low32"
+    )
+    assert low_constant.operands[0].encoding_adapter_id != 0
+    assert low_constant.immediates[0].field_name == "i"
+    assert low_constant.immediates[0].signed_min == -(1 << 31)
+    assert low_constant.immediates[0].unsigned_max == (1 << 31) - 1
+
+    high_constant = descriptors["amd.xdna.aie2p.predicate.complete.constant.high32"]
+    assert [operand.field_name for operand in high_constant.operands] == [
+        "dst",
+        "storage",
+    ]
+    assert (
+        high_constant.operands[0].reg_alts[0].register_part
+        == "aie2p.elpredicate.high32"
+    )
+    assert high_constant.operands[0].encoding_adapter_id != 0
+    assert (
+        high_constant.operands[1].reg_alts[0].register_part == "aie2p.elpredicate.low32"
+    )
+    assert set(high_constant.operands[1].flags) == {
+        OperandFlag.IMPLICIT,
+        OperandFlag.STORAGE_CONTINUATION,
+    }
+    assert high_constant.constraints == (
+        Constraint(ConstraintKind.REMATERIALIZABLE, 0),
+        Constraint(ConstraintKind.TIED, 0, 1),
+    )
+    assert high_constant.asm_forms[0].operands == ("storage",)
+    assert high_constant.immediates[0].signed_min == -(1 << 31)
+    assert high_constant.immediates[0].unsigned_max == (1 << 31) - 1
+
     for width in (16, 32):
         compare = descriptors[
             f"amd.xdna.aie2p.cmp.lt.signed.i{width}x{512 // width}.el.low32"
         ]
         assert compare.operands[0].reg_alts[0].reg_class == "aie2p.elpredicate"
-        assert compare.operands[0].register_part == "aie2p.elpredicate.low32"
+        assert (
+            compare.operands[0].reg_alts[0].register_part == "aie2p.elpredicate.low32"
+        )
         assert compare.operands[0].encoding_adapter_id != 0
 
         select = descriptors[f"amd.xdna.aie2p.select.i{width}x{512 // width}.mask64"]
         assert select.operands[-1].field_name == "sel"
         assert select.operands[-1].reg_alts[0].reg_class == "aie2p.elpredicate"
-        assert select.operands[-1].register_part == "aie2p.elpredicate.low32"
+        assert (
+            select.operands[-1].reg_alts[0].register_part == "aie2p.elpredicate.low32"
+        )
         assert select.operands[-1].encoding_adapter_id != 0
+
+    rematerializable = Constraint(ConstraintKind.REMATERIALIZABLE, 0)
+    for word, register_part in (
+        ("low32", "aie2p.elpredicate.low32"),
+        ("high32", "aie2p.elpredicate.high32"),
+    ):
+        mask = descriptors[f"amd.xdna.aie2p.predicate.mask.{word}.to.low32"]
+        assert [operand.field_name for operand in mask.operands] == [
+            "d0",
+            "s0",
+            "s1",
+        ]
+        assert mask.operands[0].reg_alts[0].reg_class == "aie2p.elpredicate"
+        assert mask.operands[0].reg_alts[0].register_part == "aie2p.elpredicate.low32"
+        assert mask.operands[1].reg_alts[0].reg_class == "aie2p.elpredicate"
+        assert mask.operands[1].reg_alts[0].register_part == register_part
+        assert all(operand.encoding_adapter_id != 0 for operand in mask.operands[:2])
+        assert mask.operands[2].reg_alts[0].reg_class == "aie2p.er"
+        assert mask.constraints == ()
+        assert mask.asm_forms[0].operands == ("s0", "s1")
+
+    high_or = descriptors["amd.xdna.aie2p.predicate.or.low32.to.high32"]
+    assert [operand.field_name for operand in high_or.operands] == [
+        "d0",
+        "s0",
+        "s1",
+        "storage",
+    ]
+    assert [operand.reg_alts[0].register_part for operand in high_or.operands] == [
+        "aie2p.elpredicate.high32",
+        "aie2p.elpredicate.low32",
+        "aie2p.elpredicate.low32",
+        "aie2p.elpredicate.low32",
+    ]
+    assert high_or.constraints == (Constraint(ConstraintKind.TIED, 0, 3),)
+    assert high_or.asm_forms[0].operands == ("s0", "s1", "storage")
+
+    for width in (8, 16, 32):
+        suffix = ".el.low32" if width != 8 else ""
+        equality = descriptors[
+            f"amd.xdna.aie2p.cmp.eqz.i{width}x{512 // width}{suffix}"
+        ]
+        assert rematerializable in equality.constraints
 
     for operation in ("and", "or", "xor"):
         low = descriptors[f"amd.xdna.aie2p.predicate.{operation}.low32"]
+        tied_low = descriptors[f"amd.xdna.aie2p.predicate.{operation}.low32.rhs_tied"]
         high = descriptors[f"amd.xdna.aie2p.predicate.{operation}.high32"]
+        tied_high = descriptors[f"amd.xdna.aie2p.predicate.{operation}.high32.rhs_tied"]
         assert all(
-            operand.register_part == "aie2p.elpredicate.low32"
+            operand.reg_alts[0].register_part == "aie2p.elpredicate.low32"
             for operand in low.operands
         )
         assert all(
-            operand.register_part == "aie2p.elpredicate.high32"
+            operand.reg_alts[0].register_part == "aie2p.elpredicate.low32"
+            for operand in tied_low.operands
+        )
+        assert tied_low.constraints == (
+            Constraint(ConstraintKind.TIED, 0, 2),
+            Constraint(ConstraintKind.DESTRUCTIVE, 0, 2),
+        )
+        assert tied_low.asm_forms[0].operands == ("s0", "s1")
+        assert all(
+            operand.reg_alts[0].register_part == "aie2p.elpredicate.high32"
+            for operand in tied_high.operands
+        )
+        assert tied_high.constraints == (Constraint(ConstraintKind.TIED, 0, 2),)
+        assert tied_high.asm_forms[0].operands == ("s0", "s1")
+        assert all(
+            operand.reg_alts[0].register_part == "aie2p.elpredicate.high32"
             for operand in high.operands[:3]
         )
         continuation = high.operands[3]
         assert continuation.field_name == "storage"
-        assert continuation.register_part == "aie2p.elpredicate.low32"
+        assert continuation.reg_alts[0].register_part == "aie2p.elpredicate.low32"
         assert set(continuation.flags) == {
             OperandFlag.IMPLICIT,
             OperandFlag.STORAGE_CONTINUATION,
@@ -1284,13 +1287,63 @@ def test_vector_predicates_use_one_partially_addressable_el_value() -> None:
         assert high.constraints[0].rhs_operand_index == 3
         assert high.asm_forms[0].operands == ("s0", "s1", "storage")
 
+    for word, source_part in (
+        ("low32", "aie2p.elpredicate.low32"),
+        ("high32", "aie2p.elpredicate.high32"),
+    ):
+        shift = descriptors[f"amd.xdna.aie2p.predicate.shift.{word}"]
+        assert [operand.field_name for operand in shift.operands] == [
+            "d0",
+            "s0",
+            "s1",
+        ]
+        assert shift.operands[0].reg_alts[0].reg_class == "aie2p.elpredicate"
+        assert shift.operands[0].reg_alts[0].register_part == "aie2p.elpredicate.low32"
+        assert shift.operands[0].encoding_adapter_id != 0
+        assert shift.operands[1].reg_alts[0].reg_class == "aie2p.elpredicate"
+        assert shift.operands[1].reg_alts[0].register_part == source_part
+        assert shift.operands[1].encoding_adapter_id != 0
+        assert shift.operands[2].reg_alts[0].reg_class == "aie2p.er"
+        assert shift.asm_forms[0].mnemonic == f"predicate.shift.{word}"
+
+        high_shift = descriptors[f"amd.xdna.aie2p.predicate.shift.{word}.to.high32"]
+        assert [operand.field_name for operand in high_shift.operands] == [
+            "d0",
+            "s0",
+            "s1",
+            "storage",
+        ]
+        assert high_shift.operands[0].reg_alts[0].reg_class == "aie2p.elpredicate"
+        assert (
+            high_shift.operands[0].reg_alts[0].register_part
+            == "aie2p.elpredicate.high32"
+        )
+        assert high_shift.operands[0].encoding_adapter_id != 0
+        assert high_shift.operands[1].reg_alts[0].reg_class == "aie2p.elpredicate"
+        assert high_shift.operands[1].reg_alts[0].register_part == source_part
+        assert high_shift.operands[1].encoding_adapter_id != 0
+        assert high_shift.operands[2].reg_alts[0].reg_class == "aie2p.er"
+        continuation = high_shift.operands[3]
+        assert continuation.reg_alts[0].register_part == "aie2p.elpredicate.low32"
+        assert set(continuation.flags) == {
+            OperandFlag.IMPLICIT,
+            OperandFlag.STORAGE_CONTINUATION,
+        }
+        assert high_shift.constraints == (Constraint(ConstraintKind.TIED, 0, 3),)
+        assert high_shift.asm_forms[0].mnemonic == (f"predicate.shift.{word}.to.high32")
+        assert high_shift.asm_forms[0].operands == ("s0", "s1", "storage")
+
     complete = descriptors["amd.xdna.aie2p.predicate.complete.zero.high32"]
-    assert complete.operands[0].register_part == "aie2p.elpredicate.high32"
-    assert complete.operands[1].register_part == "aie2p.elpredicate.low32"
+    assert complete.operands[0].reg_alts[0].register_part == "aie2p.elpredicate.high32"
+    assert complete.operands[1].reg_alts[0].register_part == "aie2p.elpredicate.low32"
     assert OperandFlag.STORAGE_CONTINUATION in complete.operands[1].flags
-    assert complete.constraints[0].kind is ConstraintKind.TIED
-    assert complete.constraints[0].lhs_operand_index == 0
-    assert complete.constraints[0].rhs_operand_index == 1
+    assert rematerializable in complete.constraints
+    complete_ties = [
+        constraint
+        for constraint in complete.constraints
+        if constraint.kind is ConstraintKind.TIED
+    ]
+    assert complete_ties == [Constraint(ConstraintKind.TIED, 0, 1)]
     assert complete.asm_forms[0].operands == ("storage",)
 
 
@@ -1319,7 +1372,6 @@ def test_vector_multiply_descriptors_own_configuration_state() -> None:
         "aie2p.er",
     ]
     assert [operand.unit_count for operand in multiply.operands] == [1, 2, 2, 1]
-
     bf16_multiply = descriptors["amd.xdna.aie2p.multiply.bf16x32.configured"]
     assert [operand.field_name for operand in bf16_multiply.operands] == [
         "dst",
@@ -1592,6 +1644,25 @@ def test_vector_multiply_descriptors_own_configuration_state() -> None:
     ]
     assert [operand.unit_count for operand in f32_add.operands[:4]] == [4, 4, 4, 1]
 
+    accumulator_shuffle = descriptors[
+        "amd.xdna.aie2p.shuffle.x.to.accumulator512.configured"
+    ]
+    assert [operand.field_name for operand in accumulator_shuffle.operands[:4]] == [
+        "dst",
+        "s1",
+        "s2",
+        "mod",
+    ]
+    assert [
+        operand.reg_alts[0].reg_class for operand in accumulator_shuffle.operands[:4]
+    ] == ["aie2p.mbmsm", "aie2p.vec256", "aie2p.vec256", "aie2p.er"]
+    assert [operand.unit_count for operand in accumulator_shuffle.operands[:4]] == [
+        1,
+        2,
+        2,
+        1,
+    ]
+
     bf16_broadcast = descriptors["amd.xdna.aie2p.broadcast.bf16x8.to.bf16x32"]
     assert [operand.reg_alts[0].reg_class for operand in bf16_broadcast.operands] == [
         "aie2p.vec256",
@@ -1740,6 +1811,7 @@ def test_vector_multiply_descriptors_own_configuration_state() -> None:
         assert len(setter.encoding_field_values) == 1
         assert setter.encoding_field_values[0].value == encoded_register
         assert DescriptorFlag.SIDE_EFFECTING in setter.flags
+        assert DescriptorFlag.STATE_ASSIGNMENT in setter.flags
         assert DescriptorFlag.DEAD_REMOVABLE not in setter.flags
         assert narrow_state_classes[state_field] == register_class
 
@@ -1761,6 +1833,7 @@ def test_vector_multiply_descriptors_own_configuration_state() -> None:
         assert state_write.encoding_field_id == 0
         assert len(setter.encoding_field_values) == 1
         assert setter.encoding_field_values[0].value == encoded_register
+        assert DescriptorFlag.STATE_ASSIGNMENT in setter.flags
         assert DescriptorFlag.SIDE_EFFECTING in setter.flags
         assert DescriptorFlag.DEAD_REMOVABLE not in setter.flags
     unsigned_unpack = descriptors["amd.xdna.aie2p.unpack.u4x64.to.u8x64.configured"]
@@ -1769,6 +1842,61 @@ def test_vector_multiply_descriptors_own_configuration_state() -> None:
         for operand in unsigned_unpack.operands[2:]
     }
     assert unsigned_unpack_state["implicit_use_crunpacksize"] == ("aie2p.mcrunpacksize")
+
+
+def test_shift_distance_adjustment_defines_the_shift_register() -> None:
+    descriptors = {
+        descriptor.key: descriptor
+        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
+    }
+
+    adjustment = descriptors["amd.xdna.aie2p.add.i32.immediate.shift"]
+    assert adjustment.semantic_tag == "integer.add.i32"
+    assert [operand.field_name for operand in adjustment.operands] == ["dst", "s0"]
+    assert [operand.reg_alts[0].reg_class for operand in adjustment.operands] == [
+        "aie2p.es",
+        "aie2p.er",
+    ]
+    assert adjustment.asm_forms[0].mnemonic == "add.shift"
+    assert DescriptorFlag.SAFE_TO_SPECULATE in adjustment.flags
+
+
+def test_native_sticky_updates_are_distinct_from_replacement_writes() -> None:
+    sticky_registers = {
+        "srSparse_of",
+        "srF2FFlags",
+        "srF2BFlags",
+        "srF2IFlags",
+        "srFPFlags",
+        "srSRS_of",
+        "srUPS_of",
+        "srFifo_of",
+        "srFifo_uf",
+    }
+    descriptors = {
+        descriptor.key: descriptor
+        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
+    }
+    seen_registers = set()
+    for spec in _DESCRIPTOR_SPECS:
+        native_updates = (
+            set(_MACHINE_FORMS[spec.form_name].implicit_defs) & sticky_registers
+        )
+        expected_fields = {
+            f"implicit_def_{register.lower()}" for register in native_updates
+        }
+        actual_fields = set()
+        for operand in descriptors[spec.key].operands:
+            if OperandFlag.COMMUTATIVE_STATE_UPDATE not in operand.flags:
+                continue
+            actual_fields.add(operand.field_name)
+            assert operand.role is OperandRole.IMPLICIT
+            assert OperandFlag.STATE_WRITE in operand.flags
+            assert OperandFlag.STATE_READ not in operand.flags
+            assert operand.write_event is not None
+        assert actual_fields == expected_fields
+        seen_registers.update(native_updates)
+    assert {"srF2BFlags", "srFPFlags"} <= seen_registers
 
 
 def test_implicit_registers_and_machine_ties_reach_low() -> None:
@@ -1887,72 +2015,12 @@ def test_implicit_registers_and_machine_ties_reach_low() -> None:
     assert constraints[0].rhs_operand_index == 2
 
 
-def test_seed_schedule_contract_retains_endpoint_events_and_separations() -> None:
-    descriptor_set = AIE2P_CORE_DESCRIPTOR_SET
-    descriptors = {row.key: row for row in descriptor_set.descriptors}
-    separations = {
-        (row.producer_event, row.consumer_event): row.minimum_issue_separation_cycles
-        for row in descriptor_set.event_separations
+def test_packed_scalar_conversion_producers_are_rematerializable() -> None:
+    descriptors = {
+        descriptor.key: descriptor
+        for descriptor in AIE2P_CORE_DESCRIPTOR_SET.descriptors
     }
-
-    scalar_add = descriptors["amd.xdna.aie2p.add.i32.immediate"]
-    scalar_write = next(
-        row.write_event for row in scalar_add.operands if row.role is OperandRole.RESULT
-    )
-    scalar_read = next(
-        row.read_event for row in scalar_add.operands if row.role is OperandRole.OPERAND
-    )
-    scalar_store = descriptors["amd.xdna.aie2p.store.scalar.i32.indexed.immediate"]
-    scalar_store_read = next(
-        row.read_event for row in scalar_store.operands if row.field_name == "src"
-    )
-    assert separations[scalar_write, scalar_read] == 1
-    assert separations[scalar_write, scalar_write] == 1
-    assert separations[scalar_read, scalar_write] == 0
-    assert separations[scalar_write, scalar_store_read] == 1
-
-    scalar_mul = descriptors["amd.xdna.aie2p.mul.i32"]
-    multiply_write = next(
-        row.write_event for row in scalar_mul.operands if row.role is OperandRole.RESULT
-    )
-    assert scalar_mul.operands[0].ready_stage == 2
-    assert separations[multiply_write, scalar_read] == 2
-
-    vector_add = descriptors["amd.xdna.aie2p.add.i32x16"]
-    vector_write = next(
-        row.write_event for row in vector_add.operands if row.role is OperandRole.RESULT
-    )
-    vector_read = next(
-        row.read_event for row in vector_add.operands if row.role is OperandRole.OPERAND
-    )
-    vector_load = descriptors["amd.xdna.aie2p.load.a.i8x64.indexed.immediate"]
-    load_write = next(
-        row.write_event
-        for row in vector_load.operands
-        if row.role is OperandRole.RESULT
-    )
-    vector_store = descriptors["amd.xdna.aie2p.store.i8x64.indexed.immediate"]
-    vector_store_read = next(
-        row.read_event for row in vector_store.operands if row.field_name == "src"
-    )
-    assert separations[load_write, vector_read] == 7
-    assert separations[vector_write, vector_read] == 1
-    assert separations[vector_write, vector_write] == 1
-    assert separations[vector_read, vector_write] == 0
-    assert separations[vector_write, vector_store_read] == 2
-
-    memory_write = next(
-        row.producer_event
-        for row in vector_store.effects
-        if row.kind is EffectKind.WRITE
-    )
-    memory_read = next(
-        row.consumer_event for row in vector_load.effects if row.kind is EffectKind.READ
-    )
-    assert separations[memory_write, memory_read] == 1
-    assert vector_load.immediates[0].encoding_field_id != 0
-    assert vector_load.immediates[0].encoding_id != 0
-    assert vector_load.immediates[0].value_step == 64
-
-    scalar_add = descriptors["amd.xdna.aie2p.add.i32.immediate"]
-    assert scalar_add.immediates[0].value_step == 1
+    for key in ("extract.i8.immediate", "extend.unsigned.i8"):
+        assert Constraint(ConstraintKind.REMATERIALIZABLE, 0) in (
+            descriptors[f"amd.xdna.aie2p.{key}"].constraints
+        )

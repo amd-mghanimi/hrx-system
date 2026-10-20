@@ -9,7 +9,7 @@
 // pipelines choose the concrete register, control-flow, and executable
 // representation.
 
-config.decl @ffn_gate_up.input_size : %value: index where [range(%value, 512, 32768), mul(%value, 512)]
+config.decl @ffn_gate_up.input_size : %value: index where [range(%value, 512, 32768), multiple_of(%value, 512)]
 
 config.def @ffn_gate_up.output_size = 768 : index
 

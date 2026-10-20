@@ -17,6 +17,8 @@ loom_target_contract_file_family(
     loom::py::loom::gen::target::contracts::amdgpu_contract_table_family
   INDEX_OUTPUT
     "tables.inl"
+  SHARED_STRINGS
+    "instruction_strings"
   FRAGMENTS
     "arithmetic=amdgpu.arithmetic"
     "async=amdgpu.async"
@@ -30,8 +32,24 @@ loom_target_contract_file_family(
     "view=amdgpu.view"
   ARGS
     "--contract-index=LOOM_AMDGPU_CONTRACT:amdgpu.arithmetic,amdgpu.buffer,amdgpu.config,amdgpu.integer,amdgpu.compare,amdgpu.dot,amdgpu.reduce,amdgpu.async,amdgpu.sanitizer,amdgpu.view,amdgpu.matrix"
+    "--shared-strings-public-header=loom/target/arch/amdgpu/contracts/instruction_strings.h"
+    "--shared-strings-symbol=loom_amdgpu_instruction_strings"
   COMMENT
     "Generating AMDGPU contract table families"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_AMDGPU)
+loom_cc_library(
+  NAME
+    instruction_strings
+  HDRS
+    "instruction_strings.h"
+  SRCS
+    "instruction_strings.c"
+  DEPS
+
+  PUBLIC
 )
 endif()
 
@@ -42,6 +60,7 @@ loom_target_contract_cc_libraries(
   CONTRACT_DEPS
     loom::target::contract
   LOWER_RULE_DEPS
+    ::instruction_strings
     loom::codegen::low::lower
     loom::ops::index
     loom::ops::scalar
@@ -72,6 +91,7 @@ loom_target_contract_cc_libraries(
   LOWER_RULE_DEPS
     loom::codegen::low::lower
     loom::ops::buffer
+    loom::ops::global
 )
 endif()
 
@@ -94,6 +114,7 @@ loom_target_contract_cc_libraries(
   CONTRACT_DEPS
     loom::target::contract
   LOWER_RULE_DEPS
+    ::instruction_strings
     loom::codegen::low::lower
     loom::ops::index
     loom::ops::scalar
@@ -110,9 +131,11 @@ loom_target_contract_cc_libraries(
   CONTRACT_DEPS
     loom::target::contract
   LOWER_RULE_DEPS
+    ::instruction_strings
     loom::codegen::low::lower
     loom::ops::vector
     loom::target::arch::amdgpu::lower::kinds
+    loom::target::arch::amdgpu::lower::materializers
 )
 endif()
 
@@ -123,9 +146,11 @@ loom_target_contract_cc_libraries(
   CONTRACT_DEPS
     loom::target::contract
   LOWER_RULE_DEPS
+    ::instruction_strings
     loom::codegen::low::lower
     loom::ops::index
     loom::ops::scalar
+    loom::ops::scf
     loom::ops::vector
     loom::target::arch::amdgpu::lower::kinds
     loom::target::arch::amdgpu::lower::materializers
@@ -152,6 +177,7 @@ loom_target_contract_cc_libraries(
   CONTRACT_DEPS
     loom::target::contract
   LOWER_RULE_DEPS
+    ::instruction_strings
     loom::codegen::low::lower
     loom::ops::vector
     loom::target::arch::amdgpu::lower::kinds

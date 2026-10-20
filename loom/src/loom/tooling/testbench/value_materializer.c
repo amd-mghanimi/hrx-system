@@ -7,6 +7,7 @@
 #include "loom/tooling/testbench/value_materializer.h"
 
 #include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "iree/base/internal/math.h"
@@ -15,6 +16,7 @@
 
 enum {
   LOOM_TESTBENCH_MAX_SHAPE_RANK = 15,
+  LOOM_TESTBENCH_INLINE_BUFFER_REFERENCE_COUNT = 64,
 };
 
 typedef enum loom_testbench_generator_kind_e {
@@ -54,23 +56,23 @@ static iree_status_t loom_testbench_value_table_add_slot_capacity(
   return iree_ok_status();
 }
 
-typedef iree_status_t (*loom_testbench_case_value_callback_fn_t)(
+typedef iree_status_t (*loom_testbench_value_callback_fn_t)(
     void* user_data, loom_value_id_t value_id);
 
-typedef struct loom_testbench_case_value_callback_t {
-  // Function invoked for each value ID referenced by a case plan.
-  loom_testbench_case_value_callback_fn_t fn;
+typedef struct loom_testbench_value_callback_t {
+  // Function invoked for each value ID referenced by an execution scope.
+  loom_testbench_value_callback_fn_t fn;
   // Opaque caller-owned context passed to |fn|.
   void* user_data;
-} loom_testbench_case_value_callback_t;
+} loom_testbench_value_callback_t;
 
-static iree_status_t loom_testbench_case_value_callback_invoke(
-    loom_testbench_case_value_callback_t callback, loom_value_id_t value_id) {
+static iree_status_t loom_testbench_value_callback_invoke(
+    loom_testbench_value_callback_t callback, loom_value_id_t value_id) {
   return callback.fn(callback.user_data, value_id);
 }
 
-static iree_status_t loom_testbench_case_plan_walk_type_dynamic_dimensions(
-    loom_type_t type, loom_testbench_case_value_callback_t callback) {
+static iree_status_t loom_testbench_walk_type_dynamic_dimensions(
+    loom_type_t type, loom_testbench_value_callback_t callback) {
   if (!loom_type_is_shaped(type)) {
     return iree_ok_status();
   }
@@ -79,72 +81,85 @@ static iree_status_t loom_testbench_case_plan_walk_type_dynamic_dimensions(
     if (!loom_type_dim_is_dynamic_at(type, dim_index)) {
       continue;
     }
-    IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
         callback, loom_type_dim_value_id_at(type, dim_index)));
   }
   return iree_ok_status();
 }
 
-static iree_status_t loom_testbench_case_plan_walk_values(
-    const loom_testbench_case_plan_t* case_plan,
-    loom_testbench_case_value_callback_t callback) {
-  for (iree_host_size_t parameter_index = 0;
-       parameter_index < case_plan->parameter_count; ++parameter_index) {
-    IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
-        callback, case_plan->parameters[parameter_index].value_id));
-  }
-  for (iree_host_size_t source_index = 0;
-       source_index < case_plan->value_source_count; ++source_index) {
-    const loom_testbench_value_source_plan_t* source =
-        &case_plan->value_sources[source_index];
-    IREE_RETURN_IF_ERROR(
-        loom_testbench_case_value_callback_invoke(callback, source->value_id));
-    if (source->kind == LOOM_TESTBENCH_VALUE_SOURCE_RANDOM_UNIFORM) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
+static iree_status_t loom_testbench_walk_value_source(
+    const loom_testbench_value_source_plan_t* source,
+    loom_testbench_value_callback_t callback) {
+  IREE_RETURN_IF_ERROR(
+      loom_testbench_value_callback_invoke(callback, source->value_id));
+  switch (source->kind) {
+    case LOOM_TESTBENCH_VALUE_SOURCE_RANDOM_UNIFORM: {
+      IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
           callback, source->random_uniform.seed_value_id));
+      break;
     }
-    if (source->kind == LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
+    case LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW: {
+      IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
           callback, source->tensor_view.source_value_id));
+      break;
     }
-    IREE_RETURN_IF_ERROR(loom_testbench_case_plan_walk_type_dynamic_dimensions(
-        source->type, callback));
+    case LOOM_TESTBENCH_VALUE_SOURCE_ENTROPY_FORK: {
+      IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+          callback, source->entropy_fork.entropy_value_id));
+      break;
+    }
+    case LOOM_TESTBENCH_VALUE_SOURCE_ENTROPY_READ: {
+      IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+          callback, source->entropy_read.entropy_value_id));
+      for (iree_host_size_t ordinal_index = 0;
+           ordinal_index < source->entropy_read.ordinal_value_count;
+           ++ordinal_index) {
+        IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+            callback, source->entropy_read.ordinal_value_ids[ordinal_index]));
+      }
+      break;
+    }
+    default:
+      break;
   }
-  for (iree_host_size_t file_write_index = 0;
-       file_write_index < case_plan->file_write_count; ++file_write_index) {
-    IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
-        callback, case_plan->file_writes[file_write_index].value_id));
+  return loom_testbench_walk_type_dynamic_dimensions(source->type, callback);
+}
+
+static iree_status_t loom_testbench_walk_invocation(
+    const loom_testbench_invocation_plan_t* invocation,
+    loom_testbench_value_callback_t callback) {
+  for (iree_host_size_t workload_index = 0;
+       workload_index < invocation->workload_count; ++workload_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+        callback, invocation->workload_value_ids[workload_index]));
   }
-  for (iree_host_size_t invocation_index = 0;
-       invocation_index < case_plan->invocation_count; ++invocation_index) {
-    const loom_testbench_invocation_plan_t* invocation =
-        &case_plan->invocations[invocation_index];
-    for (iree_host_size_t workload_index = 0;
-         workload_index < invocation->workload_count; ++workload_index) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
-          callback, invocation->workload_value_ids[workload_index]));
-    }
-    for (iree_host_size_t input_index = 0;
-         input_index < invocation->input_count; ++input_index) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
-          callback, invocation->input_value_ids[input_index]));
-    }
-    for (iree_host_size_t result_index = 0;
-         result_index < invocation->result_count; ++result_index) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
-          callback, invocation->result_value_ids[result_index]));
-    }
+  for (iree_host_size_t input_index = 0; input_index < invocation->input_count;
+       ++input_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+        callback, invocation->input_value_ids[input_index]));
   }
+  for (iree_host_size_t result_index = 0;
+       result_index < invocation->result_count; ++result_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+        callback, invocation->result_value_ids[result_index]));
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_testbench_walk_expectations(
+    const loom_testbench_expectation_plan_t* expectations,
+    iree_host_size_t expectation_count,
+    loom_testbench_value_callback_t callback) {
   for (iree_host_size_t expectation_index = 0;
-       expectation_index < case_plan->expectation_count; ++expectation_index) {
+       expectation_index < expectation_count; ++expectation_index) {
     const loom_testbench_expectation_plan_t* expectation =
-        &case_plan->expectations[expectation_index];
+        &expectations[expectation_index];
     if (expectation->actual_value_id != LOOM_VALUE_ID_INVALID) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
+      IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
           callback, expectation->actual_value_id));
     }
     if (expectation->expected_value_id != LOOM_VALUE_ID_INVALID) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
+      IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
           callback, expectation->expected_value_id));
     }
     if (expectation->kind != LOOM_TESTBENCH_EXPECTATION_SHAPE) {
@@ -152,11 +167,89 @@ static iree_status_t loom_testbench_case_plan_walk_values(
     }
     for (iree_host_size_t dim_index = 0;
          dim_index < expectation->shape.dimension_value_count; ++dim_index) {
-      IREE_RETURN_IF_ERROR(loom_testbench_case_value_callback_invoke(
+      IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
           callback, expectation->shape.dimension_value_ids[dim_index]));
     }
   }
   return iree_ok_status();
+}
+
+static iree_status_t loom_testbench_case_plan_walk_values(
+    const loom_testbench_case_plan_t* case_plan,
+    loom_testbench_value_callback_t callback) {
+  for (iree_host_size_t parameter_index = 0;
+       parameter_index < case_plan->parameter_count; ++parameter_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+        callback, case_plan->parameters[parameter_index].value_id));
+  }
+  for (iree_host_size_t source_index = 0;
+       source_index < case_plan->value_source_count; ++source_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_walk_value_source(
+        &case_plan->value_sources[source_index], callback));
+  }
+  for (iree_host_size_t file_write_index = 0;
+       file_write_index < case_plan->file_write_count; ++file_write_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+        callback, case_plan->file_writes[file_write_index].value_id));
+  }
+  for (iree_host_size_t invocation_index = 0;
+       invocation_index < case_plan->invocation_count; ++invocation_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_walk_invocation(
+        &case_plan->invocations[invocation_index], callback));
+  }
+  return loom_testbench_walk_expectations(
+      case_plan->expectations, case_plan->expectation_count, callback);
+}
+
+static iree_status_t loom_testbench_scenario_configuration_plan_walk_values(
+    const loom_testbench_scenario_plan_t* scenario_plan,
+    loom_testbench_value_callback_t callback) {
+  if (scenario_plan->configuration_ordinal_value_id != LOOM_VALUE_ID_INVALID) {
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+        callback, scenario_plan->configuration_ordinal_value_id));
+  }
+  if (scenario_plan->configuration_entropy_value_id != LOOM_VALUE_ID_INVALID) {
+    IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+        callback, scenario_plan->configuration_entropy_value_id));
+  }
+  for (iree_host_size_t source_index = 0;
+       source_index < scenario_plan->configuration_source_count;
+       ++source_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_walk_value_source(
+        &scenario_plan->configuration_sources[source_index], callback));
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_testbench_scenario_trial_plan_walk_values(
+    const loom_testbench_scenario_plan_t* scenario_plan,
+    const loom_testbench_trial_plan_t* trial_plan,
+    loom_testbench_value_callback_t callback) {
+  IREE_RETURN_IF_ERROR(loom_testbench_scenario_configuration_plan_walk_values(
+      scenario_plan, callback));
+  IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+      callback, trial_plan->ordinal_value_id));
+  IREE_RETURN_IF_ERROR(loom_testbench_value_callback_invoke(
+      callback, trial_plan->entropy_value_id));
+  for (iree_host_size_t step_index = 0;
+       step_index < trial_plan->recipe_step_count; ++step_index) {
+    const loom_testbench_trial_recipe_step_t* step =
+        &trial_plan->recipe_steps[step_index];
+    if (step->kind == LOOM_TESTBENCH_TRIAL_RECIPE_STEP_VALUE_SOURCE) {
+      IREE_RETURN_IF_ERROR(
+          loom_testbench_walk_value_source(&step->value_source, callback));
+    } else if (step->kind == LOOM_TESTBENCH_TRIAL_RECIPE_STEP_GENERATOR) {
+      IREE_RETURN_IF_ERROR(
+          loom_testbench_walk_invocation(&step->generator, callback));
+    }
+  }
+  IREE_RETURN_IF_ERROR(
+      loom_testbench_walk_invocation(&trial_plan->action.target, callback));
+  IREE_RETURN_IF_ERROR(
+      loom_testbench_walk_invocation(&trial_plan->action.oracle, callback));
+  return loom_testbench_walk_expectations(trial_plan->action.expectations,
+                                          trial_plan->action.expectation_count,
+                                          callback);
 }
 
 static iree_status_t loom_testbench_value_table_count_slot(
@@ -166,18 +259,8 @@ static iree_status_t loom_testbench_value_table_count_slot(
   return loom_testbench_value_table_add_slot_capacity(*count, 1, count);
 }
 
-static iree_status_t loom_testbench_value_table_max_slot_count(
-    const loom_testbench_case_plan_t* case_plan,
-    iree_host_size_t* out_max_slot_count) {
-  iree_host_size_t count = 0;
-  IREE_RETURN_IF_ERROR(loom_testbench_case_plan_walk_values(
-      case_plan, (loom_testbench_case_value_callback_t){
-                     .fn = loom_testbench_value_table_count_slot,
-                     .user_data = &count,
-                 }));
-  *out_max_slot_count = count;
-  return iree_ok_status();
-}
+typedef iree_status_t (*loom_testbench_value_walk_fn_t)(
+    const void* plan, loom_testbench_value_callback_t callback);
 
 static iree_host_size_t loom_testbench_value_table_lower_bound(
     const loom_testbench_value_table_t* table, loom_value_id_t value_id,
@@ -229,7 +312,7 @@ static iree_status_t loom_testbench_value_table_include_value_callback(
     return iree_ok_status();
   }
   IREE_ASSERT(table->slot_count < table->slot_capacity,
-              "testbench value slot capacity must cover the case plan");
+              "testbench value slot capacity must cover the planned scope");
   memmove(&table->slots[slot_index + 1], &table->slots[slot_index],
           (table->slot_count - slot_index) * sizeof(*table->slots));
   table->slots[slot_index] = (loom_testbench_value_slot_t){
@@ -241,27 +324,20 @@ static iree_status_t loom_testbench_value_table_include_value_callback(
   return iree_ok_status();
 }
 
-static iree_status_t loom_testbench_value_table_populate_slots(
-    loom_testbench_value_table_t* table) {
-  return loom_testbench_case_plan_walk_values(
-      table->case_plan,
-      (loom_testbench_case_value_callback_t){
-          .fn = loom_testbench_value_table_include_value_callback,
-          .user_data = table,
-      });
-}
-
-iree_status_t loom_testbench_value_table_initialize(
-    const loom_module_t* module, const loom_testbench_case_plan_t* case_plan,
-    iree_allocator_t host_allocator, loom_testbench_value_table_t* out_table) {
+static iree_status_t loom_testbench_value_table_initialize_scope(
+    const loom_module_t* module, const void* plan,
+    loom_testbench_value_walk_fn_t walk, iree_allocator_t host_allocator,
+    loom_testbench_value_table_t* out_table) {
   memset(out_table, 0, sizeof(*out_table));
   out_table->module = module;
-  out_table->case_plan = case_plan;
   out_table->host_allocator = host_allocator;
 
   iree_host_size_t max_slot_count = 0;
   IREE_RETURN_IF_ERROR(
-      loom_testbench_value_table_max_slot_count(case_plan, &max_slot_count));
+      walk(plan, (loom_testbench_value_callback_t){
+                     .fn = loom_testbench_value_table_count_slot,
+                     .user_data = &max_slot_count,
+                 }));
   if (max_slot_count == 0) {
     return iree_ok_status();
   }
@@ -273,12 +349,76 @@ iree_status_t loom_testbench_value_table_initialize(
     out_table->slot_capacity = max_slot_count;
   }
   if (iree_status_is_ok(status)) {
-    status = loom_testbench_value_table_populate_slots(out_table);
+    status =
+        walk(plan, (loom_testbench_value_callback_t){
+                       .fn = loom_testbench_value_table_include_value_callback,
+                       .user_data = out_table,
+                   });
   }
   if (!iree_status_is_ok(status)) {
     loom_testbench_value_table_deinitialize(out_table);
   }
   return status;
+}
+
+static iree_status_t loom_testbench_case_plan_walk_values_erased(
+    const void* plan, loom_testbench_value_callback_t callback) {
+  return loom_testbench_case_plan_walk_values(
+      (const loom_testbench_case_plan_t*)plan, callback);
+}
+
+iree_status_t loom_testbench_value_table_initialize_case(
+    const loom_module_t* module, const loom_testbench_case_plan_t* case_plan,
+    iree_allocator_t host_allocator, loom_testbench_value_table_t* out_table) {
+  return loom_testbench_value_table_initialize_scope(
+      module, case_plan, loom_testbench_case_plan_walk_values_erased,
+      host_allocator, out_table);
+}
+
+static iree_status_t
+loom_testbench_scenario_configuration_plan_walk_values_erased(
+    const void* plan, loom_testbench_value_callback_t callback) {
+  return loom_testbench_scenario_configuration_plan_walk_values(
+      (const loom_testbench_scenario_plan_t*)plan, callback);
+}
+
+iree_status_t loom_testbench_value_table_initialize_scenario_configuration(
+    const loom_module_t* module,
+    const loom_testbench_scenario_plan_t* scenario_plan,
+    iree_allocator_t host_allocator, loom_testbench_value_table_t* out_table) {
+  return loom_testbench_value_table_initialize_scope(
+      module, scenario_plan,
+      loom_testbench_scenario_configuration_plan_walk_values_erased,
+      host_allocator, out_table);
+}
+
+typedef struct loom_testbench_scenario_trial_value_scope_t {
+  // Scenario that owns |trial_plan|.
+  const loom_testbench_scenario_plan_t* scenario_plan;
+  // Trial whose reachable values define the table.
+  const loom_testbench_trial_plan_t* trial_plan;
+} loom_testbench_scenario_trial_value_scope_t;
+
+static iree_status_t loom_testbench_scenario_trial_plan_walk_values_erased(
+    const void* plan, loom_testbench_value_callback_t callback) {
+  const loom_testbench_scenario_trial_value_scope_t* scope =
+      (const loom_testbench_scenario_trial_value_scope_t*)plan;
+  return loom_testbench_scenario_trial_plan_walk_values(
+      scope->scenario_plan, scope->trial_plan, callback);
+}
+
+iree_status_t loom_testbench_value_table_initialize_scenario_trial(
+    const loom_module_t* module,
+    const loom_testbench_scenario_plan_t* scenario_plan,
+    const loom_testbench_trial_plan_t* trial_plan,
+    iree_allocator_t host_allocator, loom_testbench_value_table_t* out_table) {
+  const loom_testbench_scenario_trial_value_scope_t scope = {
+      .scenario_plan = scenario_plan,
+      .trial_plan = trial_plan,
+  };
+  return loom_testbench_value_table_initialize_scope(
+      module, &scope, loom_testbench_scenario_trial_plan_walk_values_erased,
+      host_allocator, out_table);
 }
 
 void loom_testbench_value_table_deinitialize(
@@ -332,12 +472,28 @@ bool loom_testbench_value_is_buffer(const loom_testbench_value_t* value) {
   return value != NULL && value->kind == LOOM_TESTBENCH_VALUE_KIND_BUFFER;
 }
 
+bool loom_testbench_value_is_entropy(const loom_testbench_value_t* value) {
+  return value != NULL && value->kind == LOOM_TESTBENCH_VALUE_KIND_ENTROPY;
+}
+
 iree_hal_buffer_view_t* loom_testbench_value_buffer_view(
     const loom_testbench_value_t* value) {
   if (!loom_testbench_value_is_buffer(value)) {
     return NULL;
   }
   return value->buffer.buffer_view;
+}
+
+void loom_testbench_value_set_buffer_reference(
+    loom_value_id_t allocation_value_id, iree_device_size_t byte_offset,
+    iree_device_size_t byte_length, loom_testbench_value_t* value) {
+  IREE_ASSERT(loom_testbench_value_is_buffer(value));
+  value->buffer_reference = (loom_testbench_buffer_reference_t){
+      .is_traceable = true,
+      .allocation_value_id = allocation_value_id,
+      .byte_offset = byte_offset,
+      .byte_length = byte_length,
+  };
 }
 
 void loom_testbench_value_retain(const loom_testbench_value_t* source,
@@ -413,7 +569,7 @@ iree_status_t loom_testbench_value_table_assign_move(
       loom_testbench_value_table_lookup_slot_mut(table, value_id);
   if (!slot) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "value ID %u is outside the case value table",
+                            "value ID %u is outside the value table",
                             (unsigned)value_id);
   }
   if (iree_any_bit_set(slot->flags, LOOM_TESTBENCH_VALUE_SLOT_FLAG_ASSIGNED)) {
@@ -460,6 +616,153 @@ iree_status_t loom_testbench_value_table_lookup_retain(
       table, value_id, &borrowed_value));
   loom_testbench_value_retain(borrowed_value, out_value);
   return iree_ok_status();
+}
+
+static int loom_testbench_compare_buffer_references(const void* lhs_ptr,
+                                                    const void* rhs_ptr) {
+  const loom_testbench_buffer_reference_t* lhs =
+      (const loom_testbench_buffer_reference_t*)lhs_ptr;
+  const loom_testbench_buffer_reference_t* rhs =
+      (const loom_testbench_buffer_reference_t*)rhs_ptr;
+  if (lhs->allocation_value_id != rhs->allocation_value_id) {
+    return (lhs->allocation_value_id > rhs->allocation_value_id) -
+           (lhs->allocation_value_id < rhs->allocation_value_id);
+  }
+  if (lhs->byte_offset != rhs->byte_offset) {
+    return (lhs->byte_offset > rhs->byte_offset) -
+           (lhs->byte_offset < rhs->byte_offset);
+  }
+  return (lhs->byte_length > rhs->byte_length) -
+         (lhs->byte_length < rhs->byte_length);
+}
+
+bool loom_testbench_buffer_footprint_equal(
+    const loom_testbench_buffer_footprint_t* lhs,
+    const loom_testbench_buffer_footprint_t* rhs) {
+  return lhs->storage_allocation_count == rhs->storage_allocation_count &&
+         lhs->storage_byte_length == rhs->storage_byte_length &&
+         lhs->binding_range_count == rhs->binding_range_count &&
+         lhs->binding_range_byte_length == rhs->binding_range_byte_length;
+}
+
+iree_status_t loom_testbench_value_table_resolve_buffer_footprint(
+    const loom_testbench_value_table_t* table, iree_host_size_t value_id_count,
+    const loom_value_id_t* value_ids,
+    loom_testbench_buffer_footprint_t* out_footprint) {
+  *out_footprint = (loom_testbench_buffer_footprint_t){0};
+
+  loom_testbench_buffer_reference_t
+      inline_buffer_references[LOOM_TESTBENCH_INLINE_BUFFER_REFERENCE_COUNT];
+  loom_testbench_buffer_reference_t* buffer_references =
+      inline_buffer_references;
+  bool buffer_references_owned = false;
+  if (value_id_count > IREE_ARRAYSIZE(inline_buffer_references)) {
+    IREE_RETURN_IF_ERROR(iree_allocator_malloc_array_uninitialized(
+        table->host_allocator, value_id_count, sizeof(*buffer_references),
+        (void**)&buffer_references));
+    buffer_references_owned = true;
+  }
+
+  iree_status_t status = iree_ok_status();
+  iree_host_size_t buffer_reference_count = 0;
+  for (iree_host_size_t value_index = 0; value_index < value_id_count;
+       ++value_index) {
+    const loom_testbench_value_t* value = NULL;
+    status = loom_testbench_value_table_lookup_borrow(
+        table, value_ids[value_index], &value);
+    if (!iree_status_is_ok(status)) {
+      break;
+    }
+    if (!loom_testbench_value_is_buffer(value)) {
+      continue;
+    }
+    if (!value->buffer_reference.is_traceable) {
+      status = iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "materialized buffer value ID %u has no logical allocation identity",
+          (unsigned)value_ids[value_index]);
+      break;
+    }
+    buffer_references[buffer_reference_count++] = value->buffer_reference;
+  }
+
+  if (iree_status_is_ok(status) && buffer_reference_count > 1) {
+    qsort(buffer_references, buffer_reference_count, sizeof(*buffer_references),
+          loom_testbench_compare_buffer_references);
+  }
+  loom_value_id_t current_allocation_value_id = LOOM_VALUE_ID_INVALID;
+  iree_device_size_t current_range_end = 0;
+  bool has_current_range = false;
+  for (iree_host_size_t reference_index = 0;
+       iree_status_is_ok(status) && reference_index < buffer_reference_count;
+       ++reference_index) {
+    const loom_testbench_buffer_reference_t* reference =
+        &buffer_references[reference_index];
+    if (reference->allocation_value_id != current_allocation_value_id) {
+      current_allocation_value_id = reference->allocation_value_id;
+      current_range_end = 0;
+      has_current_range = false;
+
+      const loom_testbench_value_t* allocation = NULL;
+      status = loom_testbench_value_table_lookup_borrow(
+          table, current_allocation_value_id, &allocation);
+      if (!iree_status_is_ok(status)) {
+        break;
+      }
+      if (!loom_testbench_value_is_buffer(allocation) ||
+          !allocation->buffer_reference.is_traceable ||
+          allocation->buffer_reference.allocation_value_id !=
+              current_allocation_value_id) {
+        status = iree_make_status(
+            IREE_STATUS_FAILED_PRECONDITION,
+            "authored allocation value ID %u is not a traceable root buffer",
+            (unsigned)current_allocation_value_id);
+        break;
+      }
+      if (UINT64_MAX - out_footprint->storage_byte_length <
+          allocation->buffer_reference.byte_length) {
+        status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                  "materialized storage footprint overflowed "
+                                  "uint64");
+        break;
+      }
+      out_footprint->storage_byte_length +=
+          allocation->buffer_reference.byte_length;
+      ++out_footprint->storage_allocation_count;
+    }
+
+    if (reference->byte_length == 0) {
+      continue;
+    }
+    const iree_device_size_t range_end =
+        reference->byte_offset + reference->byte_length;
+    uint64_t additional_byte_length = 0;
+    if (!has_current_range || reference->byte_offset > current_range_end) {
+      ++out_footprint->binding_range_count;
+      additional_byte_length = reference->byte_length;
+      has_current_range = true;
+    } else if (range_end > current_range_end) {
+      additional_byte_length = range_end - current_range_end;
+    }
+    if (UINT64_MAX - out_footprint->binding_range_byte_length <
+        additional_byte_length) {
+      status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "reachable binding footprint overflowed "
+                                "uint64");
+      break;
+    }
+    out_footprint->binding_range_byte_length += additional_byte_length;
+    if (range_end > current_range_end) {
+      current_range_end = range_end;
+    }
+  }
+  if (buffer_references_owned) {
+    iree_allocator_free(table->host_allocator, buffer_references);
+  }
+  if (!iree_status_is_ok(status)) {
+    *out_footprint = (loom_testbench_buffer_footprint_t){0};
+  }
+  return status;
 }
 
 static bool loom_testbench_attr_as_i64(loom_attribute_t attr,
@@ -721,12 +1024,41 @@ static iree_status_t loom_testbench_get_i64_value(
   return loom_testbench_value_as_i64(value, out_value);
 }
 
+static iree_status_t loom_testbench_get_entropy_value(
+    const loom_testbench_value_table_t* table, loom_value_id_t value_id,
+    loom_testbench_entropy_t* out_entropy) {
+  const loom_testbench_value_t* value = NULL;
+  IREE_RETURN_IF_ERROR(
+      loom_testbench_value_table_lookup_borrow(table, value_id, &value));
+  if (!loom_testbench_value_is_entropy(value)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "value is not an entropy identity");
+  }
+  *out_entropy = value->entropy;
+  return iree_ok_status();
+}
+
 static uint64_t loom_testbench_random_bounded_u64(
     iree_prng_xoroshiro128_state_t* state, uint64_t bound) {
+  // A wrapped interval width represents the full 64-bit domain.
   if (bound == 0) {
-    return 0;
+    return iree_prng_xoroshiro128starstar_next_uint64(state);
   }
-  return iree_prng_xoroshiro128starstar_next_uint64(state) % bound;
+  const uint64_t threshold = (UINT64_C(0) - bound) % bound;
+  uint64_t value = 0;
+  do {
+    value = iree_prng_xoroshiro128starstar_next_uint64(state);
+  } while (value < threshold);
+  return value % bound;
+}
+
+static int64_t loom_testbench_random_integer(
+    iree_prng_xoroshiro128_state_t* state, int64_t lower, uint64_t width) {
+  const uint64_t bits =
+      (uint64_t)lower + loom_testbench_random_bounded_u64(state, width);
+  int64_t value = 0;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
 }
 
 static double loom_testbench_random_unit_f64(
@@ -741,18 +1073,27 @@ static iree_host_size_t loom_testbench_iota_index(
 }
 
 static bool loom_testbench_iota_i64_value(int64_t offset, int64_t step,
-                                          iree_host_size_t period,
                                           iree_host_size_t index,
                                           int64_t* out_value) {
-  if (period != 0) {
-    index %= period;
+  // The displacement may exceed INT64_MAX while the final value still fits.
+  // Bound it against the available distance before doing unsigned arithmetic.
+  uint64_t bits = (uint64_t)offset;
+  if (step > 0) {
+    const uint64_t distance = (uint64_t)INT64_MAX - (uint64_t)offset;
+    if (index > distance / (uint64_t)step) {
+      return false;
+    }
+    bits += (uint64_t)index * (uint64_t)step;
+  } else if (step < 0) {
+    const uint64_t magnitude = UINT64_C(0) - (uint64_t)step;
+    const uint64_t distance = (uint64_t)offset - (uint64_t)INT64_MIN;
+    if (index > distance / magnitude) {
+      return false;
+    }
+    bits -= (uint64_t)index * magnitude;
   }
-  if (index > (iree_host_size_t)INT64_MAX) {
-    return false;
-  }
-  int64_t scaled_index = 0;
-  return iree_checked_mul_i64((int64_t)index, step, &scaled_index) &&
-         iree_checked_add_i64(offset, scaled_index, out_value);
+  memcpy(out_value, &bits, sizeof(bits));
+  return true;
 }
 
 #define LOOM_TESTBENCH_FILL_INT_TYPED(contents, c_type, min_value, max_value, \
@@ -771,19 +1112,31 @@ static bool loom_testbench_iota_i64_value(int64_t offset, int64_t step,
     return iree_ok_status();                                                  \
   } while (0)
 
+// Values are monotonic within each period. The offset is already in range,
+// so checking the largest generated index proves the entire sequence fits.
 #define LOOM_TESTBENCH_FILL_IOTA_TYPED(contents, c_type, min_value, max_value) \
   do {                                                                         \
     c_type* values = (c_type*)(contents).data;                                 \
     iree_host_size_t count = (contents).data_length / sizeof(*values);         \
-    for (iree_host_size_t index = 0; index < count; ++index) {                 \
-      int64_t generated_value = 0;                                             \
+    if (count != 0) {                                                          \
+      iree_host_size_t last_index = count - 1;                                 \
+      if (state->iota_period != 0 && last_index >= state->iota_period) {       \
+        last_index = state->iota_period - 1;                                   \
+      }                                                                        \
+      int64_t last_value = 0;                                                  \
       if (!loom_testbench_iota_i64_value(first_value, second_value,            \
-                                         state->iota_period, index,            \
-                                         &generated_value) ||                  \
-          generated_value < (min_value) || generated_value > (max_value)) {    \
+                                         last_index, &last_value) ||           \
+          last_value < (min_value) || last_value > (max_value)) {              \
         return iree_make_status(IREE_STATUS_OUT_OF_RANGE,                      \
                                 "generated iota value is out of range");       \
       }                                                                        \
+    }                                                                          \
+    for (iree_host_size_t index = 0; index < count; ++index) {                 \
+      uint64_t bits = (uint64_t)first_value +                                  \
+                      (uint64_t)loom_testbench_iota_index(state, index) *      \
+                          (uint64_t)second_value;                              \
+      int64_t generated_value = 0;                                             \
+      memcpy(&generated_value, &bits, sizeof(bits));                           \
       values[index] = (c_type)generated_value;                                 \
     }                                                                          \
     return iree_ok_status();                                                   \
@@ -880,34 +1233,30 @@ static iree_status_t loom_testbench_generate_integer_buffer(
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                 "random integer upper bound is below lower");
       }
-      if (second_value == INT64_MAX && first_value == INT64_MIN) {
-        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "random integer range is too wide");
-      }
-      uint64_t width = (uint64_t)(second_value - first_value) + 1;
+      const uint64_t width = (uint64_t)second_value - (uint64_t)first_value + 1;
       switch (state->scalar_type) {
         case LOOM_SCALAR_TYPE_I8:
           LOOM_TESTBENCH_FILL_INT_TYPED(
               contents, int8_t, INT8_MIN, INT8_MAX,
-              first_value + (int64_t)loom_testbench_random_bounded_u64(
-                                &state->prng_state, width));
+              loom_testbench_random_integer(&state->prng_state, first_value,
+                                            width));
         case LOOM_SCALAR_TYPE_I16:
           LOOM_TESTBENCH_FILL_INT_TYPED(
               contents, int16_t, INT16_MIN, INT16_MAX,
-              first_value + (int64_t)loom_testbench_random_bounded_u64(
-                                &state->prng_state, width));
+              loom_testbench_random_integer(&state->prng_state, first_value,
+                                            width));
         case LOOM_SCALAR_TYPE_I32:
           LOOM_TESTBENCH_FILL_INT_TYPED(
               contents, int32_t, INT32_MIN, INT32_MAX,
-              first_value + (int64_t)loom_testbench_random_bounded_u64(
-                                &state->prng_state, width));
+              loom_testbench_random_integer(&state->prng_state, first_value,
+                                            width));
         case LOOM_SCALAR_TYPE_INDEX:
         case LOOM_SCALAR_TYPE_OFFSET:
         case LOOM_SCALAR_TYPE_I64:
           LOOM_TESTBENCH_FILL_INT_TYPED(
               contents, int64_t, min_value, max_value,
-              first_value + (int64_t)loom_testbench_random_bounded_u64(
-                                &state->prng_state, width));
+              loom_testbench_random_integer(&state->prng_state, first_value,
+                                            width));
         default:
           break;
       }
@@ -1075,62 +1424,35 @@ static iree_status_t loom_testbench_generate_buffer(void* user_data,
 #undef LOOM_TESTBENCH_FILL_INT_TYPED
 #undef LOOM_TESTBENCH_FILL_IOTA_TYPED
 
-static iree_hal_buffer_params_t loom_testbench_default_buffer_params(void) {
-  iree_hal_buffer_params_t buffer_params = {
-      .usage = IREE_HAL_BUFFER_USAGE_DEFAULT | IREE_HAL_BUFFER_USAGE_MAPPING,
-      .access = IREE_HAL_MEMORY_ACCESS_ALL,
-      .type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL,
-  };
-  return buffer_params;
-}
-
-static iree_hal_buffer_params_t loom_testbench_buffer_params(
+static bool loom_testbench_should_stage_target_pool(
     const loom_testbench_value_materializer_options_t* options) {
-  if (options->buffer_params.usage == IREE_HAL_BUFFER_USAGE_NONE &&
-      options->buffer_params.access == IREE_HAL_MEMORY_ACCESS_NONE &&
-      options->buffer_params.type == IREE_HAL_MEMORY_TYPE_NONE) {
-    return loom_testbench_default_buffer_params();
-  }
-  return options->buffer_params;
+  const iree_hal_pool_host_access_t host_access =
+      iree_hal_pool_query_host_access(options->target_pool);
+  return !iree_all_bits_set(host_access.access, IREE_HAL_MEMORY_ACCESS_WRITE) ||
+         !iree_all_bits_set(host_access.modes, IREE_HAL_MAPPING_MODE_SCOPED);
 }
 
-static bool loom_testbench_should_stage_buffer_params(
-    const loom_testbench_value_materializer_options_t* options,
-    iree_hal_buffer_params_t buffer_params) {
-  if (!options->device || !options->transfer_queue) {
-    return false;
-  }
-  iree_hal_buffer_params_canonicalize(&buffer_params);
-  return !iree_all_bits_set(buffer_params.type,
-                            IREE_HAL_MEMORY_TYPE_HOST_VISIBLE);
-}
-
-static iree_hal_buffer_params_t loom_testbench_staging_buffer_params(
-    iree_hal_buffer_params_t buffer_params) {
-  iree_hal_buffer_params_canonicalize(&buffer_params);
-  buffer_params.usage |=
-      IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_MAPPING;
-  buffer_params.access = IREE_HAL_MEMORY_ACCESS_ALL;
-  buffer_params.type &= ~IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
-  buffer_params.type |=
-      IREE_HAL_MEMORY_TYPE_HOST_LOCAL | IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE;
-  return buffer_params;
-}
-
-static iree_status_t loom_testbench_copy_buffer_view_to_params(
+static iree_status_t loom_testbench_copy_buffer_view_to_target(
     const loom_testbench_value_materializer_options_t* options,
     iree_hal_buffer_view_t* source_buffer_view,
-    iree_hal_buffer_params_t target_params,
     iree_hal_buffer_view_t** out_target_buffer_view) {
   iree_hal_buffer_view_t* target_buffer_view = NULL;
   iree_status_t status = iree_hal_buffer_view_create_uninitialized_like(
-      options->device_allocator, target_params, source_buffer_view,
+      options->target_pool, options->min_alignment, source_buffer_view,
       &target_buffer_view);
+
+  if (iree_status_is_ok(status) &&
+      iree_hal_buffer_view_byte_length(source_buffer_view) == 0) {
+    *out_target_buffer_view = target_buffer_view;
+    return iree_ok_status();
+  }
 
   iree_hal_semaphore_t* completion_semaphore = NULL;
   if (iree_status_is_ok(status)) {
+    iree_hal_device_t* device = iree_hal_queue_family_device(
+        iree_hal_queue_family(options->transfer_queue));
     status = iree_hal_semaphore_create(
-        options->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, 0,
+        device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, 0,
         IREE_HAL_SEMAPHORE_FLAG_DEFAULT, &completion_semaphore);
   }
   if (iree_status_is_ok(status)) {
@@ -1144,12 +1466,20 @@ static iree_status_t loom_testbench_copy_buffer_view_to_params(
         options->transfer_queue, iree_hal_semaphore_list_empty(),
         signal_semaphore_list, iree_hal_buffer_view_buffer(source_buffer_view),
         0, iree_hal_buffer_view_buffer(target_buffer_view), 0,
-        iree_hal_buffer_view_byte_length(source_buffer_view),
+        iree_hal_buffer_view_byte_length(source_buffer_view), /*barriers=*/NULL,
         IREE_HAL_COPY_FLAG_NONE);
     if (iree_status_is_ok(status)) {
       status = iree_hal_semaphore_wait(completion_semaphore, completion_value,
                                        iree_infinite_timeout(),
                                        IREE_ASYNC_WAIT_FLAG_NONE);
+      if (!iree_status_is_ok(status)) {
+        // A failed HAL wait may carry only a code. Query before releasing the
+        // semaphore so the materialization error includes its saved diagnostic.
+        uint64_t semaphore_value = 0;
+        iree_status_t query_status =
+            iree_hal_semaphore_query(completion_semaphore, &semaphore_value);
+        status = iree_status_join(query_status, status);
+      }
     }
   }
 
@@ -1167,9 +1497,9 @@ static iree_status_t loom_testbench_materialize_generated_source(
     const loom_testbench_value_source_plan_t* source,
     loom_testbench_generator_state_t* generator_state,
     loom_testbench_value_table_t* table) {
-  if (!options->device_allocator) {
+  if (!options->target_pool) {
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "shaped value generation requires a HAL allocator");
+                            "shaped value generation requires a target pool");
   }
   if (!loom_type_is_shaped(source->type)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -1185,25 +1515,28 @@ static iree_status_t loom_testbench_materialize_generated_source(
   IREE_RETURN_IF_ERROR(loom_testbench_scalar_type_to_hal_element_type(
       loom_type_element_type(source->type), &element_type));
 
-  iree_hal_buffer_params_t buffer_params =
-      loom_testbench_buffer_params(options);
   iree_hal_buffer_view_t* buffer_view = NULL;
-  if (loom_testbench_should_stage_buffer_params(options, buffer_params)) {
+  if (loom_testbench_should_stage_target_pool(options)) {
+    if (!options->staging_pool || !options->transfer_queue) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "a non-host-writable target pool requires a staging pool and "
+          "transfer queue");
+    }
     iree_hal_buffer_view_t* staging_buffer_view = NULL;
     iree_status_t status = iree_hal_buffer_view_generate(
-        options->device_allocator,
-        loom_testbench_staging_buffer_params(buffer_params), shape_rank, shape,
+        options->staging_pool, options->min_alignment, shape_rank, shape,
         element_type, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
         loom_testbench_generate_buffer, generator_state, &staging_buffer_view);
     if (iree_status_is_ok(status)) {
-      status = loom_testbench_copy_buffer_view_to_params(
-          options, staging_buffer_view, buffer_params, &buffer_view);
+      status = loom_testbench_copy_buffer_view_to_target(
+          options, staging_buffer_view, &buffer_view);
     }
     iree_hal_buffer_view_release(staging_buffer_view);
     IREE_RETURN_IF_ERROR(status);
   } else {
     IREE_RETURN_IF_ERROR(iree_hal_buffer_view_generate(
-        options->device_allocator, buffer_params, shape_rank, shape,
+        options->target_pool, options->min_alignment, shape_rank, shape,
         element_type, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
         loom_testbench_generate_buffer, generator_state, &buffer_view));
   }
@@ -1211,6 +1544,11 @@ static iree_status_t loom_testbench_materialize_generated_source(
   loom_testbench_value_t value = {0};
   iree_status_t status =
       loom_testbench_value_set_buffer_view_move(buffer_view, &value);
+  if (iree_status_is_ok(status)) {
+    loom_testbench_value_set_buffer_reference(
+        source->value_id, /*byte_offset=*/0,
+        iree_hal_buffer_view_byte_length(buffer_view), &value);
+  }
   if (iree_status_is_ok(status)) {
     status =
         loom_testbench_value_table_assign_move(table, source->value_id, &value);
@@ -1270,9 +1608,9 @@ static iree_status_t loom_testbench_materialize_file_read_npy(
     const loom_testbench_value_materializer_options_t* options,
     const loom_testbench_value_source_plan_t* source,
     loom_testbench_value_table_t* table) {
-  if (!options->device_allocator) {
+  if (!options->target_pool) {
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                            "NPY reads require a HAL allocator");
+                            "NPY reads require a target pool");
   }
   if (!options->open_read_file.fn) {
     return iree_make_status(IREE_STATUS_UNAVAILABLE,
@@ -1287,25 +1625,29 @@ static iree_status_t loom_testbench_materialize_file_read_npy(
                             "file provider returned NULL stream");
   }
 
-  iree_hal_buffer_params_t buffer_params =
-      loom_testbench_buffer_params(options);
   iree_hal_buffer_view_t* buffer_view = NULL;
   iree_status_t status = iree_ok_status();
-  if (loom_testbench_should_stage_buffer_params(options, buffer_params)) {
+  if (loom_testbench_should_stage_target_pool(options)) {
+    if (!options->staging_pool || !options->transfer_queue) {
+      iree_io_stream_release(stream);
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "a non-host-writable target pool requires a staging pool and "
+          "transfer queue");
+    }
     iree_hal_buffer_view_t* staging_buffer_view = NULL;
     status = iree_numpy_npy_load_ndarray(
-        stream, IREE_NUMPY_NPY_LOAD_OPTION_DEFAULT,
-        loom_testbench_staging_buffer_params(buffer_params),
-        options->device_allocator, &staging_buffer_view);
+        stream, IREE_NUMPY_NPY_LOAD_OPTION_DEFAULT, options->staging_pool,
+        options->min_alignment, &staging_buffer_view);
     if (iree_status_is_ok(status)) {
-      status = loom_testbench_copy_buffer_view_to_params(
-          options, staging_buffer_view, buffer_params, &buffer_view);
+      status = loom_testbench_copy_buffer_view_to_target(
+          options, staging_buffer_view, &buffer_view);
     }
     iree_hal_buffer_view_release(staging_buffer_view);
   } else {
     status = iree_numpy_npy_load_ndarray(
-        stream, IREE_NUMPY_NPY_LOAD_OPTION_DEFAULT, buffer_params,
-        options->device_allocator, &buffer_view);
+        stream, IREE_NUMPY_NPY_LOAD_OPTION_DEFAULT, options->target_pool,
+        options->min_alignment, &buffer_view);
   }
   iree_io_stream_release(stream);
 
@@ -1319,6 +1661,11 @@ static iree_status_t loom_testbench_materialize_file_read_npy(
   }
   loom_testbench_value_t value = {0};
   status = loom_testbench_value_set_buffer_view_move(buffer_view, &value);
+  if (iree_status_is_ok(status)) {
+    loom_testbench_value_set_buffer_reference(
+        source->value_id, /*byte_offset=*/0,
+        iree_hal_buffer_view_byte_length(buffer_view), &value);
+  }
   if (iree_status_is_ok(status)) {
     status =
         loom_testbench_value_table_assign_move(table, source->value_id, &value);
@@ -1377,8 +1724,8 @@ static iree_status_t loom_testbench_materialize_tensor_view(
           source_value->buffer.byte_length - source->tensor_view.byte_offset) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
-        "check.tensor.view byte range [%" PRIu64 ", %" PRIu64
-        ") exceeds source byte length %" PRIu64,
+        "check.tensor.view byte range [%" PRIdsz ", %" PRIdsz
+        ") exceeds source byte length %" PRIdsz,
         source->tensor_view.byte_offset,
         source->tensor_view.byte_offset + result_byte_length,
         source_value->buffer.byte_length);
@@ -1406,6 +1753,26 @@ static iree_status_t loom_testbench_materialize_tensor_view(
   loom_testbench_value_t value = {0};
   if (iree_status_is_ok(status)) {
     status = loom_testbench_value_set_buffer_view_move(buffer_view, &value);
+  }
+  iree_device_size_t reference_byte_offset = 0;
+  if (iree_status_is_ok(status) &&
+      !source_value->buffer_reference.is_traceable) {
+    status = iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "check.tensor.view source has no logical allocation identity");
+  }
+  if (iree_status_is_ok(status) &&
+      !iree_device_size_checked_add(source_value->buffer_reference.byte_offset,
+                                    source->tensor_view.byte_offset,
+                                    &reference_byte_offset)) {
+    status = iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "check.tensor.view logical allocation byte offset overflows");
+  }
+  if (iree_status_is_ok(status)) {
+    loom_testbench_value_set_buffer_reference(
+        source_value->buffer_reference.allocation_value_id,
+        reference_byte_offset, result_byte_length, &value);
   }
   if (iree_status_is_ok(status)) {
     status =
@@ -1477,11 +1844,59 @@ static iree_status_t loom_testbench_materialize_value_source(
       return loom_testbench_materialize_file_read_npy(options, source, table);
     case LOOM_TESTBENCH_VALUE_SOURCE_TENSOR_VIEW:
       return loom_testbench_materialize_tensor_view(source, table);
+    case LOOM_TESTBENCH_VALUE_SOURCE_ENTROPY_FORK: {
+      loom_testbench_entropy_t parent = {0};
+      IREE_RETURN_IF_ERROR(loom_testbench_get_entropy_value(
+          table, source->entropy_fork.entropy_value_id, &parent));
+      loom_testbench_value_t value = {
+          .kind = LOOM_TESTBENCH_VALUE_KIND_ENTROPY,
+          .entropy =
+              loom_testbench_entropy_fork(parent, source->entropy_fork.name),
+      };
+      return loom_testbench_value_table_assign_move(table, source->value_id,
+                                                    &value);
+    }
+    case LOOM_TESTBENCH_VALUE_SOURCE_ENTROPY_READ: {
+      loom_testbench_entropy_t entropy = {0};
+      IREE_RETURN_IF_ERROR(loom_testbench_get_entropy_value(
+          table, source->entropy_read.entropy_value_id, &entropy));
+      int64_t ordinal = source->entropy_read.static_ordinals[0];
+      if (ordinal == INT64_MIN) {
+        IREE_RETURN_IF_ERROR(loom_testbench_get_i64_value(
+            table, source->entropy_read.ordinal_value_ids[0], &ordinal));
+      }
+      if (ordinal < 0) {
+        return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "entropy read ordinal is negative");
+      }
+      const uint64_t word =
+          loom_testbench_entropy_read(entropy, (uint64_t)ordinal);
+      int64_t signed_word = 0;
+      memcpy(&signed_word, &word, sizeof(signed_word));
+      return loom_testbench_value_table_set_value(
+          table, source->value_id,
+          (iree_tooling_value_t){
+              .kind = IREE_TOOLING_VALUE_KIND_I64,
+              .storage.i64 = signed_word,
+          });
+    }
     default:
       return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                               "invalid value source plan kind %u",
                               (unsigned)source->kind);
   }
+}
+
+iree_status_t loom_testbench_materialize_value_sources(
+    const loom_testbench_value_materializer_options_t* options,
+    const loom_testbench_value_source_plan_t* sources,
+    iree_host_size_t source_count, loom_testbench_value_table_t* table) {
+  for (iree_host_size_t source_index = 0; source_index < source_count;
+       ++source_index) {
+    IREE_RETURN_IF_ERROR(loom_testbench_materialize_value_source(
+        options, &sources[source_index], table));
+  }
+  return iree_ok_status();
 }
 
 iree_status_t loom_testbench_materialize_case_sample(
@@ -1515,12 +1930,8 @@ iree_status_t loom_testbench_materialize_case_sample(
         table, parameter->value_id, value));
   }
 
-  for (iree_host_size_t source_index = 0;
-       source_index < case_plan->value_source_count; ++source_index) {
-    IREE_RETURN_IF_ERROR(loom_testbench_materialize_value_source(
-        options, &case_plan->value_sources[source_index], table));
-  }
-  return iree_ok_status();
+  return loom_testbench_materialize_value_sources(
+      options, case_plan->value_sources, case_plan->value_source_count, table);
 }
 
 static iree_status_t loom_testbench_write_single_file(
@@ -1558,6 +1969,9 @@ static iree_status_t loom_testbench_write_single_file(
     status =
         iree_numpy_npy_save_ndarray(stream, IREE_NUMPY_NPY_SAVE_OPTION_DEFAULT,
                                     buffer_view, options->host_allocator);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_io_stream_flush(stream);
   }
   iree_io_stream_release(stream);
   loom_testbench_value_deinitialize(&value);

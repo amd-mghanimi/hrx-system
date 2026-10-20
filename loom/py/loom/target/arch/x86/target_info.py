@@ -15,14 +15,22 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from loom.target.arch.x86.packed_dot_data import (
+from loom.target.arch.x86.feature_bits import (
     FEATURE_AVX10_2,
     FEATURE_AVX512_BF16,
+    FEATURE_AVX512_FP16,
     FEATURE_AVX512_VL,
     FEATURE_AVX512_VNNI,
+    FEATURE_AVX_NE_CONVERT,
     FEATURE_AVX_VNNI,
     FEATURE_AVX_VNNI_INT8,
     FEATURE_AVX_VNNI_INT16,
+    FEATURE_BMI,
+    FEATURE_BMI2,
+    FEATURE_F16C,
+    FEATURE_LZCNT,
+    FEATURE_POPCNT,
+    X86_KNOWN_FEATURE_BITS,
 )
 
 X86_DESCRIPTOR_SET_ORDINAL_NONE = (2**16) - 1
@@ -35,7 +43,6 @@ X86_REG_CLASS_ZMM = "x86.zmm"
 X86_REG_CLASS_K = "x86.k"
 
 X86_ISA_TIER_SCALAR = "scalar"
-X86_ISA_TIER_SIMD128 = "simd128"
 X86_ISA_TIER_AVX2 = "avx2"
 X86_ISA_TIER_AVX512 = "avx512"
 X86_ISA_TIER_PACKED_DOT = "packed_dot"
@@ -43,10 +50,15 @@ X86_ISA_TIER_PACKED_DOT = "packed_dot"
 X86_FEATURE_PROFILE_NONE = "none"
 X86_FEATURE_PROFILE_AVX512_VNNI = "avx512_vnni"
 X86_FEATURE_PROFILE_AVX512_BF16 = "avx512_bf16"
+X86_FEATURE_PROFILE_AVX512_FP16 = "avx512_fp16"
 X86_FEATURE_PROFILE_AVX_VNNI = "avx_vnni"
 X86_FEATURE_PROFILE_AVX_VNNI_INT8 = "avx_vnni_int8"
 X86_FEATURE_PROFILE_AVX_VNNI_INT16 = "avx_vnni_int16"
 X86_FEATURE_PROFILE_AVX10_2 = "avx10_2"
+
+_X86_NATIVE_SCALAR_FEATURE_BITS = (
+    FEATURE_BMI | FEATURE_BMI2 | FEATURE_POPCNT | FEATURE_LZCNT
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +80,10 @@ class X86TargetProfileInfo:
     register_classes: tuple[str, ...]
     contract_feature_bits: int = 0
     native_bundle_key: str | None = None
+    feature_contract_set_key: str | None = None
+    supported_feature_bits: int = 0
+    required_cpu_features: tuple[str, ...] = ()
+    automatic_priority: int = 0
 
 
 def _with_base_registers(*register_classes: str) -> tuple[str, ...]:
@@ -80,21 +96,21 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
         key="x86.scalar.core",
         isa_tier=X86_ISA_TIER_SCALAR,
         register_classes=_with_base_registers(),
-        storage_generator_target="avx512_packed_dot",
-    ),
-    X86DescriptorSetInfo(
-        generator_target="simd128",
-        key="x86.simd128.core",
-        isa_tier=X86_ISA_TIER_SIMD128,
-        register_classes=_with_base_registers(X86_REG_CLASS_XMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
     ),
     X86DescriptorSetInfo(
         generator_target="avx2",
         key="x86.avx2.core",
         isa_tier=X86_ISA_TIER_AVX2,
         register_classes=_with_base_registers(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
+    ),
+    X86DescriptorSetInfo(
+        generator_target="avx2_features",
+        key="x86.avx2_features.core",
+        isa_tier=X86_ISA_TIER_AVX2,
+        register_classes=_with_base_registers(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM),
+        storage_generator_target="avx512_features",
     ),
     X86DescriptorSetInfo(
         generator_target="avx512",
@@ -106,14 +122,14 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
             X86_REG_CLASS_ZMM,
             X86_REG_CLASS_K,
         ),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
     ),
     X86DescriptorSetInfo(
         generator_target="packed_dot",
         key="x86.packed_dot.core",
         isa_tier=X86_ISA_TIER_PACKED_DOT,
         register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM, X86_REG_CLASS_ZMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
         required_feature_bits=(
             FEATURE_AVX512_BF16
             | FEATURE_AVX512_VL
@@ -122,8 +138,8 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
         ),
     ),
     X86DescriptorSetInfo(
-        generator_target="avx512_packed_dot",
-        key="x86.avx512_packed_dot.core",
+        generator_target="avx512_features",
+        key="x86.avx512_features.core",
         isa_tier=X86_ISA_TIER_AVX512,
         register_classes=_with_base_registers(
             X86_REG_CLASS_XMM,
@@ -131,20 +147,13 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
             X86_REG_CLASS_ZMM,
             X86_REG_CLASS_K,
         ),
-        required_feature_bits=(
-            FEATURE_AVX512_VNNI
-            | FEATURE_AVX512_BF16
-            | FEATURE_AVX512_VL
-            | FEATURE_AVX_VNNI
-            | FEATURE_AVX_VNNI_INT8
-        ),
     ),
     X86DescriptorSetInfo(
         generator_target="avx512_vnni",
         key="x86.avx512_vnni.core",
         isa_tier=X86_ISA_TIER_PACKED_DOT,
         register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM, X86_REG_CLASS_ZMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
         feature_profile=X86_FEATURE_PROFILE_AVX512_VNNI,
         required_feature_bits=FEATURE_AVX512_VNNI | FEATURE_AVX512_VL,
     ),
@@ -152,8 +161,14 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
         generator_target="avx512_bf16",
         key="x86.avx512_bf16.core",
         isa_tier=X86_ISA_TIER_PACKED_DOT,
-        register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM, X86_REG_CLASS_ZMM),
-        storage_generator_target="avx512_packed_dot",
+        register_classes=(
+            X86_REG_CLASS_GPR64,
+            X86_REG_CLASS_XMM,
+            X86_REG_CLASS_YMM,
+            X86_REG_CLASS_ZMM,
+            X86_REG_CLASS_K,
+        ),
+        storage_generator_target="avx512_features",
         feature_profile=X86_FEATURE_PROFILE_AVX512_BF16,
         required_feature_bits=FEATURE_AVX512_BF16 | FEATURE_AVX512_VL,
     ),
@@ -162,7 +177,7 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
         key="x86.avx_vnni.core",
         isa_tier=X86_ISA_TIER_PACKED_DOT,
         register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
         feature_profile=X86_FEATURE_PROFILE_AVX_VNNI,
         required_feature_bits=FEATURE_AVX_VNNI,
     ),
@@ -171,7 +186,7 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
         key="x86.avx_vnni_int8.core",
         isa_tier=X86_ISA_TIER_PACKED_DOT,
         register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
         feature_profile=X86_FEATURE_PROFILE_AVX_VNNI_INT8,
         required_feature_bits=FEATURE_AVX_VNNI_INT8,
     ),
@@ -180,7 +195,7 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
         key="x86.avx_vnni_int16.core",
         isa_tier=X86_ISA_TIER_PACKED_DOT,
         register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
         feature_profile=X86_FEATURE_PROFILE_AVX_VNNI_INT16,
         required_feature_bits=FEATURE_AVX_VNNI_INT16,
     ),
@@ -189,9 +204,23 @@ X86_DESCRIPTOR_SET_INFOS: tuple[X86DescriptorSetInfo, ...] = (
         key="x86.avx10_2.core",
         isa_tier=X86_ISA_TIER_PACKED_DOT,
         register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM, X86_REG_CLASS_ZMM),
-        storage_generator_target="avx512_packed_dot",
+        storage_generator_target="avx512_features",
         feature_profile=X86_FEATURE_PROFILE_AVX10_2,
         required_feature_bits=FEATURE_AVX10_2,
+    ),
+    X86DescriptorSetInfo(
+        generator_target="avx512_fp16",
+        key="x86.avx512_fp16.core",
+        isa_tier=X86_ISA_TIER_AVX512,
+        register_classes=(
+            X86_REG_CLASS_XMM,
+            X86_REG_CLASS_YMM,
+            X86_REG_CLASS_ZMM,
+            X86_REG_CLASS_K,
+        ),
+        storage_generator_target="avx512_features",
+        feature_profile=X86_FEATURE_PROFILE_AVX512_FP16,
+        required_feature_bits=FEATURE_AVX512_FP16 | FEATURE_AVX512_VL,
     ),
 )
 
@@ -202,13 +231,9 @@ X86_TARGET_PROFILE_INFOS: tuple[X86TargetProfileInfo, ...] = (
         descriptor_set_key="x86.scalar.core",
         register_classes=_with_base_registers(),
         native_bundle_key="x86-scalar",
-    ),
-    X86TargetProfileInfo(
-        profile_key="x86.simd128",
-        descriptor_generator_target="simd128",
-        descriptor_set_key="x86.simd128.core",
-        register_classes=_with_base_registers(X86_REG_CLASS_XMM),
-        native_bundle_key="x86-simd128",
+        feature_contract_set_key="x86.scalar.core",
+        supported_feature_bits=_X86_NATIVE_SCALAR_FEATURE_BITS,
+        automatic_priority=1,
     ),
     X86TargetProfileInfo(
         profile_key="x86.avx2",
@@ -216,6 +241,17 @@ X86_TARGET_PROFILE_INFOS: tuple[X86TargetProfileInfo, ...] = (
         descriptor_set_key="x86.avx2.core",
         register_classes=_with_base_registers(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM),
         native_bundle_key="x86-avx2",
+        feature_contract_set_key="x86.avx2_features.core",
+        supported_feature_bits=(
+            FEATURE_AVX_VNNI
+            | FEATURE_AVX_VNNI_INT8
+            | FEATURE_AVX_VNNI_INT16
+            | FEATURE_AVX_NE_CONVERT
+            | FEATURE_F16C
+            | _X86_NATIVE_SCALAR_FEATURE_BITS
+        ),
+        required_cpu_features=("AVX", "FMA", "AVX2"),
+        automatic_priority=3,
     ),
     X86TargetProfileInfo(
         profile_key="x86.avx512",
@@ -227,7 +263,19 @@ X86_TARGET_PROFILE_INFOS: tuple[X86TargetProfileInfo, ...] = (
             X86_REG_CLASS_ZMM,
             X86_REG_CLASS_K,
         ),
+        contract_feature_bits=FEATURE_AVX512_VL,
         native_bundle_key="x86-avx512",
+        feature_contract_set_key="x86.avx512_features.core",
+        supported_feature_bits=X86_KNOWN_FEATURE_BITS,
+        required_cpu_features=(
+            "AVX",
+            "FMA",
+            "AVX2",
+            "AVX512F",
+            "AVX512DQ",
+            "AVX512BW",
+        ),
+        automatic_priority=4,
     ),
     X86TargetProfileInfo(
         profile_key="x86.packed_dot",
@@ -241,11 +289,21 @@ X86_TARGET_PROFILE_INFOS: tuple[X86TargetProfileInfo, ...] = (
             | FEATURE_AVX_VNNI_INT8
         ),
         native_bundle_key="x86-packed-dot",
+        feature_contract_set_key="x86.packed_dot.core",
+        supported_feature_bits=(
+            FEATURE_AVX512_VNNI
+            | FEATURE_AVX512_VL
+            | FEATURE_AVX512_BF16
+            | FEATURE_AVX_VNNI
+            | FEATURE_AVX_VNNI_INT8
+            | FEATURE_AVX_VNNI_INT16
+            | FEATURE_AVX10_2
+        ),
     ),
     X86TargetProfileInfo(
         profile_key="x86.avx512_packed_dot",
-        descriptor_generator_target="avx512_packed_dot",
-        descriptor_set_key="x86.avx512_packed_dot.core",
+        descriptor_generator_target="avx512_features",
+        descriptor_set_key="x86.avx512_features.core",
         register_classes=_with_base_registers(
             X86_REG_CLASS_XMM,
             X86_REG_CLASS_YMM,
@@ -260,6 +318,8 @@ X86_TARGET_PROFILE_INFOS: tuple[X86TargetProfileInfo, ...] = (
             | FEATURE_AVX_VNNI_INT8
         ),
         native_bundle_key="x86-avx512-packed-dot",
+        feature_contract_set_key="x86.avx512_features.core",
+        supported_feature_bits=X86_KNOWN_FEATURE_BITS,
     ),
     X86TargetProfileInfo(
         profile_key="x86.avx512_vnni",
@@ -272,7 +332,13 @@ X86_TARGET_PROFILE_INFOS: tuple[X86TargetProfileInfo, ...] = (
         profile_key="x86.avx512_bf16",
         descriptor_generator_target="avx512_bf16",
         descriptor_set_key="x86.avx512_bf16.core",
-        register_classes=(X86_REG_CLASS_XMM, X86_REG_CLASS_YMM, X86_REG_CLASS_ZMM),
+        register_classes=(
+            X86_REG_CLASS_GPR64,
+            X86_REG_CLASS_XMM,
+            X86_REG_CLASS_YMM,
+            X86_REG_CLASS_ZMM,
+            X86_REG_CLASS_K,
+        ),
         contract_feature_bits=FEATURE_AVX512_BF16 | FEATURE_AVX512_VL,
     ),
     X86TargetProfileInfo(
@@ -311,7 +377,6 @@ X86_NATIVE_TARGET_SELECTOR_PROFILE_KEYS: tuple[str | None, ...] = (
     "x86.packed_dot",
     "x86.avx512_packed_dot",
     "x86.scalar",
-    "x86.simd128",
     "x86.avx2",
 )
 
@@ -405,6 +470,26 @@ def validate_x86_target_info_tables(
         if selector_profile_info.native_bundle_key is None:
             raise ValueError(
                 f"x86 native selector profile '{profile_key}' has no native bundle key"
+            )
+        if selector_profile_info.feature_contract_set_key is None:
+            raise ValueError(
+                f"x86 native selector profile '{profile_key}' has no feature contract"
+            )
+        if selector_profile_info.feature_contract_set_key not in descriptor_sets_by_key:
+            raise ValueError(
+                f"x86 native selector profile '{profile_key}' references unknown "
+                f"feature contract '{selector_profile_info.feature_contract_set_key}'"
+            )
+        if selector_profile_info.supported_feature_bits & ~X86_KNOWN_FEATURE_BITS:
+            raise ValueError(
+                f"x86 native selector profile '{profile_key}' supports unknown features"
+            )
+        if selector_profile_info.contract_feature_bits & ~(
+            selector_profile_info.supported_feature_bits
+        ):
+            raise ValueError(
+                f"x86 native selector profile '{profile_key}' defaults "
+                "unsupported features"
             )
 
 

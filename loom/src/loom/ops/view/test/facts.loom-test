@@ -124,6 +124,51 @@ kernel.def @kernel_reference_distribution(%buffer: buffer, %m: index) {
 
 // ====
 
+// RUN: with-checks pass canonicalize
+
+// Uniform addresses do not make concurrent atomic observations uniform. An
+// explicit subgroup broadcast establishes its own stronger result contract.
+kernel.def @atomic_observation_distribution() {
+  %unit = index.constant 1 : index
+  %width = index.constant 32 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%buffer32: buffer, %buffer64: buffer) {
+  %base = index.constant 0 : offset
+  %word32 = buffer.view %buffer32[%base] : buffer -> view<1xi32>
+  %word64 = buffer.view %buffer64[%base] : buffer -> view<1xi64>
+  %one32 = scalar.constant 1 : i32
+  %one64 = scalar.constant 1 : i64
+  %two32 = scalar.constant 2 : i32
+  %loaded32 = view.atomic.load %word32[0] {ordering = relaxed, scope = system} : view<1xi32> -> i32
+  %loaded64 = view.atomic.load %word64[0] {ordering = acquire, scope = device} : view<1xi64> -> i64
+  %updated = view.atomic.rmw<addi> %one64, %word64[0] {ordering = seq_cst, scope = system} : i64, view<1xi64> -> i64
+  %old = view.atomic.cmpxchg %one32, %two32, %word32[0] {failure_ordering = acquire, scope = workgroup, success_ordering = acq_rel} : i32, view<1xi32> -> i32
+  %success = scalar.cmpi eq, %old, %one32 : i32
+  %first = kernel.subgroup.broadcast.first %loaded32 : i32
+  %load32_varying = test.fact_lane_varying %loaded32 : i32 -> i1
+  %load64_varying = test.fact_lane_varying %loaded64 : i64 -> i1
+  %rmw_varying = test.fact_lane_varying %updated : i64 -> i1
+  %old_varying = test.fact_lane_varying %old : i32 -> i1
+  %success_varying = test.fact_lane_varying %success : i1 -> i1
+  %load_uniform = test.fact_subgroup_uniform %loaded32 : i32 -> i1
+  %first_uniform = test.fact_subgroup_uniform %first : i32 -> i1
+  %first_varying = test.fact_lane_varying %first : i32 -> i1
+  test.use %load32_varying, %load64_varying, %rmw_varying, %old_varying, %success_varying, %load_uniform, %first_uniform, %first_varying : i1, i1, i1, i1, i1, i1, i1, i1
+  kernel.return
+}
+
+// ----
+CHECK: %load32_varying = scalar.constant true : i1
+CHECK: %load64_varying = scalar.constant true : i1
+CHECK: %rmw_varying = scalar.constant true : i1
+CHECK: %old_varying = scalar.constant true : i1
+CHECK: %success_varying = scalar.constant true : i1
+CHECK: %load_uniform = scalar.constant false : i1
+CHECK: %first_uniform = scalar.constant true : i1
+CHECK: %first_varying = scalar.constant false : i1
+
+// ====
+
 // Scratch buffer roots seed extent, base alignment, memory-space, and non-null
 // facts. Views derived from them keep the root facts while computing their own
 // typed byte footprint.
@@ -304,8 +349,9 @@ func.def @subview_refine_preserves_memory_space() -> (i64, i64) {
   %layout = encoding.layout.dense : encoding<layout>
   %scratch = buffer.alloca<workgroup> align(128) %bytes : buffer
   %source = buffer.view %scratch[%base] : buffer -> view<16xf32, %layout>
-  %sub = view.subview %source[4] : view<16xf32, %layout> -> view<8xf32, %layout>
-  %refined = view.refine %sub : view<8xf32, %layout> -> view<4xf32, %layout>
+  %length = index.constant 4 : index
+  %sub = view.subview %source[4] : view<16xf32, %layout> -> view<[%length]xf32, %layout>
+  %refined = view.refine %sub : view<[%length]xf32, %layout> -> view<4xf32, %layout>
   %space = test.fact_view_memory_space %refined : view<4xf32, %layout> -> i64
   %root_align = test.fact_view_root_min_alignment %refined : view<4xf32, %layout> -> i64
   func.return %space, %root_align : i64, i64
@@ -547,7 +593,7 @@ func.def @subview_composes_base_and_root(%buffer: buffer) -> (i1, i64, i64, i64)
 
 // Offset predicates survive into view facts, preserving range and divisibility.
 func.def @dynamic_offset_facts(%buffer: buffer, %base: offset) -> (i64, i64, i64) {
-  %base2 = index.assume %base [range(%base, 0, 4096), mul(%base, 64)] : offset
+  %base2 = index.assume %base [range(%base, 0, 4096), multiple_of(%base, 64)] : offset
   %layout = encoding.layout.dense : encoding<layout>
   %view = buffer.view %buffer[%base2] : buffer -> view<4xf32, %layout>
   %offset_lo = test.fact_view_byte_offset_lo %view : view<4xf32, %layout> -> i64
@@ -690,4 +736,46 @@ func.def @finite_storage_or_zero(%condition: i1, %buffer: buffer) -> (i1) {
 func.def @finite_storage_or_zero(%condition: i1, %buffer: buffer) -> (i1) {
   %finite = scalar.constant true : i1
   func.return %finite : i1
+}
+
+// ====
+
+// Named parameters retain source storage properties without claiming a known
+// position or absolute alignment inside that storage. Derived offsets are
+// exact relative to the parameter result, including through view refinement.
+kernel.entry.decl @observe(%root: i1, %scope: i1, %space: i64, %alignment: i64, %offset_lo: i64, %offset_hi: i64, %length: i64)
+
+command.program.def @parameter_reference() launch(%parameters: buffer) {
+  %unique = buffer.assume.noalias %parameters : buffer
+  %aligned = buffer.assume.alignment %unique {minimum_alignment = 256} : buffer
+  %global = buffer.assume.memory_space<global> %aligned : buffer
+  %table = command.parameter %global, "table" : view<6x4xbf16>
+  %row = view.subview %table[5, 0] : view<6x4xbf16> -> view<1x4xbf16>
+  %refined = view.refine %row : view<1x4xbf16> -> view<1x4xbf16>
+  %root = test.fact_view_root_matches %refined, %table : view<1x4xbf16>, view<6x4xbf16> -> i1
+  %scope = test.fact_alias_scope_matches %refined, %unique : view<1x4xbf16>, buffer -> i1
+  %space = test.fact_view_memory_space %refined : view<1x4xbf16> -> i64
+  %root_alignment = test.fact_view_root_min_alignment %refined : view<1x4xbf16> -> i64
+  %offset_lo = test.fact_view_byte_offset_lo %refined : view<1x4xbf16> -> i64
+  %offset_hi = test.fact_view_byte_offset_hi %refined : view<1x4xbf16> -> i64
+  %length = test.fact_view_byte_length_hi %refined : view<1x4xbf16> -> i64
+  %groups = index.constant 1 : index
+  kernel.dispatch @observe[%groups](%root, %scope, %space, %root_alignment, %offset_lo, %offset_hi, %length) : [index](i1, i1, i64, i64, i64, i64, i64)
+  command.return
+}
+
+// ----
+kernel.entry.decl @observe(%root: i1, %scope: i1, %space: i64, %alignment: i64, %offset_lo: i64, %offset_hi: i64, %length: i64)
+
+command.program.def @parameter_reference() launch(%parameters: buffer) {
+  %root = scalar.constant true : i1
+  %scope = scalar.constant true : i1
+  %space = scalar.constant 1 : i64
+  %root_alignment = scalar.constant 1 : i64
+  %offset_lo = scalar.constant 40 : i64
+  %offset_hi = scalar.constant 40 : i64
+  %length = scalar.constant 8 : i64
+  %groups = index.constant 1 : index
+  kernel.dispatch @observe[%groups](%root, %scope, %space, %root_alignment, %offset_lo, %offset_hi, %length) : [index](i1, i1, i64, i64, i64, i64, i64)
+  command.return
 }

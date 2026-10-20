@@ -9,7 +9,7 @@
 
 iree_add_all_subdirs()
 
-loom_cc_binary(
+loomc_cc_binary(
   NAME
     loom-opt
   SRCS
@@ -17,37 +17,22 @@ loom_cc_binary(
   DEPS
     iree::base
     iree::base::tooling::flags
-    iree::io::file_handle
-    loom::codegen::low::pipeline::legalizer_registry
-    loom::codegen::low::text_asm
-    loom::codegen::low::verify
-    loom::codegen::pass_environment
-    loom::error::diagnostic
-    loom::error::json_sink
-    loom::error::source
-    loom::format::text::printer
-    loom::ir
-    loom::pass::builtin_registry
-    loom::pass::pipeline
+    loom::binding::c::interop
+    loom::binding::c::loomc
+    loom::binding::c::target::configured::target
+    loom::config::text_binding
     loom::pass::registry
     loom::pass::report
-    loom::pass::tooling
-    loom::target::configured::provider
-    loom::target::math_policy
-    loom::target::pipeline
-    loom::target::predicate
-    loom::target::provider
     loom::tooling::cli::help
-    loom::tooling::config
-    loom::tooling::context
-    loom::tooling::execution::session
+    loom::tooling::cli::loomc_diagnostic_json
+    loom::tooling::cli::loomc_options
+    loom::tooling::cli::loomc_result
+    loom::tooling::config::input
     loom::tooling::io::file
+    loom::tooling::pass::loomc_trace
     loom::tooling::pass::trace_cli
-    loom::transforms::cleanup::configured
-    loom::transforms::cleanup::patterns
     loom::util::json
     loom::util::stream
-    loom::verify
 )
 
 iree_execution_test_suite(
@@ -56,6 +41,7 @@ iree_execution_test_suite(
   MANIFESTS
     "loom-opt.test.json"
   TOOLS
+    "loom-format=loom::tools::loom-format"
     "loom-opt=::loom-opt"
   LABELS
     "hostonly"

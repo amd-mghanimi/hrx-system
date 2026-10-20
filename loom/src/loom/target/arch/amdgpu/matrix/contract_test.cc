@@ -48,8 +48,9 @@ iree_host_size_t FindDescriptorOrdinal(const char* name) {
 
 loom_amdgpu_matrix_payload_shape_t PayloadShape(
     loom_amdgpu_matrix_numeric_type_t numeric_type) {
-  loom_amdgpu_matrix_payload_shape_t payload_shape = {};
-  payload_shape.numeric_type = numeric_type;
+  loom_amdgpu_matrix_payload_shape_t payload_shape = {
+      .numeric_type = numeric_type,
+  };
   return payload_shape;
 }
 
@@ -64,8 +65,9 @@ loom_amdgpu_matrix_contract_match_request_t MatchRequest(
     loom_amdgpu_matrix_feature_bits_t feature_bits, uint32_t wave_size,
     loom_amdgpu_matrix_contract_flags_t available_flags,
     loom_amdgpu_matrix_contract_flags_t required_flags) {
-  loom_amdgpu_matrix_contract_match_request_t request = {};
-  request.family = family;
+  loom_amdgpu_matrix_contract_match_request_t request = {
+      .family = family,
+  };
   request.tile_shape.block_count = 1;
   request.tile_shape.result_row_count = result_row_count;
   request.tile_shape.result_column_count = result_column_count;
@@ -164,6 +166,33 @@ TEST(MatrixContractTest, Gfx11F16F32HasTransposedResultRealization) {
             LOOM_AMDGPU_MATRIX_FRAGMENT_LAYOUT_COUNT);
   EXPECT_EQ(representation->flags,
             LOOM_AMDGPU_MATRIX_RESULT_REPRESENTATION_FLAG_TRANSPOSE_MN);
+}
+
+TEST(MatrixContractTest, CoordinateBindingsPreserveEveryTypedRealization) {
+  for (iree_host_size_t i = 0;
+       i < loom_amdgpu_matrix_contract_descriptor_count(); ++i) {
+    const auto* descriptor = loom_amdgpu_matrix_contract_descriptor_at(i);
+    const auto& choices = descriptor->realization;
+    for (auto representation_id :
+         {choices.canonical_result_representation_id,
+          choices.operand_exchanged_result_representation_id}) {
+      const auto* representation =
+          loom_amdgpu_matrix_result_representation_at(representation_id);
+      if (representation == nullptr) {
+        continue;
+      }
+      ASSERT_NE(representation->coordinate_id, 0);
+      EXPECT_EQ(loom_amdgpu_matrix_result_representation_for_coordinates(
+                    representation->coordinate_id,
+                    static_cast<loom_amdgpu_matrix_numeric_type_t>(
+                        representation->numeric_type)),
+                representation_id);
+      EXPECT_EQ(
+          loom_amdgpu_matrix_result_representation_for_coordinates(
+              representation->coordinate_id, LOOM_AMDGPU_MATRIX_NUMERIC_FP8),
+          LOOM_AMDGPU_MATRIX_RESULT_REPRESENTATION_NONE);
+    }
+  }
 }
 
 TEST(MatrixContractTest, FeatureInfoCoversKnownFeatureBits) {

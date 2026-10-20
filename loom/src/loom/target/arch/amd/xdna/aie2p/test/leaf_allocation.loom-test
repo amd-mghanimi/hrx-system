@@ -1,3 +1,116 @@
+// A pointer fixed to p1 selects the matching lf1/r25 FIFO tuple.
+// RUN: emit aie2p-leaf @fixed_fifo_tuple fixed=%pointer:physical_register:201:1 registers=p0,p1,lf0,lf1,r24,r25
+
+low.func.def target<amd.xdna.aie2p.core> @fixed_fifo_tuple(%pointer: reg<aie2p.eps>, %initial_fifo: reg<aie2p.eldfiforeg>) -> (reg<aie2p.vec256 x2>) asm {
+  %position = mova.fifo.position 0
+  %filled_pointer, %filled_fifo, %filled_position = vldb.fill.512 %pointer, %initial_fifo, %position
+  %data, %final_pointer, %final_fifo, %final_position = vldb.pop.512.i8x64 %filled_pointer, %filled_fifo, %filled_position
+  return %data
+}
+
+// ----
+p0: preserved
+p1: written
+lf0: preserved
+lf1: written
+r24: preserved
+r25: written
+
+// ====
+
+// A constraint on a pointer identity reaches its already assigned p1 owner.
+// RUN: emit aie2p-leaf @identity_fifo_tuple fixed=%pointer:physical_register:201:1 registers=p0,p1,lf0,lf1,r24,r25
+
+low.func.def target<amd.xdna.aie2p.core> @identity_fifo_tuple(%pointer: reg<aie2p.eps>, %initial_fifo: reg<aie2p.eldfiforeg>) -> (reg<aie2p.vec256 x2>) asm {
+  %pointer_identity = low.assume %pointer [range(%pointer, 0, 1024)] : reg<aie2p.eps>
+  %position = mova.fifo.position 0
+  %filled_pointer, %filled_fifo, %filled_position = vldb.fill.512 %pointer_identity, %initial_fifo, %position
+  %data, %final_pointer, %final_fifo, %final_position = vldb.pop.512.i8x64 %filled_pointer, %filled_fifo, %filled_position
+  return %data
+}
+
+// ----
+p0: preserved
+p1: written
+lf0: preserved
+lf1: written
+r24: preserved
+r25: written
+
+// ====
+
+// The FIFO is allocated before the fixed pointer, whose resolved binding still
+// selects tuple ordinal 1 before either interval has an assignment.
+// RUN: emit aie2p-leaf @fifo_before_fixed_pointer fixed=%pointer:physical_register:201:1 registers=p0,p1,lf0,lf1,r24,r25
+
+low.func.def target<amd.xdna.aie2p.core> @fifo_before_fixed_pointer(%initial_fifo: reg<aie2p.eldfiforeg>, %pointer: reg<aie2p.eps>) -> (reg<aie2p.vec256 x2>) asm {
+  %position = mova.fifo.position 0
+  %filled_pointer, %filled_fifo, %filled_position = vldb.fill.512 %pointer, %initial_fifo, %position
+  %data, %final_pointer, %final_fifo, %final_position = vldb.pop.512.i8x64 %filled_pointer, %filled_fifo, %filled_position
+  return %data
+}
+
+// ----
+p0: preserved
+p1: written
+lf0: preserved
+lf1: written
+r24: preserved
+r25: written
+
+// ====
+
+// A constraint introduced on a future identity participates in its origin's
+// initial placement, using the FIFO's resolved lf1 binding.
+// RUN: emit aie2p-leaf @identity_before_fixed_fifo fixed=%initial_fifo:physical_register:184:1 registers=p0,p1,lf0,lf1,r24,r25
+
+low.func.def target<amd.xdna.aie2p.core> @identity_before_fixed_fifo(%pointer: reg<aie2p.eps>, %initial_fifo: reg<aie2p.eldfiforeg>) -> (reg<aie2p.vec256 x2>) asm {
+  %pointer_identity = low.assume %pointer [range(%pointer, 0, 1024)] : reg<aie2p.eps>
+  %position = mova.fifo.position 0
+  %filled_pointer, %filled_fifo, %filled_position = vldb.fill.512 %pointer_identity, %initial_fifo, %position
+  %data, %final_pointer, %final_fifo, %final_position = vldb.pop.512.i8x64 %filled_pointer, %filled_fifo, %filled_position
+  return %data
+}
+
+// ----
+p0: preserved
+p1: written
+lf0: preserved
+lf1: written
+r24: preserved
+r25: written
+
+// ====
+
+// Reversed FIFO inputs retain the pointer-selected tuple order across the
+// initial edge. Both FIFO registers are occupied, so an accidental swap has no
+// scratch register and must be prevented by placement instead of move repair.
+// RUN: with-checks emit low-allocation @paired_fifo_loop
+
+low.func.def target<amd.xdna.aie2p.core> @paired_fifo_loop(%count: reg<aie2p.er>, %pointer0: reg<aie2p.eps>, %pointer1: reg<aie2p.eps>, %fifo1: reg<aie2p.eldfiforeg>, %fifo0: reg<aie2p.eldfiforeg>, %output: reg<aie2p.ep>) asm {
+  %one = mova.i32 1
+  %position0 = mova.fifo.position 0
+  %position1 = mova.fifo.position 0
+  low.br ^loop(%count: reg<aie2p.er>, %pointer0: reg<aie2p.eps>, %fifo0: reg<aie2p.eldfiforeg>, %position0: reg<aie2p.erf2>, %pointer1: reg<aie2p.eps>, %fifo1: reg<aie2p.eldfiforeg>, %position1: reg<aie2p.erf2>)
+^loop(%remaining: reg<aie2p.er>, %left_pointer: reg<aie2p.eps>, %left_fifo: reg<aie2p.eldfiforeg>, %left_position: reg<aie2p.erf2>, %right_pointer: reg<aie2p.eps>, %right_fifo: reg<aie2p.eldfiforeg>, %right_position: reg<aie2p.erf2>):
+  low.cond_br %remaining, ^body, ^exit : reg<aie2p.er>
+^body:
+  %left, %next_left_pointer, %next_left_fifo, %next_left_position = vlda.pop.512.i32x16 %left_pointer, %left_fifo, %left_position
+  %right, %next_right_pointer, %next_right_fifo, %next_right_position = vldb.pop.512.i32x16 %right_pointer, %right_fifo, %right_position
+  vst.512.i32x16 %left, %output, 0
+  vst.512.i32x16 %right, %output, 64
+  %next_remaining = sub %remaining, %one
+  low.br ^loop(%next_remaining: reg<aie2p.er>, %next_left_pointer: reg<aie2p.eps>, %next_left_fifo: reg<aie2p.eldfiforeg>, %next_left_position: reg<aie2p.erf2>, %next_right_pointer: reg<aie2p.eps>, %next_right_fifo: reg<aie2p.eldfiforeg>, %next_right_position: reg<aie2p.erf2>)
+^exit:
+  return
+}
+
+// ----
+CHECK: spills: 0
+CHECK: copies: coalesced=0 materialized=0
+
+// ====
+
 // Reversed parameter order must preserve two independent FIFO tuples.
 // RUN: with-checks emit low-allocation @fifo_pair diagnostics=placement-decisions
 
@@ -92,6 +205,24 @@ CHECK: copies: coalesced=0 materialized=0
 
 // ====
 
+// A destructive partial predicate update reuses its dying input even when the
+// other seven physical predicate registers remain live through the return.
+// RUN: with-checks emit low-allocation @partial_predicate_update diagnostics=copy-decisions
+
+low.func.def schedule(locked) target<amd.xdna.aie2p.core> @partial_predicate_update(%a: reg<aie2p.elpredicate>, %b: reg<aie2p.elpredicate>, %c: reg<aie2p.elpredicate>, %d: reg<aie2p.elpredicate>, %e: reg<aie2p.elpredicate>, %f: reg<aie2p.elpredicate>, %g: reg<aie2p.elpredicate>, %h: reg<aie2p.elpredicate>) -> (reg<aie2p.elpredicate>, reg<aie2p.elpredicate>, reg<aie2p.elpredicate>, reg<aie2p.elpredicate>, reg<aie2p.elpredicate>, reg<aie2p.elpredicate>, reg<aie2p.elpredicate>) asm {
+  // REMARK@+1: BACKEND/006 {value_name="b", partner_value_name="b_copy", decision="accepted", coalescing_constraint="assigned-locations-match"}
+  %b_copy = copy %b : reg<aie2p.elpredicate> -> reg<aie2p.elpredicate>
+  %low = predicate.and.low32.rhs_tied %a, %b_copy
+  %result = predicate.and.high32.rhs_tied %a, %low
+  return %result, %c, %d, %e, %f, %g, %h
+}
+
+// ----
+CHECK: spills: 0
+CHECK: copies: coalesced=1 materialized=0
+
+// ====
+
 // A detached index copy materializes into the fixed insertion register.
 // RUN: with-checks emit low-allocation @insert_lane diagnostics=copy-decisions
 
@@ -109,11 +240,10 @@ CHECK: copies: coalesced=0 materialized=1
 // ====
 
 // Static byte-offset literals share scalar registers with the loop's arithmetic.
-// Their pure materializers can be recreated near use when 22 loop-invariant
-// offsets leave too few registers for the loop arithmetic and memory pipeline.
-// Input-free literals remain available to fill issue slots while their consumers
-// wait for other prerequisites, instead of inheriting the entire setup chain.
-// RUN: emit aie2p-leaf @static_offset_loop report=emission
+// The 22 loop-invariant offsets remain live across the backedge. Accounting for
+// that storage leaves enough registers for the arithmetic and memory pipeline
+// without rematerializing the literals inside the loop.
+// RUN: emit aie2p-leaf @static_offset_loop diagnostics=predicted-spills
 
 low.func.def target<amd.xdna.aie2p.core> @static_offset_loop(%input: reg<aie2p.ep>, %output: reg<aie2p.ep>, %count: reg<aie2p.er>) asm {
   %zero = mov.short 0
@@ -219,17 +349,13 @@ low.func.def target<amd.xdna.aie2p.core> @static_offset_loop(%input: reg<aie2p.e
 }
 
 // ----
-issue cycles: 74
-code bytes: 430
-coissued bundles: 26
-coissued components: 70
 
 // ====
 
 // A broadcast retains its table until the final use. Opening every leaf before
 // preparing the predicates exceeds vector capacity even though the selection
 // tree fits when its live branches can retire incrementally.
-// RUN: with-checks emit aie2p-leaf @selection_tree report=emission
+// RUN: emit low-schedule-query @selection_tree strategy=resource-stall scheduled-pressure-limit=aie2p.vec256:24
 
 low.func.def target<amd.xdna.aie2p.core> @selection_tree(%input: reg<aie2p.ep>, %output: reg<aie2p.ep>) asm {
   %table = vlda.512.i8x64 %input, 0
@@ -288,15 +414,17 @@ low.func.def target<amd.xdna.aie2p.core> @selection_tree(%input: reg<aie2p.ep>, 
 }
 
 // ----
-CHECK: code bytes: 224
+scheduled pressure aie2p.vec256: peak-live-units<=24
 
 // ====
 
 // Seven live address indexes leave one physical register free for three local
 // address moves. Work for the earlier inserts must run before setup for the
 // final singleton insert index, even when that address work crosses capacity.
-// RUN: emit aie2p-leaf @index_repair_ordering report=emission
+// RUN: emit aie2p-leaf @index_repair_ordering diagnostics=predicted-spills
 
+// Both live address results are repaired together before rebuilding allocation.
+// REMARK@+1: BACKEND/045 {function_name="index_repair_ordering", trigger_kind="allocation-failure", repaired_value_count="2", cloned_packet_count="4", rewritten_operand_count="4", retained_placement_count="0"}
 low.func.def target<amd.xdna.aie2p.core> @index_repair_ordering(%source: reg<aie2p.ep>, %destination: reg<aie2p.ep>, %address0: reg<aie2p.edj>, %address1: reg<aie2p.edj>, %address2: reg<aie2p.edj>, %address3: reg<aie2p.edj>, %address4: reg<aie2p.edj>, %address5: reg<aie2p.edj>, %address6: reg<aie2p.edj>, %position1: reg<aie2p.er>, %position2: reg<aie2p.er>, %position3: reg<aie2p.er>, %position4: reg<aie2p.er>, %position5: reg<aie2p.er>, %position6: reg<aie2p.er>, %position7: reg<aie2p.er>, %position8: reg<aie2p.er>, %position9: reg<aie2p.er>) -> (reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>, reg<aie2p.er>) asm {
   %offset7 = mov.static-byte-offset 119
   %address7 = mov.address-index %offset7
@@ -351,18 +479,15 @@ low.func.def target<amd.xdna.aie2p.core> @index_repair_ordering(%source: reg<aie
 }
 
 // ----
-issue cycles: 92
-code bytes: 296
-coissued bundles: 12
-coissued components: 24
 
 // ====
 
 // Nine loop-invariant address moves need repair while seven entry indexes stay
 // live. Repair convergence is bounded by the function's value population, not
 // an arbitrary attempt count below the amount of useful progress available.
-// RUN: emit aie2p-leaf @index_repair_population report=emission
+// RUN: emit aie2p-leaf @index_repair_population diagnostics=predicted-spills
 
+// REMARK@+1: BACKEND/045 {function_name="index_repair_population", trigger_kind="allocation-failure", repaired_value_count="9", cloned_packet_count="9", rewritten_operand_count="9", retained_placement_count="0"}
 low.func.def target<amd.xdna.aie2p.core> @index_repair_population(%output: reg<aie2p.ep>, %count: reg<aie2p.er>, %block0: reg<aie2p.edj>, %block1: reg<aie2p.edj>, %block2: reg<aie2p.edj>, %block3: reg<aie2p.edj>, %block4: reg<aie2p.edj>, %block5: reg<aie2p.edj>, %block6: reg<aie2p.edj>) -> (reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>) asm {
   %value = mov.short 1
   %offset = mov.static-byte-offset 0
@@ -396,7 +521,247 @@ low.func.def target<amd.xdna.aie2p.core> @index_repair_population(%output: reg<a
 }
 
 // ----
-issue cycles: 43
-code bytes: 142
-coissued bundles: 2
-coissued components: 4
+
+// ====
+
+// Four loaded-C fragments leave one DM register for conversion scratch. The
+// upper half is produced before the lower half's address prerequisites, so the
+// concat sources are not a compact cluster. Reserving their declared physical
+// view places the first source in the upper half; ordinary first-fit would
+// require a swap with no scratch register when the lower half arrives.
+// RUN: with-checks emit low-allocation @noncompact_upper_half_first diagnostics=placement-decisions
+
+low.func.def target<amd.xdna.aie2p.core> @noncompact_upper_half_first(%source: reg<aie2p.ep>, %reduction_cell: reg<aie2p.er>, %first_upper_bf16: reg<aie2p.vec256 x2>, %second_lower_bf16: reg<aie2p.vec256 x2>, %second_upper_bf16: reg<aie2p.vec256 x2>, %accumulator00: reg<aie2p.mbms x4>, %accumulator01: reg<aie2p.mbms x4>, %accumulator10: reg<aie2p.mbms x4>, %accumulator11: reg<aie2p.mbms x4>, %other_lhs: reg<aie2p.mexa>, %other_rhs: reg<aie2p.mexa>) -> (reg<aie2p.mbms x4>, reg<aie2p.mbms x4>, reg<aie2p.mbms x4>, reg<aie2p.mbms x4>) asm {
+  %first_upper = vconv.fp32.bf16 %first_upper_bf16
+  %lower_half_offset = mov.static-byte-offset 1024
+  %row_stride_bytes = mov.i32 128
+  // REMARK@+1: BACKEND/043 {source_value_name="lower_half_offset", result_value_name="lower_half_position", placement_cause="tied-result", relation_kind="same-storage", relation_weight="hard", decision="accepted"}
+  %lower_half_position = mac %lower_half_offset, %reduction_cell, %row_stride_bytes
+  %lower_half_address = mov.address-index %lower_half_position
+  %first_lower_bf16 = vlda.512.bf16x32.index %source, %lower_half_address
+  %first_lower = vconv.fp32.bf16 %first_lower_bf16
+  // REMARK@+2: BACKEND/043 {source_value_name="first_lower", result_value_name="first_float", placement_cause="low.concat", relation_kind="contiguous-part", decision="accepted", result_unit_offset="0", source_unit_offset="0", unit_count="2"}
+  // REMARK@+1: BACKEND/043 {source_value_name="first_upper", result_value_name="first_float", placement_cause="low.concat", relation_kind="contiguous-part", decision="accepted", result_unit_offset="2", source_unit_offset="0", unit_count="2"}
+  %first_float = concat(%first_lower, %first_upper) : (reg<aie2p.mbms x2>, reg<aie2p.mbms x2>) -> reg<aie2p.mbms x4>
+  set.rounding 12
+  %lhs = vconv.bfp16ebs8.fp32 %first_float
+  %second_lower = vconv.fp32.bf16 %second_lower_bf16
+  %second_upper = vconv.fp32.bf16 %second_upper_bf16
+  // REMARK@+2: BACKEND/043 {source_value_name="second_lower", result_value_name="second_float", placement_cause="low.concat", relation_kind="contiguous-part", decision="accepted", result_unit_offset="0", source_unit_offset="0", unit_count="2"}
+  // REMARK@+1: BACKEND/043 {source_value_name="second_upper", result_value_name="second_float", placement_cause="low.concat", relation_kind="contiguous-part", decision="accepted", result_unit_offset="2", source_unit_offset="0", unit_count="2"}
+  %second_float = concat(%second_lower, %second_upper) : (reg<aie2p.mbms x2>, reg<aie2p.mbms x2>) -> reg<aie2p.mbms x4>
+  set.rounding 12
+  %rhs = vconv.bfp16ebs8.fp32 %second_float
+  %matrix_control = mova.i32 780
+  %next00 = mma.bfp16ebs8.m8n8k8 %accumulator00, %other_lhs, %rhs, %matrix_control
+  %next01 = mma.bfp16ebs8.m8n8k8 %accumulator01, %other_lhs, %other_rhs, %matrix_control
+  %next10 = mma.bfp16ebs8.m8n8k8 %accumulator10, %lhs, %rhs, %matrix_control
+  %next11 = mma.bfp16ebs8.m8n8k8 %accumulator11, %lhs, %other_rhs, %matrix_control
+  return %next00, %next01, %next10, %next11
+}
+
+// ----
+CHECK: spills: 0
+
+// ====
+
+// Twenty invariant indices exceed eight address-index registers. Shortening
+// one original value per repair requires more than eight successful repairs.
+// RUN: emit aie2p-leaf @many_indexed_fields diagnostics=predicted-spills
+
+// REMARK@+1: BACKEND/045 {function_name="many_indexed_fields", trigger_kind="allocation-failure", repaired_value_count="20", cloned_packet_count="20", rewritten_operand_count="20", retained_placement_count="0"}
+low.func.def target<amd.xdna.aie2p.core> @many_indexed_fields(%input: reg<aie2p.ep>, %output: reg<aie2p.ep>, %count: reg<aie2p.er>) asm {
+  %zero = mov.short 0
+  %one = mov.short 1
+  %offset0 = mov.static-byte-offset 64
+  %index0 = mov.address-index %offset0
+  %offset1 = mov.static-byte-offset 128
+  %index1 = mov.address-index %offset1
+  %offset2 = mov.static-byte-offset 192
+  %index2 = mov.address-index %offset2
+  %offset3 = mov.static-byte-offset 256
+  %index3 = mov.address-index %offset3
+  %offset4 = mov.static-byte-offset 320
+  %index4 = mov.address-index %offset4
+  %offset5 = mov.static-byte-offset 384
+  %index5 = mov.address-index %offset5
+  %offset6 = mov.static-byte-offset 448
+  %index6 = mov.address-index %offset6
+  %offset7 = mov.static-byte-offset 512
+  %index7 = mov.address-index %offset7
+  %offset8 = mov.static-byte-offset 576
+  %index8 = mov.address-index %offset8
+  %offset9 = mov.static-byte-offset 640
+  %index9 = mov.address-index %offset9
+  %offset10 = mov.static-byte-offset 704
+  %index10 = mov.address-index %offset10
+  %offset11 = mov.static-byte-offset 768
+  %index11 = mov.address-index %offset11
+  %offset12 = mov.static-byte-offset 832
+  %index12 = mov.address-index %offset12
+  %offset13 = mov.static-byte-offset 896
+  %index13 = mov.address-index %offset13
+  %offset14 = mov.static-byte-offset 960
+  %index14 = mov.address-index %offset14
+  %offset15 = mov.static-byte-offset 1024
+  %index15 = mov.address-index %offset15
+  %offset16 = mov.static-byte-offset 1088
+  %index16 = mov.address-index %offset16
+  %offset17 = mov.static-byte-offset 1152
+  %index17 = mov.address-index %offset17
+  %offset18 = mov.static-byte-offset 1216
+  %index18 = mov.address-index %offset18
+  %offset19 = mov.static-byte-offset 1280
+  %index19 = mov.address-index %offset19
+  low.br ^loop(%count: reg<aie2p.er>)
+^loop(%remaining: reg<aie2p.er>):
+  %value0 = lda.i32.index %input, %index0
+  %sum0 = add.rr %zero, %value0
+  %value1 = lda.i32.index %input, %index1
+  %sum1 = add.rr %sum0, %value1
+  %value2 = lda.i32.index %input, %index2
+  %sum2 = add.rr %sum1, %value2
+  %value3 = lda.i32.index %input, %index3
+  %sum3 = add.rr %sum2, %value3
+  %value4 = lda.i32.index %input, %index4
+  %sum4 = add.rr %sum3, %value4
+  %value5 = lda.i32.index %input, %index5
+  %sum5 = add.rr %sum4, %value5
+  %value6 = lda.i32.index %input, %index6
+  %sum6 = add.rr %sum5, %value6
+  %value7 = lda.i32.index %input, %index7
+  %sum7 = add.rr %sum6, %value7
+  %value8 = lda.i32.index %input, %index8
+  %sum8 = add.rr %sum7, %value8
+  %value9 = lda.i32.index %input, %index9
+  %sum9 = add.rr %sum8, %value9
+  %value10 = lda.i32.index %input, %index10
+  %sum10 = add.rr %sum9, %value10
+  %value11 = lda.i32.index %input, %index11
+  %sum11 = add.rr %sum10, %value11
+  %value12 = lda.i32.index %input, %index12
+  %sum12 = add.rr %sum11, %value12
+  %value13 = lda.i32.index %input, %index13
+  %sum13 = add.rr %sum12, %value13
+  %value14 = lda.i32.index %input, %index14
+  %sum14 = add.rr %sum13, %value14
+  %value15 = lda.i32.index %input, %index15
+  %sum15 = add.rr %sum14, %value15
+  %value16 = lda.i32.index %input, %index16
+  %sum16 = add.rr %sum15, %value16
+  %value17 = lda.i32.index %input, %index17
+  %sum17 = add.rr %sum16, %value17
+  %value18 = lda.i32.index %input, %index18
+  %sum18 = add.rr %sum17, %value18
+  %value19 = lda.i32.index %input, %index19
+  %sum19 = add.rr %sum18, %value19
+  st %sum19, %output, 0
+  %next = sub %remaining, %one
+  %more = nez %next
+  low.cond_br %more, ^again, ^done : reg<aie2p.er>
+^again:
+  low.br ^loop(%next: reg<aie2p.er>)
+^done:
+  return
+}
+
+// ----
+
+// ====
+
+// All nine results must be live together at the return. Rematerializing each
+// original index once cannot make this fit in eight address-index registers.
+// RUN: emit aie2p-leaf @simultaneous_indices
+
+low.func.def target<amd.xdna.aie2p.core> @simultaneous_indices() -> (reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>) asm {
+  %offset0 = mov.static-byte-offset 64
+  %index0 = mov.address-index %offset0
+  %offset1 = mov.static-byte-offset 128
+  %index1 = mov.address-index %offset1
+  %offset2 = mov.static-byte-offset 192
+  %index2 = mov.address-index %offset2
+  %offset3 = mov.static-byte-offset 256
+  %index3 = mov.address-index %offset3
+  %offset4 = mov.static-byte-offset 320
+  %index4 = mov.address-index %offset4
+  %offset5 = mov.static-byte-offset 384
+  %index5 = mov.address-index %offset5
+  %offset6 = mov.static-byte-offset 448
+  %index6 = mov.address-index %offset6
+  %offset7 = mov.static-byte-offset 512
+  %index7 = mov.address-index %offset7
+  %offset8 = mov.static-byte-offset 576
+  // ERROR@+1: BACKEND/005 "aie2p.edj" "budget 8" "peak 9" "unspillable-register-exhausted"
+  %index8 = mov.address-index %offset8
+  return %index0, %index1, %index2, %index3, %index4, %index5, %index6, %index7, %index8
+}
+
+// ====
+
+// Leaf compilation cannot synthesize over a retained authored assignment.
+// RUN: emit aie2p-leaf @assigned_input
+
+// ERROR@+1: BACKEND/051 {function_name="assigned_input", allocation_mode="assigned"}
+low.func.def allocation(assigned) target<amd.xdna.aie2p.core> @assigned_input() asm {
+  return
+}
+
+// ====
+
+// RUN: emit aie2p-leaf @fixed_input
+
+// ERROR@+1: BACKEND/051 {function_name="fixed_input", allocation_mode="fixed"}
+low.func.def allocation(fixed) target<amd.xdna.aie2p.core> @fixed_input() asm {
+  return
+}
+
+// ====
+
+// A live address in p0 excludes tuple zero even when its pointer copy is
+// assigned after the FIFO. The tuple uses p1, lf1, and r25 together.
+// RUN: emit aie2p-leaf @future_pointer report=code fixed=%live:physical_register:200:1
+
+low.func.def target<amd.xdna.aie2p.core> @future_pointer(%live: reg<aie2p.ep>, %fifo: reg<aie2p.eldfiforeg>, %base: reg<aie2p.ep>) -> (reg<aie2p.vec256 x2>, reg<aie2p.ep>) asm {
+  %pointer = copy %base : reg<aie2p.ep> -> reg<aie2p.eps>
+  %position = mova.fifo.position 0
+  %filled_pointer, %filled_fifo, %filled_position = vldb.fill.512 %pointer, %fifo, %position
+  %data, %final_pointer, %final_fifo, %final_position = vldb.pop.512.i8x64 %filled_pointer, %filled_fifo, %filled_position
+  return %data, %live
+}
+
+// ----
+code: 18 c8 00 00 18 14 14 3d 18 14 00 39 00 00 18 00 28 10 00 00 00 00 00 00 00 00 00 00
+
+// ====
+
+// A live scalar in r24 excludes tuple zero before the position is defined.
+// RUN: emit aie2p-leaf @future_position report=code fixed=%live:physical_register:270:1
+
+low.func.def target<amd.xdna.aie2p.core> @future_position(%live: reg<aie2p.er>, %fifo: reg<aie2p.eldfiforeg>, %pointer: reg<aie2p.eps>) -> (reg<aie2p.vec256 x2>, reg<aie2p.er>) asm {
+  %position = mova.fifo.position 0
+  %filled_pointer, %filled_fifo, %filled_position = vldb.fill.512 %pointer, %fifo, %position
+  %data, %final_pointer, %final_fifo, %final_position = vldb.pop.512.i8x64 %filled_pointer, %filled_fifo, %filled_position
+  return %data, %live
+}
+
+// ----
+code: 18 c8 00 00 18 14 14 3d 18 14 00 39 00 00 18 00 28 10 00 00 00 00 00 00 00 00 00 00
+
+// ====
+
+// A retained FIFO in lf0 excludes tuple zero before the new FIFO halves
+// are loaded. The pointer and position must reserve tuple one.
+// RUN: emit aie2p-leaf @future_fifo report=code fixed=%live:physical_register:183:1
+
+low.func.def target<amd.xdna.aie2p.core> @future_fifo(%live: reg<aie2p.eldfiforeg>, %pointer: reg<aie2p.eps>, %address: reg<aie2p.er>) -> (reg<aie2p.vec256 x2>, reg<aie2p.eldfiforeg>) asm {
+  %base = mov.scalar-to-address %address
+  %low = vlda.load-fifo.low512 %base, 0
+  %fifo = vlda.load-fifo.high512 %base, %low, 64
+  %position = mova.fifo.position 0
+  %filled_pointer, %filled_fifo, %filled_position = vldb.fill.512 %pointer, %fifo, %position
+  %data, %final_pointer, %final_fifo, %final_position = vldb.pop.512.i8x64 %filled_pointer, %filled_fifo, %filled_position
+  return %data, %live
+}
+
+// ----
+code: d4 41 c0 04 19 00 98 87 06 02 00 00 00 00 00 00 00 00 00 00 00 00 98 07 16 02 00 00 00 00 00 00 00 00 00 00 00 00 18 14 14 3d 18 14 00 39 00 00 18 00 28 10 00 00 00 00 00 00 00 00 00 00

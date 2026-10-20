@@ -134,10 +134,11 @@ TEST(SourceContextTest, TranslatesLoadedCodeObjectDeviceSpans) {
   iree_hal_amdgpu_source_context_t context;
   InitializeContext(ranges, 2, &context);
 
-  iree_hal_amdgpu_loaded_code_object_range_t range = {};
-  range.host_pointer = host_storage;
-  range.device_pointer = 0x1000u;
-  range.byte_length = sizeof(host_storage);
+  iree_hal_amdgpu_loaded_code_object_range_t range = {
+      .host_pointer = host_storage,
+      .device_pointer = 0x1000u,
+      .byte_length = sizeof(host_storage),
+  };
   IREE_ASSERT_OK(iree_hal_amdgpu_source_context_set_loaded_code_object_range(
       &context, /*physical_device_ordinal=*/1, range));
 
@@ -212,6 +213,47 @@ TEST(SourceContextTest, ResolvesMaterializedKernelAssertSiteName) {
       &context, /*site_id=*/0, &site));
   EXPECT_TRUE(
       iree_string_view_equal(site.operation_name, IREE_SV("kernel.assert")));
+}
+
+TEST(SourceContextTest, RegisteredContextOutlivesExecutableStorage) {
+  iree_hal_amdgpu_source_context_registry_t registry;
+  iree_hal_amdgpu_source_context_registry_initialize(iree_allocator_system(),
+                                                     &registry);
+
+  const iree_hal_amdgpu_source_context_t* registered_context = nullptr;
+  {
+    std::vector<uint8_t> table = MakeSingleSiteTable();
+    iree_hal_amdgpu_source_context_t context;
+    InitializeContext(nullptr, 0, &context);
+    IREE_ASSERT_OK(iree_hal_amdgpu_source_context_set_sanitizer_site_table(
+        &context, iree_make_const_byte_span(table.data(), table.size())));
+    IREE_ASSERT_OK(iree_hal_amdgpu_source_context_registry_register(
+        &registry, &context, &registered_context));
+
+    EXPECT_NE(registered_context, &context);
+    std::memset(&context, 0, sizeof(context));
+    std::memset(table.data(), 0, table.size());
+  }
+
+  ASSERT_NE(registered_context, nullptr);
+  EXPECT_EQ(registered_context->executable_id, 0x123u);
+  EXPECT_EQ(registered_context->code_object_hash[0], 0x1234u);
+  EXPECT_EQ(registered_context->code_object_hash[1], 0x5678u);
+  EXPECT_EQ(registered_context->physical_device_count, 0u);
+  EXPECT_EQ(registered_context->loaded_code_object_ranges, nullptr);
+
+  iree_hal_device_event_site_t site = iree_hal_device_event_site_default();
+  ASSERT_TRUE(iree_hal_amdgpu_source_context_try_resolve_sanitizer_site(
+      registered_context, /*site_id=*/0, &site));
+  EXPECT_TRUE(
+      iree_string_view_equal(site.source_file, IREE_SV("model/layer.loom")));
+  EXPECT_TRUE(iree_string_view_equal(site.operation_name,
+                                     IREE_SV("sanitizer.assert.access")));
+  ASSERT_EQ(site.producer_payload.data_length, 2u);
+  EXPECT_EQ(site.producer_payload.data[0], 0xA5u);
+  EXPECT_EQ(site.producer_payload.data[1], 0x5Au);
+
+  iree_hal_amdgpu_source_context_registry_deinitialize(&registry);
 }
 
 TEST(SourceContextTest, RejectsMalformedSanitizerSiteTable) {

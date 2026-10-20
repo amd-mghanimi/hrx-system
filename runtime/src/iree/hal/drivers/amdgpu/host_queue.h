@@ -17,6 +17,7 @@
 #include "iree/hal/drivers/amdgpu/abi/profile.h"
 #include "iree/hal/drivers/amdgpu/abi/signal.h"
 #include "iree/hal/drivers/amdgpu/abi/tsan.h"
+#include "iree/hal/drivers/amdgpu/barrier.h"
 #include "iree/hal/drivers/amdgpu/device/blit.h"
 #include "iree/hal/drivers/amdgpu/device/grid_sync.h"
 #include "iree/hal/drivers/amdgpu/dispatch_concurrency.h"
@@ -264,10 +265,6 @@ typedef struct iree_hal_amdgpu_host_queue_params_t {
     iree_hal_amdgpu_host_queue_profiling_memory_t profiling;
     // Builtin transfer kernels and target-specific transfer metadata.
     const iree_hal_amdgpu_device_buffer_transfer_context_t* transfer_context;
-    // Default pool routing table for queue allocations.
-    const iree_hal_pool_set_t* default_pool_set;
-    // Default TLSF pool used by queue allocations.
-    iree_hal_pool_t* default_pool;
     // Wrapper pool used for queue-allocation results.
     iree_hal_amdgpu_transient_buffer_pool_t* transient_buffer_pool;
     // Fixed-size staging pool used by file transfers.
@@ -373,15 +370,7 @@ typedef struct iree_hal_amdgpu_host_queue_t {
 
   // Queue-owned TSAN state used by instrumented command buffers.
   struct {
-    // Base pointer returned by HSA for the combined TSAN allocation.
-    IREE_AMDGPU_DEVICE_PTR void* allocation_base;
-    // Total byte length of |allocation_base|.
-    iree_device_size_t allocation_size;
-    // Host-owned mirror of the device queue state header.
-    iree_hal_amdgpu_tsan_queue_state_t host_state;
-    // Device-visible queue state header inside |allocation_base|.
-    IREE_AMDGPU_DEVICE_PTR iree_hal_amdgpu_tsan_queue_state_t* queue_state;
-    // Queue-local dispatch shadow storage inside |allocation_base|.
+    // Queue-local serialized shadow arena returned by HSA.
     IREE_AMDGPU_DEVICE_PTR void* shadow_base;
     // Byte length of |shadow_base|.
     iree_device_size_t shadow_size;
@@ -702,12 +691,6 @@ typedef struct iree_hal_amdgpu_host_queue_t {
   // NULL when feedback is disabled.
   iree_hal_amdgpu_feedback_state_t* feedback_state;
 
-  // Borrowed default pool set for this queue's physical device.
-  const iree_hal_pool_set_t* default_pool_set;
-
-  // Borrowed TLSF default pool for this queue's physical device.
-  iree_hal_pool_t* default_pool;
-
   // Borrowed transient wrapper pool for queue_alloca results.
   iree_hal_amdgpu_transient_buffer_pool_t* transient_buffer_pool;
 
@@ -785,7 +768,8 @@ iree_status_t iree_hal_amdgpu_host_queue_copy_buffer(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_copy_flags_t flags,
+    iree_device_size_t length, iree_hal_amdgpu_queue_barriers_t barriers,
+    iree_hal_copy_flags_t flags,
     iree_hal_profile_queue_event_type_t profile_event_type);
 
 // Enqueues a driver-owned host action ordered after |wait_semaphore_list|.
@@ -799,7 +783,8 @@ iree_status_t iree_hal_amdgpu_host_queue_enqueue_host_action(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     iree_hal_amdgpu_reclaim_action_t action,
     iree_hal_resource_t* const* operation_resources,
-    iree_host_size_t operation_resource_count);
+    iree_host_size_t operation_resource_count,
+    iree_hal_amdgpu_queue_barrier_t barriers);
 
 // Enqueues |action| to run after the current or next notification-ring drain
 // has fully published completed entries. The action storage must remain valid
@@ -808,6 +793,18 @@ void iree_hal_amdgpu_host_queue_enqueue_post_drain_action(
     iree_hal_amdgpu_host_queue_t* queue,
     iree_hal_amdgpu_host_queue_post_drain_action_t* action,
     iree_hal_amdgpu_host_queue_post_drain_fn_t fn, void* user_data);
+
+// Retains the queue through its HAL resource lifetime. NULL is allowed.
+static inline void iree_hal_amdgpu_host_queue_retain(
+    iree_hal_amdgpu_host_queue_t* queue) {
+  iree_hal_queue_retain((iree_hal_queue_t*)queue);
+}
+
+// Releases a queue reference. NULL is allowed.
+static inline void iree_hal_amdgpu_host_queue_release(
+    iree_hal_amdgpu_host_queue_t* queue) {
+  iree_hal_queue_release((iree_hal_queue_t*)queue);
+}
 
 // Initializes a host queue in caller-provided memory.
 // The caller must allocate at least sizeof(iree_hal_amdgpu_host_queue_t).
@@ -873,7 +870,8 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_read(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_file_t* source_file, uint64_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_read_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_read_flags_t flags);
 
 // Enqueues a buffer-to-file write on |queue|.
 iree_status_t iree_hal_amdgpu_host_queue_submit_write(
@@ -882,7 +880,8 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_write(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t* target_file, uint64_t target_offset,
-    iree_device_size_t length, iree_hal_write_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_write_flags_t flags);
 
 // Initializes queue-owned TSAN state.
 //
@@ -891,10 +890,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_write(
 iree_status_t iree_hal_amdgpu_host_queue_initialize_tsan_state(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_amdgpu_tsan_memory_policy_t* memory_policy,
-    iree_device_size_t workgroup_shadow_stride,
-    iree_device_size_t dispatch_shadow_stride, uint32_t workgroup_capacity,
-    uint32_t shadow_entry_size, uint32_t memory_granule_shift,
-    uint32_t shadow_slot_count);
+    iree_device_size_t shadow_size);
 
 // Deinitializes queue-owned TSAN state if present.
 void iree_hal_amdgpu_host_queue_deinitialize_tsan_state(
@@ -967,14 +963,6 @@ void iree_hal_amdgpu_host_queue_record_failure(
 void iree_hal_amdgpu_host_queue_query_scope(
     const iree_hal_amdgpu_host_queue_t* queue,
     iree_hal_amdgpu_queue_scope_t* out_scope);
-
-// Drains completed notification entries, retires queue-owned resources, runs
-// post-drain continuations, and advances the queue frontier tracker.
-//
-// The queue completion thread calls this after epoch-signal wakeups. Internal
-// serialization keeps notification-ring consumption single-reader.
-iree_host_size_t iree_hal_amdgpu_host_queue_drain_completions(
-    iree_hal_amdgpu_host_queue_t* queue);
 
 // Drains completed notification entries and retires queue-owned resources after
 // a direct host waiter has independently observed a producer epoch.

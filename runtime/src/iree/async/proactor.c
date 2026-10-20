@@ -60,6 +60,7 @@ IREE_API_EXPORT iree_status_t iree_async_proactor_request_cancel(
                             "target operation");
   }
   switch (target->type) {
+    case IREE_ASYNC_OPERATION_TYPE_TIMER:
     case IREE_ASYNC_OPERATION_TYPE_SOCKET_CONNECT:
     case IREE_ASYNC_OPERATION_TYPE_SOCKET_ACCEPT:
     case IREE_ASYNC_OPERATION_TYPE_HANDLE_POLL:

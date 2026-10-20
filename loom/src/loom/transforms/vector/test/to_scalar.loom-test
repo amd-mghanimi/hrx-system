@@ -1,5 +1,23 @@
 // RUN: pass vector-to-scalar,canonicalize
 
+// Targets without a shaped address conversion retain the scalar index.cast
+// reference semantics for each lane.
+func.def @index_cast_lanes(%values: vector<2xi32>) -> (vector<2xindex>) {
+  %result = vector.index_cast %values : vector<2xi32> to vector<2xindex>
+  func.return %result : vector<2xindex>
+}
+// ----
+func.def @index_cast_lanes(%values: vector<2xi32>) -> (vector<2xindex>) {
+  %3 = vector.extract %values[0] : vector<2xi32> -> i32
+  %4 = index.cast %3 : i32 to index
+  %5 = vector.extract %values[1] : vector<2xi32> -> i32
+  %6 = index.cast %5 : i32 to index
+  %result = vector.from_elements %4, %6 : vector<2xindex>
+  func.return %result : vector<2xindex>
+}
+
+// ====
+
 func.def @scalar_selection_is_terminal(%condition: i1, %a: i32, %b: i32) -> (i32) {
   %selected = scf.select %condition, %a, %b : i32
   func.return %selected : i32
@@ -216,7 +234,7 @@ func.def @scalarizes_block_scaled_f8_mma(%lhs_data: vector<4xf8E4M3>, %rhs_data:
   %m = index.constant 2 : index
   %n = index.constant 2 : index
   %k = index.constant 2 : index
-  %schema = encoding.define #encoding.f8e4m3<affine=scale_only, payload_elements=4, scale_format=f32, scale_group_elements=2, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %schema = encoding.define #encoding.f8e4m3fn<affine=scale_only, payload_elements=4, scale_format=f32, scale_group_elements=2, scale_operands=1, scale_topology=block_1d> : encoding<schema>
   %lhs = vector.fragment<lhs> %lhs_data shape [%m, %k] using {scale = %lhs_scale : vector<2xf32>, schema = %schema : encoding<schema>} : vector<4xf8E4M3>
   %rhs = vector.fragment<rhs> %rhs_data shape [%k, %n] using {scale = %rhs_scale : vector<2xf32>, schema = %schema : encoding<schema>} : vector<4xf8E4M3>
   %init = vector.fragment<init> %init_data shape [%m, %n] : vector<4xf32>
@@ -312,7 +330,7 @@ func.def @scalarizes_block_scaled_f8_mma(%lhs_data: vector<4xf8E4M3>, %rhs_data:
 // ====
 
 func.def @scalarizes_block_scaled_f8_decode(%payload: vector<4xf8E4M3>, %scale: vector<2xf32>) -> (vector<4xf32>) {
-  %schema = encoding.define #encoding.f8e4m3<affine=scale_only, payload_elements=4, scale_format=f32, scale_group_elements=2, scale_operands=1, scale_topology=block_1d> : encoding<schema>
+  %schema = encoding.define #encoding.f8e4m3fn<affine=scale_only, payload_elements=4, scale_format=f32, scale_group_elements=2, scale_operands=1, scale_topology=block_1d> : encoding<schema>
   %decoded = vector.decode %payload using %schema {scale = %scale : vector<2xf32>} : vector<4xf8E4M3>, encoding<schema> -> vector<4xf32>
   func.return %decoded : vector<4xf32>
 }
@@ -342,7 +360,7 @@ func.def @scalarizes_block_scaled_f8_decode(%payload: vector<4xf8E4M3>, %scale: 
 // ====
 
 func.def @scalarizes_content_policy_f8_decode(%payload: vector<2xf8E4M3>) -> (vector<2xbf16>) {
-  %schema = encoding.define #encoding.f8e4m3<payload_elements=2, rounding=finite_flush_subnormal> : encoding<schema>
+  %schema = encoding.define #encoding.f8e4m3fn<payload_elements=2, rounding=finite_flush_subnormal> : encoding<schema>
   %decoded = vector.decode %payload using %schema : vector<2xf8E4M3>, encoding<schema> -> vector<2xbf16>
   func.return %decoded : vector<2xbf16>
 }
@@ -360,7 +378,7 @@ func.def @scalarizes_content_policy_f8_decode(%payload: vector<2xf8E4M3>) -> (ve
 // ====
 
 func.def @scalarizes_row_scaled_f8_decode(%payload: vector<2x2xf8E4M3>, %scale: vector<2xf32>) -> (vector<2x2xf32>) {
-  %schema = encoding.define #encoding.f8e4m3<affine=scale_only, payload_elements=4, scale_format=f32, scale_group_elements=1, scale_operands=1, scale_topology=row> : encoding<schema>
+  %schema = encoding.define #encoding.f8e4m3fn<affine=scale_only, payload_elements=4, scale_format=f32, scale_group_elements=1, scale_operands=1, scale_topology=row> : encoding<schema>
   %decoded = vector.decode %payload using %schema {scale = %scale : vector<2xf32>} : vector<2x2xf8E4M3>, encoding<schema> -> vector<2x2xf32>
   func.return %decoded : vector<2x2xf32>
 }
@@ -1023,20 +1041,18 @@ func.def @scalarizes_dynamic_flat_product_f32_mma(%m: index, %n: index, %k: inde
 
 // ====
 
-func.def @rejects_unrepresentable_static_lane_count() {
-  // ERROR@+1: SHAPE/007 "vector.poison" "vector-to-scalar" "vector<4294967296x4294967296xi32>"
-  %value = vector.poison : vector<4294967296x4294967296xi32>
-  test.use %value : vector<4294967296x4294967296xi32>
-  func.return
+func.def @rejects_unrepresentable_static_lane_count() -> (vector<4294967296x4294967296xi32>) {
+  // ERROR@+1: SHAPE/007 "vector.constant" "vector-to-scalar" "vector<4294967296x4294967296xi32>"
+  %value = vector.constant 0 : vector<4294967296x4294967296xi32>
+  func.return %value : vector<4294967296x4294967296xi32>
 }
 
 // ====
 
-func.def @rejects_static_lane_count_beyond_value_slice() {
-  // ERROR@+1: SHAPE/007 "vector.poison" "vector-to-scalar" "vector<65536xi32>"
-  %value = vector.poison : vector<65536xi32>
-  test.use %value : vector<65536xi32>
-  func.return
+func.def @rejects_static_lane_count_beyond_value_slice() -> (vector<65536xi32>) {
+  // ERROR@+1: SHAPE/007 "vector.constant" "vector-to-scalar" "vector<65536xi32>"
+  %value = vector.constant 0 : vector<65536xi32>
+  func.return %value : vector<65536xi32>
 }
 
 // ====
@@ -1414,6 +1430,61 @@ func.def @f32x2x4_insert_static(%values: vector<2x4xf32>, %value: f32) -> (vecto
   %9 = vector.extract %values[1, 1] : vector<2x4xf32> -> f32
   %10 = vector.extract %values[1, 3] : vector<2x4xf32> -> f32
   %result = vector.from_elements %4, %5, %6, %7, %8, %9, %value, %10 : vector<2x4xf32>
+  func.return %result : vector<2x4xf32>
+}
+
+// ====
+
+// Target construction linearization produces one static insert per lane. The
+// scalarizer must consume the complete chain without changing lane order.
+func.def @i8x16_insert_chain(%v0: i8, %v1: i8, %v2: i8, %v3: i8, %v4: i8, %v5: i8, %v6: i8, %v7: i8, %v8: i8, %v9: i8, %v10: i8, %v11: i8, %v12: i8, %v13: i8, %v14: i8, %v15: i8) -> (vector<16xi8>) {
+  %seed = vector.splat %v0 : vector<16xi8>
+  %1 = vector.insert %v1 into %seed[1] : i8, vector<16xi8>
+  %2 = vector.insert %v2 into %1[2] : i8, vector<16xi8>
+  %3 = vector.insert %v3 into %2[3] : i8, vector<16xi8>
+  %4 = vector.insert %v4 into %3[4] : i8, vector<16xi8>
+  %5 = vector.insert %v5 into %4[5] : i8, vector<16xi8>
+  %6 = vector.insert %v6 into %5[6] : i8, vector<16xi8>
+  %7 = vector.insert %v7 into %6[7] : i8, vector<16xi8>
+  %8 = vector.insert %v8 into %7[8] : i8, vector<16xi8>
+  %9 = vector.insert %v9 into %8[9] : i8, vector<16xi8>
+  %10 = vector.insert %v10 into %9[10] : i8, vector<16xi8>
+  %11 = vector.insert %v11 into %10[11] : i8, vector<16xi8>
+  %12 = vector.insert %v12 into %11[12] : i8, vector<16xi8>
+  %13 = vector.insert %v13 into %12[13] : i8, vector<16xi8>
+  %14 = vector.insert %v14 into %13[14] : i8, vector<16xi8>
+  %result = vector.insert %v15 into %14[15] : i8, vector<16xi8>
+  func.return %result : vector<16xi8>
+}
+
+// ----
+func.def @i8x16_insert_chain(%v0: i8, %v1: i8, %v2: i8, %v3: i8, %v4: i8, %v5: i8, %v6: i8, %v7: i8, %v8: i8, %v9: i8, %v10: i8, %v11: i8, %v12: i8, %v13: i8, %v14: i8, %v15: i8) -> (vector<16xi8>) {
+  %result = vector.from_elements %v0, %v1, %v2, %v3, %v4, %v5, %v6, %v7, %v8, %v9, %v10, %v11, %v12, %v13, %v14, %v15 : vector<16xi8>
+  func.return %result : vector<16xi8>
+}
+
+// ====
+
+// Matching a subvector insertion consumes its leading coordinate; mismatching
+// the later insertion continues through its destination to the earlier row.
+func.def @f32x2x4_subvector_insert_chain(%row0: vector<4xf32>, %row1: vector<4xf32>) -> (vector<2x4xf32>) {
+  %seed = vector.poison : vector<2x4xf32>
+  %with_row0 = vector.insert %row0 into %seed[0] : vector<4xf32>, vector<2x4xf32>
+  %result = vector.insert %row1 into %with_row0[1] : vector<4xf32>, vector<2x4xf32>
+  func.return %result : vector<2x4xf32>
+}
+
+// ----
+func.def @f32x2x4_subvector_insert_chain(%row0: vector<4xf32>, %row1: vector<4xf32>) -> (vector<2x4xf32>) {
+  %15 = vector.extract %row0[0] : vector<4xf32> -> f32
+  %16 = vector.extract %row0[1] : vector<4xf32> -> f32
+  %17 = vector.extract %row0[2] : vector<4xf32> -> f32
+  %18 = vector.extract %row0[3] : vector<4xf32> -> f32
+  %10 = vector.extract %row1[0] : vector<4xf32> -> f32
+  %11 = vector.extract %row1[1] : vector<4xf32> -> f32
+  %12 = vector.extract %row1[2] : vector<4xf32> -> f32
+  %13 = vector.extract %row1[3] : vector<4xf32> -> f32
+  %result = vector.from_elements %15, %16, %17, %18, %10, %11, %12, %13 : vector<2x4xf32>
   func.return %result : vector<2x4xf32>
 }
 

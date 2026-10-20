@@ -21,6 +21,9 @@
 extern "C" {
 #endif
 
+typedef struct loomc_link_target_specializations_t
+    loomc_link_target_specializations_t;
+
 // Shared invocation state for selective provider materialization.
 //
 // The state borrows every referenced public handle and descriptor. It must
@@ -58,6 +61,13 @@ typedef struct loomc_link_materialization_state_t {
 
     // Optional target specialization applied after configuration.
     const loomc_target_specialization_options_t* target;
+
+    // Resolved input identities retained after the first materialization.
+    const loomc_link_target_specializations_t* indexed;
+
+    // Optional homogeneous kernel-entry profile applied after configuration.
+    // Mutually exclusive with nonempty explicit target assignments.
+    const loomc_target_profile_t* kernel_profile;
   } specialization;
 
   // Synchronous diagnostic destination and current provider source.
@@ -69,17 +79,27 @@ typedef struct loomc_link_materialization_state_t {
     const loomc_source_t* source;
   } diagnostics;
 
+  // Invocation-owned storage for target assignments shared by materializations.
+  iree_arena_allocator_t* arena;
+
   // Host allocator used for transient specialization objects.
   loomc_allocator_t allocator;
 } loomc_link_materialization_state_t;
+
+// Validates the mutually exclusive homogeneous and explicit target policies at
+// the public invocation boundary, including profile/environment compatibility.
+LOOMC_API_PRIVATE loomc_status_t loomc_link_materialization_validate_targets(
+    const loomc_target_profile_t* kernel_profile,
+    const loomc_target_specialization_options_t* target_specialization,
+    const loomc_target_environment_t* target_environment);
 
 // Initializes borrowed state shared by one selective materialization.
 LOOMC_API_PRIVATE void loomc_link_materialization_state_initialize(
     loomc_context_t* context, loomc_workspace_t* workspace,
     const loomc_link_index_t* link_index, const loomc_config_options_t* config,
     const loomc_target_specialization_options_t* target_specialization,
-    loomc_result_t* result, loomc_allocator_t allocator,
-    loomc_link_materialization_state_t* out_state);
+    loomc_result_t* result, iree_arena_allocator_t* arena,
+    loomc_allocator_t allocator, loomc_link_materialization_state_t* out_state);
 
 // Initializes borrowed materialization state for an immutable library index
 // overlaid by one invocation-local source provider.
@@ -89,8 +109,8 @@ LOOMC_API_PRIVATE void loomc_link_materialization_state_initialize_overlay(
     iree_host_size_t appended_provider_ordinal,
     const loomc_source_t* appended_source, const loomc_config_options_t* config,
     const loomc_target_specialization_options_t* target_specialization,
-    loomc_result_t* result, loomc_allocator_t allocator,
-    loomc_link_materialization_state_t* out_state);
+    loomc_result_t* result, iree_arena_allocator_t* arena,
+    loomc_allocator_t allocator, loomc_link_materialization_state_t* out_state);
 
 // Returns an internal materialization environment borrowing |state|.
 LOOMC_API_PRIVATE loom_link_plan_materialization_environment_t

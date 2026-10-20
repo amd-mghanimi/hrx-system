@@ -14,6 +14,14 @@
 extern "C" {
 #endif  // __cplusplus
 
+// Structurally validated barrier records borrowed from the replay file.
+typedef struct iree_hal_replay_barrier_list_view_t {
+  // Number of records, or UINT64_MAX for the default boundary policy.
+  uint64_t count;
+  // Barrier headers and their memory/buffer payloads in list order.
+  iree_const_byte_span_t payload;
+} iree_hal_replay_barrier_list_view_t;
+
 // Borrowed view of a parsed replay file record.
 //
 // All pointers reference the original file contents passed to
@@ -22,8 +30,15 @@ extern "C" {
 typedef struct iree_hal_replay_file_record_t {
   // Parsed record header value.
   iree_hal_replay_file_record_header_t header;
-  // Payload bytes following |header|.
+  // Operation or object payload bytes, excluding the queue barrier extension.
   iree_const_byte_span_t payload;
+  // Queue barrier lists, valid when QUEUE_BARRIERS is set in |header|.
+  struct {
+    // Barriers before the operation, after its waits.
+    iree_hal_replay_barrier_list_view_t before;
+    // Barriers after the operation, before its signals.
+    iree_hal_replay_barrier_list_view_t after;
+  } barriers;
 } iree_hal_replay_file_record_t;
 
 // Parses and validates the file header in |file_contents|.

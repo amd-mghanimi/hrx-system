@@ -2,54 +2,86 @@
 
 // Two folded outputs share record work but occupy distinct accumulator lanes
 // and retain their own output rings and binding relocations.
-
 aie2p.target<array> @array_target
 
 aie2p.target<core> @core_target
 
-pipeline.def<kernel> public retain target(@array_target) @parallel_folded_composite_array() launch(%left: buffer, %right: buffer, %shared: buffer, %left_output: buffer, %right_output: buffer) {
-  %lane_count = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %workers = group.create %lane_count : index -> group
-  %left_view = buffer.view %left[%base] : buffer -> view<2x1xf32>
-  %right_view = buffer.view %right[%base] : buffer -> view<2x1xf32>
-  %shared_view = buffer.view %shared[%base] : buffer -> view<2x1xf32>
-  %left_output_view = buffer.view %left_output[%base] : buffer -> view<1xf32>
-  %right_output_view = buffer.view %right_output[%base] : buffer -> view<1xf32>
-  %left_flow = pipeline.read %left_view on %workers : view<2x1xf32>, group -> pipeline.flow<tile<1xf32>>
-  %right_flow = pipeline.read %right_view on %workers : view<2x1xf32>, group -> pipeline.flow<tile<1xf32>>
-  %shared_flow = pipeline.read %shared_view on %workers : view<2x1xf32>, group -> pipeline.flow<tile<1xf32>>
-  %mapped_shared = pipeline.stage @copy_f32_record on %workers(%shared_flow) : (group, pipeline.flow<tile<1xf32>>) -> (pipeline.flow<tile<1xf32>>)
-  %left_records = pipeline.stage @add_f32_record on %workers(%left_flow, %mapped_shared) : (group, pipeline.flow<tile<1xf32>>, pipeline.flow<tile<1xf32>>) -> (pipeline.flow<tile<1xf32>>)
-  %right_records = pipeline.stage @add_f32_record on %workers(%right_flow, %mapped_shared) : (group, pipeline.flow<tile<1xf32>>, pipeline.flow<tile<1xf32>>) -> (pipeline.flow<tile<1xf32>>)
-  %left_sum = pipeline.fold<addf> %left_records : pipeline.flow<tile<1xf32>>
-  %right_sum = pipeline.fold<addf> %right_records : pipeline.flow<tile<1xf32>>
-  pipeline.write %left_sum to %left_output_view : pipeline.flow<tile<1xf32>>, view<1xf32>
-  pipeline.write %right_sum to %right_output_view : pipeline.flow<tile<1xf32>>, view<1xf32>
-  pipeline.return
-}
-
-func.def target(@core_target) @copy_f32_record(%input: buffer, %output: buffer) {
-  %input_aligned, %output_aligned = buffer.assume.alignment %input, %output {minimum_alignment = 64} : buffer, buffer
-  %base = index.constant 0 : offset
-  %input_view = buffer.view %input_aligned[%base] : buffer -> view<1xf32>
-  %output_view = buffer.view %output_aligned[%base] : buffer -> view<1xf32>
-  %value = view.load %input_view[0] : view<1xf32> -> f32
-  view.store %value, %output_view[0] : f32, view<1xf32>
+func.def target(@core_target) @parallel_folded_composite_array_worker_0(%shared: buffer, %left: buffer, %right: buffer, %left_output: buffer, %right_output: buffer) {
+  %scratch_bytes = index.constant 4 : offset
+  %scratch = buffer.alloca<private> align(64) %scratch_bytes : buffer
+  %shared_aligned, %scratch_aligned = buffer.assume.alignment %shared, %scratch {minimum_alignment = 64} : buffer, buffer
+  %scratch_offset = index.constant 0 : offset
+  %shared_view = buffer.view %shared_aligned[%scratch_offset] : buffer -> view<1xf32>
+  %scratch_view = buffer.view %scratch_aligned[%scratch_offset] : buffer -> view<1xf32>
+  %shared_value = view.load %shared_view[0] : view<1xf32> -> f32
+  view.store %shared_value, %scratch_view[0] : f32, view<1xf32>
+  %left_aligned, %left_scratch_aligned, %left_output_aligned = buffer.assume.alignment %left, %scratch, %left_output {minimum_alignment = 64} : buffer, buffer, buffer
+  %left_offset = index.constant 0 : offset
+  %left_view = buffer.view %left_aligned[%left_offset] : buffer -> view<1xf32>
+  %left_scratch_view = buffer.view %left_scratch_aligned[%left_offset] : buffer -> view<1xf32>
+  %left_output_view = buffer.view %left_output_aligned[%left_offset] : buffer -> view<1xf32>
+  %left_value = view.load %left_view[0] : view<1xf32> -> f32
+  %left_shared_value = view.load %left_scratch_view[0] : view<1xf32> -> f32
+  %left_sum = scalar.addf %left_value, %left_shared_value : f32
+  view.store %left_sum, %left_output_view[0] : f32, view<1xf32>
+  %right_aligned, %right_scratch_aligned, %right_output_aligned = buffer.assume.alignment %right, %scratch, %right_output {minimum_alignment = 64} : buffer, buffer, buffer
+  %right_offset = index.constant 0 : offset
+  %right_view = buffer.view %right_aligned[%right_offset] : buffer -> view<1xf32>
+  %right_scratch_view = buffer.view %right_scratch_aligned[%right_offset] : buffer -> view<1xf32>
+  %right_output_view = buffer.view %right_output_aligned[%right_offset] : buffer -> view<1xf32>
+  %right_value = view.load %right_view[0] : view<1xf32> -> f32
+  %right_shared_value = view.load %right_scratch_view[0] : view<1xf32> -> f32
+  %right_sum = scalar.addf %right_value, %right_shared_value : f32
+  view.store %right_sum, %right_output_view[0] : f32, view<1xf32>
   func.return
 }
 
-func.def target(@core_target) @add_f32_record(%lhs: buffer, %rhs: buffer, %output: buffer) {
-  %lhs_aligned, %rhs_aligned, %output_aligned = buffer.assume.alignment %lhs, %rhs, %output {minimum_alignment = 64} : buffer, buffer, buffer
-  %base = index.constant 0 : offset
-  %lhs_view = buffer.view %lhs_aligned[%base] : buffer -> view<1xf32>
-  %rhs_view = buffer.view %rhs_aligned[%base] : buffer -> view<1xf32>
-  %output_view = buffer.view %output_aligned[%base] : buffer -> view<1xf32>
-  %lhs_value = view.load %lhs_view[0] : view<1xf32> -> f32
-  %rhs_value = view.load %rhs_view[0] : view<1xf32> -> f32
-  %sum = scalar.addf %lhs_value, %rhs_value : f32
-  view.store %sum, %output_view[0] : f32, view<1xf32>
-  func.return
+low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array_program) abi_layout({binding_count = 5}) @parallel_folded_composite_array() asm {
+  %worker_count = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %workers = group %worker_count
+  %worker_lane = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %fold_records = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %worker = worker.fold %workers, %worker_lane, %fold_records, @parallel_folded_composite_array_worker_0, 3, 2, "addf", 0
+  %left = binding 0, "read"
+  %right = binding 1, "read"
+  %shared = binding 2, "read"
+  %left_output = binding 3, "write"
+  %right_output = binding 4, "write"
+  %shared_sender = sender %shared, 0 : reg<aie2p.array.sender : tile<2x1xf32>>
+  %shared_offset = constant.u64 0 : reg<aie2p.array.offset : offset>
+  %shared_record_sender = view.sender %shared_sender, %shared_offset : reg<aie2p.array.sender : tile<1xf32>>
+  %shared_receiver = receiver %worker, 0 : reg<aie2p.array.receiver : tile<1xf32>>
+  %shared_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %shared_records = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %shared_channel = channel %shared_record_sender, %shared_receiver, %shared_capacity, %shared_records : reg<aie2p.array.channel : tile<1xf32>>
+  %left_sender = sender %left, 0 : reg<aie2p.array.sender : tile<2x1xf32>>
+  %left_offset = constant.u64 0 : reg<aie2p.array.offset : offset>
+  %left_record_sender = view.sender %left_sender, %left_offset : reg<aie2p.array.sender : tile<1xf32>>
+  %left_receiver = receiver %worker, 1 : reg<aie2p.array.receiver : tile<1xf32>>
+  %left_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %left_records = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %left_channel = channel %left_record_sender, %left_receiver, %left_capacity, %left_records : reg<aie2p.array.channel : tile<1xf32>>
+  %right_sender = sender %right, 0 : reg<aie2p.array.sender : tile<2x1xf32>>
+  %right_offset = constant.u64 0 : reg<aie2p.array.offset : offset>
+  %right_record_sender = view.sender %right_sender, %right_offset : reg<aie2p.array.sender : tile<1xf32>>
+  %right_receiver = receiver %worker, 2 : reg<aie2p.array.receiver : tile<1xf32>>
+  %right_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %right_records = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %right_channel = channel %right_record_sender, %right_receiver, %right_capacity, %right_records : reg<aie2p.array.channel : tile<1xf32>>
+  %left_result_sender = sender %worker, 3 : reg<aie2p.array.sender : tile<1xf32>>
+  %left_output_receiver = receiver %left_output, 0 : reg<aie2p.array.receiver : tile<1xf32>>
+  %left_output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %left_output_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %left_output_channel = channel %left_result_sender, %left_output_receiver, %left_output_capacity, %left_output_records : reg<aie2p.array.channel : tile<1xf32>>
+  %right_result_sender = sender %worker, 4 : reg<aie2p.array.sender : tile<1xf32>>
+  %right_output_receiver = receiver %right_output, 0 : reg<aie2p.array.receiver : tile<1xf32>>
+  %right_output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %right_output_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %right_output_channel = channel %right_result_sender, %right_output_receiver, %right_output_capacity, %right_output_records : reg<aie2p.array.channel : tile<1xf32>>
+  %worker_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %worker_row = constant.u32 2 : reg<aie2p.array.scalar : index>
+  constrain.location %worker, %worker_column, %worker_row
+  return
 }
 
 // ----
@@ -59,7 +91,7 @@ binding index=1 ordinal=1 access=read
 binding index=2 ordinal=2 access=read
 binding index=3 ordinal=3 access=write
 binding index=4 ordinal=4 access=write
-worker index=0 group=0 lane=0 entry=@parallel_folded_composite_array$group$0 tile=(0,2) fold-records=2 fold-output=3+2 fold-kind=1 fold-fast-math=0x00 resources=5 storage-domains=1
+worker index=0 group=0 lane=0 entry=@parallel_folded_composite_array_worker_0 tile=(0,2) fold-records=2 fold-output=3+2 fold-kind=1 fold-fast-math=0x00 resources=5 storage-domains=1
 channel index=0 transport=external-dma record-bytes=4 capacity=2 records=2 sender=binding[2]:0 receiver=worker[0]:0
 channel index=1 transport=external-dma record-bytes=4 capacity=2 records=2 sender=binding[0]:0 receiver=worker[0]:1
 channel index=2 transport=external-dma record-bytes=4 capacity=2 records=2 sender=binding[1]:0 receiver=worker[0]:2
@@ -164,120 +196,114 @@ control-relocation index=3 record=6 word=1 binding=3 addend=0 alignment=4
 control-relocation index=4 record=9 word=1 binding=4 addend=0 alignment=4
 
 resident-program workers=1
-resident worker=0 entry=@parallel_folded_composite_array$worker$0 tile=(0,2) code-bytes=680 resources=0 fixups=6
+resident worker=0 entry=@parallel_folded_composite_array$worker$0 tile=(0,2) code-bytes=580 resources=0 fixups=6
 
-low.func.def retain target<amd.xdna.aie2p.core>(@core_target) @parallel_folded_composite_array$worker$0() asm {
-  %184 = storage {byte_alignment = 64, byte_length = 4} : low.storage<private>
+low.func.def retain target<amd.xdna.aie2p.core> @parallel_folded_composite_array$worker$0() asm {
+  %7 = storage {byte_alignment = 64, byte_length = 4} : low.storage<private>
   %acquire_delta = mov.short -1
   %release_delta = mov.short 1
   %fold_zero = mov.short 0
   %fold_record_count = mov.i32 2
   %fold_mode = mova.i32 60
-  %235 = acc.clear.f32x64
-  %274 = mov.local-address 458752
-  %275 = mov.local-address 491520
-  %276 = mov.local-address 393216
-  %277 = mov.local-address 458816
-  %278 = mov.local-address 491584
-  low.br ^_bb1(%274: reg<aie2p.ep>, %275: reg<aie2p.ep>, %276: reg<aie2p.ep>, %277: reg<aie2p.ep>, %278: reg<aie2p.ep>)
-^_bb1(%224: reg<aie2p.ep>, %225: reg<aie2p.ep>, %226: reg<aie2p.ep>, %227: reg<aie2p.ep>, %228: reg<aie2p.ep>):
+  %52 = acc.clear.f32x64
+  %91 = mov.local-address 458752
+  %92 = mov.local-address 491520
+  %93 = mov.local-address 393216
+  %94 = mov.local-address 458816
+  %95 = mov.local-address 491584
+  low.br ^_bb1(%91: reg<aie2p.ep>, %92: reg<aie2p.ep>, %93: reg<aie2p.ep>, %94: reg<aie2p.ep>, %95: reg<aie2p.ep>)
+^_bb1(%41: reg<aie2p.ep>, %42: reg<aie2p.ep>, %43: reg<aie2p.ep>, %44: reg<aie2p.ep>, %45: reg<aie2p.ep>):
   acq %acquire_delta, 52
   acq %acquire_delta, 54
-  low.br ^_bb2(%224: reg<aie2p.ep>, %225: reg<aie2p.ep>, %226: reg<aie2p.ep>, %227: reg<aie2p.ep>, %228: reg<aie2p.ep>, %235: reg<aie2p.mbms x4>, %fold_record_count: reg<aie2p.er>, %release_delta: reg<aie2p.er>)
-^_bb2(%214: reg<aie2p.ep>, %216: reg<aie2p.ep>, %218: reg<aie2p.ep>, %220: reg<aie2p.ep>, %222: reg<aie2p.ep>, %229: reg<aie2p.mbms x4>, %230: reg<aie2p.er>, %231: reg<aie2p.er>):
+  low.br ^_bb2(%41: reg<aie2p.ep>, %42: reg<aie2p.ep>, %43: reg<aie2p.ep>, %44: reg<aie2p.ep>, %45: reg<aie2p.ep>, %52: reg<aie2p.mbms x4>, %fold_record_count: reg<aie2p.er>, %release_delta: reg<aie2p.er>)
+^_bb2(%31: reg<aie2p.ep>, %33: reg<aie2p.ep>, %35: reg<aie2p.ep>, %37: reg<aie2p.ep>, %39: reg<aie2p.ep>, %46: reg<aie2p.mbms x4>, %47: reg<aie2p.er>, %48: reg<aie2p.er>):
   acq %acquire_delta, 49
   acq %acquire_delta, 51
   acq %acquire_delta, 33
-  %input_view = copy %214 : reg<aie2p.ep> -> reg<aie2p.ep>
-  %lhs_view$217 = copy %216 : reg<aie2p.ep> -> reg<aie2p.ep>
-  %lhs_view$219 = copy %218 : reg<aie2p.ep> -> reg<aie2p.ep>
-  %output_view$221 = copy %220 : reg<aie2p.ep> -> reg<aie2p.ep>
-  %output_view$223 = copy %222 : reg<aie2p.ep> -> reg<aie2p.ep>
-  %rhs_view = storage_address %184 : low.storage<private> -> reg<aie2p.ep>
-  %value = lda %input_view, 0
-  st %value, %rhs_view, 0
-  %lhs_value$187 = lda %lhs_view$217, 0
-  %rhs_value$188 = lda %rhs_view, 0
-  %189 = vbcst.32 %lhs_value$187
-  %190 = vbcst.32 %rhs_value$188
-  %191 = acc.clear.f32x64
-  %192 = slice %191[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
-  %193 = vmov.vector512.to.accumulator512 %189
-  %194 = concat(%193, %192, %192, %192) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
-  %195 = vmov.vector512.to.accumulator512 %190
-  %196 = concat(%195, %192, %192, %192) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
-  %197 = mova.i32 60
-  %198 = vadd.f32x64 %194, %196, %197
-  %199 = slice %198[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
-  %200 = vmov.accumulator512.to.vector512 %199
-  %sum$201 = vextract.32.imm %200, 0
-  st %sum$201, %output_view$221, 0
-  %lhs_value$202 = lda %lhs_view$219, 0
-  %rhs_value$203 = lda %rhs_view, 0
-  %204 = vbcst.32 %lhs_value$202
-  %205 = vbcst.32 %rhs_value$203
-  %206 = vmov.vector512.to.accumulator512 %204
-  %207 = concat(%206, %192, %192, %192) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
-  %208 = vmov.vector512.to.accumulator512 %205
-  %209 = concat(%208, %192, %192, %192) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
-  %210 = vadd.f32x64 %207, %209, %197
-  %211 = slice %210[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
-  %212 = vmov.accumulator512.to.vector512 %211
-  %sum$213 = vextract.32.imm %212, 0
-  st %sum$213, %output_view$223, 0
-  %237 = lda %220, 0
-  %238 = vbcst.32 %237
-  %239 = lda %222, 0
-  %240 = mov.short 1
-  %241 = copy %240 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
-  %242 = vinsert.32.reg %238, %241, %239
-  %243 = vmov.vector512.to.accumulator512 %242
-  %244 = concat(%243, %243, %243, %243) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
-  %245 = nez %231
-  low.cond_br %245, ^_bb3, ^_bb4 : reg<aie2p.er>
+  %shared_view = copy %31 : reg<aie2p.ep> -> reg<aie2p.ep>
+  %left_view = copy %33 : reg<aie2p.ep> -> reg<aie2p.ep>
+  %right_view = copy %35 : reg<aie2p.ep> -> reg<aie2p.ep>
+  %left_output_view = copy %37 : reg<aie2p.ep> -> reg<aie2p.ep>
+  %right_output_view = copy %39 : reg<aie2p.ep> -> reg<aie2p.ep>
+  %right_scratch_view = storage_address %7 : low.storage<private> -> reg<aie2p.ep>
+  %shared_value = lda %shared_view, 0
+  st %shared_value, %right_scratch_view, 0
+  %left_value = lda %left_view, 0
+  %left_shared_value = lda %right_scratch_view, 0
+  %12 = vbcst.32 %left_value
+  %13 = vbcst.32 %left_shared_value
+  %14 = vmov.vector512.to.accumulator512.low %12
+  %15 = vmov.vector512.to.accumulator512.low %13
+  %16 = mova.i32 60
+  %17 = vadd.f32x16 %14, %15, %16
+  %18 = slice %17[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %19 = vmov.accumulator512.to.vector512 %18
+  %left_sum = vextract.32.imm %19, 0
+  st %left_sum, %left_output_view, 0
+  %right_value = lda %right_view, 0
+  %right_shared_value = lda %right_scratch_view, 0
+  %23 = vbcst.32 %right_value
+  %24 = vbcst.32 %right_shared_value
+  %25 = vmov.vector512.to.accumulator512.low %23
+  %26 = vmov.vector512.to.accumulator512.low %24
+  %27 = vadd.f32x16 %25, %26, %16
+  %28 = slice %27[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %29 = vmov.accumulator512.to.vector512 %28
+  %right_sum = vextract.32.imm %29, 0
+  st %right_sum, %right_output_view, 0
+  %54 = lda %37, 0
+  %55 = vbcst.32 %54
+  %56 = lda %39, 0
+  %57 = mov.short 1
+  %58 = copy %57 : reg<aie2p.er> -> reg<aie2p.mr29_insert>
+  %59 = vinsert.32.reg %55, %58, %56
+  %60 = vmov.vector512.to.accumulator512 %59
+  %61 = concat(%60, %60, %60, %60) : (reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>, reg<aie2p.mbms>) -> reg<aie2p.mbms x4>
+  %62 = nez %48
+  low.cond_br %62, ^_bb3, ^_bb4 : reg<aie2p.er>
 ^_bb3:
-  low.br ^_bb5(%244: reg<aie2p.mbms x4>)
+  low.br ^_bb5(%61: reg<aie2p.mbms x4>)
 ^_bb4:
-  %246 = vadd.f32x64 %229, %244, %fold_mode
-  low.br ^_bb5(%246: reg<aie2p.mbms x4>)
-^_bb5(%236: reg<aie2p.mbms x4>):
+  %63 = vadd.f32x64 %46, %61, %fold_mode
+  low.br ^_bb5(%63: reg<aie2p.mbms x4>)
+^_bb5(%53: reg<aie2p.mbms x4>):
   rel %release_delta, 48
   rel %release_delta, 50
   rel %release_delta, 32
-  %247 = mov.address-to-scalar %214
-  %248 = mov.i32 16384
-  %249 = xor %247, %248
-  %250 = mov.scalar-to-address %249
-  %251 = mov.address-to-scalar %216
-  %252 = mov.i32 16448
-  %253 = xor %251, %252
-  %254 = mov.scalar-to-address %253
-  %255 = mov.address-to-scalar %218
-  %256 = xor %255, %248
-  %257 = mov.scalar-to-address %256
-  %258 = sub %230, %release_delta
-  %259 = nez %258
-  low.cond_br %259, ^_bb6, ^_bb7 : reg<aie2p.er>
+  %64 = mov.address-to-scalar %31
+  %65 = mov.i32 16384
+  %66 = xor %64, %65
+  %67 = mov.scalar-to-address %66
+  %68 = mov.address-to-scalar %33
+  %69 = mov.i32 16448
+  %70 = xor %68, %69
+  %71 = mov.scalar-to-address %70
+  %72 = mov.address-to-scalar %35
+  %73 = xor %72, %65
+  %74 = mov.scalar-to-address %73
+  %75 = sub %47, %release_delta
+  %76 = nez %75
+  low.cond_br %76, ^_bb6, ^_bb7 : reg<aie2p.er>
 ^_bb6:
-  low.br ^_bb2(%250: reg<aie2p.ep>, %254: reg<aie2p.ep>, %257: reg<aie2p.ep>, %220: reg<aie2p.ep>, %222: reg<aie2p.ep>, %236: reg<aie2p.mbms x4>, %258: reg<aie2p.er>, %fold_zero: reg<aie2p.er>)
+  low.br ^_bb2(%67: reg<aie2p.ep>, %71: reg<aie2p.ep>, %74: reg<aie2p.ep>, %37: reg<aie2p.ep>, %39: reg<aie2p.ep>, %53: reg<aie2p.mbms x4>, %75: reg<aie2p.er>, %fold_zero: reg<aie2p.er>)
 ^_bb7:
-  %260 = slice %236[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
-  %261 = vmov.accumulator512.to.vector512 %260
-  %262 = vextract.32.imm %261, 0
-  st %262, %220, 0
-  %263 = slice %236[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
-  %264 = vmov.accumulator512.to.vector512 %263
-  %265 = vextract.32.imm %264, 1
-  st %265, %222, 0
+  %77 = slice %53[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %78 = vmov.accumulator512.to.vector512 %77
+  %79 = vextract.32.imm %78, 0
+  st %79, %37, 0
+  %80 = slice %53[0] : reg<aie2p.mbms x4> -> reg<aie2p.mbms>
+  %81 = vmov.accumulator512.to.vector512 %80
+  %82 = vextract.32.imm %81, 1
+  st %82, %39, 0
   rel %release_delta, 53
   rel %release_delta, 55
-  %266 = mov.address-to-scalar %220
-  %267 = mov.i32 16384
-  %268 = xor %266, %267
-  %269 = mov.scalar-to-address %268
-  %270 = mov.address-to-scalar %222
-  %271 = mov.i32 16576
-  %272 = xor %270, %271
-  %273 = mov.scalar-to-address %272
-  low.br ^_bb1(%250: reg<aie2p.ep>, %254: reg<aie2p.ep>, %257: reg<aie2p.ep>, %269: reg<aie2p.ep>, %273: reg<aie2p.ep>)
+  %83 = mov.address-to-scalar %37
+  %84 = mov.i32 16384
+  %85 = xor %83, %84
+  %86 = mov.scalar-to-address %85
+  %87 = mov.address-to-scalar %39
+  %88 = mov.i32 16576
+  %89 = xor %87, %88
+  %90 = mov.scalar-to-address %89
+  low.br ^_bb1(%67: reg<aie2p.ep>, %71: reg<aie2p.ep>, %74: reg<aie2p.ep>, %86: reg<aie2p.ep>, %90: reg<aie2p.ep>)
 }

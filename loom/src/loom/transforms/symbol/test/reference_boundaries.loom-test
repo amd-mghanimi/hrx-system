@@ -1,0 +1,110 @@
+// RUN: pass refine-boundaries
+
+// Distinct caller allocations have the same extent. A shared noinline helper
+// can fold the length without treating their storage roots as identical.
+func.def noinline @record_length(%record: buffer) -> (offset) {
+  %length = buffer.length %record
+  func.return %length : offset
+}
+
+func.def public @two_records() -> (offset, offset) {
+  %bytes = index.constant 256 : offset
+  %first = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %second = buffer.alloca<workgroup> align(32) %bytes : buffer
+  %first_length = func.call @record_length(%first) : (buffer) -> (offset)
+  %second_length = func.call @record_length(%second) : (buffer) -> (offset)
+  func.return %first_length, %second_length : offset, offset
+}
+
+// ----
+func.def noinline @record_length() {
+  func.return
+}
+
+func.def public @two_records() -> (offset, offset) {
+  %11 = index.constant 256 : offset
+  %12 = index.constant 256 : offset
+  func.return %11, %12 : offset, offset
+}
+
+// ====
+
+// RUN: pass refine-boundaries
+
+// Return alternatives preserve their extent bound and divisibility without
+// making the selected extent exact. The length remains dependent on the branch.
+func.def noinline @select_record(%first: buffer, %second: buffer, %pick_first: i1) -> (buffer) {
+  cfg.cond_br %pick_first, ^first, ^second
+^first:
+  func.return %first : buffer
+^second:
+  func.return %second : buffer
+}
+
+func.def public @record_properties(%pick_first: i1) -> (offset, i1, index) {
+  %first_bytes = index.constant 256 : offset
+  %second_bytes = index.constant 512 : offset
+  %alignment = index.constant 128 : index
+  %first = buffer.alloca<workgroup> align(64) %first_bytes : buffer
+  %second = buffer.alloca<workgroup> align(32) %second_bytes : buffer
+  %record = func.call @select_record(%first, %second, %pick_first) : (buffer, buffer, i1) -> (buffer)
+  %length = buffer.length %record
+  %fits = index.cmp sle, %length, %second_bytes : offset
+  %byte_count = index.cast %length : offset to index
+  %remainder = index.rem %byte_count, %alignment : index
+  func.return %length, %fits, %remainder : offset, i1, index
+}
+
+// ----
+func.def noinline @select_record(%first: buffer, %second: buffer, %pick_first: i1) -> (buffer) {
+  cfg.cond_br %pick_first, ^first, ^second
+^first:
+  func.return %first : buffer
+^second:
+  func.return %second : buffer
+}
+
+func.def public @record_properties(%pick_first: i1) -> (offset, i1, index) {
+  %first_bytes = index.constant 256 : offset
+  %second_bytes = index.constant 512 : offset
+  %first = buffer.alloca<workgroup> align(64) %first_bytes : buffer
+  %second = buffer.alloca<workgroup> align(32) %second_bytes : buffer
+  %record = func.call pure @select_record(%first, %second, %pick_first) : (buffer, buffer, i1) -> (buffer)
+  %length = buffer.length %record
+  %fits = scalar.constant true : i1
+  %remainder = index.constant 0 : index
+  func.return %length, %fits, %remainder : offset, i1, index
+}
+
+// ====
+
+// RUN: pass refine-boundaries
+
+// An unconstrained caller participates in the join. A known allocation cannot
+// narrow the helper's buffer extent for all callers.
+func.def noinline @record_length(%record: buffer) -> (offset) {
+  %length = buffer.length %record
+  func.return %length : offset
+}
+
+func.def public @mixed_records(%external: buffer) -> (offset, offset) {
+  %bytes = index.constant 256 : offset
+  %local = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %local_length = func.call @record_length(%local) : (buffer) -> (offset)
+  %external_length = func.call @record_length(%external) : (buffer) -> (offset)
+  func.return %local_length, %external_length : offset, offset
+}
+
+// ----
+func.def noinline @record_length(%record: buffer) -> (offset) {
+  %length = buffer.length %record
+  func.return %length : offset
+}
+
+func.def public @mixed_records(%external: buffer) -> (offset, offset) {
+  %bytes = index.constant 256 : offset
+  %local = buffer.alloca<workgroup> align(64) %bytes : buffer
+  %local_length = func.call pure @record_length(%local) : (buffer) -> (offset)
+  %external_length = func.call pure @record_length(%external) : (buffer) -> (offset)
+  func.return %local_length, %external_length : offset, offset
+}

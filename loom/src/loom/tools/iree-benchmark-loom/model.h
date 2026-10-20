@@ -11,7 +11,6 @@
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
-#include "loom/tooling/compile/report_capture.h"
 #include "loom/tooling/execution/hal/benchmark.h"
 #include "loom/tooling/execution/hal/testbench_actual.h"
 #include "loom/tooling/testbench/executor.h"
@@ -19,12 +18,12 @@
 #include "loom/tools/iree-benchmark-loom/output.h"
 #include "loom/util/json.h"
 #include "loom/util/stream.h"
+#include "loomc/artifact.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct loom_tooling_config_set_t loom_tooling_config_set_t;
 typedef struct iree_benchmark_loom_launch_evidence_t
     iree_benchmark_loom_launch_evidence_t;
 
@@ -87,6 +86,11 @@ typedef struct iree_benchmark_loom_selected_benchmark_t {
   const loom_testbench_benchmark_plan_t* benchmark_plan;
   // Borrowed case plan referenced by |benchmark_plan|.
   const loom_testbench_case_plan_t* case_plan;
+  // Borrowed scenario plan referenced by |benchmark_plan|.
+  const loom_testbench_scenario_plan_t* scenario_plan;
+  // True when the subject's requirements exclude execution. Populated once
+  // before invocation binding; dry-run planning leaves this false.
+  bool skipped;
   // Effective benchmark policy after command-line overrides.
   iree_benchmark_loom_benchmark_policy_t policy;
 } iree_benchmark_loom_selected_benchmark_t;
@@ -134,12 +138,24 @@ typedef struct iree_benchmark_loom_data_cache_summary_t {
   iree_host_size_t command_buffer_ring_count;
   // Number of dispatch slots recorded in each command buffer.
   iree_host_size_t dispatches_per_batch;
-  // Requested minimum byte size for the physical binding ring.
+  // Requested minimum byte size for unique reachable binding ranges.
   uint64_t requested_min_ring_bytes;
-  // Byte length of the first materialized binding set.
+  // Sum of binding-reference byte lengths in the first materialized set.
   uint64_t binding_set_bytes;
-  // Sum of byte lengths across materialized binding sets.
+  // Sum of binding-reference byte lengths across the physical ring.
   uint64_t binding_ring_bytes;
+  // Number of disjoint reachable binding ranges in one materialized set.
+  iree_host_size_t binding_range_count;
+  // Sum of reachable binding ranges in one materialized set.
+  uint64_t binding_range_set_bytes;
+  // Sum of reachable binding ranges across the physical ring.
+  uint64_t binding_range_ring_bytes;
+  // Number of unique logical input allocations in one materialized set.
+  iree_host_size_t materialized_storage_count;
+  // Sum of unique logical input-allocation bytes in one materialized set.
+  uint64_t materialized_storage_set_bytes;
+  // Sum of unique logical input-allocation bytes across the physical ring.
+  uint64_t materialized_storage_ring_bytes;
 } iree_benchmark_loom_data_cache_summary_t;
 
 typedef struct iree_benchmark_loom_benchmark_result_t {
@@ -163,8 +179,8 @@ typedef struct iree_benchmark_loom_benchmark_result_t {
   iree_host_size_t diagnostic_remark_count;
   // JSON array entries for structured diagnostics associated with the failure.
   iree_string_view_t diagnostic_json;
-  // Captured structured compile report for the benchmark candidate.
-  const loom_compile_report_capture_t* compile_report_capture;
+  // Public structured compile-report artifact for the benchmark candidate.
+  const loomc_artifact_t* compile_report;
   // Sidecar compile report artifact path for debug/full bundles, if any.
   iree_string_view_t compile_report_artifact_path;
   // Sidecar artifact manifest path for debug/full bundles, if any.
@@ -179,11 +195,20 @@ typedef struct iree_benchmark_loom_benchmark_result_t {
   bool executed;
   // True when no measured or warmup sample failed expectations.
   bool passed;
-  // True when |sample_ordinal| identifies the measured sample.
+  // True when |sample_ordinal| identifies the measured check.case sample.
   bool has_sample_ordinal;
   // Concrete case sample ordinal measured by dispatch_complete.
   iree_host_size_t sample_ordinal;
-  // Number of case samples run per benchmark iteration.
+  // True when |benchmark_sample_ordinal| identifies one selected benchmark
+  // sample and can be passed back through --sample.
+  bool has_benchmark_sample_ordinal;
+  // Concrete ordinal within the selected benchmark's sample space.
+  iree_host_size_t benchmark_sample_ordinal;
+  // True when |scenario_coordinate| identifies the measured scenario trial.
+  bool has_scenario_coordinate;
+  // Concrete scenario coordinate measured by dispatch_complete.
+  loom_testbench_scenario_sample_coordinate_t scenario_coordinate;
+  // Number of selected subject samples run per benchmark iteration.
   iree_host_size_t samples_per_iteration;
   // Borrowed concrete workload and resolved launch records for the timed work
   // item. Empty for benchmarks that do not submit HAL kernel launches.
@@ -205,8 +230,6 @@ typedef struct iree_benchmark_loom_hal_context_t {
   const iree_benchmark_loom_configuration_t* configuration;
   // Optional artifact bundle receiving HAL profile artifact references.
   iree_benchmark_loom_artifact_bundle_t* artifact_bundle;
-  // Config bindings materialized into HAL actual candidate compile copies.
-  const loom_tooling_config_set_t* config_set;
   // Shared HAL runtime and artifact-provider state.
   loom_run_hal_testbench_context_t execution;
 } iree_benchmark_loom_hal_context_t;
@@ -220,8 +243,6 @@ typedef struct iree_benchmark_loom_hal_actual_provider_t {
   iree_string_view_t artifact_path_suffix;
   // Structured diagnostics emitted while compiling this candidate.
   iree_benchmark_loom_diagnostic_capture_t diagnostics;
-  // Structured compile report populated while emitting this candidate.
-  loom_compile_report_capture_t compile_report_capture;
   // Borrowed view into |compile_report_artifact_path_storage|.
   iree_string_view_t compile_report_artifact_path;
   // Owned debug/full bundle compile-report artifact path.
@@ -242,8 +263,6 @@ typedef struct iree_benchmark_loom_hal_actual_provider_t {
   iree_string_view_t hal_executable_path;
   // Owned debug/full bundle HAL executable artifact path.
   char* hal_executable_path_storage;
-  // True when |compile_report_capture| owns initialized capture state.
-  bool compile_report_capture_initialized;
 } iree_benchmark_loom_hal_actual_provider_t;
 
 typedef struct iree_benchmark_loom_hal_actual_sequence_t {
@@ -258,9 +277,9 @@ typedef struct iree_benchmark_loom_hal_actual_sequence_t {
 } iree_benchmark_loom_hal_actual_sequence_t;
 
 typedef struct iree_benchmark_loom_dispatch_comparison_candidate_t {
-  // Selected benchmark/case/policy identity for this comparison member.
+  // Selected benchmark/subject/policy identity for this comparison member.
   const iree_benchmark_loom_selected_benchmark_t* selection;
-  // Module owning the selected benchmark and case plans.
+  // Module owning the selected benchmark and subject plans.
   const loom_module_t* module;
   // Deduplicated physical work item index used for setup.
   iree_host_size_t work_item_index;

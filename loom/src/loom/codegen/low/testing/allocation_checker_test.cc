@@ -13,6 +13,7 @@
 #include "loom/codegen/low/allocation/assignment.h"
 #include "loom/codegen/low/frame.h"
 #include "loom/codegen/low/placement.h"
+#include "loom/target/test/descriptors.h"
 
 namespace loom {
 namespace {
@@ -20,12 +21,13 @@ namespace {
 loom_liveness_interval_t MakeInterval(loom_value_id_t value_id,
                                       uint32_t start_point, uint32_t end_point,
                                       loom_liveness_value_class_t value_class) {
-  loom_liveness_interval_t interval = {};
-  interval.value_id = value_id;
-  interval.start_point = start_point;
-  interval.end_point = end_point;
-  interval.value_class = value_class;
-  interval.unit_count = 1;
+  loom_liveness_interval_t interval = {
+      .value_id = value_id,
+      .start_point = start_point,
+      .end_point = end_point,
+      .value_class = value_class,
+      .unit_count = 1,
+  };
   return interval;
 }
 
@@ -33,28 +35,29 @@ loom_low_allocation_assignment_t MakeAssignment(
     loom_value_id_t value_id, uint32_t start_point, uint32_t end_point,
     uint32_t location_base, uint32_t unit_point_start,
     loom_liveness_value_class_t value_class) {
-  loom_low_allocation_assignment_t assignment = {};
-  assignment.value_id = value_id;
-  assignment.value_class = value_class;
-  assignment.descriptor_reg_class_id = 0;
-  assignment.start_point = start_point;
-  assignment.end_point = end_point;
-  assignment.unit_count = 1;
-  assignment.location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER;
-  assignment.location_base = location_base;
-  assignment.location_count = 1;
-  assignment.unit_point_start = unit_point_start;
+  loom_low_allocation_assignment_t assignment = {
+      .value_id = value_id,
+      .descriptor_reg_class_id = value_class.register_class_id,
+      .start_point = start_point,
+      .end_point = end_point,
+      .unit_count = 1,
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .location_base = location_base,
+      .location_count = 1,
+      .unit_point_start = unit_point_start,
+  };
   return assignment;
 }
 
 loom_low_placement_relation_t MakeAliasRelation(
     loom_value_ordinal_t result_ordinal, loom_value_ordinal_t source_ordinal,
     loom_low_placement_relation_flags_t flags) {
-  loom_low_placement_relation_t relation = {};
-  relation.result_ordinal = result_ordinal;
-  relation.source_ordinal = source_ordinal;
-  relation.unit_count = 1;
-  relation.kind = LOOM_LOW_PLACEMENT_RELATION_SAME_STORAGE;
+  loom_low_placement_relation_t relation = {
+      .result_ordinal = result_ordinal,
+      .source_ordinal = source_ordinal,
+      .unit_count = 1,
+      .kind = LOOM_LOW_PLACEMENT_RELATION_SAME_STORAGE,
+  };
   relation.flags = flags | LOOM_LOW_PLACEMENT_RELATION_FLAG_CAN_ALIAS_STORAGE;
   return relation;
 }
@@ -186,6 +189,32 @@ class AllocationCheckerTest : public ::testing::Test {
     frame_.allocation.unit_point_count = 3;
   }
 
+  void ConfigureStorageLease(
+      loom_low_storage_lease_kind_t kind = LOOM_LOW_STORAGE_LEASE_SOURCE_READ) {
+    lease_record_ = {};
+    lease_record_.kind = kind;
+    lease_record_.unit_count = 1;
+    frame_.allocation.storage_leases.schedule = &frame_.schedule;
+    frame_.allocation.storage_leases.records = &lease_record_;
+    frame_.allocation.storage_leases.record_count = 1;
+
+    lease_instance_ = {};
+    lease_instance_.lease_record_index = 0;
+    lease_instance_.assignment_index = 0;
+    lease_instance_.value_id = assignments_[0].value_id;
+    lease_instance_.start_point = 0;
+    lease_instance_.end_point = 4;
+    lease_instance_.release_action_index =
+        LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE;
+    lease_instance_.descriptor_reg_class_id = 0;
+    lease_instance_.location_kind =
+        LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER;
+    lease_instance_.location_base = assignments_[0].location_base;
+    lease_instance_.location_count = 1;
+    frame_.allocation.storage_lease_instances = &lease_instance_;
+    frame_.allocation.storage_lease_instance_count = 1;
+  }
+
   iree_arena_block_pool_t block_pool_;
   iree_arena_allocator_t arena_;
   loom_low_reg_class_t reg_class_ = {};
@@ -199,12 +228,57 @@ class AllocationCheckerTest : public ::testing::Test {
   uint32_t unit_start_points_[4] = {};
   uint32_t unit_end_points_[4] = {};
   loom_low_placement_relation_t relations_[3] = {};
+  loom_low_storage_lease_record_t lease_record_ = {};
+  loom_low_allocation_storage_lease_t lease_instance_ = {};
   loom_low_emission_frame_t frame_ = {};
 };
 
 TEST_F(AllocationCheckerTest, AcceptsDisjointAssignments) {
   const loom_low_allocation_check_result_t result = Check();
   EXPECT_EQ(result.violation_count, 0u);
+}
+
+TEST_F(AllocationCheckerTest, AcceptsAcquisitionBeforeTiedSourceDefinition) {
+  // Region layout puts the tied descendant before its dominating source. The
+  // source owns storage from the descendant's start, not just its own start.
+  intervals_[0].start_point = 3;
+  assignments_[1].location_base = assignments_[0].location_base;
+  loom_low_placement_relation_t relation =
+      MakeAliasRelation(1, 0, LOOM_LOW_PLACEMENT_RELATION_FLAG_HARD);
+  relation.cause = LOOM_LOW_PLACEMENT_CAUSE_TIED_RESULT;
+  frame_.allocation.placement.relations = &relation;
+  frame_.allocation.placement.relation_count = 1;
+  EXPECT_EQ(Check().violation_count, 0u);
+}
+
+TEST_F(AllocationCheckerTest, RejectsAcquisitionAfterSemanticStart) {
+  assignments_[0].start_point = 1;
+  const auto result = Check();
+  EXPECT_GT(result.violation_count, 0u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_ASSIGNMENT_SHAPE);
+}
+
+TEST_F(AllocationCheckerTest, EarlyAcquisitionConflictsBeforeDefinition) {
+  intervals_[0].start_point = 2;
+  intervals_[1].end_point = assignments_[1].end_point = unit_end_points_[1] = 2;
+  assignments_[1].location_base = assignments_[0].location_base;
+  const auto result = Check();
+  EXPECT_GT(result.violation_count, 0u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_CONFLICT);
+}
+
+TEST_F(AllocationCheckerTest, AcceptsAliasReservationBeforeSemanticDefinition) {
+  intervals_[1].start_point = 2;
+  assignments_[1].start_point = unit_start_points_[1] = 0;
+  assignments_[1].location_base = assignments_[0].location_base;
+  loom_low_placement_relation_t relation =
+      MakeAliasRelation(1, 0, LOOM_LOW_PLACEMENT_RELATION_FLAG_PREFERRED);
+  relation.cause = LOOM_LOW_PLACEMENT_CAUSE_LOW_BRANCH;
+  frame_.allocation.placement.relations = &relation;
+  frame_.allocation.placement.relation_count = 1;
+  EXPECT_EQ(Check().violation_count, 0u);
 }
 
 TEST_F(AllocationCheckerTest, RejectsOverlappingLiveAssignments) {
@@ -495,9 +569,182 @@ TEST_F(AllocationCheckerTest, DistinguishesContentsAtDifferentSourceOffsets) {
   EXPECT_EQ(Check().violation_count, 0u);
 }
 
+TEST_F(AllocationCheckerTest, AcceptsLeasedTiedConsumer) {
+  ConfigureStorageLease();
+  intervals_[0].end_point = assignments_[0].end_point = unit_end_points_[0] = 2;
+  intervals_[1].start_point = assignments_[1].start_point =
+      unit_start_points_[1] = 2;
+  assignments_[1].location_base = assignments_[0].location_base;
+  loom_low_placement_relation_t relation =
+      MakeAliasRelation(1, 0, LOOM_LOW_PLACEMENT_RELATION_FLAG_HARD);
+  relation.cause = LOOM_LOW_PLACEMENT_CAUSE_TIED_RESULT;
+  frame_.allocation.placement.relations = &relation;
+  frame_.allocation.placement.relation_count = 1;
+  EXPECT_EQ(Check().violation_count, 0u);
+}
+
+TEST_F(AllocationCheckerTest, AcceptsLeasedStructuralAlias) {
+  ConfigureStorageLease();
+  assignments_[1].location_base = assignments_[0].location_base;
+  loom_low_placement_relation_t relation =
+      MakeAliasRelation(1, 0, LOOM_LOW_PLACEMENT_RELATION_FLAG_PREFERRED);
+  relation.cause = LOOM_LOW_PLACEMENT_CAUSE_LOW_SLICE;
+  frame_.allocation.placement.relations = &relation;
+  frame_.allocation.placement.relation_count = 1;
+  EXPECT_EQ(Check().violation_count, 0u);
+}
+
+TEST_F(AllocationCheckerTest, RejectsUnrelatedReuseOfLeasedStorage) {
+  ConfigureStorageLease();
+  intervals_[0].end_point = assignments_[0].end_point = unit_end_points_[0] = 2;
+  intervals_[1].start_point = assignments_[1].start_point =
+      unit_start_points_[1] = 2;
+  assignments_[1].location_base = assignments_[0].location_base;
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
+TEST_F(AllocationCheckerTest, ClipsLeaseConflictsToSparseStorageLiveness) {
+  ConfigureStorageLease();
+  intervals_[0].end_point = assignments_[0].end_point = unit_end_points_[0] = 1;
+  intervals_[1].start_point = assignments_[1].start_point =
+      unit_start_points_[1] = 1;
+  intervals_[1].end_point = assignments_[1].end_point = unit_end_points_[1] = 5;
+  assignments_[1].location_base = assignments_[0].location_base;
+  loom_liveness_segment_t segment = {3, 5};
+  frame_.allocation.liveness.segments = &segment;
+  frame_.allocation.liveness.segment_count = 1;
+  frame_.allocation.storage_segments = &segment;
+  assignments_[1].liveness_segments = {0, 1};
+  EXPECT_EQ(Check().violation_count, 1u);
+
+  segment.start_point = lease_instance_.end_point;
+  EXPECT_EQ(Check().violation_count, 0u);
+}
+
+TEST_F(AllocationCheckerTest, ChecksOnlyLeasedAssignmentUnits) {
+  intervals_[0].unit_count = 2;
+  intervals_[0].end_point = 1;
+  assignments_[0].unit_count = assignments_[0].location_count = 2;
+  assignments_[0].end_point = 1;
+  unit_end_points_[0] = unit_end_points_[1] = 1;
+  intervals_[1].start_point = assignments_[1].start_point =
+      unit_start_points_[2] = 1;
+  assignments_[1].unit_point_start = 2;
+  frame_.allocation.unit_point_count = 3;
+  ConfigureStorageLease();
+  lease_record_.unit_offset = 1;
+  lease_instance_.location_base = assignments_[0].location_base + 1;
+
+  assignments_[1].location_base = assignments_[0].location_base;
+  EXPECT_EQ(Check().violation_count, 0u);
+
+  assignments_[1].location_base = lease_instance_.location_base;
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
+TEST_F(AllocationCheckerTest, StartsResultWriteLeaseAfterIssue) {
+  intervals_[0].start_point = assignments_[0].start_point =
+      unit_start_points_[0] = 2;
+  intervals_[1].start_point = assignments_[1].start_point =
+      unit_start_points_[1] = 0;
+  intervals_[1].end_point = assignments_[1].end_point = unit_end_points_[1] = 2;
+  assignments_[1].location_base = assignments_[0].location_base;
+  ConfigureStorageLease(LOOM_LOW_STORAGE_LEASE_RESULT_WRITE);
+  lease_instance_.start_point = 1;
+  EXPECT_EQ(Check().violation_count, 0u);
+
+  lease_record_.kind = LOOM_LOW_STORAGE_LEASE_SOURCE_READ;
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
+TEST_F(AllocationCheckerTest, RejectsPartialPhysicalRegisterLeaseAlias) {
+  const loom_low_descriptor_set_t* descriptor_set =
+      loom_test_low_core_descriptor_set();
+  uint16_t owner_class = LOOM_LOW_REG_CLASS_NONE;
+  uint16_t candidate_class = LOOM_LOW_REG_CLASS_NONE;
+  ASSERT_TRUE(loom_low_descriptor_set_lookup_register_class(
+      descriptor_set, IREE_SV("test.atomic.narrow"), &owner_class, nullptr));
+  ASSERT_TRUE(loom_low_descriptor_set_lookup_register_class(
+      descriptor_set, IREE_SV("test.alias.narrow"), &candidate_class, nullptr));
+  frame_.target.descriptor_set = descriptor_set;
+  frame_.schedule.target.descriptor_set = descriptor_set;
+  frame_.allocation.target.descriptor_set = descriptor_set;
+
+  intervals_[0].end_point = assignments_[0].end_point = unit_end_points_[0] = 1;
+  intervals_[1].start_point = assignments_[1].start_point =
+      unit_start_points_[1] = 1;
+  for (auto& interval : intervals_) {
+    interval.value_class.register_descriptor_set_stable_id =
+        descriptor_set->stable_id;
+  }
+  intervals_[0].value_class.register_class_id = owner_class;
+  intervals_[1].value_class.register_class_id = candidate_class;
+  assignments_[0].descriptor_reg_class_id = owner_class;
+  assignments_[0].location_base =
+      loom_low_descriptor_set_physical_register_candidate(descriptor_set,
+                                                          owner_class, 0);
+  assignments_[1].descriptor_reg_class_id = candidate_class;
+  assignments_[1].location_base =
+      loom_low_descriptor_set_physical_register_candidate(descriptor_set,
+                                                          candidate_class, 0);
+  ConfigureStorageLease();
+  lease_instance_.descriptor_reg_class_id = owner_class;
+  lease_instance_.location_base = assignments_[0].location_base;
+
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
+TEST_F(AllocationCheckerTest, RejectsMalformedLeaseUnitRange) {
+  ConfigureStorageLease();
+  lease_record_.unit_offset = 1;
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
+TEST_F(AllocationCheckerTest, RejectsMalformedLeaseRegisterClass) {
+  ConfigureStorageLease();
+  lease_instance_.descriptor_reg_class_id = 1;
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
+TEST_F(AllocationCheckerTest, RejectsMissingLeaseStartPoint) {
+  ConfigureStorageLease();
+  lease_instance_.start_point = UINT32_MAX;
+  lease_instance_.end_point = UINT32_MAX;
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
+TEST_F(AllocationCheckerTest, RejectsMissingLeaseReleaseAction) {
+  ConfigureStorageLease();
+  lease_instance_.release_action_index = 0;
+  const auto result = Check();
+  EXPECT_EQ(result.violation_count, 1u);
+  EXPECT_EQ(result.first_violation.kind,
+            LOOM_LOW_ALLOCATION_CHECK_VIOLATION_STORAGE_LEASE);
+}
+
 TEST_F(AllocationCheckerTest, RejectsFixedLocationMismatch) {
-  loom_low_allocation_resolved_fixed_value_t fixed = {};
-  fixed.value_ordinal = 0;
+  loom_low_allocation_resolved_fixed_value_t fixed = {.value_ordinal = 0};
   fixed.assignment.value_id = value_ids_[0];
   fixed.assignment.descriptor_reg_class_id = 0;
   fixed.assignment.location_kind =
@@ -513,11 +760,12 @@ TEST_F(AllocationCheckerTest, RejectsFixedLocationMismatch) {
 }
 
 TEST_F(AllocationCheckerTest, RejectsReservedLocationOverlap) {
-  loom_low_allocation_resolved_reserved_range_t reserved = {};
-  reserved.descriptor_reg_class_id = 0;
-  reserved.location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER;
-  reserved.location_base = assignments_[1].location_base;
-  reserved.location_count = 1;
+  loom_low_allocation_resolved_reserved_range_t reserved = {
+      .descriptor_reg_class_id = 0,
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .location_base = assignments_[1].location_base,
+      .location_count = 1,
+  };
   frame_.allocation.reserved_ranges = &reserved;
   frame_.allocation.reserved_range_count = 1;
   const loom_low_allocation_check_result_t result = Check();

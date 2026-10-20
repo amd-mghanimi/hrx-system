@@ -12,11 +12,44 @@ iree_add_all_subdirs()
 if(LOOM_TARGET_ARCH_X86)
 loom_cc_library(
   NAME
+    facts
+  HDRS
+    "facts.h"
+  SRCS
+    "facts.c"
+  DEPS
+    ::feature_bits
+    iree::base
+    iree::base::cpu_data
+    loom::target::arch::x86::records::target_records
+    loom::target::facts
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
     feature_bits
   HDRS
     "feature_bits.h"
   DEPS
     iree::base
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    call_abi
+  HDRS
+    "call_abi.h"
+  SRCS
+    "call_abi.c"
+  DEPS
+    ::register_classes
+    loom::ir
   PUBLIC
 )
 endif()
@@ -30,9 +63,29 @@ loom_cc_library(
   SRCS
     "math_policy.c"
   DEPS
+    ::feature_bits
     iree::base
     loom::target::math_policy
   PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_test(
+  NAME
+    math_policy_test
+  SRCS
+    "math_policy_test.cc"
+  DEPS
+    ::feature_bits
+    ::math_policy
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::target::math_policy
+    loom::target::types
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
 )
 endif()
 
@@ -46,7 +99,7 @@ loom_cc_library(
     "register_classes.c"
   DEPS
     iree::base
-    loom::target::arch::x86::descriptors::avx512_packed_dot_descriptors_ids
+    loom::target::arch::x86::descriptors::avx512_features_descriptors_ids
   PUBLIC
 )
 endif()
@@ -58,6 +111,7 @@ loom_cc_test(
   SRCS
     "register_classes_test.cc"
   DEPS
+    ::feature_bits
     ::register_classes
     iree::testing::gtest
     iree::testing::gtest_main
@@ -77,11 +131,85 @@ loom_cc_library(
     "legalization.h"
   SRCS
     "legalization.c"
+    "vector_insert.c"
+    "vector_insert.h"
   DEPS
     iree::base
+    loom::codegen::low::descriptors
+    loom::ir
+    loom::ops::index
+    loom::ops::scalar
+    loom::ops::scf
     loom::ops::vector
     loom::target::arch::x86::records::target_records
     loom::target::legalization
+    loom::transforms::scalar::target_legalization
+    loom::transforms::vector::packet_legalization
+    loom::transforms::vector::to_scalar
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    hal_materialization
+  HDRS
+    "hal_materialization.h"
+  SRCS
+    "hal_materialization.c"
+  DEPS
+    ::call_abi
+    ::facts
+    ::register_classes
+    iree::base
+    iree::base::internal::arena
+    iree::hal::drivers::task::executable::library::abi
+    loom::codegen::low::builder
+    loom::codegen::low::transforms::task_abi
+    loom::ir
+    loom::ops::low
+    loom::ops::op_defs
+    loom::pass::types
+    loom::target::arch::x86::descriptors::entry
+    loom::target::arch::x86::ops
+    loom::target::registers
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    pass_registry
+  HDRS
+    "pass_registry.h"
+  SRCS
+    "pass_registry.c"
+  DEPS
+    ::hal_materialization
+    loom::codegen::low::pipeline::pass_environment
+    loom::pass::registry
+    loom::target::pass_environment
+    loom::target::pass_requirements
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    ir_provider
+  HDRS
+    "ir_provider.h"
+  SRCS
+    "ir_provider.c"
+  DEPS
+    ::facts
+    iree::base
+    loom::target::arch::x86::descriptors::low_registry
+    loom::target::arch::x86::ops
+    loom::target::provider
   PUBLIC
 )
 endif()
@@ -95,10 +223,16 @@ loom_cc_library(
   SRCS
     "provider.c"
   DEPS
+    ::call_abi
+    ::facts
+    ::feature_bits
     ::legalization
     ::math_policy
+    ::pass_registry
     iree::base
+    iree::base::cpu_data
     loom::ir
+    loom::pass::builder
     loom::target::arch::x86::descriptors::low_registry
     loom::target::arch::x86::lower
     loom::target::arch::x86::ops
@@ -109,59 +243,159 @@ loom_cc_library(
 endif()
 
 if(LOOM_TARGET_ARCH_X86)
+loom_cc_test(
+  NAME
+    provider_test
+  SRCS
+    "provider_test.cc"
+  DEPS
+    ::facts
+    ::feature_bits
+    ::provider
+    iree::base::cpu_data
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::target::arch::x86::ops
+    loom::target::arch::x86::records::target_records
+    loom::target::facts_builder
+    loom::testing::module_ptr
+  LABELS
+    "iree-build-requirement=loom.target.arch.x86"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
+loom_cc_library(
+  NAME
+    compiler_provider
+  HDRS
+    "compiler_provider.h"
+  SRCS
+    "compiler_provider.c"
+  DEPS
+    ::facts
+    ::provider
+    loom::target::arch::x86::ops
+    loom::target::emit::native::x86::module
+    loom::target::provider
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_X86)
 loom_check_test_suite(
   NAME
     loom_check_file_test
   SRCS
+    "test/hal_materialization.loom-test"
+    "test/hal_materialization_diagnostics.loom-test"
+    "test/hal_query.loom-test"
+    "test/instruction_immediates.loom-test"
+    "test/low_avx512_bf16.loom-test"
+    "test/low_bmi2_variable_shift.loom-test"
     "test/register_classes.loom-test"
     "test/source_low/allocation.loom-test"
     "test/source_low/buffer_bulk.loom-test"
     "test/source_low/buffer_raw.loom-test"
     "test/source_low/buffer_selection.loom-test"
-    "test/source_low/callable_returns.loom-test"
     "test/source_low/callable_values.loom-test"
     "test/source_low/carried_counter_store.loom-test"
+    "test/source_low/function_boundary.loom-test"
+    "test/source_low/function_storage.loom-test"
+    "test/source_low/lane_constants.loom-test"
+    "test/source_low/licm_index_arithmetic.loom-test"
     "test/source_low/loop_counter_offset.loom-test"
+    "test/source_low/low_schedule_models.loom-test"
     "test/source_low/math_contraction.loom-test"
+    "test/source_low/math_contraction_forms.loom-test"
     "test/source_low/memory_access_flags.loom-test"
+    "test/source_low/memory_biased_offsets.loom-test"
+    "test/source_low/memory_byte_offset_reuse.loom-test"
     "test/source_low/memory_float8.loom-test"
     "test/source_low/memory_packed_tails.loom-test"
     "test/source_low/memory_scalar_narrow.loom-test"
+    "test/source_low/memory_shared_components.loom-test"
     "test/source_low/memory_signed_terms.loom-test"
     "test/source_low/memory_subview.loom-test"
+    "test/source_low/memory_tiled_channel.loom-test"
+    "test/source_low/memory_view_base.loom-test"
     "test/source_low/memory_wide_carriers.loom-test"
     "test/source_low/memory_wide_offsets.loom-test"
     "test/source_low/memory_word.loom-test"
-    "test/source_low/memory_word_avx512.loom-test"
+    "test/source_low/native_integer_rotations.loom-test"
+    "test/source_low/native_scalar_bit_counts.loom-test"
     "test/source_low/nested_view_selection.loom-test"
     "test/source_low/numeric_address_widening.loom-test"
+    "test/source_low/numeric_bfloat_narrow_avx2.loom-test"
+    "test/source_low/numeric_bfloat_narrow_avx512.loom-test"
     "test/source_low/numeric_bfloat_widen.loom-test"
     "test/source_low/numeric_bfloat_widen_avx512.loom-test"
     "test/source_low/numeric_bitwise_constants.loom-test"
     "test/source_low/numeric_boolean_comparison.loom-test"
     "test/source_low/numeric_constant_remainder.loom-test"
-    "test/source_low/numeric_float_comparison_flags.loom-test"
+    "test/source_low/numeric_f32_constants.loom-test"
+    "test/source_low/numeric_f64_constants.loom-test"
+    "test/source_low/numeric_float_conversion_avx2.loom-test"
+    "test/source_low/numeric_float_conversion_avx512.loom-test"
+    "test/source_low/numeric_float_integer_avx2.loom-test"
+    "test/source_low/numeric_float_integer_avx512.loom-test"
+    "test/source_low/numeric_half_conversion_avx512.loom-test"
     "test/source_low/numeric_index_operands.loom-test"
+    "test/source_low/numeric_integer_bit_counts.loom-test"
+    "test/source_low/numeric_integer_bit_counts_avx512.loom-test"
     "test/source_low/numeric_integer_extrema.loom-test"
+    "test/source_low/numeric_integer_float_avx2.loom-test"
+    "test/source_low/numeric_integer_float_avx512.loom-test"
+    "test/source_low/numeric_integer_immediates.loom-test"
+    "test/source_low/numeric_integer_truncation.loom-test"
+    "test/source_low/numeric_integer_vector_constants.loom-test"
+    "test/source_low/numeric_integer_widening.loom-test"
+    "test/source_low/numeric_narrow_constants.loom-test"
+    "test/source_low/numeric_narrow_widening.loom-test"
     "test/source_low/numeric_offset_wide.loom-test"
+    "test/source_low/numeric_packet_concat.loom-test"
+    "test/source_low/numeric_runtime_division.loom-test"
     "test/source_low/numeric_scalar_i64.loom-test"
     "test/source_low/numeric_scalar_i64_shift_counts.loom-test"
     "test/source_low/numeric_scalar_i64_subtract.loom-test"
+    "test/source_low/numeric_signed_unary.loom-test"
     "test/source_low/numeric_unsigned_constant_division.loom-test"
-    "test/source_low/numeric_unsigned_remainder.loom-test"
+    "test/source_low/numeric_unsigned_word_offsets.loom-test"
+    "test/source_low/numeric_vector_bitfield.loom-test"
+    "test/source_low/packed_bitstream_words.loom-test"
     "test/source_low/packed_memory_alignment.loom-test"
     "test/source_low/packed_memory_values.loom-test"
     "test/source_low/predicate_extension.loom-test"
+    "test/source_low/rodata.loom-test"
+    "test/source_low/scalar_selection.loom-test"
     "test/source_low/selected_payload_transport.loom-test"
     "test/source_low/semantic_assertions.loom-test"
     "test/source_low/shared_conditional_values.loom-test"
     "test/source_low/source_low.loom-test"
     "test/source_low/source_low_avx2.loom-test"
+    "test/source_low/source_low_avx2_arithmetic.loom-test"
+    "test/source_low/source_low_avx2_construction.loom-test"
+    "test/source_low/source_low_avx2_float_semantics.loom-test"
+    "test/source_low/source_low_avx2_predicates.loom-test"
+    "test/source_low/source_low_avx2_reductions.loom-test"
+    "test/source_low/source_low_avx512_bf16.loom-test"
+    "test/source_low/source_low_avx512_families.loom-test"
+    "test/source_low/source_low_avx512_float_semantics.loom-test"
+    "test/source_low/source_low_avx512_fp16.loom-test"
     "test/source_low/source_low_avx512_packed_dot.loom-test"
+    "test/source_low/source_low_avx512_predicates.loom-test"
+    "test/source_low/source_low_avx512_reductions.loom-test"
+    "test/source_low/source_low_avx_ne_convert.loom-test"
     "test/source_low/source_low_avx_vnni.loom-test"
+    "test/source_low/source_low_bmi2_variable_shift.loom-test"
     "test/source_low/source_low_contraction.loom-test"
+    "test/source_low/source_low_float_roots.loom-test"
     "test/source_low/source_low_invoke.loom-test"
+    "test/source_low/source_low_math_legalization_report.loom-test"
     "test/source_low/source_low_packed_dot.loom-test"
+    "test/source_low/source_low_rsqrt_refinement.loom-test"
     "test/source_low/source_low_scalar_addressing.loom-test"
     "test/source_low/source_low_scalar_arithmetic.loom-test"
     "test/source_low/source_low_scalar_bitwise.loom-test"
@@ -171,12 +405,21 @@ loom_check_test_suite(
     "test/source_low/source_low_scalar_f32.loom-test"
     "test/source_low/source_low_scalar_i64.loom-test"
     "test/source_low/source_low_scalar_memory.loom-test"
+    "test/source_low/source_low_scalar_read_memory.loom-test"
     "test/source_low/source_low_schedule_scopes.loom-test"
+    "test/source_low/source_low_transcendental_basis.loom-test"
     "test/source_low/source_low_v4.loom-test"
-    "test/source_low/uniform_predicate_control.loom-test"
+    "test/source_low/source_low_x86_shuffle.loom-test"
+    "test/source_low/split_barrier.loom-test"
+    "test/source_low/storage_float_constants.loom-test"
+    "test/source_low/uniform_shifts.loom-test"
+    "test/source_low/vector_from_elements.loom-test"
     "test/source_low/vector_large_insert.loom-test"
     "test/source_low/view_carrier.loom-test"
+    "test/source_low/view_carriers.loom-test"
     "test/source_low/view_transport.loom-test"
+    "test/target_feature_diagnostics.loom-test"
+    "test/target_features.loom-test"
   TEST_NAME_PREFIX_TO_STRIP
     "test/source_low/"
 )

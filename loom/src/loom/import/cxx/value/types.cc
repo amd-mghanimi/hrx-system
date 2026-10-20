@@ -14,8 +14,14 @@
 #include <cxx/symbols.h>
 #include <cxx/types.h>
 
+#include <algorithm>
 #include <limits>
 #include <optional>
+
+#include "loom/import/cxx/source/error.h"
+#include "loom/ir/context.h"
+#include "loom/ir/module.h"
+#include "loom/ops/type_registry.h"
 
 namespace loom::cxx_import {
 namespace {
@@ -41,13 +47,127 @@ const cxx::Attribute* type_binding(cxx::ClassSymbol* source) {
   return primary == source ? nullptr : find(primary);
 }
 
-}  // namespace
-
-const cxx::Type* Types::unqualified(const cxx::Type* type) {
-  return unit_.typeTraits().remove_cv(type);
+const cxx::ParameterPackSymbol* template_argument_pack(
+    cxx::ClassSymbol* source) {
+  auto arguments = source->templateArguments();
+  if (arguments.size() != 1) {
+    return nullptr;
+  }
+  auto* symbol = std::get_if<cxx::Symbol*>(&arguments.front());
+  return symbol ? cxx::symbol_cast<cxx::ParameterPackSymbol>(*symbol) : nullptr;
 }
 
-const cxx::VectorType* Types::vector(const cxx::Type* type) {
+loom_type_t make_shaped_type(loom_type_kind_t kind, loom_scalar_type_t element,
+                             std::span<const uint64_t> dimensions,
+                             BoundTypeStorage& storage) {
+  bool all_static = true;
+  for (auto dimension : dimensions) {
+    all_static &= !loom_dim_is_dynamic(dimension);
+  }
+  uint8_t flags = all_static ? LOOM_TYPE_FLAG_ALL_STATIC : 0;
+  if (dimensions.size() <= 2) {
+    flags |= LOOM_TYPE_FLAG_INLINE_DIMS;
+  }
+  loom_type_t result = {
+      .header = loom_type_make_header(
+          kind, element, static_cast<uint8_t>(dimensions.size()), flags),
+  };
+  if (dimensions.size() <= 2) {
+    std::copy(dimensions.begin(), dimensions.end(), result.dims);
+  } else {
+    auto* retained = storage.retain_dimensions(dimensions);
+    result.dims[0] = reinterpret_cast<uintptr_t>(retained);
+  }
+  return result;
+}
+
+loom_type_t make_view_type(loom_scalar_type_t element,
+                           std::span<const uint64_t> dimensions,
+                           loom_value_id_t encoding,
+                           BoundTypeStorage& storage) {
+  auto result = make_shaped_type(LOOM_TYPE_VIEW, element, dimensions, storage);
+  result.encoding_id = static_cast<uint16_t>(encoding);
+  result.encoding_flags = LOOM_ENCODING_FLAG_SSA;
+  return result;
+}
+
+}  // namespace
+
+const loom_overflow_dim_t* BoundTypeStorage::retain_dimensions(
+    std::span<const loom_overflow_dim_t> dimensions) {
+  IREE_ASSERT(dimensions.size() >= 3 &&
+              dimensions.size() <= LOOM_TYPE_MAX_RANK);
+  auto& payload = dimension_payloads_.emplace_front();
+  std::copy(dimensions.begin(), dimensions.end(), payload.begin());
+  return payload.data();
+}
+
+void ShapeExtents::assign(std::span<const int64_t> extents) {
+  IREE_ASSERT(!extents.empty() && extents.size() <= LOOM_TYPE_MAX_RANK);
+  rank_ = extents.size();
+  if (rank_ <= inline_extents_.size()) {
+    std::copy(extents.begin(), extents.end(), inline_extents_.begin());
+    overflow_extents_.reset();
+    return;
+  }
+  overflow_extents_ = std::make_unique<int64_t[]>(rank_);
+  std::copy(extents.begin(), extents.end(), overflow_extents_.get());
+}
+
+loom_type_t VectorPartition::bind_type(
+    std::span<const loom_value_id_t> dynamic_extents,
+    BoundTypeStorage& storage) const {
+  IREE_ASSERT(dynamic_extents.size() == component_count - 1);
+  if (!is_dynamic()) {
+    return static_type;
+  }
+  std::array<uint64_t, LOOM_TYPE_MAX_RANK> dimensions;
+  size_t dynamic_index = 0;
+  for (size_t axis = 0; axis < extents.size(); ++axis) {
+    dimensions[axis] =
+        extents[axis] < 0
+            ? loom_dim_pack_dynamic(dynamic_extents[dynamic_index++])
+            : loom_dim_pack_static(extents[axis]);
+  }
+  return make_shaped_type(
+      LOOM_TYPE_VECTOR, element,
+      std::span<const uint64_t>(dimensions).first(extents.size()), storage);
+}
+
+loom_value_id_t VectorPartition::vector_value(
+    std::span<const loom_value_id_t> components) const {
+  IREE_ASSERT(components.size() == component_count);
+  return components.back();
+}
+
+loom_type_t TensorPartition::bind_type(
+    std::span<const loom_value_id_t> dynamic_extents) const {
+  IREE_ASSERT(dynamic_extents.size() == (is_dynamic() ? 1u : 0u));
+  auto dimension = is_dynamic() ? loom_dim_pack_dynamic(dynamic_extents[0])
+                                : loom_dim_pack_static(extent);
+  if (vector_lane_count) {
+    return loom_type_shaped_2d(LOOM_TYPE_TENSOR, element, dimension,
+                               loom_dim_pack_static(vector_lane_count), 0);
+  }
+  return loom_type_shaped_1d(LOOM_TYPE_TENSOR, element, dimension, 0);
+}
+
+loom_value_id_t TensorPartition::tensor_value(
+    std::span<const loom_value_id_t> components) const {
+  IREE_ASSERT(components.size() == component_count);
+  return components.back();
+}
+
+const cxx::Type* Types::unqualified(const cxx::Type* type) {
+  return cxx::unaligned_type(unit_.typeTraits().remove_cv(type));
+}
+
+const cxx::Type* Types::unqualified_value(const cxx::Type* type) {
+  auto traits = unit_.typeTraits();
+  return cxx::unaligned_type(traits.remove_cv(traits.remove_reference(type)));
+}
+
+const cxx::VectorType* Types::native_vector(const cxx::Type* type) {
   return cxx::type_cast<cxx::VectorType>(unqualified(type));
 }
 
@@ -58,6 +178,9 @@ loom_memory_access_flags_t Types::memory_access_flags(const cxx::Type* input) {
 }
 
 const Partition& Types::partition(const cxx::Type* input, cxx::AST* owner) {
+  if (auto* admitted = array(input, owner)) {
+    return *admitted;
+  }
   if (auto* admitted = special(input, owner)) {
     return *admitted;
   }
@@ -71,19 +194,46 @@ const Partition& Types::partition(const cxx::Type* input, cxx::AST* owner) {
 
 bool Types::requires_binding(const cxx::Type* input, cxx::AST* owner) {
   const auto& admitted = partition(input, owner);
-  if (admitted.kind == ValueKind::View) {
+  if ((admitted.kind == ValueKind::Vector &&
+       static_cast<const VectorPartition&>(admitted).is_dynamic()) ||
+      admitted.kind == ValueKind::View ||
+      (admitted.kind == ValueKind::Tensor &&
+       static_cast<const TensorPartition&>(admitted).is_dynamic())) {
     return true;
   }
-  if (admitted.kind != ValueKind::Record) {
-    return false;
+  return admitted.kind == ValueKind::Record
+             ? static_cast<const RecordPartition&>(admitted).requires_binding
+         : admitted.kind == ValueKind::Array
+             ? static_cast<const ArrayPartition&>(admitted).requires_binding
+             : false;
+}
+
+const ArrayPartition* Types::array(const cxx::Type* input, cxx::AST* owner) {
+  auto* source = cxx::type_cast<cxx::BoundedArrayType>(unqualified(input));
+  if (!source) {
+    return nullptr;
   }
-  const auto& record = static_cast<const RecordPartition&>(admitted);
-  for (const auto& member : record.members) {
-    if (requires_binding(member.field->type(), owner)) {
-      return true;
-    }
+  if (unit_.typeTraits().is_volatile(input)) {
+    diagnostics_.reject(unit_, owner,
+                        "volatile objects require addressable storage");
   }
-  return false;
+  if (auto found = arrays_.find(source); found != arrays_.end()) {
+    return found->second.get();
+  }
+  const auto& element = partition(source->elementType(), owner);
+  if (element.component_count &&
+      source->size() > SIZE_MAX / element.component_count) {
+    diagnostics_.reject(unit_, owner, "array value component count overflows");
+  }
+  auto result = std::make_unique<ArrayPartition>();
+  result->kind = ValueKind::Array;
+  result->component_count = source->size() * element.component_count;
+  result->source = source;
+  result->element = &element;
+  result->requires_binding = requires_binding(source->elementType(), owner);
+  auto* admitted = result.get();
+  arrays_.emplace(source, std::move(result));
+  return admitted;
 }
 
 const Partition* Types::special(const cxx::Type* input, cxx::AST* owner) {
@@ -108,8 +258,20 @@ const Partition* Types::special(const cxx::Type* input, cxx::AST* owner) {
                         "loom source types require one string type binding");
   }
   auto name = binding->arguments[0]->name();
+  if (name == "buffer") {
+    return buffer(type, owner);
+  }
+  if (name == "index") {
+    return address(type, LOOM_SCALAR_TYPE_INDEX, owner);
+  }
+  if (name == "offset") {
+    return address(type, LOOM_SCALAR_TYPE_OFFSET, owner);
+  }
   if (name == "encoding") {
     return encoding(type, owner);
+  }
+  if (name == "vector") {
+    return semantic_vector(type, owner);
   }
   if (name == "view") {
     return view(type, owner);
@@ -117,7 +279,135 @@ const Partition* Types::special(const cxx::Type* input, cxx::AST* owner) {
   if (name == "tensor") {
     return tensor(type, owner);
   }
-  diagnostics_.reject(unit_, owner, "unknown Loom source type binding");
+  return opaque_dialect(type, name, owner);
+}
+
+const BufferPartition* Types::buffer(const cxx::ClassType* input,
+                                     cxx::AST* owner) {
+  auto* source = input->definition();
+  if (auto found = buffers_.find(source); found != buffers_.end()) {
+    return found->second.get();
+  }
+  auto traits = unit_.typeTraits();
+  if (source) {
+    traits.requireCompleteClass(source);
+    source = input->definition();
+  }
+  if (!source || !source->isComplete() || source->isUnion() ||
+      !source->baseClasses().empty() || !traits.is_trivially_copyable(input) ||
+      !traits.has_trivial_destructor(input)) {
+    diagnostics_.reject(unit_, owner,
+                        "buffer values require a complete trivial class "
+                        "without bases");
+  }
+  auto arguments = source->templateArguments();
+  auto* element = arguments.size() == 1
+                      ? cxx::template_argument_type(arguments[0])
+                      : nullptr;
+  if (!element) {
+    diagnostics_.reject(
+        unit_, owner,
+        "buffer values require one supported non-boolean scalar or vector "
+        "element type");
+  }
+  auto element_type = get(element, owner);
+  if ((loom_type_kind(element_type) != LOOM_TYPE_SCALAR &&
+       loom_type_kind(element_type) != LOOM_TYPE_VECTOR) ||
+      loom_type_element_type(element_type) == LOOM_SCALAR_TYPE_I1) {
+    diagnostics_.reject(
+        unit_, owner,
+        "buffer values require one supported non-boolean scalar or vector "
+        "element type");
+  }
+  auto result = std::make_unique<BufferPartition>();
+  result->kind = ValueKind::Buffer;
+  result->component_count = 1;
+  result->source = source;
+  result->element_type = element;
+  auto* admitted = result.get();
+  buffers_.emplace(source, std::move(result));
+  return admitted;
+}
+
+const AddressPartition* Types::address(const cxx::ClassType* input,
+                                       loom_scalar_type_t element_type,
+                                       cxx::AST* owner) {
+  auto* source = input->definition();
+  if (auto found = addresses_.find(source); found != addresses_.end()) {
+    if (found->second->element_type != element_type) {
+      diagnostics_.reject(unit_, owner,
+                          "source class has conflicting address domains");
+    }
+    return found->second.get();
+  }
+  auto traits = unit_.typeTraits();
+  if (source) {
+    traits.requireCompleteClass(source);
+    source = input->definition();
+  }
+  if (!source || !source->isComplete() || source->isUnion() ||
+      !source->baseClasses().empty() || !source->templateArguments().empty() ||
+      !traits.is_trivially_copyable(input) ||
+      !traits.has_trivial_destructor(input)) {
+    diagnostics_.reject(
+        unit_, owner,
+        "address values require a complete non-template trivial "
+        "class without bases");
+  }
+  auto result = std::make_unique<AddressPartition>();
+  result->kind = ValueKind::Address;
+  result->component_count = 1;
+  result->source = source;
+  result->element_type = element_type;
+  auto* admitted = result.get();
+  addresses_.emplace(source, std::move(result));
+  return admitted;
+}
+
+const OpaqueDialectPartition* Types::opaque_dialect(const cxx::ClassType* input,
+                                                    std::string_view name,
+                                                    cxx::AST* owner) {
+  auto* source = input->definition();
+  if (auto found = opaque_dialects_.find(source);
+      found != opaque_dialects_.end()) {
+    return found->second.get();
+  }
+  auto traits = unit_.typeTraits();
+  if (source) {
+    traits.requireCompleteClass(source);
+    source = input->definition();
+  }
+  if (traits.is_volatile(input) || !source || !source->isComplete() ||
+      source->isUnion() || !source->baseClasses().empty() ||
+      !traits.is_trivially_copyable(input) ||
+      !traits.has_trivial_destructor(input)) {
+    diagnostics_.reject(
+        unit_, owner,
+        "dialect values require a complete trivial class without bases");
+  }
+  if (!module_) {
+    diagnostics_.reject(unit_, owner,
+                        "dialect source types require a destination module");
+  }
+  const auto name_view = iree_make_string_view(name.data(), name.size());
+  const auto* descriptor =
+      loom_type_registry_lookup(module_->context, name_view);
+  if (!descriptor || descriptor->ir_kind != LOOM_TYPE_DIALECT ||
+      descriptor->param_count != 0 || descriptor->format_element_count != 0) {
+    diagnostics_.reject(
+        unit_, owner,
+        "Loom source type binding must name a registered opaque dialect type");
+  }
+  loom_string_id_t name_id;
+  check(loom_module_intern_string(module_, name_view, &name_id));
+  auto result = std::make_unique<OpaqueDialectPartition>();
+  result->kind = ValueKind::OpaqueDialect;
+  result->component_count = 1;
+  result->source = source;
+  result->type = loom_type_dialect_opaque(name_id);
+  auto* admitted = result.get();
+  opaque_dialects_.emplace(source, std::move(result));
+  return admitted;
 }
 
 const EncodingPartition* Types::encoding(const cxx::ClassType* input,
@@ -139,7 +429,7 @@ const EncodingPartition* Types::encoding(const cxx::ClassType* input,
         unit_, owner,
         "encoding values require a complete trivial class without bases");
   }
-  auto arguments = cxx::class_template_arguments(source);
+  auto arguments = source->templateArguments();
   if (arguments.size() != 2) {
     diagnostics_.reject(unit_, owner,
                         "encoding values require role and rank arguments");
@@ -149,19 +439,163 @@ const EncodingPartition* Types::encoding(const cxx::ClassType* input,
   auto rank = cxx::template_argument_value(arguments[1]);
   auto role_value = role ? interpreter.toInt(*role) : std::nullopt;
   auto rank_value = rank ? interpreter.toInt(*rank) : std::nullopt;
-  if (!role_value || *role_value != 0 || !rank_value || *rank_value < 1 ||
-      *rank_value > LOOM_TYPE_MAX_RANK) {
+  bool ranked = (role_value == 0 || role_value == 2) && rank_value &&
+                *rank_value >= 1 && *rank_value <= LOOM_TYPE_MAX_RANK;
+  bool unranked = (role_value == 1 || role_value == 3) && rank_value == 0;
+  if (!ranked && !unranked) {
     diagnostics_.reject(
         unit_, owner,
-        "encoding values require the layout role and rank in [1, 15]");
+        "encoding values require layout/storage rank in [1, 15] or "
+        "schema/transform rank zero");
   }
   auto result = std::make_unique<EncodingPartition>();
   result->kind = ValueKind::Encoding;
   result->component_count = 1;
   result->source = source;
+  switch (*role_value) {
+    case 0:
+      result->role = LOOM_ENCODING_ROLE_ADDRESS_LAYOUT;
+      break;
+    case 1:
+      result->role = LOOM_ENCODING_ROLE_STORAGE_SCHEMA;
+      break;
+    case 2:
+      result->role = LOOM_ENCODING_ROLE_PHYSICAL_STORAGE;
+      break;
+    case 3:
+      result->role = LOOM_ENCODING_ROLE_NUMERIC_TRANSFORM;
+      break;
+  }
   result->rank = static_cast<size_t>(*rank_value);
   auto* admitted = result.get();
   encodings_.emplace(source, std::move(result));
+  return admitted;
+}
+
+ShapeExtents Types::parse_shape(const cxx::Type* input,
+                                std::string_view value_kind, cxx::AST* owner) {
+  auto* shape_type =
+      input ? cxx::type_cast<cxx::ClassType>(unqualified(input)) : nullptr;
+  auto* shape_source = shape_type ? shape_type->definition() : nullptr;
+  auto* shape_binding = shape_source ? type_binding(shape_source) : nullptr;
+  if (!shape_binding || shape_binding->arguments.size() != 1 ||
+      shape_binding->arguments[0]->name() != "shape") {
+    diagnostics_.reject(unit_, owner,
+                        std::string(value_kind) +
+                            " shape must be a loom::type::shape "
+                            "specialization");
+  }
+  auto* shape_pack = template_argument_pack(shape_source);
+  auto shape_arguments =
+      shape_pack ? std::span<cxx::Symbol* const>(shape_pack->elements())
+                 : std::span<cxx::Symbol* const>{};
+  if (shape_arguments.empty() || shape_arguments.size() > LOOM_TYPE_MAX_RANK) {
+    diagnostics_.reject(unit_, owner,
+                        std::string(value_kind) +
+                            " rank must be in Loom's supported range [1, 15]");
+  }
+
+  cxx::ASTInterpreter interpreter(&unit_);
+  auto pointer_bytes = unit_.control()->memoryLayout()->sizeOfPointer();
+  uint64_t dynamic = pointer_bytes == 4 ? UINT32_MAX : UINT64_MAX;
+  std::array<int64_t, LOOM_TYPE_MAX_RANK> parsed_extents;
+  for (size_t axis = 0; axis < shape_arguments.size(); ++axis) {
+    auto value = cxx::template_argument_value(shape_arguments[axis]);
+    auto number = value ? interpreter.toInt(*value) : std::nullopt;
+    if (!number) {
+      diagnostics_.reject(
+          unit_, owner,
+          std::string(value_kind) + " extents require constant size arguments");
+    }
+    uint64_t bits = static_cast<uint64_t>(*number);
+    if (pointer_bytes == 4) {
+      bits &= UINT32_MAX;
+    }
+    if (bits == dynamic) {
+      parsed_extents[axis] = -1;
+    } else if (*number < 0 || bits > LOOM_DIM_MAX_STATIC_SIZE) {
+      diagnostics_.reject(unit_, owner,
+                          std::string(value_kind) +
+                              " extent is outside Loom's static dimension "
+                              "range");
+    } else {
+      parsed_extents[axis] = static_cast<int64_t>(bits);
+    }
+  }
+  ShapeExtents result;
+  result.assign(
+      std::span<const int64_t>(parsed_extents).first(shape_arguments.size()));
+  return result;
+}
+
+const VectorPartition* Types::semantic_vector(const cxx::ClassType* input,
+                                              cxx::AST* owner) {
+  auto* source = input->definition();
+  if (auto found = semantic_vectors_.find(source);
+      found != semantic_vectors_.end()) {
+    return found->second.get();
+  }
+  auto traits = unit_.typeTraits();
+  if (source) {
+    traits.requireCompleteClass(source);
+    source = input->definition();
+  }
+  if (!source || !source->isComplete() || source->isUnion() ||
+      !source->baseClasses().empty() || !traits.is_trivially_copyable(input) ||
+      !traits.has_trivial_destructor(input)) {
+    diagnostics_.reject(unit_, owner,
+                        "vector values require a complete trivial class "
+                        "without bases");
+  }
+  auto arguments = source->templateArguments();
+  if (arguments.size() != 2) {
+    diagnostics_.reject(unit_, owner,
+                        "vector values require shape and element arguments");
+  }
+  auto extents =
+      parse_shape(cxx::template_argument_type(arguments[0]), "vector", owner);
+  auto* element_type = cxx::template_argument_type(arguments[1]);
+  if (!element_type || traits.is_const(element_type) ||
+      traits.is_volatile(element_type)) {
+    diagnostics_.reject(unit_, owner,
+                        "vector elements require an unqualified source type");
+  }
+  auto element = get(element_type, owner);
+  if (loom_type_kind(element) != LOOM_TYPE_SCALAR) {
+    diagnostics_.reject(unit_, owner,
+                        "vector elements require a supported scalar type");
+  }
+  size_t dynamic_count = 0;
+  for (auto extent : extents) {
+    if (extent < 0) {
+      ++dynamic_count;
+    }
+  }
+  auto result = std::make_unique<VectorPartition>();
+  result->kind = ValueKind::Vector;
+  result->component_count = dynamic_count + 1;
+  result->source = source;
+  result->element_type = element_type;
+  result->element = loom_type_element_type(element);
+  result->extents = std::move(extents);
+  for (size_t axis = 0; axis < result->extents.size(); ++axis) {
+    if (result->extents[axis] < 0) {
+      result->component_names.push_back("dim" + std::to_string(axis));
+    }
+  }
+  result->component_names.emplace_back();
+  if (!result->is_dynamic()) {
+    std::array<uint64_t, LOOM_TYPE_MAX_RANK> dimensions;
+    for (size_t axis = 0; axis < result->extents.size(); ++axis) {
+      dimensions[axis] = loom_dim_pack_static(result->extents[axis]);
+    }
+    result->static_type = make_shaped_type(
+        LOOM_TYPE_VECTOR, result->element,
+        std::span<const uint64_t>(dimensions).first(result->extents.size()),
+        result->static_type_storage);
+  }
+  auto* admitted = result.get();
+  semantic_vectors_.emplace(source, std::move(result));
   return admitted;
 }
 
@@ -183,13 +617,19 @@ const ViewPartition* Types::view(const cxx::ClassType* input, cxx::AST* owner) {
                         "view values require a complete trivial class without "
                         "bases");
   }
-  auto arguments = cxx::class_template_arguments(source);
+  auto arguments = source->templateArguments();
   if (arguments.size() != 3) {
-    diagnostics_.reject(
-        unit_, owner,
-        "rank-two view values require an element and two extent arguments");
+    diagnostics_.reject(unit_, owner,
+                        "view values require shape, element, and encoding "
+                        "role arguments");
   }
-  auto* element_type = cxx::template_argument_type(arguments[0]);
+  auto extents =
+      parse_shape(cxx::template_argument_type(arguments[0]), "view", owner);
+  auto* element_type = cxx::template_argument_type(arguments[1]);
+  if (!element_type) {
+    diagnostics_.reject(unit_, owner,
+                        "view element requires a source type argument");
+  }
   auto element = get(element_type, owner);
   if (loom_type_kind(element) != LOOM_TYPE_SCALAR ||
       loom_type_element_type(element) == LOOM_SCALAR_TYPE_I1) {
@@ -198,30 +638,18 @@ const ViewPartition* Types::view(const cxx::ClassType* input, cxx::AST* owner) {
         "view elements require a supported non-boolean scalar type");
   }
   cxx::ASTInterpreter interpreter(&unit_);
-  auto pointer_bytes = unit_.control()->memoryLayout()->sizeOfPointer();
-  uint64_t dynamic = pointer_bytes == 4 ? UINT32_MAX : UINT64_MAX;
-  std::array<int64_t, 2> extents;
+  auto role = cxx::template_argument_value(arguments[2]);
+  auto role_value = role ? interpreter.toInt(*role) : std::nullopt;
+  if (role_value != 0 && role_value != 2) {
+    diagnostics_.reject(
+        unit_, owner, "view encoding role must be layout or physical storage");
+  }
+  auto encoding_role = role_value == 0 ? LOOM_ENCODING_ROLE_ADDRESS_LAYOUT
+                                       : LOOM_ENCODING_ROLE_PHYSICAL_STORAGE;
   size_t dynamic_count = 0;
-  for (size_t axis = 0; axis < extents.size(); ++axis) {
-    auto value = cxx::template_argument_value(arguments[axis + 1]);
-    auto number = value ? interpreter.toInt(*value) : std::nullopt;
-    if (!number) {
-      diagnostics_.reject(unit_, owner,
-                          "view extents require constant size arguments");
-    }
-    uint64_t bits = static_cast<uint64_t>(*number);
-    if (pointer_bytes == 4) {
-      bits &= UINT32_MAX;
-    }
-    if (bits == dynamic) {
-      extents[axis] = -1;
+  for (auto extent : extents) {
+    if (extent < 0) {
       ++dynamic_count;
-    } else if (*number < 0 || bits > LOOM_DIM_MAX_STATIC_SIZE) {
-      diagnostics_.reject(unit_, owner,
-                          "view extent is outside Loom's static dimension "
-                          "range");
-    } else {
-      extents[axis] = static_cast<int64_t>(bits);
     }
   }
   auto result = std::make_unique<ViewPartition>();
@@ -231,14 +659,16 @@ const ViewPartition* Types::view(const cxx::ClassType* input, cxx::AST* owner) {
   result->element_type = element_type;
   result->element = loom_type_element_type(element);
   result->access_flags = memory_access_flags(element_type);
-  result->extents = extents;
-  if (extents[0] < 0) {
-    result->component_names.push_back("rows");
+  result->encoding_role = encoding_role;
+  result->extents = std::move(extents);
+  for (size_t axis = 0; axis < result->extents.size(); ++axis) {
+    if (result->extents[axis] < 0) {
+      result->component_names.push_back("dim" + std::to_string(axis));
+    }
   }
-  if (extents[1] < 0) {
-    result->component_names.push_back("columns");
-  }
-  result->component_names.push_back("layout");
+  result->component_names.push_back(
+      encoding_role == LOOM_ENCODING_ROLE_ADDRESS_LAYOUT ? "layout"
+                                                         : "storage");
   result->component_names.emplace_back();
   auto* admitted = result.get();
   views_.emplace(source, std::move(result));
@@ -263,40 +693,45 @@ const TensorPartition* Types::tensor(const cxx::ClassType* input,
                         "tensor values require a complete trivial class "
                         "without bases");
   }
-  auto arguments = cxx::class_template_arguments(source);
+  auto arguments = source->templateArguments();
   if (arguments.size() != 2) {
     diagnostics_.reject(unit_, owner,
-                        "rank-one tensor values require an element and extent "
-                        "argument");
+                        "tensor values require shape and element arguments");
   }
-  auto* element = cxx::template_argument_type(arguments[0]);
-  auto element_type = get(element, owner);
+  auto extents =
+      parse_shape(cxx::template_argument_type(arguments[0]), "tensor", owner);
+  if (extents.size() != 1) {
+    diagnostics_.reject(unit_, owner,
+                        "check tensors currently require rank one");
+  }
+  auto* element = cxx::template_argument_type(arguments[1]);
+  auto projected_element = get(element, owner);
+  auto element_kind = loom_type_kind(projected_element);
+  auto* source_vector = native_vector(element);
+  auto* lane_type = source_vector ? source_vector->elementType() : element;
   auto bytes = unit_.control()->memoryLayout()->sizeOf(element);
-  if (loom_type_kind(element_type) != LOOM_TYPE_SCALAR ||
-      loom_type_element_type(element_type) == LOOM_SCALAR_TYPE_I1 ||
+  if ((element_kind != LOOM_TYPE_SCALAR && element_kind != LOOM_TYPE_VECTOR) ||
+      loom_type_element_type(projected_element) == LOOM_SCALAR_TYPE_I1 ||
       traits.is_const(element) || traits.is_volatile(element) || !bytes ||
       !*bytes) {
     diagnostics_.reject(unit_, owner,
                         "tensor elements require unqualified non-boolean "
-                        "scalar types");
+                        "scalar or vector types");
   }
-  auto extent = cxx::template_argument_value(arguments[1]);
-  cxx::ASTInterpreter interpreter(&unit_);
-  auto count = extent ? interpreter.toInt(*extent) : std::nullopt;
-  if (!count || *count < 0 ||
-      static_cast<uint64_t>(*count) > INT64_MAX / *bytes) {
+  if (extents[0] >= 0 &&
+      static_cast<uint64_t>(extents[0]) > INT64_MAX / *bytes) {
     diagnostics_.reject(unit_, owner,
-                        "tensor extent requires a nonnegative constant with "
-                        "a representable byte length");
+                        "tensor extent has an unrepresentable byte length");
   }
   auto result = std::make_unique<TensorPartition>();
   result->kind = ValueKind::Tensor;
-  result->component_count = 1;
+  result->component_count = extents[0] < 0 ? 2 : 1;
   result->source = source;
   result->element_type = element;
-  result->type = loom_type_shaped_1d(LOOM_TYPE_TENSOR,
-                                     loom_type_element_type(element_type),
-                                     loom_dim_pack_static(*count), 0);
+  result->lane_type = lane_type;
+  result->element = loom_type_element_type(projected_element);
+  result->vector_lane_count = source_vector ? source_vector->elementCount() : 0;
+  result->extent = extents[0];
   result->element_bytes = *bytes;
   auto* admitted = result.get();
   tensors_.emplace(source, std::move(result));
@@ -345,19 +780,27 @@ const RecordPartition* Types::record(const cxx::Type* input, cxx::AST* owner) {
     if (!field || field->isStatic()) {
       continue;
     }
-    if (field->isBitField() || traits.is_reference(field->type()) ||
-        traits.is_array(field->type())) {
+    if (field->isBitField()) {
+      diagnostics_.reject(unit_, owner,
+                          "record value fields cannot be bitfields");
+    }
+    if (traits.is_rvalue_reference(field->type())) {
       diagnostics_.reject(
           unit_, owner,
-          "record value fields cannot be bitfields, references or arrays");
+          "rvalue-reference fields require consuming object identity");
     }
-    auto& member_partition = partition(field->type(), owner);
+    const auto& member_partition = traits.is_lvalue_reference(field->type())
+                                       ? kPointerPartition
+                                       : partition(field->type(), owner);
     MemberPartition member{field, &member_partition, result->component_count};
     result->members.push_back(member);
     members_.emplace(field, member);
     auto name = cxx::to_string(field->name());
     append_component_names(member_partition, name, result->component_names);
     result->component_count += member_partition.component_count;
+    if (!traits.is_reference(field->type())) {
+      result->requires_binding |= requires_binding(field->type(), owner);
+    }
   }
   auto* admitted = result.get();
   records_.emplace(source, std::move(result));
@@ -376,10 +819,27 @@ void Types::append_component_names(const Partition& partition,
   };
   switch (partition.kind) {
     case ValueKind::SSA:
+    case ValueKind::Buffer:
+    case ValueKind::Address:
+    case ValueKind::OpaqueDialect:
     case ValueKind::Encoding:
-    case ValueKind::Tensor:
       append({});
       return;
+    case ValueKind::Vector: {
+      const auto& vector = static_cast<const VectorPartition&>(partition);
+      for (const auto& name : vector.component_names) {
+        append(name);
+      }
+      return;
+    }
+    case ValueKind::Tensor: {
+      const auto& tensor = static_cast<const TensorPartition&>(partition);
+      if (tensor.is_dynamic()) {
+        append("dim0");
+      }
+      append({});
+      return;
+    }
     case ValueKind::Pointer:
       append({});
       append("byte_offset");
@@ -388,6 +848,15 @@ void Types::append_component_names(const Partition& partition,
       const auto& record = static_cast<const RecordPartition&>(partition);
       for (const auto& name : record.component_names) {
         append(name);
+      }
+      return;
+    }
+    case ValueKind::Array: {
+      const auto& array = static_cast<const ArrayPartition&>(partition);
+      for (size_t index = 0; index < array.source->size(); ++index) {
+        append_component_names(
+            *array.element, std::string(prefix) + "_" + std::to_string(index),
+            output);
       }
       return;
     }
@@ -456,7 +925,7 @@ loom_type_t Types::get(const cxx::Type* input, cxx::AST* ast) {
       return get(underlying, ast);
     }
     case cxx::TypeKind::kVector: {
-      auto* source = vector(input);
+      auto* source = native_vector(input);
       auto element = get(source->elementType(), ast);
       auto* layout = unit_.control()->memoryLayout();
       auto bytes = layout->sizeOf(source);
@@ -477,11 +946,9 @@ loom_type_t Types::get(const cxx::Type* input, cxx::AST* ast) {
     case cxx::TypeKind::kBoundedArray: {
       auto* array = cxx::type_cast<cxx::BoundedArrayType>(unqualified(input));
       auto element = get(array->elementType(), ast);
-      if (loom_type_kind(element) != LOOM_TYPE_SCALAR ||
-          loom_type_element_type(element) == LOOM_SCALAR_TYPE_I1) {
-        diagnostics_.reject(
-            unit_, ast,
-            "arrays require a supported non-boolean scalar element");
+      if (loom_type_kind(element) != LOOM_TYPE_SCALAR) {
+        diagnostics_.reject(unit_, ast,
+                            "arrays require a supported scalar element");
       }
       return loom_type_buffer();
     }
@@ -496,8 +963,33 @@ loom_type_t Types::get(const cxx::Type* input, cxx::AST* ast) {
     }
     case cxx::TypeKind::kClass: {
       auto* admitted = special(input, ast);
+      if (admitted && admitted->kind == ValueKind::Buffer) {
+        return loom_type_buffer();
+      }
+      if (admitted && admitted->kind == ValueKind::Address) {
+        return loom_type_scalar(
+            static_cast<const AddressPartition*>(admitted)->element_type);
+      }
+      if (admitted && admitted->kind == ValueKind::Vector) {
+        const auto& vector = static_cast<const VectorPartition&>(*admitted);
+        if (vector.is_dynamic()) {
+          diagnostics_.reject(
+              unit_, ast,
+              "dynamic vector types require bound extent identities");
+        }
+        return vector.static_type;
+      }
       if (admitted && admitted->kind == ValueKind::Tensor) {
-        return static_cast<const TensorPartition*>(admitted)->type;
+        const auto& tensor = static_cast<const TensorPartition&>(*admitted);
+        if (tensor.is_dynamic()) {
+          diagnostics_.reject(
+              unit_, ast,
+              "dynamic tensor types require a bound extent identity");
+        }
+        return tensor.bind_type({});
+      }
+      if (admitted && admitted->kind == ValueKind::OpaqueDialect) {
+        return static_cast<const OpaqueDialectPartition*>(admitted)->type;
       }
       diagnostics_.reject(unit_, ast,
                           "unsupported C++ type: " + cxx::to_string(input));
@@ -563,13 +1055,11 @@ int64_t Types::storage_size(const cxx::Type* input, cxx::AST* owner) {
     require_record_storage(record, owner);
   } else {
     auto type = get(input, owner);
-    if ((loom_type_kind(type) != LOOM_TYPE_SCALAR &&
-         loom_type_kind(type) != LOOM_TYPE_VECTOR) ||
-        loom_type_element_type(type) == LOOM_SCALAR_TYPE_I1) {
+    if (loom_type_kind(type) != LOOM_TYPE_SCALAR &&
+        loom_type_kind(type) != LOOM_TYPE_VECTOR) {
       diagnostics_.reject(
           unit_, owner,
-          "memory objects require non-boolean scalar, vector or plain record "
-          "storage");
+          "memory objects require scalar, vector or plain record storage");
     }
   }
   auto bytes = unit_.control()->memoryLayout()->sizeOf(input);
@@ -584,33 +1074,65 @@ bool Types::is_unsigned(const cxx::Type* type) {
   return traits.is_unsigned(traits.underlying_type(type));
 }
 
+bool Types::is_opaque_dialect(const cxx::Type* type, std::string_view name,
+                              cxx::AST* owner) {
+  auto projected = get(type, owner);
+  if (!loom_type_is_dialect(projected) ||
+      loom_type_dialect_param_count(projected) != 0 || !module_) {
+    return false;
+  }
+  auto name_id = loom_type_dialect_name_id(projected);
+  return name_id != LOOM_STRING_ID_INVALID &&
+         name_id < module_->strings.count &&
+         iree_string_view_equal(
+             loom_string_table_get(&module_->strings, name_id),
+             iree_make_string_view(name.data(), name.size()));
+}
+
 // The frontend has selected the special member and checked accessibility,
 // deletion, cv and overload resolution. Source admission establishes trivial
-// lifecycle semantics before an implicit copy becomes an SSA value copy.
-void Types::admit_copy(cxx::FunctionSymbol* constructor, const cxx::Type* type,
-                       cxx::AST* owner) {
+// lifecycle semantics before an implicit copy becomes an SSA value copy. An
+// admitted record's default constructor contributes only its canonical member
+// initialization plan; Initialization evaluates that plan against the current
+// object.
+void Types::admit_construction(cxx::FunctionSymbol* constructor,
+                               const cxx::Type* type, cxx::AST* owner) {
   if (!constructor) {
     return;
   }
-  const auto& admitted = partition(type, owner);
+  // Array initialization retains an element constructor on the array entity.
+  // Initialization admits and executes it independently for every element.
+  if (unit_.typeTraits().is_array(type)) {
+    return;
+  }
+  const auto& admitted = partition(unqualified(type), owner);
   cxx::ClassSymbol* source = nullptr;
   bool is_record = admitted.kind == ValueKind::Record;
   if (admitted.kind == ValueKind::Record) {
     source = static_cast<const RecordPartition&>(admitted).source;
+  } else if (admitted.kind == ValueKind::Buffer) {
+    source = static_cast<const BufferPartition&>(admitted).source;
+  } else if (admitted.kind == ValueKind::Address) {
+    source = static_cast<const AddressPartition&>(admitted).source;
   } else if (admitted.kind == ValueKind::Encoding) {
     source = static_cast<const EncodingPartition&>(admitted).source;
+  } else if (admitted.kind == ValueKind::OpaqueDialect) {
+    source = static_cast<const OpaqueDialectPartition&>(admitted).source;
+  } else if (admitted.kind == ValueKind::Vector) {
+    source = static_cast<const VectorPartition&>(admitted).source;
   } else if (admitted.kind == ValueKind::View) {
     source = static_cast<const ViewPartition&>(admitted).source;
   } else if (admitted.kind == ValueKind::Tensor) {
     source = static_cast<const TensorPartition&>(admitted).source;
   }
   if (source && constructor == source->defaultConstructor()) {
+    if (is_record) {
+      return;
+    }
     diagnostics_.reject(
         unit_, owner,
-        is_record ? "default record construction requires source object "
-                    "initialization semantics"
-                  : "default encoding, view or tensor construction requires "
-                    "source object initialization semantics");
+        "default Loom source type construction requires source object "
+        "initialization semantics");
   }
   if (!source || (constructor != source->copyConstructor() &&
                   constructor != source->moveConstructor())) {
@@ -619,8 +1141,8 @@ void Types::admit_copy(cxx::FunctionSymbol* constructor, const cxx::Type* type,
         is_record
             ? "record construction requires aggregate initialization "
               "or a trivial copy"
-            : "encoding, view and tensor construction requires an operation "
-              "result or a trivial copy");
+            : "Loom source type construction requires an operation result or "
+              "a trivial copy");
   }
 }
 
@@ -638,11 +1160,16 @@ void Types::append(const cxx::Type* input, cxx::AST* owner,
         unit_, owner,
         "dependent source values require reserved destination identities");
   }
-  append_bound(input, owner, {}, output);
+  // Only dependent shaped types use temporary overflow payloads. The
+  // rejection above therefore guarantees that no returned type borrows this
+  // local storage; static semantic vectors retain their own payload.
+  BoundTypeStorage storage;
+  append_bound(input, owner, {}, storage, output);
 }
 
 void Types::append_bound(const cxx::Type* input, cxx::AST* owner,
                          std::span<const loom_value_id_t> identities,
+                         BoundTypeStorage& storage,
                          std::vector<loom_type_t>& output) {
   const auto& admitted = partition(input, owner);
   if (!identities.empty() && identities.size() != admitted.component_count) {
@@ -654,17 +1181,55 @@ void Types::append_bound(const cxx::Type* input, cxx::AST* owner,
     case ValueKind::SSA:
       output.push_back(get(input, owner));
       return;
+    case ValueKind::Buffer:
+      output.push_back(loom_type_buffer());
+      return;
+    case ValueKind::Address:
+      output.push_back(loom_type_scalar(
+          static_cast<const AddressPartition&>(admitted).element_type));
+      return;
+    case ValueKind::OpaqueDialect:
+      output.push_back(
+          static_cast<const OpaqueDialectPartition&>(admitted).type);
+      return;
     case ValueKind::Pointer:
       output.push_back(loom_type_buffer());
       output.push_back(loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET));
       return;
     case ValueKind::Encoding:
-      output.push_back(
-          loom_type_encoding_with_role(LOOM_ENCODING_ROLE_ADDRESS_LAYOUT));
+      output.push_back(loom_type_encoding_with_role(
+          static_cast<const EncodingPartition&>(admitted).role));
       return;
-    case ValueKind::Tensor:
-      output.push_back(static_cast<const TensorPartition&>(admitted).type);
+    case ValueKind::Vector: {
+      const auto& vector = static_cast<const VectorPartition&>(admitted);
+      if (vector.is_dynamic()) {
+        if (identities.size() != vector.component_count) {
+          diagnostics_.reject(
+              unit_, owner,
+              "vector values require reserved destination component "
+              "identities");
+        }
+        for (size_t index = 0; index + 1 < identities.size(); ++index) {
+          output.push_back(loom_type_scalar(LOOM_SCALAR_TYPE_INDEX));
+        }
+        output.push_back(
+            vector.bind_type(identities.first(identities.size() - 1), storage));
+      } else {
+        output.push_back(vector.bind_type({}, storage));
+      }
       return;
+    }
+    case ValueKind::Tensor: {
+      const auto& tensor = static_cast<const TensorPartition&>(admitted);
+      if (tensor.is_dynamic()) {
+        IREE_ASSERT(identities.size() == tensor.component_count);
+        output.push_back(loom_type_scalar(LOOM_SCALAR_TYPE_INDEX));
+        output.push_back(tensor.bind_type(identities.first(1)));
+      } else {
+        output.push_back(tensor.bind_type({}));
+      }
+      return;
+    }
     case ValueKind::Record: {
       const auto& record = static_cast<const RecordPartition&>(admitted);
       for (const auto& member : record.members) {
@@ -673,7 +1238,25 @@ void Types::append_bound(const cxx::Type* input, cxx::AST* owner,
                 ? std::span<const loom_value_id_t>{}
                 : identities.subspan(member.component_offset,
                                      member.partition->component_count);
-        append_bound(member.field->type(), owner, member_identities, output);
+        auto* member_type = member.field->type();
+        if (unit_.typeTraits().is_lvalue_reference(member_type)) {
+          member_type = unit_.typeTraits().add_pointer(
+              unit_.typeTraits().remove_reference(member_type));
+        }
+        append_bound(member_type, owner, member_identities, storage, output);
+      }
+      return;
+    }
+    case ValueKind::Array: {
+      const auto& array = static_cast<const ArrayPartition&>(admitted);
+      for (size_t index = 0; index < array.source->size(); ++index) {
+        auto element_identities =
+            identities.empty()
+                ? std::span<const loom_value_id_t>{}
+                : identities.subspan(index * array.element->component_count,
+                                     array.element->component_count);
+        append_bound(array.source->elementType(), owner, element_identities,
+                     storage, output);
       }
       return;
     }
@@ -684,9 +1267,9 @@ void Types::append_bound(const cxx::Type* input, cxx::AST* owner,
             "view values require reserved destination component identities");
       }
       const auto& view = static_cast<const ViewPartition&>(admitted);
-      std::array<uint64_t, 2> dimensions;
+      std::array<uint64_t, LOOM_TYPE_MAX_RANK> dimensions;
       size_t component = 0;
-      for (size_t axis = 0; axis < dimensions.size(); ++axis) {
+      for (size_t axis = 0; axis < view.extents.size(); ++axis) {
         if (view.extents[axis] < 0) {
           dimensions[axis] = loom_dim_pack_dynamic(identities[component++]);
           output.push_back(loom_type_scalar(LOOM_SCALAR_TYPE_INDEX));
@@ -694,19 +1277,17 @@ void Types::append_bound(const cxx::Type* input, cxx::AST* owner,
           dimensions[axis] = loom_dim_pack_static(view.extents[axis]);
         }
       }
-      auto layout = identities[component++];
-      if (layout > UINT16_MAX) {
+      auto encoding = identities[component++];
+      if (encoding > UINT16_MAX) {
         diagnostics_.reject(
             unit_, owner,
-            "view layout identity exceeds Loom's current type capacity");
+            "view encoding identity exceeds Loom's current type capacity");
       }
-      output.push_back(
-          loom_type_encoding_with_role(LOOM_ENCODING_ROLE_ADDRESS_LAYOUT));
-      auto type = loom_type_shaped_2d(LOOM_TYPE_VIEW, view.element,
-                                      dimensions[0], dimensions[1], 0);
-      type.encoding_id = static_cast<uint16_t>(layout);
-      type.encoding_flags = LOOM_ENCODING_FLAG_SSA;
-      output.push_back(type);
+      output.push_back(loom_type_encoding_with_role(view.encoding_role));
+      output.push_back(make_view_type(
+          view.element,
+          std::span<const uint64_t>(dimensions).first(view.extents.size()),
+          encoding, storage));
       return;
     }
   }
@@ -718,6 +1299,22 @@ bool Types::is_float(const cxx::Type* input) {
          kind == cxx::TypeKind::kBFloat16 || kind == cxx::TypeKind::kDouble ||
          kind == cxx::TypeKind::kFloat8E4M3FN ||
          kind == cxx::TypeKind::kFloat8E5M2;
+}
+
+bool Types::is_index(const cxx::Type* type, cxx::AST* owner) {
+  return address_domain(type, owner) == LOOM_SCALAR_TYPE_INDEX;
+}
+
+bool Types::is_offset(const cxx::Type* type, cxx::AST* owner) {
+  return address_domain(type, owner) == LOOM_SCALAR_TYPE_OFFSET;
+}
+
+loom_scalar_type_t Types::address_domain(const cxx::Type* type,
+                                         cxx::AST* owner) {
+  const auto& admitted = partition(type, owner);
+  return admitted.kind == ValueKind::Address
+             ? static_cast<const AddressPartition&>(admitted).element_type
+             : LOOM_SCALAR_TYPE_NONE;
 }
 
 }  // namespace loom::cxx_import

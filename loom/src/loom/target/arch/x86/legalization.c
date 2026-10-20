@@ -6,13 +6,39 @@
 
 #include "loom/target/arch/x86/legalization.h"
 
+#include "loom/codegen/low/descriptors.h"
+#include "loom/ir/module.h"
+#include "loom/ops/scalar/ops.h"
 #include "loom/ops/vector/ops.h"
 #include "loom/target/arch/x86/records/target_records.h"
+#include "loom/target/arch/x86/vector_insert.h"
+#include "loom/transforms/scalar/target_legalization.h"
+#include "loom/transforms/vector/packet_legalization.h"
+#include "loom/transforms/vector/to_scalar.h"
 
 static bool loom_x86_legalizer_descriptor_set_is_x86(
     const loom_low_descriptor_set_t* descriptor_set) {
   return descriptor_set != NULL &&
          descriptor_set->target_stable_id == LOOM_X86_TARGET_STABLE_ID;
+}
+
+static bool loom_x86_descriptor_features_available(
+    const loom_target_legalization_context_t* context,
+    const loom_low_descriptor_t* descriptor) {
+  const loom_low_descriptor_set_t* descriptor_set = context->descriptor_set;
+  const loom_low_descriptor_layout_t* layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  const uint64_t feature_bits = loom_target_legalization_context_bundle(context)
+                                    ->config->contract_feature_bits;
+  for (uint16_t i = 0; i < layout->feature_mask_word_count; ++i) {
+    const uint64_t required_bits =
+        descriptor_set->feature_mask_words[layout->feature_mask_word_start + i];
+    const uint64_t available_bits = i == 0 ? feature_bits : 0;
+    if ((required_bits & ~available_bits) != 0) {
+      return false;
+    }
+  }
+  return true;
 }
 
 static iree_status_t loom_x86_retain_native_vector_op(
@@ -33,7 +59,205 @@ static iree_status_t loom_x86_retain_native_vector_op(
   return iree_ok_status();
 }
 
+static bool loom_x86_match_vector_float8_extension(
+    const loom_target_legalizer_entry_t* entry,
+    const loom_target_legalization_context_t* context, const loom_op_t* op) {
+  (void)entry;
+  const loom_type_t result_type =
+      loom_module_value_type(context->module, loom_vector_extf_result(op));
+  return loom_scalar_type_set_contains(
+      LOOM_SCALAR_TYPE_SET_16BIT_FLOAT | LOOM_SCALAR_TYPE_SET_F32,
+      loom_type_element_type(result_type));
+}
+
+static bool loom_x86_match_vector_narrow_float_truncation(
+    const loom_target_legalizer_entry_t* entry,
+    const loom_target_legalization_context_t* context, const loom_op_t* op) {
+  (void)entry;
+  const loom_type_t result_type =
+      loom_module_value_type(context->module, loom_vector_fptrunc_result(op));
+  return loom_scalar_type_set_contains(LOOM_SCALAR_TYPE_SET_F8E4M3 |
+                                           LOOM_SCALAR_TYPE_SET_F8E5M2 |
+                                           LOOM_SCALAR_TYPE_SET_16BIT_FLOAT,
+                                       loom_type_element_type(result_type));
+}
+
+static iree_status_t loom_x86_legalize_float8_to_bfloat_extension(
+    const loom_target_legalizer_entry_t* entry,
+    loom_target_legalization_context_t* context, loom_op_t* op,
+    loom_target_legalizer_result_t* out_result) {
+  (void)entry;
+  *out_result = (loom_target_legalizer_result_t){
+      .action = LOOM_TARGET_LEGALIZER_ACTION_NO_COMMENT,
+  };
+  if (!loom_x86_legalizer_descriptor_set_is_x86(context->descriptor_set)) {
+    return iree_ok_status();
+  }
+  IREE_RETURN_IF_ERROR(loom_scalar_rewrite_float8_extension(context, op));
+  out_result->action = LOOM_TARGET_LEGALIZER_ACTION_REWRITTEN;
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_legalize_vector_conversion(
+    const loom_target_legalizer_entry_t* entry,
+    loom_target_legalization_context_t* context, loom_op_t* op,
+    loom_target_legalizer_result_t* out_result) {
+  (void)entry;
+  *out_result = (loom_target_legalizer_result_t){
+      .action = LOOM_TARGET_LEGALIZER_ACTION_NO_COMMENT,
+  };
+  if (!loom_x86_legalizer_descriptor_set_is_x86(context->descriptor_set)) {
+    return iree_ok_status();
+  }
+
+  // A legal query can retain an unavailable primary descriptor so Low
+  // verification reports its precise missing features. Scalarize only that
+  // fallback; contracts executable on this target remain native.
+  const loom_target_contract_query_result_t* contract_result =
+      context->contract_query_result;
+  if (contract_result != NULL &&
+      contract_result->outcome == LOOM_TARGET_CONTRACT_QUERY_LEGAL &&
+      (contract_result->selected_descriptor == NULL ||
+       loom_x86_descriptor_features_available(
+           context, contract_result->selected_descriptor))) {
+    return iree_ok_status();
+  }
+
+  // Capture each source lane at the authored conversion. Reconstructing a
+  // producer at a later scalar consumer could move a read across an aliasing
+  // write and change the converted value.
+  bool rewritten = false;
+  IREE_RETURN_IF_ERROR(loom_vector_descriptor_to_scalar_rewrite_op(
+      context->pass, context->rewriter, op, &rewritten));
+  if (rewritten) {
+    out_result->action = LOOM_TARGET_LEGALIZER_ACTION_REWRITTEN;
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_legalize_vector_divrem(
+    const loom_target_legalizer_entry_t* entry,
+    loom_target_legalization_context_t* context, loom_op_t* op,
+    loom_target_legalizer_result_t* out_result) {
+  (void)entry;
+  *out_result = (loom_target_legalizer_result_t){
+      .action = LOOM_TARGET_LEGALIZER_ACTION_NO_COMMENT,
+  };
+  if (!loom_x86_legalizer_descriptor_set_is_x86(context->descriptor_set)) {
+    return iree_ok_status();
+  }
+
+  // Preserve the quotient/remainder tuple while converting unsupported vector
+  // carriers to scalar lanes. Each lane can then select the paired native
+  // divide instead of the shared fallback splitting the source operation.
+  bool rewritten = false;
+  IREE_RETURN_IF_ERROR(loom_vector_descriptor_to_scalar_rewrite_op(
+      context->pass, context->rewriter, op, &rewritten));
+  if (rewritten) {
+    out_result->action = LOOM_TARGET_LEGALIZER_ACTION_REWRITTEN;
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_legalize_vector_packets(
+    const loom_target_legalizer_entry_t* entry,
+    loom_target_legalization_context_t* context, loom_op_t* op,
+    loom_target_legalizer_result_t* out_result) {
+  (void)entry;
+  *out_result = (loom_target_legalizer_result_t){
+      .action = LOOM_TARGET_LEGALIZER_ACTION_NO_COMMENT,
+  };
+  if (!loom_x86_legalizer_descriptor_set_is_x86(context->descriptor_set) ||
+      context->source_function_has_unsupported_vector_carrier ||
+      context->vector_packet_policy == NULL) {
+    return iree_ok_status();
+  }
+
+  bool rewritten = false;
+  switch (op->kind) {
+    case LOOM_OP_VECTOR_LOAD: {
+      IREE_RETURN_IF_ERROR(loom_vector_packet_legalize_load(
+          context, op, context->vector_packet_policy, &rewritten));
+      break;
+    }
+    case LOOM_OP_VECTOR_STORE: {
+      IREE_RETURN_IF_ERROR(loom_vector_packet_legalize_store(
+          context, op, context->vector_packet_policy, &rewritten));
+      break;
+    }
+    case LOOM_OP_VECTOR_INSERT: {
+      IREE_RETURN_IF_ERROR(
+          loom_x86_vector_insert_legalize(context, op, &rewritten));
+      break;
+    }
+    default:
+      IREE_ASSERT_UNREACHABLE();
+  }
+  if (rewritten) {
+    out_result->action = LOOM_TARGET_LEGALIZER_ACTION_REWRITTEN;
+  }
+  return iree_ok_status();
+}
+
 static const loom_target_legalizer_rule_t kX86LegalizerRules[] = {
+    {
+        .root_kind = LOOM_OP_VECTOR_LOAD,
+        .legalize = loom_x86_legalize_vector_packets,
+    },
+    {
+        // A native-width store may terminate packets retained from an
+        // oversized producer graph without materializing its logical result.
+        .flags = LOOM_TARGET_LEGALIZER_ENTRY_FLAG_REWRITE_LEGAL,
+        .root_kind = LOOM_OP_VECTOR_STORE,
+        .legalize = loom_x86_legalize_vector_packets,
+    },
+    {
+        .root_kind = LOOM_OP_VECTOR_INSERT,
+        .legalize = loom_x86_legalize_vector_packets,
+    },
+    {
+        .root_kind = LOOM_OP_SCALAR_EXTF,
+        .first_operand_element_types =
+            LOOM_SCALAR_TYPE_SET_F8E4M3 | LOOM_SCALAR_TYPE_SET_F8E5M2,
+        .match = loom_scalar_match_float8_to_bfloat_extension,
+        .legalize = loom_x86_legalize_float8_to_bfloat_extension,
+    },
+    {
+        .root_kind = LOOM_OP_VECTOR_EXTF,
+        .first_operand_element_types =
+            LOOM_SCALAR_TYPE_SET_F8E4M3 | LOOM_SCALAR_TYPE_SET_F8E5M2,
+        .match = loom_x86_match_vector_float8_extension,
+        .legalize = loom_x86_legalize_vector_conversion,
+    },
+    {
+        .root_kind = LOOM_OP_VECTOR_FPTRUNC,
+        .first_operand_element_types =
+            LOOM_SCALAR_TYPE_SET_16BIT_FLOAT | LOOM_SCALAR_TYPE_SET_F32,
+        .match = loom_x86_match_vector_narrow_float_truncation,
+        .legalize = loom_x86_legalize_vector_conversion,
+    },
+    {
+        .flags = LOOM_TARGET_LEGALIZER_ENTRY_FLAG_REWRITE_LEGAL,
+        .root_kind = LOOM_OP_VECTOR_SITOFP,
+        .first_operand_element_types =
+            LOOM_SCALAR_TYPE_SET_I32 | LOOM_SCALAR_TYPE_SET_I64,
+        .legalize = loom_x86_legalize_vector_conversion,
+    },
+    {
+        .flags = LOOM_TARGET_LEGALIZER_ENTRY_FLAG_REWRITE_LEGAL,
+        .root_kind = LOOM_OP_VECTOR_UITOFP,
+        .first_operand_element_types =
+            LOOM_SCALAR_TYPE_SET_I32 | LOOM_SCALAR_TYPE_SET_I64,
+        .legalize = loom_x86_legalize_vector_conversion,
+    },
+    {
+        .root_kind = LOOM_OP_VECTOR_DIVREMSI,
+        .legalize = loom_x86_legalize_vector_divrem,
+    },
+    {
+        .root_kind = LOOM_OP_VECTOR_DIVREMUI,
+        .legalize = loom_x86_legalize_vector_divrem,
+    },
     {
         .root_kind = LOOM_OP_VECTOR_DOT2F,
         .legalize = loom_x86_retain_native_vector_op,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from loom.target.arch.spirv.features import feature_bits_value
 from loom.target.arch.spirv.scalar_alu import (
     BFLOAT16_SCALAR_TYPE,
     FLOAT_SCALAR_ALU_TYPES,
@@ -29,6 +30,10 @@ _BIT_WIDTHS = {
     "f64": 64,
 }
 
+_FLOAT32_SCALAR_TYPE = next(
+    scalar for scalar in FLOAT_SCALAR_ALU_TYPES if scalar.source_type == "f32"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ScalarConversion:
@@ -38,6 +43,7 @@ class ScalarConversion:
     opcode: str
     source_type: ScalarAluType
     result_type: ScalarAluType
+    feature_atoms: tuple[str, ...] = ()
 
     @property
     def key(self) -> str:
@@ -52,7 +58,11 @@ class ScalarConversion:
 
     @property
     def feature_bits(self) -> int:
-        return self.source_type.feature_bits | self.result_type.feature_bits
+        return (
+            self.source_type.feature_bits
+            | self.result_type.feature_bits
+            | feature_bits_value(self.feature_atoms)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +85,40 @@ class IntegerValueViewConversion:
 
 def _bit_width(scalar: ScalarAluType) -> int:
     return _BIT_WIDTHS[scalar.source_type]
+
+
+def _float_narrowing_feature_atoms(
+    source_width: int, result_width: int
+) -> tuple[str, ...]:
+    if result_width == 32:
+        behavior_atoms = (
+            "float32_denorm_preserve",
+            "float32_rounding_rte",
+        )
+    elif result_width == 16:
+        # Vulkan devices may expose F32 controls independently while coupling
+        # the F16 and F64 execution modes. The profile records that coupled
+        # promise as one feature per behavior.
+        behavior_atoms = (
+            "float16_64_denorm_preserve",
+            "float16_64_rounding_rte",
+        )
+    else:
+        raise ValueError(f"unsupported native float narrowing width {result_width}")
+
+    # Vulkan assumes NSZ, NotInf, and NotNaN when an entry point omits
+    # SignedZeroInfNanPreserve for any operand or result width used by an
+    # instruction. Native narrowing therefore needs the promise for both
+    # widths even though rounding and destination-denormal behavior are
+    # selected by the result format.
+    atoms = (
+        *behavior_atoms,
+        f"float{result_width}_signed_zero_inf_nan_preserve",
+        f"float{source_width}_signed_zero_inf_nan_preserve",
+    )
+    if source_width == 64 and result_width == 16:
+        atoms = (*atoms, "float64_to_float16_conversion")
+    return atoms
 
 
 def _integer_width_conversions() -> tuple[ScalarConversion, ...]:
@@ -106,6 +150,23 @@ def _float_width_conversions() -> tuple[ScalarConversion, ...]:
                 continue
             source_width = _bit_width(source_type)
             result_width = _bit_width(result_type)
+            feature_atoms: tuple[str, ...] = ()
+            if source_width > result_width:
+                feature_atoms = _float_narrowing_feature_atoms(
+                    source_width, result_width
+                )
+            else:
+                # Nonzero finite widening results are normal in the destination,
+                # but OpFConvert may flush a source subnormal. Both widths
+                # also need the promise that preserves zeros and nonfinite
+                # values. Portable bit-pattern recipes cover other profiles.
+                feature_atoms = (
+                    "float32_denorm_preserve"
+                    if source_width == 32
+                    else "float16_64_denorm_preserve",
+                    f"float{source_width}_signed_zero_inf_nan_preserve",
+                    f"float{result_width}_signed_zero_inf_nan_preserve",
+                )
             rows.append(
                 ScalarConversion(
                     source_op_key="extf" if source_width < result_width else "fptrunc",
@@ -114,6 +175,7 @@ def _float_width_conversions() -> tuple[ScalarConversion, ...]:
                     opcode="LOOM_SPIRV_OP_F_CONVERT",
                     source_type=source_type,
                     result_type=result_type,
+                    feature_atoms=feature_atoms,
                 )
             )
     return tuple(rows)
@@ -270,9 +332,16 @@ DIRECT_SCALAR_CONVERSIONS = (
         mnemonic="OpFConvert",
         opcode="LOOM_SPIRV_OP_F_CONVERT",
         source_type=BFLOAT16_SCALAR_TYPE,
-        result_type=next(
-            scalar for scalar in FLOAT_SCALAR_ALU_TYPES if scalar.source_type == "f32"
-        ),
+        result_type=_FLOAT32_SCALAR_TYPE,
+        feature_atoms=("float32_denorm_preserve",),
+    ),
+    ScalarConversion(
+        source_op_key="fptrunc",
+        descriptor_suffix="f_convert",
+        mnemonic="OpFConvert",
+        opcode="LOOM_SPIRV_OP_F_CONVERT",
+        source_type=_FLOAT32_SCALAR_TYPE,
+        result_type=BFLOAT16_SCALAR_TYPE,
     ),
     *_signed_integer_to_float_conversions(),
     *_float_to_signed_integer_conversions(),

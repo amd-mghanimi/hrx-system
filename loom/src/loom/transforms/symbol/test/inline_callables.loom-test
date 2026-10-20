@@ -48,36 +48,36 @@ kernel.def @inlines_into_required_ancestor() {
 
 // RUN: pass inline-callables,canonicalize
 
-target.generic<reference> @wave32 {subgroup_size = 32}
+test.target<low_core> @subgroup32 {subgroup_size = 32}
 
-target.generic<reference> @wave64 {subgroup_size = 64}
+test.target<low_core> @subgroup64 {subgroup_size = 64}
 
 func.def inline @current_subgroup_size() -> (index) {
   %size = target.subgroup.size : index
   func.return %size : index
 }
 
-func.def target(@wave32) abi(object_function) @caller_wave32() -> (index) {
+func.def target(@subgroup32) abi(object_function) @caller_subgroup32() -> (index) {
   %size = func.call @current_subgroup_size() : () -> (index)
   func.return %size : index
 }
 
-func.def target(@wave64) abi(object_function) @caller_wave64() -> (index) {
+func.def target(@subgroup64) abi(object_function) @caller_subgroup64() -> (index) {
   %size = func.call @current_subgroup_size() : () -> (index)
   func.return %size : index
 }
 
 // ----
-target.generic<reference> @wave32 {subgroup_size = 32}
+test.target<low_core> @subgroup32 {subgroup_size = 32}
 
-target.generic<reference> @wave64 {subgroup_size = 64}
+test.target<low_core> @subgroup64 {subgroup_size = 64}
 
-func.def target(@wave32) abi(object_function) @caller_wave32() -> (index) {
+func.def target(@subgroup32) abi(object_function) @caller_subgroup32() -> (index) {
   %size = index.constant 32 : index
   func.return %size : index
 }
 
-func.def target(@wave64) abi(object_function) @caller_wave64() -> (index) {
+func.def target(@subgroup64) abi(object_function) @caller_subgroup64() -> (index) {
   %size = index.constant 64 : index
   func.return %size : index
 }
@@ -87,7 +87,7 @@ func.def target(@wave64) abi(object_function) @caller_wave64() -> (index) {
 // RUN: pass inline-callables
 
 func.def inline @misplaced_lane_id() -> (index) {
-  // ERROR@+1: STRUCTURE/029 "kernel.subgroup.lane.id" "required" "kernel.def" "func.def"
+  // ERROR@+1: STRUCTURE/029 "kernel.subgroup.lane.id" "one-of-required" "kernel.def or pipeline.strand" "func.def"
   %lane = kernel.subgroup.lane.id : index
   func.return %lane : index
 }

@@ -10,6 +10,7 @@
 #include <stdio.h>
 
 #include "loomc/context.h"
+#include "loomc/product.h"
 #include "loomc/result.h"
 #include "loomc/source.h"
 #include "loomc/workspace.h"
@@ -87,6 +88,59 @@ extern "C" {
 /// guarantees that no mutating module operation is active. Mutating operations
 /// such as compiling a module require exclusive access to that module handle.
 typedef struct loomc_module_t loomc_module_t;
+
+/// Invariants checked by an explicit module verification operation.
+typedef enum loomc_module_verify_scope_e {
+  /// Structural and target-Low checks using the module's target environment.
+  LOOMC_MODULE_VERIFY_SCOPE_DEFAULT = 0,
+  /// Structural checks only, without establishing target-Low admission.
+  LOOMC_MODULE_VERIFY_SCOPE_STRUCTURAL = 1,
+} loomc_module_verify_scope_t;
+
+/// Options for an explicit module verification operation.
+typedef struct loomc_module_verify_options_t {
+  /// Structure type; LOOMC_STRUCTURE_TYPE_MODULE_VERIFY_OPTIONS when nonzero.
+  loomc_structure_type_t type;
+  /// Size of this structure in bytes, or zero.
+  loomc_host_size_t structure_size;
+  /// Reserved extension chain. Must be NULL.
+  const void* next;
+  /// Maximum errors to report; zero selects the library default.
+  uint32_t max_errors;
+  /// Reserved padding separating appended fields from the original ABI prefix.
+  uint32_t reserved;
+  /// Verification scope. Requires structure_size to include this field;
+  /// absent fields and zero-sized descriptors select the default scope.
+  loomc_module_verify_scope_t scope;
+} loomc_module_verify_options_t;
+
+/// Checks module invariants explicitly according to the selected scope.
+///
+/// Every call performs verification and returns its diagnostics, even when a
+/// prior operation established cached admission facts. Target checks use the
+/// module's context and retained function-version facts. Successful
+/// verification establishes admission for subsequent compilation or pipeline
+/// execution. Structural-only verification establishes no target admission;
+/// later compilation or pipeline execution still performs its target checks.
+///
+/// @param module Module to check, without modifying its IR.
+/// @param options Verification options, or NULL for defaults.
+/// @param allocator Host allocator used for result-owned storage.
+/// @param out_result Receives one owned verification result on an OK return.
+/// @return OK for successful verification or diagnosed invalid IR. API misuse
+/// and infrastructure failures return non-OK with NULL result.
+///
+/// @ownership
+/// The caller retains the module and releases the result with
+/// loomc_result_release. Diagnostics retain their own source information.
+///
+/// @thread_safety
+/// Verification uses module scratch and updates admission facts, requiring
+/// exclusive access to the module and its workspace for the duration of the
+/// call.
+LOOMC_API_EXPORT loomc_status_t loomc_module_verify(
+    loomc_module_t* module, const loomc_module_verify_options_t* options,
+    loomc_allocator_t allocator, loomc_result_t** out_result);
 
 /// Public function category reported from a module query.
 typedef enum loomc_module_function_kind_e {
@@ -315,6 +369,14 @@ typedef struct loomc_module_serialize_options_t {
 
   /// Presentation policy for textual `.loom` output.
   loomc_module_text_presentation_t text_presentation;
+
+  /// Reserved padding separating appended fields from the original ABI prefix.
+  uint32_t reserved;
+
+  /// Include operation source locations in textual output. Requires
+  /// structure_size to include this field; absent fields default to false.
+  /// Bytecode preserves location information independently of this option.
+  bool print_locations;
 } loomc_module_serialize_options_t;
 
 /// Module deserialization options.
@@ -821,6 +883,44 @@ LOOMC_API_EXPORT loomc_status_t loomc_module_deserialize_from_source(
     const loomc_source_t* source,
     const loomc_module_deserialize_options_t* options,
     loomc_allocator_t allocator, loomc_module_t** out_module,
+    loomc_result_t** out_result);
+
+/// Deserializes an immutable request and resolves its exact source roots.
+///
+/// This is the mutable-module entry point for hosts composing request
+/// compilation with target specialization and native emission. Root names are
+/// projected directly from the decoded bytecode symbol table in request order;
+/// no parent product, source indexing, or function enumeration is required.
+/// The operation accepts any request product descriptor and validates source
+/// root addresses, not the root operation kinds required by a later compiler.
+///
+/// @param context Context used to resolve dialect and bytecode metadata.
+/// @param workspace Invocation-local workspace used for module storage.
+/// @param request Immutable request supplying bytecode and source-local roots.
+/// @param host_allocator Allocator used for module and result handles.
+/// @param out_module Receives an owned module when the result succeeds, or
+/// NULL.
+/// @param out_root_symbols Optional caller-owned array with room for
+/// `loomc_request_root_count(request)` names. NULL validates roots without
+/// projecting names. Names are valid only when the operation and result
+/// succeed.
+/// @param out_result Receives an owned result on an OK return.
+/// @return OK when deserialization ran to a result, INVALID_ARGUMENT for an
+/// unavailable root address, or another non-OK status for infrastructure
+/// failure.
+///
+/// @ownership
+/// Release returned handles with `loomc_module_release` and
+/// `loomc_result_release`. Names borrow from the returned module, not the
+/// request. Copy names needed across module mutation or release. The returned
+/// handles do not borrow the request; diagnostics may retain its source.
+///
+/// @thread_safety
+/// Concurrent calls may share context and request with distinct workspaces.
+LOOMC_API_EXPORT loomc_status_t loomc_module_deserialize_request(
+    loomc_context_t* context, loomc_workspace_t* workspace,
+    const loomc_request_t* request, loomc_allocator_t host_allocator,
+    loomc_module_t** out_module, loomc_string_view_t* out_root_symbols,
     loomc_result_t** out_result);
 
 /// Deserializes a source handle as textual `.loom` into a mutable module.

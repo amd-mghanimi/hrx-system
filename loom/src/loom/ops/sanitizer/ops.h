@@ -102,7 +102,7 @@ iree_status_t loom_sanitizer_assert_access_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_SANITIZER_ASSERT_VALUE: Assert predicate constraints over SSA values and return checked identity aliases. Unlike assume ops, this op is executable: failing the assertion reports the site and aborts execution. Passing the assertion refines facts for the returned aliases.
-// %n_checked = sanitizer.assert.value %n [range(%n, 0, 4096), mul(%n, 16)] : index
+// %n_checked = sanitizer.assert.value %n [range(%n, 0, 4096), multiple_of(%n, 16)] : index
 LOOM_DEFINE_ISA(loom_sanitizer_assert_value_isa, LOOM_OP_SANITIZER_ASSERT_VALUE)
 LOOM_DEFINE_VARIADIC_OPERANDS(loom_sanitizer_assert_value_values, 0)
 LOOM_DEFINE_VARIADIC_RESULTS(loom_sanitizer_assert_value_results, 0)

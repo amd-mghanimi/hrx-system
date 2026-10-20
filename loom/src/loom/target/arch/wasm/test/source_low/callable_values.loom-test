@@ -1,76 +1,31 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/callable_values.loom-test
 // RUN: emit source-low target=wasm:simd128 output=low
-
-func.def public @call_mixed_i32(%input: vector<1xi32>, %delta: i32) -> (i32, i32) {
-  // ERROR@+1: WASM/001 {op_name="vector.extract", field_name="source"}
-  %value = vector.extract %input[0] : vector<1xi32> -> i32
-  %mixed = func.call @add_i32(%value, %delta) : (i32, i32) -> (i32)
-  %uniform = func.call @add_i32(%delta, %delta) : (i32, i32) -> (i32)
-  func.return %mixed, %uniform : i32, i32
-}
-
-func.def @add_i32(%value: i32, %delta: i32) -> (i32) {
-  %wide_value = scalar.extui %value : i32 to i64
-  %wide_delta = scalar.extui %delta : i32 to i64
-  %sum = scalar.addi %wide_value, %wide_delta : i64
-  %result = scalar.trunci %sum : i64 to i32
-  func.return %result : i32
-}
-
-// ====
-
-func.def public @call_mixed_i64(%input: vector<1xi64>, %delta: i64) -> (i64, i64) {
-  // ERROR@+1: WASM/001 {op_name="vector.extract", field_name="source"}
-  %value = vector.extract %input[0] : vector<1xi64> -> i64
-  %mixed = func.call @add_i64(%value, %delta) : (i64, i64) -> (i64)
-  %uniform = func.call @add_i64(%delta, %delta) : (i64, i64) -> (i64)
-  func.return %mixed, %uniform : i64, i64
-}
-
-func.def @add_i64(%value: i64, %delta: i64) -> (i64) {
-  %result = scalar.addi %value, %delta : i64
-  func.return %result : i64
-}
-
-// ====
 
 func.def public @call_vector_result(%input: i32, %lane: index) -> (i32) where [range(%lane, 0, 3)] {
   %c1 = scalar.constant 1 : i32
   %c2 = scalar.constant 2 : i32
   %c3 = scalar.constant 3 : i32
   %values = vector.from_elements %input, %c1, %c2, %c3 : vector<4xi32>
-  %result = func.call @select_lane(%values, %lane) : (vector<4xi32>, index) -> (i32)
+  %result = func.call inline @select_lane(%values, %lane) : (vector<4xi32>, index) -> (i32)
   func.return %result : i32
 }
 
 func.def @select_lane(%values: vector<4xi32>, %lane: index) -> (i32) where [range(%lane, 0, 3)] {
-  // ERROR@+1: TARGET/004 {op_name="vector.extract", subject_role="operand_segment", subject_name="indices", constraint_key="operand_segment_count", expected_count="0"}
   %result = vector.extract %values[%lane] : vector<4xi32> -> i32
   func.return %result : i32
 }
 
-// ====
-
-func.def public @call_loop(%input: vector<1xi32>, %delta: i32, %count: index) -> (i32) {
-  // ERROR@+1: WASM/001 {op_name="vector.extract", field_name="source"}
-  %value = vector.extract %input[0] : vector<1xi32> -> i32
-  %result = func.call @repeat_add(%value, %delta, %count) : (i32, i32, index) -> (i32)
-  func.return %result : i32
-}
-
-func.def @repeat_add(%value: i32, %delta: i32, %count: index) -> (i32) {
-  %c0 = index.constant 0 : index
-  %c1 = index.constant 1 : index
-  %result = scf.for %i = [%c0 to %count step %c1](%current = %value : i32) -> (i32) {
-    %next = func.call @advance_i32(%current, %delta) : (i32, i32) -> (i32)
-    scf.yield %next : i32
-  }
-  func.return %result : i32
-}
-
-func.def @advance_i32(%value: i32, %delta: i32) -> (i32) {
-  %result = scalar.addi %value, %delta : i32
-  func.return %result : i32
+// ----
+low.func.def public target<wasm.core.simd128> abi(wasm_function) @call_vector_result(%input: reg<wasm.i32>, %lane: reg<wasm.i32>) -> (reg<wasm.i32>) where [range(%lane, 0, 3)] asm {
+  %c1 = i32.const 1
+  %c2 = i32.const 2
+  %c3 = i32.const 3
+  %28 = i32.eq %lane, %c1
+  %29 = i32.select %c1, %input, %28
+  %31 = i32.eq %lane, %c2
+  %32 = i32.select %c2, %29, %31
+  %34 = i32.eq %lane, %c3
+  %result = i32.select %c3, %32, %34
+  return %result
 }
 
 // ====
@@ -98,6 +53,19 @@ low.func.def target<wasm.core.simd128> @scalar_add(%value: reg<wasm.i32>, %delta
 
 // ====
 
+// Callable contracts retain argument and result identities across source-to-Low
+// boundary mapping. Results are signature values rather than body-local values.
+func.def public @preserve_contracts(%limit: index, %value: i32) -> (%bounded: index, %echo: i32) where [range(%limit, 1, 8), eq(%bounded, %limit), eq(%echo, %value)] {
+  func.return %limit, %value : index, i32
+}
+
+// ----
+low.func.def public target<wasm.core.simd128> abi(wasm_function) @preserve_contracts(%limit: reg<wasm.i32>, %value: reg<wasm.i32>) -> (%bounded: reg<wasm.i32>, %echo: reg<wasm.i32>) where [range(%limit, 1, 8), eq(%bounded, %limit), eq(%echo, %value)] asm {
+  return %limit, %value
+}
+
+// ====
+
 // A separately compiled definition must use the same signature as its caller's
 // declaration. The declaration is resolved by IR linking, not a runtime import.
 func.def public @call_external(%value: i32) -> (i32) {
@@ -105,7 +73,7 @@ func.def public @call_external(%value: i32) -> (i32) {
   func.return %result : i32
 }
 
-func.decl @increment(%value: i32) -> (i32)
+func.decl @increment(%value: i32) -> (%result: i32) where [eq(%result, %value)]
 
 // ----
 low.func.def public target<wasm.core.simd128> abi(wasm_function) @call_external(%value: reg<wasm.i32>) -> (reg<wasm.i32>) asm {
@@ -113,4 +81,4 @@ low.func.def public target<wasm.core.simd128> abi(wasm_function) @call_external(
   return %result
 }
 
-low.func.decl target<wasm.core.simd128> @increment(%value: reg<wasm.i32>) -> (reg<wasm.i32>)
+low.func.decl target<wasm.core.simd128> @increment(%value: reg<wasm.i32>) -> (%result: reg<wasm.i32>) where [eq(%result, %value)]

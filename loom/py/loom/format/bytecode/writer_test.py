@@ -21,6 +21,7 @@ from loom.assembly import FuncArgs
 from loom.builtin_types import ALL_BUILTIN_TYPES
 from loom.dialect.buffer import ALL_BUFFER_OPS
 from loom.dialect.cfg import ALL_CFG_OPS
+from loom.dialect.check import ALL_CHECK_OPS, ALL_CHECK_TYPES
 from loom.dialect.encoding import ALL_ENCODING_OPS
 from loom.dialect.func import ALL_FUNC_OPS
 from loom.dialect.globals import ALL_GLOBAL_OPS
@@ -29,7 +30,7 @@ from loom.dialect.kernel import ALL_KERNEL_OPS, ALL_KERNEL_TYPES
 from loom.dialect.low import ALL_LOW_OPS
 from loom.dialect.pass_ import ALL_PASS_OPS
 from loom.dialect.scalar import ALL_SCALAR_OPS
-from loom.dialect.target import ALL_TARGET_OPS, ALL_TARGET_PARAMETERIZED_ATTRS
+from loom.dialect.target import ALL_TARGET_PARAMETERIZED_ATTRS
 from loom.dialect.template import ALL_TEMPLATE_OPS
 from loom.dialect.test import (
     ALL_TEST_OPS,
@@ -57,7 +58,10 @@ from loom.dsl import (
 )
 from loom.format.bytecode.encoding import decode_varint
 from loom.format.bytecode.reader import read_module
-from loom.format.bytecode.symbol_references import SYMBOL_INTERFACE_BITS
+from loom.format.bytecode.symbol_references import (
+    SYMBOL_INTERFACE_BITS,
+    symbol_reference_dependency_contract_parts,
+)
 from loom.format.bytecode.writer import (
     FORMAT_VERSION,
     LOCATION_MODE_FULL_LOCATIONS,
@@ -97,6 +101,7 @@ from loom.ir import (
     EnumArrayAttr,
     FileLocation,
     FunctionType,
+    GroupType,
     LocationTable,
     Module,
     Operation,
@@ -114,6 +119,7 @@ from loom.ir import (
     StaticDim,
     StorageSpace,
     StorageType,
+    StringArrayAttr,
     Symbol,
     SymbolKind,
     SymbolName,
@@ -208,6 +214,7 @@ def _text_parser(
     include_kernel: bool = False,
     include_low: bool = False,
     include_pass: bool = False,
+    include_check: bool = False,
 ) -> Parser:
     parser = Parser()
     ops = (
@@ -236,6 +243,8 @@ def _text_parser(
         _append_unique(ops, ALL_LOW_OPS)
     if include_pass:
         _append_unique(ops, ALL_PASS_OPS)
+    if include_check:
+        _append_unique(ops, ALL_CHECK_OPS)
     parser.register_ops(ops)
     parser.register_parameterized_attrs(
         (*ALL_TEST_PARAMETERIZED_ATTRS, *ALL_TARGET_PARAMETERIZED_ATTRS)
@@ -243,6 +252,8 @@ def _text_parser(
     types = list(ALL_BUILTIN_TYPES)
     if include_kernel:
         _append_unique(types, ALL_KERNEL_TYPES)
+    if include_check:
+        _append_unique(types, ALL_CHECK_TYPES)
     parser.register_types(types)
     return parser
 
@@ -582,6 +593,57 @@ class TestFileHeader:
 
 
 class TestSymbolReferencesSection:
+    def test_support_dependency_roles_survive_projection(self) -> None:
+        module = _text_parser(include_check=True).parse(
+            "func.def @subject(%x: i32) -> (i32) {\n"
+            "  func.return %x : i32\n"
+            "}\n"
+            "func.def @oracle(%x: i32) -> (i32) {\n"
+            "  func.return %x : i32\n"
+            "}\n"
+            "func.def @generator(%seed: i32) -> (i32) {\n"
+            "  func.return %seed : i32\n"
+            "}\n"
+            "check.scenario @scenario {\n"
+            "  check.trial[1](%trial: index, %entropy: check.entropy) {\n"
+            "    %seed = check.literal value(1) : i32\n"
+            "    %input = check.generate<@generator>(%seed) : (i32) -> (i32)\n"
+            "    %shared = check.generate<@subject>(%input) : (i32) -> (i32)\n"
+            "    check.compare<@subject, @oracle>(%shared) : (i32) -> "
+            "[actual(%actual: i32), expected(%expected: i32)] {\n"
+            "      check.expect.equal actual(%actual) expected(%expected) : i32\n"
+            "    }\n"
+            "  }\n"
+            "  check.return\n"
+            "}\n"
+        )
+        data = _section_payload(
+            write_module(module, op_decls=(*ALL_FUNC_OPS, *ALL_CHECK_OPS)),
+            SECTION_SYMBOL_REFERENCES,
+        )
+        offset = 0
+        symbol_count, offset = decode_varint(data, offset)
+        dependency_count, offset = decode_varint(data, offset)
+        template_demand_count, offset = decode_varint(data, offset)
+        module_dependency_count, offset = decode_varint(data, offset)
+        assert (symbol_count, dependency_count, template_demand_count) == (4, 4, 0)
+        assert module_dependency_count == 0
+
+        roles_by_target: set[tuple[int, int]] = set()
+        for _ in range(symbol_count):
+            row_dependency_count, offset = decode_varint(data, offset)
+            for _ in range(row_dependency_count):
+                _source_root, offset = decode_varint(data, offset)
+                target_symbol, offset = decode_varint(data, offset)
+                contract, offset = decode_varint(data, offset)
+                _interfaces, role = symbol_reference_dependency_contract_parts(contract)
+                roles_by_target.add((target_symbol, role))
+            row_template_demand_count, offset = decode_varint(data, offset)
+            assert row_template_demand_count == 0
+
+        assert roles_by_target == {(0, 0), (0, 2), (1, 2), (2, 2)}
+        assert offset == len(data)
+
     def test_records_retain_contract_and_root_region_origins(self) -> None:
         module = _text_parser().parse(
             "test.record @config_dependency\n"
@@ -929,14 +991,19 @@ class TestTypesSection:
         dialect_type = DialectType("test.ref", (I32,))
         self._roundtrip_type(_test_ptr_register_type(value_type=dialect_type))
 
-    def test_pool_static(self) -> None:
-        self._roundtrip_type(PoolType(StaticDim(65536)))
+    def test_pool(self) -> None:
+        self._roundtrip_type(PoolType())
 
-    def test_pool_static_small(self) -> None:
-        self._roundtrip_type(PoolType(StaticDim(4096)))
+    def test_group_static(self) -> None:
+        self._roundtrip_type(GroupType((StaticDim(8),)))
 
-    def test_pool_dynamic(self) -> None:
-        self._roundtrip_type(PoolType(DynamicDim(0)), bindings=(INDEX,))
+    def test_group_static_overflow_dimensions(self) -> None:
+        self._roundtrip_type(GroupType((StaticDim(2), StaticDim(2), StaticDim(2))))
+
+    def test_group_dynamic(self) -> None:
+        self._roundtrip_type(
+            GroupType((DynamicDim(0), StaticDim(4))), bindings=(INDEX,)
+        )
 
     def test_buffer_type(self) -> None:
         self._roundtrip_type(BUFFER_TYPE)
@@ -1594,6 +1661,30 @@ class TestCrossFormatRoundTrip:
         assert "optional_values" not in body_ops[2].attributes
         assert _roundtrip_text_through_bytecode(text) == text
 
+    def test_string_arrays_survive_bytecode_with_presence_and_order(self) -> None:
+        text = (
+            "test.func @string_arrays() {\n"
+            '  test.string_array_attrs ["gfx12-generic", "gfx1250", '
+            '"gfx12-generic"] using [] '
+            '{fallbacks = ["gfx11-generic", "gfx12-generic"]}\n'
+            '  test.string_array_attrs ["gfx1250"]\n'
+            "  test.yield\n"
+            "}\n"
+        )
+        loaded = _parse_write_read(text)
+        function = loaded.symbols[0].op
+        assert function is not None
+        first, second, _yield = function.regions[0].blocks[0].ops
+        assert first.attributes["required_values"] == StringArrayAttr(
+            ["gfx12-generic", "gfx1250", "gfx12-generic"]
+        )
+        assert first.attributes["optional_values"] == StringArrayAttr()
+        assert first.attributes["dict"]["fallbacks"] == StringArrayAttr(
+            ["gfx11-generic", "gfx12-generic"]
+        )
+        assert "optional_values" not in second.attributes
+        assert _roundtrip_text_through_bytecode(text) == text
+
     def test_signed_enum_sets_survive_bytecode_with_presence(self) -> None:
         text = (
             "test.func @signed_enum_sets() {\n"
@@ -2075,11 +2166,11 @@ class TestCrossFormatRoundTrip:
 
     def test_enum_future_ordinal_survives_bytecode(self) -> None:
         text = (
-            "target.generic<reference> @future_target "
+            "test.target<low_core> @future_target "
             "{artifact_format = elf, codegen_format = low_native}\n"
         )
         parser = Parser()
-        parser.register_ops(ALL_TARGET_OPS)
+        parser.register_ops(ALL_TEST_OPS)
         module = parser.parse(text)
         target_op = module.symbols[0].op
         assert target_op is not None
@@ -2246,7 +2337,7 @@ class TestCrossFormatRoundTrip:
 
     def test_dynamic_global_symbol_values_survive_bytecode(self) -> None:
         text = (
-            "global.constant @weights : tile<[%n]xf32> where [mul(%n, 16)]\n"
+            "global.constant @weights : tile<[%n]xf32> where [multiple_of(%n, 16)]\n"
             "\n"
             "func.def @load_weights() -> (index) {\n"
             "  %tile, %m = global.load @weights : tile<[%m]xf32>\n"
@@ -2260,7 +2351,7 @@ class TestCrossFormatRoundTrip:
     def test_static_encoding_global_symbols_survive_bytecode(self) -> None:
         text = (
             "global.constant @weights : tile<[%m]x[%k]xi8, #q8_0<block=32>> "
-            "where [mul(%m, 16)]\n"
+            "where [multiple_of(%m, 16)]\n"
             "\n"
             "func.def @load_weights() {\n"
             "  %tile, %m, %k = global.load @weights : "
@@ -2293,7 +2384,7 @@ class TestCrossFormatRoundTrip:
     def test_ssa_encoding_global_symbols_survive_bytecode(self) -> None:
         text = (
             "global.variable @scratch_view : view<[%n]xf32, %layout> "
-            "where [mul(%n, 16)]\n"
+            "where [multiple_of(%n, 16)]\n"
             "\n"
             "func.def @roundtrip_scratch_view() {\n"
             "  %view, %n, %layout = global.load @scratch_view : "
@@ -2338,11 +2429,11 @@ class TestCrossFormatRoundTrip:
             "  %scratch = buffer.alloca<workgroup> align(64) %bytes : buffer\n"
             "  %dest = buffer.view %scratch[%zero] : buffer -> view<16xi8, %layout>\n"
             "  %copy = kernel.async.cluster.gather %source to %dest using "
-            "%cluster_mask {cache_scope = se, cache_temporal = high_temporal} : "
+            "%cluster_mask {cache_scope = cluster, cache_temporal = high_temporal} : "
             "view<16xi8, %layout> to view<16xi8, %layout>, i32 -> "
             "kernel.async.token\n"
             "  %masked = kernel.async.cluster.gather.mask %source to %dest using "
-            "%cluster_mask, %in_bounds {cache_scope = cu, cache_temporal = regular} "
+            "%cluster_mask, %in_bounds {cache_scope = workgroup, cache_temporal = regular} "
             ": view<16xi8, %layout> to view<16xi8, %layout>, i32, i1 -> "
             "kernel.async.token\n"
             "  %group = kernel.async.group %copy, %masked : kernel.async.token, "
@@ -2377,7 +2468,7 @@ class TestCrossFormatRoundTrip:
             "  %lds = buffer.view %scratch[%zero] : buffer -> "
             "view<64x64xf32, %layout>\n"
             "  %load = kernel.async.tensor.load.to.lds %source to %lds using "
-            "%desc {cache_scope = cu, cache_temporal = regular} : "
+            "%desc {cache_scope = workgroup, cache_temporal = regular} : "
             "view<64x64xf32, %layout> to view<64x64xf32, %layout>, "
             "kernel.tensor.lds.descriptor -> kernel.async.token\n"
             "  %load_group = kernel.async.group %load : kernel.async.token -> "
@@ -2501,7 +2592,9 @@ class TestPredicateBytecodeRoundTrip:
             operation,
             attributes={
                 **operation.attributes,
-                "predicates": [Predicate("pow2", (PredicateArg("value", foreign_id),))],
+                "predicates": [
+                    Predicate("power_of_two", (PredicateArg("value", foreign_id),))
+                ],
             },
         )
         module.body.ops[0] = operation
@@ -2532,7 +2625,7 @@ class TestPredicateBytecodeRoundTrip:
         result_id = module.add_value(Value(name="", type=F32))
         predicates = [
             Predicate(
-                kind="mul",
+                kind="multiple_of",
                 args=(
                     PredicateArg(tag="value", value=m_id),
                     PredicateArg(tag="const", value=16),
@@ -2553,7 +2646,7 @@ class TestPredicateBytecodeRoundTrip:
                 ),
             ),
             Predicate(
-                kind="pow2",
+                kind="power_of_two",
                 args=(PredicateArg(tag="value", value=n_id),),
             ),
             Predicate(
@@ -2576,6 +2669,16 @@ class TestPredicateBytecodeRoundTrip:
                 kind="finite",
                 args=(PredicateArg(tag="value", value=arg_id),),
             ),
+            *(
+                Predicate(
+                    kind=kind,
+                    args=(
+                        PredicateArg(tag="value", value=m_id),
+                        PredicateArg(tag="value", value=k_id),
+                    ),
+                )
+                for kind in ("ult", "ule", "ugt", "uge")
+            ),
         ]
         func_op = Operation(
             name="func.decl",
@@ -2592,10 +2695,10 @@ class TestPredicateBytecodeRoundTrip:
         loaded_op = loaded.symbols[0].op
         assert loaded_op is not None
         loaded_preds = loaded_op.attributes.get("predicates", [])
-        assert len(loaded_preds) == 8
+        assert len(loaded_preds) == 12
 
         # Verify each predicate survived.
-        assert loaded_preds[0].kind == "mul"
+        assert loaded_preds[0].kind == "multiple_of"
         assert len(loaded_preds[0].args) == 2
         assert loaded_preds[0].args[0].tag == "value"
         assert loaded_preds[0].args[0].value == loaded_op.operands[0]
@@ -2608,7 +2711,7 @@ class TestPredicateBytecodeRoundTrip:
         assert loaded_preds[2].kind == "ne"
         assert loaded_preds[2].args[1].value == 0
 
-        assert loaded_preds[3].kind == "pow2"
+        assert loaded_preds[3].kind == "power_of_two"
         assert len(loaded_preds[3].args) == 1
 
         assert loaded_preds[4].kind == "range"
@@ -2625,6 +2728,14 @@ class TestPredicateBytecodeRoundTrip:
         assert loaded_preds[7].kind == "finite"
         assert len(loaded_preds[7].args) == 1
         assert loaded_preds[7].args[0].value == loaded_op.operands[3]
+
+        for predicate, kind in zip(
+            loaded_preds[8:], ("ult", "ule", "ugt", "uge"), strict=True
+        ):
+            assert predicate.kind == kind
+            assert len(predicate.args) == 2
+            assert predicate.args[0].value == loaded_op.operands[0]
+            assert predicate.args[1].value == loaded_op.operands[1]
 
     def test_empty_predicates_roundtrip(self) -> None:
         """Function with no predicates survives bytecode round-trip."""

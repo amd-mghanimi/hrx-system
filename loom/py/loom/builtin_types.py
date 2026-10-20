@@ -8,9 +8,8 @@
 
 These TypeDefs define the textual format for the core loom types.
 Scalar types (f32, i32, index) are keywords, not TypeDefs. Core named types
-such as encoding, tile<...>, tensor<...>, vector<...>, view<...>, bare buffer,
-and pool<...>, plus dotted dialect types such as hal.buffer and test.ref<...>,
-are TypeDefs.
+such as encoding, tile<...>, tensor<...>, vector<...>, view<...>, buffer and pool,
+plus dotted dialect types such as hal.buffer and test.ref<...>, are TypeDefs.
 
 Dialect-specific types are declared in their respective dialect files
 (e.g., dialect/hal/ and dialect/kernel/) using the same TypeDef pattern.
@@ -38,7 +37,13 @@ from loom.dsl import (
     ShapeParam,
     TypeDef,
 )
-from loom.ir import EncodingRole, EncodingType, StorageSpace, StorageType, TypeKind
+from loom.ir import (
+    EncodingRole,
+    EncodingType,
+    StorageSpace,
+    StorageType,
+    TypeKind,
+)
 
 __all__ = [
     "ALL_BUILTIN_TYPES",
@@ -53,6 +58,13 @@ __all__ = [
     "buffer_type",
     # Pool type.
     "pool_type",
+    # Communication domain type.
+    "group_type",
+    # Communication identities and owned accesses.
+    "channel_type",
+    "read_type",
+    "write_type",
+    "ChannelReadMode",
     # Storage type.
     "storage_type",
 ]
@@ -207,19 +219,80 @@ buffer_type = TypeDef(
 )
 
 # ============================================================================
-# pool<...> — block-managed device memory pool
+# pool — opaque allocation resource
 # ============================================================================
 
 pool_type = TypeDef(
     name="pool",
-    doc="Block-managed device memory pool with a single block size dimension.",
+    doc=(
+        "Opaque allocation resource. Its value selects backing storage; device, "
+        "memory-space capabilities, capacity and allocation strategy are value "
+        "properties rather than type parameters."
+    ),
     ir_kind="pool",
+)
+
+# ============================================================================
+# group<...> — shaped communication domain
+# ============================================================================
+
+group_type = TypeDef(
+    name="group",
+    doc=(
+        "Shaped communication domain identifying participants without "
+        "containing participant values or physical resources."
+    ),
+    ir_kind="group",
+    params=[ShapeParam("dims")],
+    format=[ShapeOf("dims")],
+)
+
+# ============================================================================
+# channel<T>, read<T>, write<T> — communication and access ownership
+# ============================================================================
+
+ChannelReadMode = EnumDef(
+    "ChannelReadMode",
+    [EnumCase("mutable", 1, doc="Exclusive consumption with read/modify permission.")],
+    doc="Permission on an owned consuming access; absence means immutable reading.",
+)
+
+channel_type = TypeDef(
+    "channel",
+    fact_domain="loom_view_fact_domain",
+    params=[AttrDef("payload", "type")],
+    format=[Param("payload")],
+    doc=(
+        "Communication identity carrying records of one payload type. Storage, "
+        "capacity and transport belong to its binding, independently of its address."
+    ),
+)
+
+read_type = TypeDef(
+    "read",
+    fact_domain="loom_view_fact_domain",
     params=[
-        ShapeParam("block_size"),
+        AttrDef("payload", "type"),
+        AttrDef("mode", ATTR_TYPE_ENUM, enum_def=ChannelReadMode, optional=True),
     ],
-    format=[
-        ShapeOf("block_size"),
-    ],
+    format=[Param("payload"), OptionalGroup([COMMA, Param("mode")], anchor="mode")],
+    doc=(
+        "Owned consumption of a channel record, possibly pending. Passing this "
+        "value to a callable transfers its obligation. Payload access requires "
+        "readiness; release retires the obligation. Mutable consumption is exclusive."
+    ),
+)
+
+write_type = TypeDef(
+    "write",
+    fact_domain="loom_view_fact_domain",
+    params=[AttrDef("payload", "type")],
+    format=[Param("payload")],
+    doc=(
+        "Owned producer reservation for one channel record. Passing this value "
+        "to a callable transfers its obligation. Publication is explicit and "
+        "cannot be inferred from the reservation's last use."
+    ),
 )
 
 # ============================================================================
@@ -262,6 +335,10 @@ ALL_BUILTIN_TYPES: tuple[TypeDef, ...] = (
     view_type,
     buffer_type,
     pool_type,
+    group_type,
+    channel_type,
+    read_type,
+    write_type,
     storage_type,
 )
 

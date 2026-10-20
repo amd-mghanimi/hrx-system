@@ -206,6 +206,13 @@ static iree_status_t loomc_module_byte_buffer_stream_write(
   return iree_ok_status();
 }
 
+static iree_status_t loomc_module_byte_buffer_stream_flush(
+    iree_io_stream_t* base_stream) {
+  // Writes immediately update the owned byte buffer.
+  (void)base_stream;
+  return iree_ok_status();
+}
+
 static iree_status_t loomc_module_byte_buffer_stream_fill(
     iree_io_stream_t* base_stream, iree_io_stream_pos_t count,
     const void* pattern, iree_host_size_t pattern_length) {
@@ -247,6 +254,7 @@ static const iree_io_stream_vtable_t loomc_module_byte_buffer_stream_vtable = {
     .seek = loomc_module_byte_buffer_stream_seek,
     .read = loomc_module_byte_buffer_stream_read,
     .write = loomc_module_byte_buffer_stream_write,
+    .flush = loomc_module_byte_buffer_stream_flush,
     .fill = loomc_module_byte_buffer_stream_fill,
     .map_read = loomc_module_byte_buffer_stream_map_read,
     .map_write = loomc_module_byte_buffer_stream_map_write,
@@ -355,16 +363,22 @@ loomc_status_t loomc_module_deserialize_bytecode_from_source(
     const loomc_module_deserialize_options_t* options,
     loomc_allocator_t allocator, loomc_module_t** out_module,
     loomc_result_t** out_result) {
-  return loomc_module_deserialize_explicit_source(
+  IREE_TRACE_ZONE_BEGIN(z0);
+  loomc_status_t return_status = loomc_module_deserialize_explicit_source(
       context, workspace, source, options, LOOMC_SOURCE_FORMAT_BYTECODE,
       loomc_module_decode_bytecode_source, allocator, out_module, out_result);
+  IREE_TRACE_ZONE_END(z0);
+  return return_status;
 }
 
 loomc_status_t loomc_module_serialize_bytecode_to_source(
     const loomc_module_t* module,
     const loomc_module_serialize_options_t* options,
     loomc_allocator_t allocator, loomc_source_t** out_source) {
-  return loomc_module_serialize_explicit_source(
+  IREE_TRACE_ZONE_BEGIN(z0);
+  loomc_status_t return_status = loomc_module_serialize_explicit_source(
       module, options, LOOMC_SOURCE_FORMAT_BYTECODE,
       loomc_module_encode_bytecode_source, allocator, out_source);
+  IREE_TRACE_ZONE_END(z0);
+  return return_status;
 }

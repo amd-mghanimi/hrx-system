@@ -100,7 +100,9 @@ test.target<low_core> @test_target
 
 low.func.def target<test.low.core>(@test_target) abi(object_function) @structural_register_emits(%lo: reg<test.i32>, %hi: reg<test.i32>) -> (reg<test.i32>, reg<test.i32>) asm {
   %pair = concat(%lo, %hi) : (reg<test.i32>, reg<test.i32>) -> reg<test.i32 x2>
-  %result_lo = slice %pair[0] : reg<test.i32 x2> -> reg<test.i32>
-  %result_hi = slice %pair[1] : reg<test.i32 x2> -> reg<test.i32>
+  %12 = slice %pair[0] : reg<test.i32 x2> -> reg<test.i32>
+  %result_lo = move %12 : reg<test.i32> -> reg<test.i32>
+  %14 = slice %pair[1] : reg<test.i32 x2> -> reg<test.i32>
+  %result_hi = move %14 : reg<test.i32> -> reg<test.i32>
   return %result_lo, %result_hi
 }

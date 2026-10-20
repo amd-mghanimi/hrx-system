@@ -174,11 +174,11 @@ TEST(SpirvRegistersTest, StructuralIdPayloadsCoverCanonicalScalarTypes) {
 
   for (const ScalarCase& test_case : kCases) {
     const loom_register_type_data_t register_data = {
-        /*.carrier_payload0=*/SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
-        /*.carrier_payload1=*/
-        loom_low_register_type_pack_payload1(SPIRV_LOGICAL_CORE_REG_CLASS_ID_ID,
-                                             /*unit_count=*/1),
-        /*.value_type=*/loom_type_scalar(test_case.source_type),
+        .carrier_payload0 = SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
+        .carrier_payload1 = loom_low_register_type_pack_payload1(
+            SPIRV_LOGICAL_CORE_REG_CLASS_ID_ID,
+            /*unit_count=*/1),
+        .value_type = loom_type_scalar(test_case.source_type),
     };
     const loom_type_t register_type =
         loom_type_register_payload_with_value_type(&register_data);
@@ -229,11 +229,10 @@ TEST(SpirvRegistersTest,
           LOOM_TYPE_VECTOR, test_case.source_type,
           loom_dim_pack_static(lane_count), /*encoding_id=*/0);
       const loom_register_type_data_t register_data = {
-          /*.carrier_payload0=*/SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
-          /*.carrier_payload1=*/
-          loom_low_register_type_pack_payload1(
+          .carrier_payload0 = SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
+          .carrier_payload1 = loom_low_register_type_pack_payload1(
               SPIRV_LOGICAL_CORE_REG_CLASS_ID_ID, /*unit_count=*/1),
-          /*.value_type=*/source_value_type,
+          .value_type = source_value_type,
       };
       const loom_type_t register_type =
           loom_type_register_payload_with_value_type(&register_data);
@@ -279,11 +278,10 @@ TEST(SpirvRegistersTest, StructuralMappingRejectsAmbiguousRegisterTypes) {
       loom_spirv_value_type_from_low_register_type(untyped_id, &value_type));
 
   const loom_register_type_data_t typed_offset_data = {
-      /*.carrier_payload0=*/SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
-      /*.carrier_payload1=*/
-      loom_low_register_type_pack_payload1(
+      .carrier_payload0 = SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
+      .carrier_payload1 = loom_low_register_type_pack_payload1(
           SPIRV_LOGICAL_CORE_REG_CLASS_ID_OFFSET64, /*unit_count=*/1),
-      /*.value_type=*/loom_type_scalar(LOOM_SCALAR_TYPE_I64),
+      .value_type = loom_type_scalar(LOOM_SCALAR_TYPE_I64),
   };
   const loom_type_t typed_offset =
       loom_type_register_payload_with_value_type(&typed_offset_data);
@@ -295,11 +293,11 @@ TEST(SpirvRegistersTest, StructuralMappingRejectsAmbiguousRegisterTypes) {
   };
   for (loom_scalar_type_t scalar_type : kUnsupportedPayloads) {
     const loom_register_type_data_t register_data = {
-        /*.carrier_payload0=*/SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
-        /*.carrier_payload1=*/
-        loom_low_register_type_pack_payload1(SPIRV_LOGICAL_CORE_REG_CLASS_ID_ID,
-                                             /*unit_count=*/1),
-        /*.value_type=*/loom_type_scalar(scalar_type),
+        .carrier_payload0 = SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID,
+        .carrier_payload1 = loom_low_register_type_pack_payload1(
+            SPIRV_LOGICAL_CORE_REG_CLASS_ID_ID,
+            /*unit_count=*/1),
+        .value_type = loom_type_scalar(scalar_type),
     };
     const loom_type_t register_type =
         loom_type_register_payload_with_value_type(&register_data);
@@ -308,11 +306,11 @@ TEST(SpirvRegistersTest, StructuralMappingRejectsAmbiguousRegisterTypes) {
   }
 
   const loom_register_type_data_t foreign_id_data = {
-      /*.carrier_payload0=*/SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID + 1,
-      /*.carrier_payload1=*/
-      loom_low_register_type_pack_payload1(SPIRV_LOGICAL_CORE_REG_CLASS_ID_ID,
-                                           /*unit_count=*/1),
-      /*.value_type=*/loom_type_scalar(LOOM_SCALAR_TYPE_I32),
+      .carrier_payload0 = SPIRV_LOGICAL_CORE_DESCRIPTOR_SET_ID + 1,
+      .carrier_payload1 = loom_low_register_type_pack_payload1(
+          SPIRV_LOGICAL_CORE_REG_CLASS_ID_ID,
+          /*unit_count=*/1),
+      .value_type = loom_type_scalar(LOOM_SCALAR_TYPE_I32),
   };
   const loom_type_t foreign_id =
       loom_type_register_payload_with_value_type(&foreign_id_data);
@@ -338,9 +336,11 @@ TEST(SpirvRegistersTest, StorageBufferEffectsStayDescriptorLocal) {
   const loom_low_descriptor_t* load_descriptor = LookupDescriptor(
       descriptor_set, IREE_SV("spirv.op_load.storage_buffer.i32"));
   ASSERT_NE(load_descriptor, nullptr);
-  ASSERT_EQ(load_descriptor->effect_count, 1);
+  const auto* load_layout =
+      loom_low_descriptor_layout(descriptor_set, load_descriptor);
+  ASSERT_EQ(load_layout->effect_count, 1);
   const loom_low_effect_t& load_effect =
-      descriptor_set->effects[load_descriptor->effect_start];
+      descriptor_set->effects[load_layout->effect_start];
   EXPECT_EQ(load_effect.kind, LOOM_LOW_EFFECT_KIND_READ);
   EXPECT_EQ(load_effect.memory_space, LOOM_LOW_MEMORY_SPACE_GLOBAL);
   EXPECT_TRUE(
@@ -349,9 +349,11 @@ TEST(SpirvRegistersTest, StorageBufferEffectsStayDescriptorLocal) {
   const loom_low_descriptor_t* store_descriptor = LookupDescriptor(
       descriptor_set, IREE_SV("spirv.op_store.storage_buffer.i32"));
   ASSERT_NE(store_descriptor, nullptr);
-  ASSERT_EQ(store_descriptor->effect_count, 1);
+  const auto* store_layout =
+      loom_low_descriptor_layout(descriptor_set, store_descriptor);
+  ASSERT_EQ(store_layout->effect_count, 1);
   const loom_low_effect_t& store_effect =
-      descriptor_set->effects[store_descriptor->effect_start];
+      descriptor_set->effects[store_layout->effect_start];
   EXPECT_EQ(store_effect.kind, LOOM_LOW_EFFECT_KIND_WRITE);
   EXPECT_EQ(store_effect.memory_space, LOOM_LOW_MEMORY_SPACE_GLOBAL);
   EXPECT_TRUE(
@@ -370,11 +372,12 @@ TEST(SpirvRegistersTest, StorageBufferAddressArithmeticUsesBdaRegisters) {
       LookupRegisterClass(descriptor_set, IREE_SV("spirv.offset64"));
   ASSERT_NE(offset_class, nullptr);
   ASSERT_EQ(offset_add->operand_count, 3);
-  const loom_low_operand_t* operands =
-      &descriptor_set->operands[offset_add->operand_start];
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[0]), offset_class);
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[1]), offset_class);
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[2]), offset_class);
+  for (uint16_t i = 0; i < offset_add->operand_count; ++i) {
+    EXPECT_EQ(OperandRegisterClass(
+                  descriptor_set,
+                  *loom_low_descriptor_operand(descriptor_set, offset_add, i)),
+              offset_class);
+  }
 
   const loom_low_descriptor_t* ptr_access_chain = LookupDescriptor(
       descriptor_set,
@@ -384,14 +387,24 @@ TEST(SpirvRegistersTest, StorageBufferAddressArithmeticUsesBdaRegisters) {
       LookupRegisterClass(descriptor_set, IREE_SV("spirv.ptr.storage_buffer"));
   ASSERT_NE(storage_buffer_ptr_class, nullptr);
   ASSERT_EQ(ptr_access_chain->operand_count, 3);
-  operands = &descriptor_set->operands[ptr_access_chain->operand_start];
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[0]),
+  EXPECT_EQ(OperandRegisterClass(descriptor_set,
+                                 *loom_low_descriptor_operand(
+                                     descriptor_set, ptr_access_chain, 0)),
             storage_buffer_ptr_class);
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[1]),
+  EXPECT_EQ(OperandRegisterClass(descriptor_set,
+                                 *loom_low_descriptor_operand(
+                                     descriptor_set, ptr_access_chain, 1)),
             storage_buffer_ptr_class);
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[2]), offset_class);
-  EXPECT_EQ(operands[1].role, LOOM_LOW_OPERAND_ROLE_RESOURCE);
-  EXPECT_EQ(operands[2].role, LOOM_LOW_OPERAND_ROLE_OPERAND);
+  EXPECT_EQ(OperandRegisterClass(descriptor_set,
+                                 *loom_low_descriptor_operand(
+                                     descriptor_set, ptr_access_chain, 2)),
+            offset_class);
+  EXPECT_EQ(
+      loom_low_descriptor_operand(descriptor_set, ptr_access_chain, 1)->role,
+      LOOM_LOW_OPERAND_ROLE_RESOURCE);
+  EXPECT_EQ(
+      loom_low_descriptor_operand(descriptor_set, ptr_access_chain, 2)->role,
+      LOOM_LOW_OPERAND_ROLE_OPERAND);
 }
 
 TEST(SpirvRegistersTest, WorkgroupAccessChainUsesTypedArrayBase) {
@@ -414,15 +427,22 @@ TEST(SpirvRegistersTest, WorkgroupAccessChainUsesTypedArrayBase) {
   ASSERT_NE(id_class, nullptr);
 
   ASSERT_EQ(access_chain->operand_count, 3);
-  const loom_low_operand_t* operands =
-      &descriptor_set->operands[access_chain->operand_start];
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[0]),
+  EXPECT_EQ(OperandRegisterClass(
+                descriptor_set,
+                *loom_low_descriptor_operand(descriptor_set, access_chain, 0)),
             workgroup_scalar_class);
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[1]),
+  EXPECT_EQ(OperandRegisterClass(
+                descriptor_set,
+                *loom_low_descriptor_operand(descriptor_set, access_chain, 1)),
             workgroup_array_class);
-  EXPECT_EQ(OperandRegisterClass(descriptor_set, operands[2]), id_class);
-  EXPECT_EQ(operands[1].role, LOOM_LOW_OPERAND_ROLE_RESOURCE);
-  EXPECT_EQ(operands[2].role, LOOM_LOW_OPERAND_ROLE_OPERAND);
+  EXPECT_EQ(OperandRegisterClass(
+                descriptor_set,
+                *loom_low_descriptor_operand(descriptor_set, access_chain, 2)),
+            id_class);
+  EXPECT_EQ(loom_low_descriptor_operand(descriptor_set, access_chain, 1)->role,
+            LOOM_LOW_OPERAND_ROLE_RESOURCE);
+  EXPECT_EQ(loom_low_descriptor_operand(descriptor_set, access_chain, 2)->role,
+            LOOM_LOW_OPERAND_ROLE_OPERAND);
 }
 
 }  // namespace

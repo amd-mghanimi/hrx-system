@@ -1,0 +1,66 @@
+// Compare-exchange must distinguish expected from replacement, preserve memory
+// on failure, and return the original value in both cases.
+kernel.def @workgroup_atomic_cmpxchg() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%initial_bits: i64, %replacement_bits: i64, %other_bits: i64, %output: buffer) {
+  %base = index.constant 0 : offset
+  %bytes = index.constant 4 : offset
+  %initial = scalar.trunci %initial_bits : i64 to i32
+  %replacement = scalar.trunci %replacement_bits : i64 to i32
+  %other = scalar.trunci %other_bits : i64 to i32
+  %scratch = buffer.alloca<workgroup> align(4) %bytes : buffer
+  %cell = buffer.view %scratch[%base] : buffer -> view<1xi32>
+  %global = buffer.assume.memory_space<global> %output : buffer
+  %results = buffer.view %global[%base] : buffer -> view<4xi32>
+  view.store %initial, %cell[0] : i32, view<1xi32>
+  %success_old = view.atomic.cmpxchg %initial, %replacement, %cell[0] {failure_ordering = relaxed, scope = workgroup, success_ordering = relaxed} : i32, view<1xi32> -> i32
+  %success_value = view.load %cell[0] : view<1xi32> -> i32
+  %failure_old = view.atomic.cmpxchg %initial, %other, %cell[0] {failure_ordering = relaxed, scope = workgroup, success_ordering = relaxed} : i32, view<1xi32> -> i32
+  %failure_value = view.load %cell[0] : view<1xi32> -> i32
+  view.store %success_old, %results[0] : i32, view<4xi32>
+  view.store %success_value, %results[1] : i32, view<4xi32>
+  view.store %failure_old, %results[2] : i32, view<4xi32>
+  view.store %failure_value, %results[3] : i32, view<4xi32>
+  kernel.return
+}
+
+func.def @workgroup_atomic_cmpxchg_oracle(%initial_bits: i64, %replacement_bits: i64, %other_bits: i64, %output: buffer) {
+  %base = index.constant 0 : offset
+  %initial = scalar.trunci %initial_bits : i64 to i32
+  %replacement = scalar.trunci %replacement_bits : i64 to i32
+  %other = scalar.trunci %other_bits : i64 to i32
+  %results = buffer.view %output[%base] : buffer -> view<4xi32>
+  %second_succeeds = scalar.cmpi eq, %replacement, %initial : i32
+  %final = scf.select %second_succeeds, %other, %replacement : i32
+  view.store %initial, %results[0] : i32, view<4xi32>
+  view.store %replacement, %results[1] : i32, view<4xi32>
+  view.store %replacement, %results[2] : i32, view<4xi32>
+  view.store %final, %results[3] : i32, view<4xi32>
+  func.return
+}
+
+check.scenario @workgroup_atomic_cmpxchg_values {
+  check.trial[32](%trial: index, %entropy: check.entropy) {
+    %initial_entropy = check.entropy.fork %entropy name("initial") : check.entropy
+    %replacement_entropy = check.entropy.fork %entropy name("replacement") : check.entropy
+    %other_entropy = check.entropy.fork %entropy name("other") : check.entropy
+    %initial_bits = check.entropy.read %initial_entropy[%trial] : check.entropy -> i64
+    %replacement_bits = check.entropy.read %replacement_entropy[%trial] : check.entropy -> i64
+    %other_bits = check.entropy.read %other_entropy[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<4xi32>
+    check.compare<@workgroup_atomic_cmpxchg, @workgroup_atomic_cmpxchg_oracle>(%initial_bits, %replacement_bits, %other_bits, %output) : (i64, i64, i64, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %initial = check.literal value(7) : i64
+    %replacement = check.literal value(7) : i64
+    %other = check.literal value(11) : i64
+    %output = check.generate.fill value(0) : tensor<4xi32>
+    check.compare<@workgroup_atomic_cmpxchg, @workgroup_atomic_cmpxchg_oracle>(%initial, %replacement, %other, %output) : (i64, i64, i64, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.return
+}

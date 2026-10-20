@@ -6,9 +6,9 @@
 // that loads from the view cannot produce NaN or infinity payloads.
 config.decl @finite_storage_decode.row_capacity : %value: index where [range(%value, 1, 4294967295)]
 
-config.decl @finite_storage_decode.input_capacity : %value: index where [range(%value, 16, 65536), mul(%value, 16)]
+config.decl @finite_storage_decode.input_capacity : %value: index where [range(%value, 16, 65536), multiple_of(%value, 16)]
 
-config.decl @finite_storage_decode.output_capacity : %value: index where [range(%value, 16, 16384), mul(%value, 16)]
+config.decl @finite_storage_decode.output_capacity : %value: index where [range(%value, 16, 16384), multiple_of(%value, 16)]
 
 kernel.def @fp8_finite_storage_decode(%row_count: index) {
   %unit = index.constant 1 : index
@@ -293,8 +293,8 @@ kernel.def @fp8_finite_storage_compact_rhs_tile_zero_scale_bf16(%output_size: in
   %weight_storage = encoding.define #encoding.storage {layout = %dense : encoding<layout>, schema = %weight_schema : encoding<schema>} : encoding<storage>
   %input_capacity = config.get @finite_storage_decode.input_capacity : index
   %output_capacity = config.get @finite_storage_decode.output_capacity : index
-  %bounded_input_size = index.assume %input_size [range(%input_size, 16, 65536), mul(%input_size, 16), le(%input_size, %input_capacity)] : index
-  %bounded_output_size = index.assume %output_size [range(%output_size, 16, 16384), mul(%output_size, 16), le(%output_size, %output_capacity)] : index
+  %bounded_input_size = index.assume %input_size [range(%input_size, 16, 65536), multiple_of(%input_size, 16), le(%input_size, %input_capacity)] : index
+  %bounded_output_size = index.assume %output_size [range(%output_size, 16, 16384), multiple_of(%output_size, 16), le(%output_size, %output_capacity)] : index
   %input_tile_count = index.div %bounded_input_size, %tile_extent : index
   %output_tile_count = index.div %bounded_output_size, %tile_extent : index
   %weight_view = buffer.view %weight_noalias[%base] : buffer -> view<[%bounded_output_size]x[%input_tile_count]x16xf8E4M3, %weight_storage>

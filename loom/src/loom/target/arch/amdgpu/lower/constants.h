@@ -127,25 +127,16 @@ iree_status_t loom_amdgpu_resolve_imm32_descriptor(
     loom_low_lower_resolved_descriptor_t* out_descriptor,
     loom_string_id_t* out_imm32_attr_name_id, bool* out_present);
 
-// Selects an AMDGPU constant materialization plan for index.constant.
-iree_status_t loom_amdgpu_select_index_constant_plan(
-    loom_low_lower_context_t* context, const loom_op_t* source_op,
-    loom_amdgpu_constant_plan_t* out_plan, bool* out_selected);
-
-// Selects an AMDGPU constant materialization plan for scalar.constant.
-iree_status_t loom_amdgpu_select_scalar_constant_plan(
-    loom_low_lower_context_t* context, const loom_op_t* source_op,
-    loom_amdgpu_constant_plan_t* out_plan, bool* out_selected);
-
-// Selects an AMDGPU constant materialization plan for vector.constant.
-iree_status_t loom_amdgpu_select_vector_constant_plan(
+// Selects constant bits, descriptors, and the result carrier for index,
+// scalar, and vector constants while source facts are available.
+iree_status_t loom_amdgpu_select_constant_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_amdgpu_constant_plan_t* out_plan, bool* out_selected);
 
 // Emits and binds an ordered range of descriptor-backed u32 constants.
 iree_status_t loom_amdgpu_bind_register_u32_lane_constants(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
-    loom_value_id_t source_result,
+    loom_value_id_t source_result, loom_type_t result_type,
     const loom_low_lower_resolved_descriptor_t* descriptor,
     loom_string_id_t imm32_attr_name_id, const uint32_t* lane_bit_patterns,
     uint32_t lane_count);

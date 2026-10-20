@@ -2,7 +2,7 @@
 
 amdgpu.target<gfx11-generic> @target
 
-config.decl @runtime.column_count : %value: index where [range(%value, 4, 64), mul(%value, 4)]
+config.decl @runtime.column_count : %value: index where [range(%value, 4, 64), multiple_of(%value, 4)]
 
 kernel.def target(@target) @config_decl_facts_bound_dynamic_view() {
   %unit = index.constant 1 : index
@@ -34,7 +34,7 @@ low.kernel.def target<amdgpu.gfx11.generic.core>(@target) abi_layout({constant_c
 
 amdgpu.target<gfx11-generic> @target
 
-config.decl @runtime.column_count : %value: index where [range(%value, 3072, 8192), mul(%value, 4)]
+config.decl @runtime.column_count : %value: index where [range(%value, 3072, 8192), multiple_of(%value, 4)]
 
 kernel.def target(@target) @config_decl_matvec_block_lane_vec4_dynamic_view() {
   %unit = index.constant 1 : index
@@ -71,22 +71,21 @@ low.kernel.def target<amdgpu.gfx11.generic.core>(@target) abi_layout({constant_c
   %block_begin = s_mov_b32 0
   %block_end = s_mov_b32 12
   %block_step = s_mov_b32 4
+  %lane_group = v_lshrrev_b32_src0_inline %lane, 4
+  %39 = s_mov_b32 15
+  %lane_offset = v_and_b32 %39, %lane
   low.br ^_bb1(%block_begin: reg<amdgpu.sgpr>)
 ^_bb1(%block_base: reg<amdgpu.sgpr>):
-  %38 = s_cmp_lt_i32 %block_base, %block_end
-  low.cond_br %38, ^_bb2, ^_bb3 : reg<amdgpu.scc>
+  %41 = s_cmp_lt_i32 %block_base, %block_end
+  low.cond_br %41, ^_bb2, ^_bb3 : reg<amdgpu.scc>
 ^_bb2:
-  %lane_group = v_lshrrev_b32_src0_inline %lane, 4
-  %40 = s_mov_b32 15
-  %lane_offset = v_and_b32 %40, %lane
-  %42 = v_mov_b32_copy %block_base
-  %43 = v_add_u32 %lane_group, %42
-  %44 = v_mad_u32_u24_src1_lit %43, %lane_offset, 105
-  %45 = v_lshlrev_b32_src0_inline %44, 2
-  %loaded = global_load_b128_saddr %45, %input_view
-  global_store_b128_saddr %45, %loaded, %output_view
-  %51 = s_add_u32 %block_base, %block_step
-  low.br ^_bb1(%51: reg<amdgpu.sgpr>)
+  %block = v_add_u32 %block_base, %lane_group
+  %origin = v_mad_u32_u24_src1_lit %block, %lane_offset, 105
+  %44 = v_lshlrev_b32_src0_inline %origin, 2
+  %loaded = global_load_b128_saddr %44, %input_view
+  global_store_b128_saddr %44, %loaded, %output_view
+  %47 = s_add_u32 %block_base, %block_step
+  low.br ^_bb1(%47: reg<amdgpu.sgpr>)
 ^_bb3:
   return
 }
@@ -153,7 +152,7 @@ kernel.def target(@target) @config_decl_missing_bounds_for_matvec_vec4_dynamic_v
 
 amdgpu.target<gfx11-generic> @target
 
-config.decl @runtime.scalar_count : %value: index where [range(%value, 4, 64), mul(%value, 4)]
+config.decl @runtime.scalar_count : %value: index where [range(%value, 4, 64), multiple_of(%value, 4)]
 
 kernel.def target(@target) @config_decl_runtime_use_stays_illegal() {
   %unit = index.constant 1 : index

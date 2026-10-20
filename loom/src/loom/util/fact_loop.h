@@ -11,6 +11,7 @@
 #ifndef LOOM_UTIL_FACT_LOOP_H_
 #define LOOM_UTIL_FACT_LOOP_H_
 
+#include "loom/analysis/loop_domain.h"
 #include "loom/util/fact_table.h"
 
 #ifdef __cplusplus
@@ -21,6 +22,18 @@ extern "C" {
 iree_status_t loom_value_fact_table_seed_loop_iv_arg(
     loom_value_fact_table_t* table, const loom_module_t* module,
     const loom_block_t* block, loom_op_t* parent_op);
+
+// Retains the current counted domain in the body's fact-scope lifetime.
+// Reseeding an induction argument replaces the previous domain identities.
+iree_status_t loom_value_fact_table_set_counted_loop_domain(
+    loom_value_fact_table_t* table, const loom_region_t* body,
+    loom_value_id_t induction_value, loom_loop_domain_t domain);
+
+// Returns the retained domain when value is its body's counted induction
+// argument. Lookup follows the defining block directly, without a scope walk.
+const loom_loop_domain_t* loom_value_fact_table_lookup_counted_loop_domain(
+    const loom_value_fact_table_t* table, const loom_module_t* module,
+    loom_value_id_t value);
 
 // Computes the complete LoopLike summary, including nested region facts.
 // Reports result changes to the caller-maintained rewrite worklist.

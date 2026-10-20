@@ -12,15 +12,19 @@
 #include "iree/base/internal/json.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
-#include "loom/error/error_defs.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
-#include "loom/target/low_descriptor_registry_core_test.h"
 #include "loom/target/provider.h"
-#include "loom/target/test/lower.h"
+#include "loom/target/test/provider.h"
 #include "loom/testing/context.h"
 #include "loom/testing/test_file.h"
+#include "loom/tools/loom-check/compile.h"
 #include "loom/tools/loom-check/diagnostics.h"
+#include "loom/tools/loom-check/source_low.h"
 #include "loom/transforms/cleanup/configured.h"
+#include "loomc/interop.h"
+#include "loomc/iree.h"
+#include "loomc/source.h"
 
 namespace loom {
 namespace {
@@ -56,42 +60,8 @@ iree_status_t RegisterTestContext(void* user_data, loom_context_t* context) {
   return loom_testing_context_register_all_dialects(context);
 }
 
-iree_status_t InitializeTestLowDescriptorRegistry(
-    void* user_data, loom_target_low_descriptor_registry_t* out_registry) {
-  (void)user_data;
-  loom_target_core_test_low_descriptor_registry_initialize(out_registry);
-  return iree_ok_status();
-}
-
-iree_status_t InitializeTestLowLowerPolicyRegistry(
-    void* user_data, loom_low_lower_policy_registry_t* out_registry) {
-  (void)user_data;
-  loom_test_low_lower_policy_registry_initialize(out_registry);
-  return iree_ok_status();
-}
-
-void InitializeTestLowDescriptorRegistryForProvider(
-    loom_target_low_descriptor_registry_t* out_registry) {
-  loom_target_core_test_low_descriptor_registry_initialize(out_registry);
-}
-
-void InitializeTestLowLowerPolicyRegistryForProvider(
-    loom_low_lower_policy_registry_t* out_registry) {
-  loom_test_low_lower_policy_registry_initialize(out_registry);
-}
-
-const loom_target_provider_t kTestTargetProvider = {
-    /*.profile_type=*/{},
-    /*.materialize_definition=*/{},
-    /*.register_context=*/{},
-    /*.initialize_low_descriptor_registry=*/
-    InitializeTestLowDescriptorRegistryForProvider,
-    /*.initialize_low_lower_policy_registry=*/
-    InitializeTestLowLowerPolicyRegistryForProvider,
-};
-
 const loom_target_provider_t* const kTestTargetProviders[] = {
-    &kTestTargetProvider,
+    &loom_test_target_provider,
 };
 
 bool TestRequirementProviderMatches(
@@ -125,10 +95,10 @@ iree_status_t TestRequirementProviderAppendNames(
 }
 
 const loom_check_requirement_provider_t kTestRequirementProvider = {
-    /*.name=*/IREE_SVL("test"),
-    /*.match=*/TestRequirementProviderMatches,
-    /*.query=*/TestRequirementProviderQuery,
-    /*.append_names=*/TestRequirementProviderAppendNames,
+    .name = IREE_SVL("test"),
+    .match = TestRequirementProviderMatches,
+    .query = TestRequirementProviderQuery,
+    .append_names = TestRequirementProviderAppendNames,
 };
 
 const loom_check_requirement_provider_t* const kTestRequirementProviders[] = {
@@ -145,22 +115,38 @@ iree_status_t TestEmitProviderExecute(
     const loom_check_emit_provider_t* provider,
     const loom_check_emit_provider_request_t* request) {
   (void)provider;
-  if (iree_string_view_equal(request->target_options,
-                             IREE_SV("status-after-diagnostic"))) {
+  const bool status_after_diagnostic = iree_string_view_equal(
+      request->target_options, IREE_SV("status-after-diagnostic"));
+  if (status_after_diagnostic ||
+      iree_string_view_equal(request->target_options, IREE_SV("remark")) ||
+      iree_string_view_equal(request->target_options,
+                             IREE_SV("empty-remark")) ||
+      iree_string_view_equal(request->target_options, IREE_SV("error"))) {
     loom_diagnostic_param_t params[] = {
         loom_param_string(IREE_SV("fake.emit")),
     };
     loom_diagnostic_t diagnostic = {
-        /*.severity=*/LOOM_DIAGNOSTIC_ERROR,
-        /*.error=*/loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 6),
-        /*.params=*/params,
-        /*.param_count=*/IREE_ARRAYSIZE(params),
-        /*.emitter=*/LOOM_EMITTER_PASS,
+        .severity = status_after_diagnostic ||
+                            iree_string_view_equal(request->target_options,
+                                                   IREE_SV("error"))
+                        ? LOOM_DIAGNOSTIC_ERROR
+                        : LOOM_DIAGNOSTIC_REMARK,
+        .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 6),
+        .params = params,
+        .param_count = IREE_ARRAYSIZE(params),
+        .emitter = LOOM_EMITTER_PASS,
     };
+    diagnostic.origin.filename = request->filename;
+    diagnostic.origin.start_line = 1;
     IREE_RETURN_IF_ERROR(loom_check_diagnostic_collector_sink(
         request->diagnostic_collector, &diagnostic));
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "synthetic provider status");
+    if (status_after_diagnostic) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "synthetic provider status");
+    }
+    if (!iree_string_view_equal(request->target_options, IREE_SV("remark"))) {
+      return iree_ok_status();
+    }
   }
   return iree_string_builder_append_cstring(&request->result->actual_output,
                                             "fake emit\n");
@@ -174,72 +160,165 @@ iree_status_t TestEmitProviderAppendNames(
 }
 
 const loom_check_emit_provider_t kTestEmitProvider = {
-    /*.name=*/IREE_SVL("test"),
-    /*.match=*/TestEmitProviderMatches,
-    /*.check_requirements=*/nullptr,
-    /*.execute=*/TestEmitProviderExecute,
-    /*.append_names=*/TestEmitProviderAppendNames,
+    .name = IREE_SVL("test"),
+    .flags = 0,
+    .match = TestEmitProviderMatches,
+    .check_requirements = nullptr,
+    .execute = TestEmitProviderExecute,
+    .execute_native = nullptr,
+    .append_names = TestEmitProviderAppendNames,
+};
+
+bool TestNativeEmitProviderMatches(const loom_check_emit_provider_t* provider,
+                                   iree_string_view_t target_name) {
+  (void)provider;
+  return iree_string_view_equal(target_name, IREE_SV("fake-native-emit"));
+}
+
+iree_status_t TestNativeEmitProviderExecute(
+    const loom_check_emit_provider_t* provider,
+    const loom_check_emit_provider_request_t* request,
+    const loom_check_emit_native_module_t* native_module) {
+  (void)provider;
+  if (native_module->module == nullptr) {
+    return iree_make_status(IREE_STATUS_INTERNAL,
+                            "native provider received no module");
+  }
+  return iree_string_builder_append_cstring(&request->result->actual_output,
+                                            "fake native emit\n");
+}
+
+iree_status_t TestNativeEmitProviderAppendNames(
+    const loom_check_emit_provider_t* provider,
+    iree_string_builder_t* builder) {
+  (void)provider;
+  return iree_string_builder_append_cstring(builder, "fake-native-emit");
+}
+
+const loom_check_emit_provider_t kTestNativeEmitProvider = {
+    .name = IREE_SVL("native test"),
+    .flags = 0,
+    .match = TestNativeEmitProviderMatches,
+    .check_requirements = nullptr,
+    .execute = nullptr,
+    .execute_native = TestNativeEmitProviderExecute,
+    .append_names = TestNativeEmitProviderAppendNames,
 };
 
 const loom_check_emit_provider_t* const kTestEmitProviders[] = {
+    &loom_check_source_low_emit_provider,
     &kTestEmitProvider,
+    &kTestNativeEmitProvider,
 };
 
+iree_status_t TestForeignInputNativeLoad(const loom_input_request_t* request,
+                                         loom_input_source_capture_t capture,
+                                         loom_context_t* context,
+                                         iree_arena_block_pool_t* block_pool,
+                                         iree_allocator_t host_allocator,
+                                         loom_module_t** out_module) {
+  (void)request;
+  (void)capture;
+  (void)context;
+  (void)block_pool;
+  (void)host_allocator;
+  *out_module = nullptr;
+  return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                          "foreign input bypassed public admission");
+}
+
+const loom_input_format_t kTestForeignInputFormat = {
+    .name = IREE_SVL("test-foreign"),
+    .suffixes = {},
+};
+
+const loom_input_provider_t kTestForeignInputProvider = {
+    .format = &kTestForeignInputFormat,
+    .load = TestForeignInputNativeLoad,
+};
+
+const loom_input_provider_t* const kTestForeignInputProviders[] = {
+    &kTestForeignInputProvider,
+};
+
+struct TestForeignImportState {
+  iree_host_size_t import_count = 0;
+};
+
+iree_status_t TestForeignInputImport(
+    void* user_data, iree_string_view_t format,
+    iree_string_view_t input_options,
+    const loom_tooling_source_path_options_t* source_path_options,
+    loomc_context_t* context, loomc_workspace_t* workspace,
+    const loomc_source_t* source, iree_arena_block_pool_t* block_pool,
+    iree_allocator_t host_allocator, loomc_module_t** out_module,
+    loomc_result_t** out_result) {
+  (void)source_path_options;
+  (void)block_pool;
+  TestForeignImportState* state =
+      static_cast<TestForeignImportState*>(user_data);
+  ++state->import_count;
+  if (!iree_string_view_equal(format, kTestForeignInputFormat.name) ||
+      !iree_string_view_is_empty(input_options)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "unexpected foreign input request");
+  }
+
+  const loomc_source_options_t text_options = {
+      .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+      .structure_size = sizeof(text_options),
+      .next = nullptr,
+      .format = LOOMC_SOURCE_FORMAT_TEXT,
+      .identifier = loomc_source_identifier(source),
+      .contents = loomc_source_contents(source),
+      .storage = LOOMC_SOURCE_STORAGE_BORROWED,
+  };
+  loomc_source_t* text_source = nullptr;
+  iree_status_t status = iree_status_from_loomc(loomc_source_create(
+      &text_options, loomc_allocator_from_iree(host_allocator), &text_source));
+  if (iree_status_is_ok(status)) {
+    status = iree_status_from_loomc(loomc_module_deserialize_from_source(
+        context, workspace, text_source, /*options=*/nullptr,
+        loomc_allocator_from_iree(host_allocator), out_module, out_result));
+  }
+  loomc_source_release(text_source);
+  return status;
+}
+
 const loom_check_environment_t kExecuteTestEnvironment = {
-    /*.input_providers=*/{},
-    /*.register_context=*/
-    {
-        /*.fn=*/RegisterTestContext,
-        /*.user_data=*/nullptr,
-    },
-    /*.target_environment=*/{},
-    /*.cleanup_pattern_provider_set=*/
-    loom_cleanup_configured_pattern_provider_set(),
-    /*.initialize_low_descriptor_registry=*/
-    {
-        /*.fn=*/InitializeTestLowDescriptorRegistry,
-        /*.user_data=*/nullptr,
-    },
-    /*.initialize_low_lower_policy_registry=*/
-    {
-        /*.fn=*/InitializeTestLowLowerPolicyRegistry,
-        /*.user_data=*/nullptr,
-    },
+    .input_providers = {},
+    .register_context =
+        {
+            .fn = RegisterTestContext,
+            .user_data = nullptr,
+        },
+    .target_environment = {},
+    .compile_session = nullptr,
+    .cleanup_pattern_provider_set =
+        loom_cleanup_configured_pattern_provider_set(),
 };
 
 const loom_check_environment_t kExecuteTestProviderEnvironment = {
-    /*.input_providers=*/{},
-    /*.register_context=*/
-    {
-        /*.fn=*/RegisterTestContext,
-        /*.user_data=*/nullptr,
-    },
-    /*.target_environment=*/{},
-    /*.cleanup_pattern_provider_set=*/
-    loom_cleanup_configured_pattern_provider_set(),
-    /*.initialize_low_descriptor_registry=*/
-    {
-        /*.fn=*/InitializeTestLowDescriptorRegistry,
-        /*.user_data=*/nullptr,
-    },
-    /*.initialize_low_lower_policy_registry=*/{},
-    /*.initialize_math_policy_registry=*/{},
-    /*.pass_registry=*/{},
-    /*.low_legality_provider_list=*/{},
-    /*.legalizer_provider_list=*/{},
-    /*.low_packet_diagnostic_provider_list=*/{},
-    /*.low_asm_diagnostic_provider_list=*/{},
-    /*.low_verify_provider_list=*/{},
-    /*.emit_providers=*/
-    {
-        /*.providers=*/kTestEmitProviders,
-        /*.provider_count=*/IREE_ARRAYSIZE(kTestEmitProviders),
-    },
-    /*.requirement_providers=*/
-    {
-        /*.providers=*/kTestRequirementProviders,
-        /*.provider_count=*/IREE_ARRAYSIZE(kTestRequirementProviders),
-    },
+    .input_providers = {},
+    .register_context =
+        {
+            .fn = RegisterTestContext,
+            .user_data = nullptr,
+        },
+    .target_environment = {},
+    .compile_session = nullptr,
+    .cleanup_pattern_provider_set =
+        loom_cleanup_configured_pattern_provider_set(),
+    .emit_providers =
+        {
+            .providers = kTestEmitProviders,
+            .provider_count = IREE_ARRAYSIZE(kTestEmitProviders),
+        },
+    .requirement_providers =
+        {
+            .providers = kTestRequirementProviders,
+            .provider_count = IREE_ARRAYSIZE(kTestRequirementProviders),
+        },
 };
 
 class ExecuteTest : public ::testing::Test {
@@ -249,12 +328,28 @@ class ExecuteTest : public ::testing::Test {
                                      &block_pool_);
     target_provider_set_ = loom_target_provider_set_make(
         kTestTargetProviders, IREE_ARRAYSIZE(kTestTargetProviders));
-    IREE_ASSERT_OK(loom_target_environment_initialize(&target_provider_set_,
-                                                      &target_environment_));
+    loomc_target_environment_t* public_target_environment = nullptr;
+    IREE_ASSERT_OK(iree_status_from_loomc(
+        loomc_target_environment_create_from_provider_set(
+            &target_provider_set_, loomc_allocator_system(),
+            &public_target_environment)));
+    target_environment_ =
+        loomc_target_environment_get_interop_view(public_target_environment);
     execute_environment_ = kExecuteTestEnvironment;
-    execute_environment_.target_environment = &target_environment_;
+    execute_environment_.target_environment = target_environment_;
+    compile_session_ = {
+        .provider = nullptr,
+        .host_allocator = iree_allocator_system(),
+        .target_environment = public_target_environment,
+    };
+    execute_environment_.compile_session = &compile_session_;
+    execute_environment_.emit_providers = {
+        .providers = kTestEmitProviders,
+        .provider_count = IREE_ARRAYSIZE(kTestEmitProviders),
+    };
     provider_environment_ = kExecuteTestProviderEnvironment;
-    provider_environment_.target_environment = &target_environment_;
+    provider_environment_.target_environment = target_environment_;
+    provider_environment_.compile_session = &compile_session_;
     loom_context_initialize(iree_allocator_system(), &context_);
     IREE_ASSERT_OK(loom_check_context_register_and_finalize(
         &execute_environment_, &context_));
@@ -262,7 +357,7 @@ class ExecuteTest : public ::testing::Test {
 
   void TearDown() override {
     loom_context_deinitialize(&context_);
-    loom_target_environment_deinitialize(&target_environment_);
+    loom_check_compile_session_deinitialize(&compile_session_);
     iree_arena_block_pool_deinitialize(&block_pool_);
   }
 
@@ -296,8 +391,7 @@ class ExecuteTest : public ::testing::Test {
     if (iree_status_is_ok(status)) {
       loom_check_result_initialize(iree_allocator_system(), out_result);
       result_initialized = true;
-      loom_input_request_t input_request = {};
-      input_request.path = IREE_SV("test.loom-test");
+      loom_input_request_t input_request = {.path = IREE_SV("test.loom-test")};
       status = loom_check_execute_case(
           &file.cases[0], 0, &report, iree_make_cstring_view("test.loom-test"),
           &input_request, environment, &context_, &block_pool_,
@@ -354,7 +448,8 @@ class ExecuteTest : public ::testing::Test {
   iree_arena_block_pool_t block_pool_;
   loom_context_t context_;
   loom_target_provider_set_t target_provider_set_;
-  loom_target_environment_t target_environment_;
+  const loom_target_environment_t* target_environment_;
+  loom_check_compile_session_t compile_session_;
   loom_check_environment_t execute_environment_;
   loom_check_environment_t provider_environment_;
 };
@@ -487,8 +582,8 @@ TEST_F(ExecuteTest, PrintedIRMustParseBeforeUpdating) {
   loom_check_result_t result;
   loom_check_result_initialize(iree_allocator_system(), &result);
   const loom_text_print_options_t options = {
-      /*.flags=*/LOOM_TEXT_PRINT_DEFAULT,
-      /*.low_asm_environment=*/{},
+      .flags = LOOM_TEXT_PRINT_DEFAULT,
+      .low_asm_environment = {},
   };
   bool valid = true;
   IREE_ASSERT_OK(loom_check_validate_printed_ir(IREE_SV("%undefined\n"),
@@ -506,8 +601,8 @@ TEST_F(ExecuteTest, PrintedIRMustBeStableBeforeUpdating) {
   loom_check_result_t result;
   loom_check_result_initialize(iree_allocator_system(), &result);
   const loom_text_print_options_t options = {
-      /*.flags=*/LOOM_TEXT_PRINT_DEFAULT,
-      /*.low_asm_environment=*/{},
+      .flags = LOOM_TEXT_PRINT_DEFAULT,
+      .low_asm_environment = {},
   };
   bool valid = true;
   IREE_ASSERT_OK(loom_check_validate_printed_ir(IREE_SV("func.def @f() {}"),
@@ -670,18 +765,20 @@ TEST_F(ExecuteTest, HeaderDiagnosticCannotMatchOrEditTheMainSource) {
   IREE_ASSERT_OK(loom_check_file_report_initialize(&file, &arena, &report));
   loom_check_result_t result;
   loom_check_result_initialize(iree_allocator_system(), &result);
-  loom_check_diagnostic_collector_t collector = {};
-  collector.arena = &arena;
-  collector.host_allocator = iree_allocator_system();
-  collector.filename = IREE_SV("test.loom-test");
-  collector.result = &result;
+  loom_check_diagnostic_collector_t collector = {
+      .arena = &arena,
+      .host_allocator = iree_allocator_system(),
+      .filename = IREE_SV("test.loom-test"),
+      .result = &result,
+  };
   loom_diagnostic_param_t parameter =
       loom_param_string(IREE_SV("invalid input"));
-  loom_diagnostic_t diagnostic = {};
-  diagnostic.severity = LOOM_DIAGNOSTIC_ERROR;
-  diagnostic.error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 36);
-  diagnostic.params = &parameter;
-  diagnostic.param_count = 1;
+  loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = loom_error_def_lookup(LOOM_ERROR_DOMAIN_PARSE, 36),
+      .params = &parameter,
+      .param_count = 1,
+  };
   diagnostic.origin.filename = IREE_SV("included.h");
   diagnostic.origin.start_line = 2;
   IREE_ASSERT_OK(loom_check_diagnostic_collector_sink(&collector, &diagnostic));
@@ -1118,36 +1215,38 @@ TEST_F(ExecuteTest, PassModeIgnoresStandaloneFixtureComments) {
   loom_check_result_deinitialize(&result);
 }
 
-TEST_F(ExecuteTest, PassModeVerifiesTransformedModule) {
-  loom_check_result_t result;
-  IREE_ASSERT_OK(
-      ExecuteFirst("// RUN: pass dce\n"
-                   "func.def @f(%a: f32, %b: f32) -> (f32) {\n"
-                   "  %r = test.addi %a, %b : f32\n"
-                   "  func.return %r : f32\n"
-                   "}\n"
-                   "// ----\n"
-                   "func.def @f(%a: f32, %b: f32) -> (f32) {\n"
-                   "  %r = test.addi %a, %b : f32\n"
-                   "  func.return %r : f32\n"
-                   "}\n",
-                   &result));
-  EXPECT_EQ(result.final_outcome, LOOM_CHECK_FAIL);
-  EXPECT_GT(result.diagnostics.count, 0u);
-  EXPECT_NE(DiagnosticJsonString(result).find("\"emitter\":\"verifier\""),
-            std::string::npos);
-  EXPECT_NE(DetailString(result).find("TYPE/"), std::string::npos);
-  loom_check_result_deinitialize(&result);
+TEST_F(ExecuteTest, PassModesRejectInvalidInputBeforeDeadCodeElimination) {
+  for (const char* mode : {"pass", "pass-report", "compile-report"}) {
+    SCOPED_TRACE(mode);
+    std::string source = std::string("// RUN: ") + mode +
+                         " dce\n"
+                         "func.def @f(%a: f32, %b: f32) -> (f32) {\n"
+                         "  %dead = test.addi %a, %b : f32\n"
+                         "  func.return %a : f32\n"
+                         "}\n";
+    loom_check_result_t result;
+    IREE_ASSERT_OK(ExecuteFirst(source.c_str(), &result));
+    EXPECT_EQ(result.final_outcome, LOOM_CHECK_FAIL);
+    EXPECT_EQ(result.diagnostics.count, 3u);
+    EXPECT_NE(DiagnosticJsonString(result).find("\"emitter\":\"verifier\""),
+              std::string::npos);
+    EXPECT_NE(DetailString(result).find("TYPE/003"), std::string::npos);
+    EXPECT_NE(DetailString(result).find("TYPE/004"), std::string::npos);
+    EXPECT_FALSE(result.has_actual_output);
+    loom_check_result_deinitialize(&result);
+  }
 }
 
 TEST_F(ExecuteTest, PassModeCapturesPassDiagnostic) {
   loom_check_result_t result;
   IREE_ASSERT_OK(ExecuteFirst(
       "// RUN: pass vector-memory-footprint\n"
-      "func.def @f(%buffer: buffer, %base: offset) {\n"
+      "func.def @f(%buffer: buffer, %base: offset, %origin_input: index) {\n"
+      "  %origin = index.assume %origin_input [range(%origin_input, 0, 7)] : "
+      "index\n"
       "  %layout = encoding.layout.dense : encoding<layout>\n"
       "  %view = buffer.view %buffer[%base] : buffer -> view<8xf32, %layout>\n"
-      "  %loaded = vector.load %view[5] : view<8xf32, %layout> -> "
+      "  %loaded = vector.load %view[%origin] : view<8xf32, %layout> -> "
       "vector<4xf32>\n"
       "  func.return\n"
       "}\n",
@@ -1333,6 +1432,31 @@ TEST_F(ExecuteTest, EmitProviderCanOwnTarget) {
   loom_check_result_deinitialize(&result);
 }
 
+TEST_F(ExecuteTest, NativeEmitProviderUsesOnePublicAdmission) {
+  TestForeignImportState import_state;
+  const loom_check_compile_provider_t compile_provider = {
+      .import = TestForeignInputImport,
+      .import_user_data = &import_state,
+  };
+  compile_session_.provider = &compile_provider;
+  provider_environment_.input_providers = {
+      .values = kTestForeignInputProviders,
+      .count = IREE_ARRAYSIZE(kTestForeignInputProviders),
+  };
+
+  loom_check_result_t result;
+  IREE_ASSERT_OK(
+      ExecuteFirstWithEnvironment("// INPUT: test-foreign\n"
+                                  "// RUN: emit fake-native-emit\n"
+                                  "// ----\n"
+                                  "fake native emit\n",
+                                  &provider_environment_, &result));
+  EXPECT_EQ(import_state.import_count, 1u);
+  EXPECT_EQ(result.raw_outcome, LOOM_CHECK_PASS) << DetailString(result);
+  EXPECT_EQ(result.final_outcome, LOOM_CHECK_PASS);
+  loom_check_result_deinitialize(&result);
+}
+
 TEST_F(ExecuteTest, EmitProviderStatusIsNotMaskedByMatchedDiagnostic) {
   loom_check_result_t result;
   IREE_ASSERT_OK(ExecuteFirstWithEnvironment(
@@ -1345,6 +1469,57 @@ TEST_F(ExecuteTest, EmitProviderStatusIsNotMaskedByMatchedDiagnostic) {
   EXPECT_EQ(result.raw_outcome, LOOM_CHECK_FAIL);
   EXPECT_EQ(result.final_outcome, LOOM_CHECK_FAIL);
   EXPECT_NE(DetailString(result).find("INVALID_ARGUMENT"), std::string::npos);
+  loom_check_result_deinitialize(&result);
+}
+
+TEST_F(ExecuteTest, EmitProviderRemarksPreserveOutputComparison) {
+  struct Case {
+    // Provider mode selects whether successful output is empty.
+    const char* request;
+    // Complete output expected alongside the remark.
+    const char* expected;
+    // A matched remark cannot hide an output mismatch.
+    loom_check_outcome_t outcome;
+  };
+  const Case cases[] = {
+      {"remark", "fake emit\n", LOOM_CHECK_PASS},
+      {"remark", "wrong output\n", LOOM_CHECK_FAIL},
+      {"empty-remark", "fake emit\n", LOOM_CHECK_FAIL},
+      {"empty-remark", "", LOOM_CHECK_PASS},
+  };
+  for (const auto& test_case : cases) {
+    SCOPED_TRACE(test_case.request);
+    SCOPED_TRACE(test_case.expected);
+    std::string source = std::string("// RUN: emit fake-emit ") +
+                         test_case.request +
+                         "\n// REMARK: PARSE/006\n"
+                         "func.def @f() {\n"
+                         "  func.return\n"
+                         "}\n"
+                         "// ----\n" +
+                         test_case.expected;
+    loom_check_result_t result;
+    IREE_ASSERT_OK(ExecuteFirstWithEnvironment(
+        source.c_str(), &provider_environment_, &result));
+    EXPECT_EQ(result.raw_outcome, test_case.outcome) << DetailString(result);
+    EXPECT_EQ(result.final_outcome, test_case.outcome);
+    EXPECT_TRUE(result.has_actual_output);
+    loom_check_result_deinitialize(&result);
+  }
+}
+
+TEST_F(ExecuteTest, EmitProviderExpectedErrorHasNoComparableOutput) {
+  loom_check_result_t result;
+  IREE_ASSERT_OK(
+      ExecuteFirstWithEnvironment("// RUN: emit fake-emit error\n"
+                                  "// ERROR: PARSE/006\n"
+                                  "func.def @f() {\n"
+                                  "  func.return\n"
+                                  "}\n",
+                                  &provider_environment_, &result));
+  EXPECT_EQ(result.raw_outcome, LOOM_CHECK_PASS) << DetailString(result);
+  EXPECT_EQ(result.final_outcome, LOOM_CHECK_PASS);
+  EXPECT_FALSE(result.has_actual_output);
   loom_check_result_deinitialize(&result);
 }
 
@@ -1436,17 +1611,6 @@ TEST_F(ExecuteTest, EmitSourceLowRejectsIncompleteOrConflictingTargets) {
       "requires module, low, or none output");
 }
 
-TEST_F(ExecuteTest, EmitSourceLowImplicitEntryRejectsAmbiguousModules) {
-  for (const char* visibility : {"", "public "}) {
-    const std::string source =
-        std::string("// RUN: emit source-low target=vm:core\nfunc.def ") +
-        visibility + "@first() { func.return }\nfunc.def " + visibility +
-        "@second() { func.return }\n";
-    ExpectFirstFailsWithDetail(source.c_str(),
-                               "specify @function for an ambiguous module");
-  }
-}
-
 TEST_F(ExecuteTest, EmitSourceLowCanSuppressSuccessfulOutput) {
   loom_check_result_t result;
   IREE_ASSERT_OK(
@@ -1479,29 +1643,6 @@ TEST_F(ExecuteTest, LowReportRejectsMissingSymbolAndExtraOptions) {
                              "requires one low function symbol name");
   ExpectFirstFailsWithDetail("// RUN: emit low-compile-report @f extra\n",
                              "requires one low function symbol name");
-}
-
-TEST_F(ExecuteTest, PipelinePlanRequiresSymbolAndExplicitCapacity) {
-  for (const char* directive : {
-           "// RUN: emit pipeline-plan\n",
-           "// RUN: emit pipeline-plan @entry\n",
-           "// RUN: emit pipeline-plan @ max-instances=2\n",
-       }) {
-    SCOPED_TRACE(directive);
-    ExpectFirstFailsWithDetail(
-        directive, "requires @pipeline max-instances=<positive integer>");
-  }
-  ExpectFirstFailsWithDetail(
-      "// RUN: emit pipeline-plan @entry max-instances=0\n",
-      "max-instances must be positive");
-  for (const char* directive : {
-           "// RUN: emit pipeline-plan @entry max-instances=-1\n",
-           "// RUN: emit pipeline-plan @entry max-instances=2 extra\n",
-           "// RUN: emit pipeline-plan @entry max-instances=4294967296\n",
-       }) {
-    SCOPED_TRACE(directive);
-    ExpectFirstFailsWithDetail(directive, "uint32");
-  }
 }
 
 TEST_F(ExecuteTest, EmitSourceLowParsesSanitizerOptions) {

@@ -1,0 +1,70 @@
+// The positive count proves that the publishing lane also initializes.
+kernel.def @conditional_publication() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%output: buffer, %count: index) {
+  %limit = index.assume %count [range(%count, 1, 64)] : index
+  %lane = kernel.workitem.id<x> : index
+  %c0 = index.constant 0 : index
+  %base = index.constant 0 : offset
+  %values = buffer.view %output[%base] : buffer -> view<128xi32>
+  %c1 = scalar.constant 1 : i32
+  %c2 = scalar.constant 2 : i32
+  %first = index.cmp eq, %lane, %c0 : index
+  scf.if %first {
+    view.store %c1, %values[%c0] : i32, view<128xi32>
+  }
+  %active = index.cmp ult, %lane, %limit : index
+  scf.if %active {
+    %half = index.constant 64 : index
+    %index = index.add %lane, %half : index
+    view.store %c2, %values[%index] : i32, view<128xi32>
+  }
+  kernel.return
+}
+
+func.def @conditional_publication_oracle(%output: buffer, %count: index) {
+  %limit = index.assume %count [range(%count, 1, 64)] : index
+  %base = index.constant 0 : offset
+  %values = buffer.view %output[%base] : buffer -> view<128xi32>
+  %published = scalar.constant 1 : i32
+  view.store %published, %values[0] : i32, view<128xi32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %half = index.constant 64 : index
+  %initialized = scalar.constant 2 : i32
+  scf.for %lane = [%begin to %limit step %step] {
+    %index = index.add %lane, %half : index
+    view.store %initialized, %values[%index] : i32, view<128xi32>
+  }
+  func.return
+}
+
+check.scenario @conditional_publication_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %count = check.literal value(1) : index
+    %storage = check.generate.fill value(-99) : tensor<160xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<160xi32> -> tensor<128xi32>
+    check.compare<@conditional_publication, @conditional_publication_oracle>(%output, %count) : (tensor<128xi32>, index) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %count = check.literal value(5) : index
+    %storage = check.generate.fill value(-99) : tensor<160xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<160xi32> -> tensor<128xi32>
+    check.compare<@conditional_publication, @conditional_publication_oracle>(%output, %count) : (tensor<128xi32>, index) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %count = check.literal value(64) : index
+    %storage = check.generate.fill value(-99) : tensor<160xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<160xi32> -> tensor<128xi32>
+    check.compare<@conditional_publication, @conditional_publication_oracle>(%output, %count) : (tensor<128xi32>, index) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi32>
+    }
+  }
+  check.return
+}

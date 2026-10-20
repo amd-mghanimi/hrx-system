@@ -9,9 +9,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
 from pathlib import Path
 
+from loom.target.arch.x86 import native_vector as native
 from loom.target.arch.x86.packed_dot_data import (
     FAMILY_AVX10_2,
     FAMILY_AVX512_BF16,
@@ -21,6 +21,10 @@ from loom.target.arch.x86.packed_dot_data import (
     FAMILY_AVX_VNNI_INT16,
     X86_PACKED_DOT_DESCRIPTORS,
     PackedDotDescriptor,
+)
+from loom.target.arch.x86.vector_encoding import (
+    VectorEncodingPrefix,
+    restrict_vex_registers,
 )
 from loom.target.low_descriptors import (
     Descriptor,
@@ -44,7 +48,6 @@ from .common import (
     _SCHEDULE_VECTOR_DOT_XMM,
     _SCHEDULE_VECTOR_DOT_YMM,
     _SCHEDULE_VECTOR_DOT_ZMM,
-    _low_subset_operand,
     _packed_dot_descriptor,
     _vector_lane_units,
 )
@@ -61,7 +64,6 @@ _PACKED_DOT_VECTOR_WIDTH_TO_SCHEDULE = {
     256: _SCHEDULE_VECTOR_DOT_YMM,
     512: _SCHEDULE_VECTOR_DOT_ZMM,
 }
-_X86_VEX_ADDRESSABLE_REGISTER_COUNT = 16
 _X86_VEX_PACKED_DOT_FAMILIES = frozenset(
     (
         FAMILY_AVX_VNNI,
@@ -69,6 +71,9 @@ _X86_VEX_PACKED_DOT_FAMILIES = frozenset(
         FAMILY_AVX_VNNI_INT16,
     )
 )
+_AVX_VNNI_INT8_INSTRUCTIONS = {
+    instruction.descriptor_mnemonic: instruction for instruction in native.AVX_VNNI_INT8
+}
 
 
 def _packed_dot_file_name(stem: str, suffix: str) -> Path:
@@ -158,15 +163,17 @@ def _packed_dot_target_descriptor(
         descriptor_data,
         qualify_asm_mnemonic=qualify_asm_mnemonic,
     )
-    if descriptor_data.family not in _X86_VEX_PACKED_DOT_FAMILIES:
-        return descriptor
-    return replace(
-        descriptor,
-        operands=tuple(
-            _low_subset_operand(operand, _X86_VEX_ADDRESSABLE_REGISTER_COUNT)
-            for operand in descriptor.operands
-        ),
-    )
+    if descriptor_data.family == FAMILY_AVX_VNNI_INT8:
+        try:
+            instruction = _AVX_VNNI_INT8_INSTRUCTIONS[descriptor_data.mnemonic]
+        except KeyError as error:
+            raise ValueError(
+                f"{descriptor_data.key}: missing AVX-VNNI-INT8 machine facts"
+            ) from error
+        descriptor = instruction.bind(descriptor, VectorEncodingPrefix.VEX)
+    elif descriptor_data.family in _X86_VEX_PACKED_DOT_FAMILIES:
+        descriptor = restrict_vex_registers(descriptor)
+    return descriptor
 
 
 def _descriptor_set(
@@ -221,6 +228,7 @@ def _overlay_descriptor_set(
     family: str,
     vector_bit_widths: Sequence[int],
     allocatable_count: int,
+    qualify_asm_mnemonics: bool = False,
 ) -> DescriptorSet:
     return _descriptor_set(
         key=key,
@@ -232,6 +240,7 @@ def _overlay_descriptor_set(
         descriptor_data=_packed_dot_descriptor_data((family,), vector_bit_widths),
         vector_bit_widths=vector_bit_widths,
         allocatable_count=allocatable_count,
+        qualify_asm_mnemonics=qualify_asm_mnemonics,
     )
 
 
@@ -247,7 +256,7 @@ X86_AVX512_VNNI_DESCRIPTOR_SET = _overlay_descriptor_set(
     allocatable_count=32,
 )
 
-X86_AVX512_BF16_DESCRIPTOR_SET = _overlay_descriptor_set(
+X86_AVX512_BF16_DOT_DESCRIPTOR_SET = _overlay_descriptor_set(
     key="x86.avx512_bf16.core",
     feature_key="x86.avx512_bf16.v1",
     stem="avx512_bf16",
@@ -257,6 +266,7 @@ X86_AVX512_BF16_DESCRIPTOR_SET = _overlay_descriptor_set(
     family=FAMILY_AVX512_BF16,
     vector_bit_widths=(128, 256, 512),
     allocatable_count=32,
+    qualify_asm_mnemonics=True,
 )
 
 X86_AVX_VNNI_DESCRIPTOR_SET = _overlay_descriptor_set(
@@ -305,15 +315,6 @@ X86_AVX10_2_DESCRIPTOR_SET = _overlay_descriptor_set(
     family=FAMILY_AVX10_2,
     vector_bit_widths=(128, 256, 512),
     allocatable_count=32,
-)
-
-X86_PACKED_DOT_FEATURE_DESCRIPTOR_SETS = (
-    X86_AVX512_VNNI_DESCRIPTOR_SET,
-    X86_AVX512_BF16_DESCRIPTOR_SET,
-    X86_AVX_VNNI_DESCRIPTOR_SET,
-    X86_AVX_VNNI_INT8_DESCRIPTOR_SET,
-    X86_AVX_VNNI_INT16_DESCRIPTOR_SET,
-    X86_AVX10_2_DESCRIPTOR_SET,
 )
 
 X86_PACKED_DOT_DESCRIPTOR_SET = _descriptor_set(

@@ -27,6 +27,7 @@ low.func.def target<amdgpu.rdna3.core>(@gfx11_target) @gfx11_multi_counter_consu
 
 // ====
 
+
 // RUN: emit amdgpu-wait-counter-plan-json @gfx11_explicit_smem_wait strategy=source
 amdgpu.target<gfx1100> @gfx11_target
 

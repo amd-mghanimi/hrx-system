@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/numeric_float8_widen.loom-test
 // RUN: emit source-low target=amdgpu:gfx1250 output=low
 
 func.def @float8_to_half(%e4m3: f8E4M3, %e5m2: f8E5M2) -> (f16, f16) {
@@ -11,8 +10,8 @@ func.def @float8_to_half(%e4m3: f8E4M3, %e5m2: f8E5M2) -> (f16, f16) {
 low.func.def target<amdgpu.rdna4.gfx125x.core> abi(hal_kernel) @float8_to_half(%e4m3: reg<amdgpu.vgpr>, %e5m2: reg<amdgpu.vgpr>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
   %half_e4m3 = v_cvt_f16_fp8_byte0 %e4m3
   %half_e5m2 = v_cvt_f16_bf8_byte0 %e5m2
-  %12 = v_bfe_u32_offset_0_width_16_low16 %half_e4m3
-  %13 = v_bfe_u32_offset_0_width_16_low16 %half_e5m2
+  %12 = v_bfe_u32_offset_0_width_inline_low16 %half_e4m3
+  %13 = v_bfe_u32_offset_0_width_inline_low16 %half_e5m2
   return %12, %13
 }
 

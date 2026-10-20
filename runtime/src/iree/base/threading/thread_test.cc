@@ -12,9 +12,14 @@
 
 #include "iree/base/internal/atomics.h"
 #include "iree/base/threading/notification.h"
+#include "iree/base/threading/numa.h"
 #include "iree/base/threading/thread_impl.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
+
+#if defined(IREE_PLATFORM_LINUX)
+#include <sched.h>
+#endif  // IREE_PLATFORM_LINUX
 
 namespace {
 
@@ -34,10 +39,10 @@ TEST(ThreadAffinityTest, SetAny) {
 TEST(ThreadAffinityTest, SetGroupAny) {
   iree_thread_affinity_t affinity;
   memset(&affinity, 0xFF, sizeof(affinity));  // Dirty memory.
-  iree_thread_affinity_set_group_any(5, &affinity);
+  iree_thread_affinity_set_group_any(0x80000105u, &affinity);
   EXPECT_FALSE(iree_thread_affinity_is_unspecified(affinity));
   EXPECT_TRUE(affinity.group_any);
-  EXPECT_EQ(5u, affinity.group);
+  EXPECT_EQ(0x80000105u, affinity.group);
   EXPECT_FALSE(affinity.id_assigned);
 }
 
@@ -254,37 +259,117 @@ TEST(ThreadTest, NamedThread) {
   iree_thread_release(thread);
 }
 
+// Affinity changes operate on a live suspended thread, not a thread that may
+// already have exited by the time the native affinity syscall runs.
 TEST(ThreadTest, RequestAffinity) {
-  iree_thread_create_params_t params;
-  memset(&params, 0, sizeof(params));
-
-  std::atomic<bool> completed{false};
-  iree_thread_entry_t entry_fn = +[](void* entry_arg) -> int {
-    auto* completed = reinterpret_cast<std::atomic<bool>*>(entry_arg);
-    // Spin for a bit to give time for affinity to take effect (maybe).
-    for (int i = 0; i < 1000; ++i) {
-      iree_thread_yield();
-    }
-    completed->store(true, std::memory_order_release);
-    return 0;
-  };
-
+  iree_thread_create_params_t params = {.create_suspended = true};
+  uint32_t observed_node = IREE_NUMA_NODE_ANY;
   iree_thread_t* thread = nullptr;
-  IREE_ASSERT_OK(iree_thread_create(entry_fn, &completed, params,
-                                    iree_allocator_system(), &thread));
+  IREE_ASSERT_OK(iree_thread_create(
+      +[](void* arg) -> int {
+        *static_cast<uint32_t*>(arg) = iree_numa_node_for_current_thread();
+        return 0;
+      },
+      &observed_node, params, iree_allocator_system(), &thread));
 
-  // Request affinity to group 0 (smoke test - may be ignored by OS).
+  uint32_t node = iree_numa_node_for_current_thread();
   iree_thread_affinity_t affinity;
-  iree_thread_affinity_set_group_any(0, &affinity);
-  iree_thread_request_affinity(thread, affinity);
-
-  // Wait for completion.
-  while (!completed.load(std::memory_order_acquire)) {
-    iree_thread_yield();
-  }
-
+  iree_thread_affinity_set_group_any(node, &affinity);
+  IREE_EXPECT_OK(iree_thread_request_affinity(thread, affinity));
+  iree_thread_resume(thread);
   iree_thread_release(thread);
+  EXPECT_EQ(node, observed_node);
 }
+
+TEST(ThreadTest, NumaAffinityBeforeEntry) {
+  iree_thread_create_params_t params = {};
+  uint32_t node = iree_numa_node_for_current_thread();
+  iree_thread_affinity_set_group_any(node, &params.initial_affinity);
+  uint32_t observed_node = IREE_NUMA_NODE_ANY;
+  iree_thread_t* thread = nullptr;
+  IREE_ASSERT_OK(iree_thread_create(
+      +[](void* arg) -> int {
+        *static_cast<uint32_t*>(arg) = iree_numa_node_for_current_thread();
+        return 0;
+      },
+      &observed_node, params, iree_allocator_system(), &thread));
+  iree_thread_release(thread);
+  EXPECT_EQ(node, observed_node);
+}
+
+TEST(ThreadTest, FailedAffinityNeverCallsEntry) {
+  iree_thread_create_params_t params = {};
+  iree_thread_affinity_set_group_any(UINT16_MAX, &params.initial_affinity);
+  bool called = false;
+  iree_thread_t* thread = nullptr;
+  iree_status_t status = iree_thread_create(
+      +[](void* arg) -> int {
+        *static_cast<bool*>(arg) = true;
+        return 0;
+      },
+      &called, params, iree_allocator_system(), &thread);
+  IREE_EXPECT_NOT_OK(status);
+  iree_thread_release(thread);
+  EXPECT_EQ(nullptr, thread);
+  EXPECT_FALSE(called);
+}
+
+TEST(ThreadTest, InvalidAllocatorClearsOutput) {
+  iree_thread_create_params_t params = {};
+  iree_thread_t* thread = reinterpret_cast<iree_thread_t*>(uintptr_t{1});
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        iree_thread_create(
+                            +[](void*) -> int { return 0; }, nullptr, params,
+                            iree_allocator_null(), &thread));
+  EXPECT_EQ(nullptr, thread);
+}
+
+#if defined(IREE_PLATFORM_LINUX)
+TEST(ThreadTest, CpuAffinityBeforeEntry) {
+  cpu_set_t allowed;
+  ASSERT_EQ(0, sched_getaffinity(0, sizeof(allowed), &allowed));
+  int cpu = -1;
+  for (int i = CPU_SETSIZE - 1; i >= 0; --i) {
+    if (CPU_ISSET(i, &allowed)) {
+      cpu = i;
+      break;
+    }
+  }
+  ASSERT_GE(cpu, 0);
+
+  iree_thread_create_params_t params = {};
+  params.initial_affinity.id_assigned = 1;
+  params.initial_affinity.id = cpu;
+  cpu_set_t observed;
+  CPU_ZERO(&observed);
+  iree_thread_t* thread = nullptr;
+  IREE_ASSERT_OK(iree_thread_create(
+      +[](void* arg) -> int {
+        EXPECT_EQ(0, sched_getaffinity(0, sizeof(cpu_set_t),
+                                       static_cast<cpu_set_t*>(arg)));
+        return 0;
+      },
+      &observed, params, iree_allocator_system(), &thread));
+  iree_thread_release(thread);
+  EXPECT_EQ(1, CPU_COUNT(&observed));
+  EXPECT_TRUE(CPU_ISSET(cpu, &observed));
+}
+
+TEST(ThreadTest, FailedNativeCreationNeverCallsEntry) {
+  iree_thread_create_params_t params = {.stack_size = 1};
+  bool called = false;
+  iree_thread_t* thread = nullptr;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT,
+                        iree_thread_create(
+                            +[](void* arg) -> int {
+                              *static_cast<bool*>(arg) = true;
+                              return 0;
+                            },
+                            &called, params, iree_allocator_system(), &thread));
+  EXPECT_EQ(nullptr, thread);
+  EXPECT_FALSE(called);
+}
+#endif  // IREE_PLATFORM_LINUX
 
 // Testing whether priority took effect is hard given that on certain platforms
 // the priority may not be respected or may be clamped by the system. This test

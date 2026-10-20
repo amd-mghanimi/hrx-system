@@ -41,6 +41,7 @@ iree_cc_library(
     ::uring
     iree::async
     iree::async::platform::linux::signal
+    iree::async::platform::linux::socket_options
     iree::async::types
     iree::async::util::continuation
     iree::async::util::intrusive_list
@@ -251,6 +252,24 @@ iree_cc_test(
     ::io_uring
     iree::async
     iree::async::types
+    iree::testing::gtest
+    iree::testing::gtest_main
+  RESOURCE_GROUP
+    io_uring
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+iree_cc_test(
+  NAME
+    proactor_capability_test
+  SRCS
+    "proactor_capability_test.cc"
+  DEPS
+    ::defs
+    ::io_uring
+    iree::async
+    iree::async::platform
     iree::testing::gtest
     iree::testing::gtest_main
   RESOURCE_GROUP

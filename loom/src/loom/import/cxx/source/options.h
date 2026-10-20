@@ -14,6 +14,8 @@
 extern "C" {
 #endif
 
+typedef struct loom_cxx_preamble_t loom_cxx_preamble_t;
+
 // Source integer and pointer layout, independent of the importing process.
 typedef enum loom_cxx_data_model_e {
   LOOM_CXX_DATA_MODEL_LP64 = 0,
@@ -21,11 +23,18 @@ typedef enum loom_cxx_data_model_e {
   LOOM_CXX_DATA_MODEL_ILP32 = 2,
 } loom_cxx_data_model_t;
 
+// Translation-unit floating-point transformation policy. Source fastmath
+// attributes may replace this default for individual functions or statements.
+typedef enum loom_cxx_fp_model_e {
+  // Preserve floating-point value and evaluation-order semantics.
+  LOOM_CXX_FP_MODEL_PRECISE = 0,
+  // Permit the complete Loom fast-math contract.
+  LOOM_CXX_FP_MODEL_FAST = 1,
+} loom_cxx_fp_model_t;
+
 typedef enum loom_cxx_import_flag_bits_e {
-  // Permit approximations for mathematical functions (Loom's AFN contract).
-  LOOM_CXX_IMPORT_FLAG_APPROXIMATE_FUNCTIONS = 1u << 0,
   // Omit the embedded system include root and use explicit source paths only.
-  LOOM_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES = 1u << 1,
+  LOOM_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES = 1u << 0,
 } loom_cxx_import_flag_bits_t;
 typedef uint32_t loom_cxx_import_flags_t;
 
@@ -48,15 +57,17 @@ typedef struct loom_cxx_source_provider_t {
   void* user_data;
 } loom_cxx_source_provider_t;
 
-// Observes source bytes immediately before preprocessing admits them. This
-// includes the main source and headers from every lookup mechanism, including
-// embedded headers. Views are borrowed for the callback; consumers retaining
-// source text for later diagnostics copy it here. A failure aborts import.
+// Observes exact source bytes when translation first retains a location from
+// them. |source_id| is the stable ID already assigned in the output module.
+// Headers that contribute no retained IR location are not observed. Views are
+// borrowed for the callback; consumers retaining source text copy it here. A
+// failure aborts import.
 typedef iree_status_t (*loom_cxx_source_observer_fn_t)(
-    void* user_data, iree_string_view_t filename, iree_string_view_t source);
+    void* user_data, loom_source_id_t source_id, iree_string_view_t filename,
+    iree_string_view_t source);
 
 typedef struct loom_cxx_source_observer_t {
-  // Optional source admission callback.
+  // Optional translated-source retention callback.
   loom_cxx_source_observer_fn_t fn;
   // Caller-owned state borrowed for the duration of import.
   void* user_data;
@@ -83,7 +94,9 @@ typedef struct loom_cxx_import_options_t {
   iree_string_view_t triple;
   // Source integer and pointer widths. The default is LP64.
   loom_cxx_data_model_t data_model;
-  // Explicit permissions controlling imported source semantics.
+  // Default floating-point transformation policy. The default is precise.
+  loom_cxx_fp_model_t fp_model;
+  // Include delivery flags.
   loom_cxx_import_flags_t flags;
   // Include source ownership and lookup callback.
   loom_cxx_source_provider_t source_provider;
@@ -106,9 +119,20 @@ typedef struct loom_cxx_import_options_t {
   const iree_string_view_t* roots;
   // Number of explicitly selected source roots.
   iree_host_size_t root_count;
+  // Optional immutable frontend preamble borrowed for the import duration.
+  // Source or frontend-configuration mismatches use ordinary cold parsing.
+  const loom_cxx_preamble_t* preamble;
 } loom_cxx_import_options_t;
 
+// Parses the canonical precise or fast floating-point model spelling.
+bool loom_cxx_fp_model_parse(iree_string_view_t value,
+                             loom_cxx_fp_model_t* out_model);
+
 void loom_cxx_import_options_initialize(loom_cxx_import_options_t* options);
+
+// Validates enum, flag and borrowed-array invariants at a public API boundary.
+iree_status_t loom_cxx_import_options_validate(
+    const loom_cxx_import_options_t* options);
 
 #ifdef __cplusplus
 }

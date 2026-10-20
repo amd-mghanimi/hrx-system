@@ -6,26 +6,36 @@
 
 #include <stdint.h>
 
+#include "loom/codegen/low/lower/task_abi.h"
 #include "loom/error/error_catalog.h"
 #include "loom/ir/module.h"
+#include "loom/target/abi/task/parameter_layout.h"
 #include "loom/target/arch/x86/contracts/avx2.h"
 #include "loom/target/arch/x86/contracts/avx2_lower_rules.h"
 #include "loom/target/arch/x86/contracts/avx512.h"
+#include "loom/target/arch/x86/contracts/avx512_bf16.h"
+#include "loom/target/arch/x86/contracts/avx512_bf16_lower_rules.h"
+#include "loom/target/arch/x86/contracts/avx512_fp16.h"
+#include "loom/target/arch/x86/contracts/avx512_fp16_lower_rules.h"
 #include "loom/target/arch/x86/contracts/avx512_lower_rules.h"
+#include "loom/target/arch/x86/contracts/avx_ne_convert.h"
+#include "loom/target/arch/x86/contracts/avx_ne_convert_lower_rules.h"
+#include "loom/target/arch/x86/contracts/bmi2.h"
+#include "loom/target/arch/x86/contracts/bmi2_lower_rules.h"
+#include "loom/target/arch/x86/contracts/f16c.h"
+#include "loom/target/arch/x86/contracts/f16c_lower_rules.h"
 #include "loom/target/arch/x86/contracts/packed_dot.h"
 #include "loom/target/arch/x86/contracts/packed_dot_lower_rules.h"
 #include "loom/target/arch/x86/contracts/scalar.h"
 #include "loom/target/arch/x86/contracts/scalar_lower_rules.h"
+#include "loom/target/arch/x86/contracts/scalar_read_memory.h"
+#include "loom/target/arch/x86/contracts/scalar_read_memory_lower_rules.h"
+#include "loom/target/arch/x86/feature_bits.h"
 #include "loom/target/arch/x86/lower/contraction.h"
 #include "loom/target/arch/x86/lower/lower.h"
+#include "loom/target/arch/x86/lower/predicate_representation.h"
+#include "loom/target/arch/x86/lower/vector_construct.h"
 #include "loom/target/arch/x86/register_classes.h"
-
-static bool loom_x86_type_is_vector_i1(loom_type_t type, int64_t lane_count) {
-  return loom_type_is_vector(type) && loom_type_rank(type) == 1 &&
-         loom_type_is_all_static(type) &&
-         loom_type_element_type(type) == LOOM_SCALAR_TYPE_I1 &&
-         loom_type_dim_static_size_at(type, 0) == lane_count;
-}
 
 static bool loom_x86_vector_element_bit_width(loom_scalar_type_t scalar_type,
                                               uint32_t* out_bit_width) {
@@ -44,7 +54,8 @@ static bool loom_x86_vector_element_bit_width(loom_scalar_type_t scalar_type,
 }
 
 static bool loom_x86_static_vector_register_class_for_source_type(
-    loom_type_t source_type, uint32_t maximum_vector_bit_width,
+    loom_type_t source_type, uint32_t minimum_vector_bit_width,
+    uint32_t maximum_vector_bit_width,
     loom_x86_register_class_t* out_register_class) {
   if (!loom_type_is_vector(source_type) || loom_type_rank(source_type) != 1 ||
       !loom_type_is_all_static(source_type)) {
@@ -61,6 +72,9 @@ static bool loom_x86_static_vector_register_class_for_source_type(
     return false;
   }
   const uint32_t vector_bit_width = (uint32_t)lane_count * element_bit_width;
+  if (vector_bit_width < minimum_vector_bit_width) {
+    return false;
+  }
   return loom_x86_register_class_for_vector_bit_width(vector_bit_width,
                                                       out_register_class);
 }
@@ -95,6 +109,32 @@ static bool loom_x86_type_is_narrow_scalar_bits(loom_type_t type) {
     default:
       return false;
   }
+}
+
+static bool loom_x86_type_is_scalar_f16(loom_type_t type) {
+  return loom_type_is_scalar(type) &&
+         loom_type_element_type(type) == LOOM_SCALAR_TYPE_F16;
+}
+
+static bool loom_x86_type_is_low_xmm_16bit_payload(
+    loom_type_t type, loom_scalar_type_set_t allowed_element_types) {
+  if (!loom_type_is_vector(type) || loom_type_rank(type) != 1 ||
+      !loom_type_is_all_static(type) ||
+      loom_type_dim_static_size_at(type, 0) != 4) {
+    return false;
+  }
+  return loom_scalar_type_set_contains(allowed_element_types,
+                                       loom_type_element_type(type));
+}
+
+static bool loom_x86_avx512_features_support_low_xmm_bf16(
+    loom_x86_feature_bits_t feature_bits) {
+  if ((feature_bits & LOOM_X86_FEATURE_AVX_NE_CONVERT) != 0) {
+    return true;
+  }
+  const loom_x86_feature_bits_t required_features =
+      LOOM_X86_FEATURE_AVX512_BF16 | LOOM_X86_FEATURE_AVX512_VL;
+  return (feature_bits & required_features) == required_features;
 }
 
 static bool loom_x86_type_is_scalar_f32(loom_type_t type) {
@@ -166,23 +206,71 @@ static bool loom_x86_avx2_register_class_for_source_type(
     *out_register_class = LOOM_X86_REGISTER_CLASS_XMM;
     return true;
   }
+  if (loom_x86_avx2_predicate_register_class(
+          source_type, LOOM_LOW_REPRESENTATION_ID_NONE, out_register_class)) {
+    return true;
+  }
   return loom_x86_static_vector_register_class_for_source_type(
-      source_type, /*maximum_vector_bit_width=*/256, out_register_class);
+      source_type, /*minimum_vector_bit_width=*/8,
+      /*maximum_vector_bit_width=*/256, out_register_class);
 }
 
 static bool loom_x86_avx512_register_class_for_source_type(
     loom_type_t source_type, loom_x86_register_class_t* out_register_class) {
+  if (loom_x86_avx512_predicate_register_class(
+          source_type, LOOM_LOW_REPRESENTATION_ID_NONE, out_register_class)) {
+    return true;
+  }
   if (loom_x86_avx2_register_class_for_source_type(source_type,
                                                    out_register_class)) {
     return true;
   }
-  if (loom_x86_type_is_vector_i1(source_type, 4) ||
-      loom_x86_type_is_vector_i1(source_type, 16)) {
-    *out_register_class = LOOM_X86_REGISTER_CLASS_K;
+  return loom_x86_static_vector_register_class_for_source_type(
+      source_type, /*minimum_vector_bit_width=*/128,
+      /*maximum_vector_bit_width=*/512, out_register_class);
+}
+
+static bool loom_x86_avx2_features_register_class_for_source_type(
+    loom_type_t source_type, loom_x86_feature_bits_t feature_bits,
+    loom_x86_register_class_t* out_register_class) {
+  if ((feature_bits & LOOM_X86_FEATURE_AVX_NE_CONVERT) != 0 &&
+      loom_x86_type_is_low_xmm_16bit_payload(source_type,
+                                             LOOM_SCALAR_TYPE_SET_BF16) &&
+      loom_x86_static_vector_register_class_for_source_type(
+          source_type, /*minimum_vector_bit_width=*/64,
+          /*maximum_vector_bit_width=*/64, out_register_class)) {
     return true;
   }
-  return loom_x86_static_vector_register_class_for_source_type(
-      source_type, /*maximum_vector_bit_width=*/512, out_register_class);
+  return loom_x86_avx2_register_class_for_source_type(source_type,
+                                                      out_register_class);
+}
+
+static bool loom_x86_avx512_features_register_class_for_source_type(
+    loom_type_t source_type, loom_x86_feature_bits_t feature_bits,
+    loom_x86_register_class_t* out_register_class) {
+  if ((feature_bits & LOOM_X86_FEATURE_AVX512_FP16) != 0 &&
+      loom_x86_type_is_scalar_f16(source_type)) {
+    *out_register_class = LOOM_X86_REGISTER_CLASS_XMM;
+    return true;
+  }
+  if (loom_x86_avx512_features_support_low_xmm_bf16(feature_bits) &&
+      loom_x86_type_is_low_xmm_16bit_payload(source_type,
+                                             LOOM_SCALAR_TYPE_SET_BF16) &&
+      loom_x86_static_vector_register_class_for_source_type(
+          source_type, /*minimum_vector_bit_width=*/64,
+          /*maximum_vector_bit_width=*/64, out_register_class)) {
+    return true;
+  }
+  if ((feature_bits & LOOM_X86_FEATURE_AVX512_FP16) != 0 &&
+      loom_x86_type_is_low_xmm_16bit_payload(
+          source_type, LOOM_SCALAR_TYPE_SET_F16 | LOOM_SCALAR_TYPE_SET_I16) &&
+      loom_x86_static_vector_register_class_for_source_type(
+          source_type, /*minimum_vector_bit_width=*/64,
+          /*maximum_vector_bit_width=*/64, out_register_class)) {
+    return true;
+  }
+  return loom_x86_avx512_register_class_for_source_type(source_type,
+                                                        out_register_class);
 }
 
 static iree_status_t loom_x86_make_register_type(
@@ -218,6 +306,149 @@ static iree_status_t loom_x86_map_avx2_type(void* user_data,
   return iree_ok_status();
 }
 
+static iree_status_t loom_x86_map_avx2_features_type(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_op, loom_type_t source_type,
+    loom_type_t* out_low_type) {
+  (void)user_data;
+  (void)source_op;
+  const loom_x86_feature_bits_t feature_bits =
+      (loom_x86_feature_bits_t)loom_low_lower_context_bundle(context)
+          ->config->contract_feature_bits;
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx2_features_register_class_for_source_type(
+          source_type, feature_bits, &register_class)) {
+    return loom_x86_make_register_type(context, register_class, out_low_type);
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_map_avx2_value(void* user_data,
+                                             loom_low_lower_context_t* context,
+                                             const loom_op_t* source_op,
+                                             loom_value_id_t source_value_id,
+                                             loom_type_t source_type,
+                                             loom_type_t* out_low_type) {
+  if (!loom_x86_avx2_predicate_type(source_type, NULL)) {
+    return loom_x86_map_avx2_type(user_data, context, source_op, source_type,
+                                  out_low_type);
+  }
+  loom_low_representation_id_t representation = LOOM_LOW_REPRESENTATION_ID_NONE;
+  loom_low_lower_representation_lookup_if_ready(context, source_value_id,
+                                                &representation);
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx2_predicate_register_class(source_type, representation,
+                                             &register_class)) {
+    return loom_x86_make_register_type(context, register_class, out_low_type);
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_map_avx2_features_value(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_op, loom_value_id_t source_value_id,
+    loom_type_t source_type, loom_type_t* out_low_type) {
+  if (loom_x86_avx2_predicate_type(source_type, NULL)) {
+    return loom_x86_map_avx2_value(user_data, context, source_op,
+                                   source_value_id, source_type, out_low_type);
+  }
+  return loom_x86_map_avx2_features_type(user_data, context, source_op,
+                                         source_type, out_low_type);
+}
+
+static iree_status_t loom_x86_map_avx512_value(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_op, loom_value_id_t source_value_id,
+    loom_type_t source_type, loom_type_t* out_low_type) {
+  if (!loom_x86_avx512_predicate_type(source_type, NULL)) {
+    return loom_x86_map_avx512_type(user_data, context, source_op, source_type,
+                                    out_low_type);
+  }
+  loom_low_representation_id_t representation = LOOM_LOW_REPRESENTATION_ID_NONE;
+  loom_low_lower_representation_lookup_if_ready(context, source_value_id,
+                                                &representation);
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx512_predicate_register_class(source_type, representation,
+                                               &register_class)) {
+    return loom_x86_make_register_type(context, register_class, out_low_type);
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_map_avx2_contract_value(
+    void* user_data,
+    const loom_target_contract_query_environment_t* environment,
+    const loom_op_t* source_op, loom_value_id_t source_value_id,
+    loom_low_lower_rule_mapped_value_t* out_mapped_value) {
+  (void)user_data;
+  (void)source_op;
+  *out_mapped_value = loom_low_lower_rule_mapped_value_none();
+  const loom_type_t source_type =
+      loom_module_value_type(environment->module, source_value_id);
+  if (!loom_x86_avx2_predicate_type(source_type, NULL)) {
+    return iree_ok_status();
+  }
+  loom_low_representation_id_t representation = LOOM_LOW_REPRESENTATION_ID_NONE;
+  IREE_RETURN_IF_ERROR(loom_low_lower_representation_query_lookup(
+      environment, source_value_id, &representation));
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx2_predicate_register_class(source_type, representation,
+                                             &register_class)) {
+    *out_mapped_value = loom_low_lower_rule_mapped_value_register(
+        register_class, representation, 1);
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_map_avx2_features_contract_value(
+    void* user_data,
+    const loom_target_contract_query_environment_t* environment,
+    const loom_op_t* source_op, loom_value_id_t source_value_id,
+    loom_low_lower_rule_mapped_value_t* out_mapped_value) {
+  const loom_type_t source_type =
+      loom_module_value_type(environment->module, source_value_id);
+  const loom_x86_feature_bits_t feature_bits =
+      (loom_x86_feature_bits_t)loom_target_contract_query_environment_bundle(
+          environment)
+          ->config->contract_feature_bits;
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx2_features_register_class_for_source_type(
+          source_type, feature_bits, &register_class) &&
+      loom_x86_type_is_low_xmm_16bit_payload(source_type,
+                                             LOOM_SCALAR_TYPE_SET_BF16)) {
+    *out_mapped_value = loom_low_lower_rule_mapped_value_register(
+        register_class, LOOM_LOW_REPRESENTATION_ID_NONE, 1);
+    return iree_ok_status();
+  }
+  return loom_x86_map_avx2_contract_value(user_data, environment, source_op,
+                                          source_value_id, out_mapped_value);
+}
+
+static iree_status_t loom_x86_map_avx512_contract_value(
+    void* user_data,
+    const loom_target_contract_query_environment_t* environment,
+    const loom_op_t* source_op, loom_value_id_t source_value_id,
+    loom_low_lower_rule_mapped_value_t* out_mapped_value) {
+  (void)user_data;
+  (void)source_op;
+  *out_mapped_value = loom_low_lower_rule_mapped_value_none();
+  const loom_type_t source_type =
+      loom_module_value_type(environment->module, source_value_id);
+  if (!loom_x86_avx512_predicate_type(source_type, NULL)) {
+    return iree_ok_status();
+  }
+  loom_low_representation_id_t representation = LOOM_LOW_REPRESENTATION_ID_NONE;
+  IREE_RETURN_IF_ERROR(loom_low_lower_representation_query_lookup(
+      environment, source_value_id, &representation));
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx512_predicate_register_class(source_type, representation,
+                                               &register_class)) {
+    *out_mapped_value = loom_low_lower_rule_mapped_value_register(
+        register_class, representation, 1);
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t loom_x86_map_scalar_type(void* user_data,
                                               loom_low_lower_context_t* context,
                                               const loom_op_t* source_op,
@@ -237,7 +468,8 @@ static iree_status_t loom_x86_map_packed_dot_type(
     loom_type_t* out_low_type) {
   loom_x86_register_class_t register_class = 0;
   if (loom_x86_static_vector_register_class_for_source_type(
-          source_type, /*maximum_vector_bit_width=*/512, &register_class)) {
+          source_type, /*minimum_vector_bit_width=*/128,
+          /*maximum_vector_bit_width=*/512, &register_class)) {
     return loom_x86_make_register_type(context, register_class, out_low_type);
   }
   return iree_ok_status();
@@ -254,7 +486,7 @@ static iree_status_t loom_x86_map_scalar_argument(
   *out_argument = (loom_low_lower_abi_argument_t){
       .kind = LOOM_LOW_LOWER_ABI_ARGUMENT_DIRECT,
       .abi_type = loom_type_none(),
-      .resource_source_type = loom_type_none(),
+      .body_type = loom_type_none(),
   };
   return loom_x86_map_scalar_type(user_data, context, source_function_op,
                                   source_type, &out_argument->abi_type);
@@ -271,7 +503,7 @@ static iree_status_t loom_x86_map_avx512_argument(
   *out_argument = (loom_low_lower_abi_argument_t){
       .kind = LOOM_LOW_LOWER_ABI_ARGUMENT_DIRECT,
       .abi_type = loom_type_none(),
-      .resource_source_type = loom_type_none(),
+      .body_type = loom_type_none(),
   };
   return loom_x86_map_avx512_type(user_data, context, source_function_op,
                                   source_type, &out_argument->abi_type);
@@ -288,26 +520,13 @@ static iree_status_t loom_x86_map_avx2_argument(
   *out_argument = (loom_low_lower_abi_argument_t){
       .kind = LOOM_LOW_LOWER_ABI_ARGUMENT_DIRECT,
       .abi_type = loom_type_none(),
-      .resource_source_type = loom_type_none(),
+      .body_type = loom_type_none(),
   };
   return loom_x86_map_avx2_type(user_data, context, source_function_op,
                                 source_type, &out_argument->abi_type);
 }
 
-static iree_status_t loom_x86_map_avx512_packed_dot_type(
-    void* user_data, loom_low_lower_context_t* context,
-    const loom_op_t* source_op, loom_type_t source_type,
-    loom_type_t* out_low_type) {
-  loom_x86_register_class_t register_class = 0;
-  if (loom_x86_static_vector_register_class_for_source_type(
-          source_type, /*maximum_vector_bit_width=*/512, &register_class)) {
-    return loom_x86_make_register_type(context, register_class, out_low_type);
-  }
-  return loom_x86_map_avx512_type(user_data, context, source_op, source_type,
-                                  out_low_type);
-}
-
-static iree_status_t loom_x86_map_avx512_packed_dot_argument(
+static iree_status_t loom_x86_map_avx2_features_argument(
     void* user_data, loom_low_lower_context_t* context,
     const loom_op_t* source_function_op, uint16_t source_argument_index,
     loom_value_id_t source_argument_id,
@@ -318,38 +537,454 @@ static iree_status_t loom_x86_map_avx512_packed_dot_argument(
   *out_argument = (loom_low_lower_abi_argument_t){
       .kind = LOOM_LOW_LOWER_ABI_ARGUMENT_DIRECT,
       .abi_type = loom_type_none(),
-      .resource_source_type = loom_type_none(),
+      .body_type = loom_type_none(),
   };
-  return loom_x86_map_avx512_packed_dot_type(user_data, context,
-                                             source_function_op, source_type,
-                                             &out_argument->abi_type);
+  return loom_x86_map_avx2_features_type(user_data, context, source_function_op,
+                                         source_type, &out_argument->abi_type);
+}
+
+static iree_status_t loom_x86_map_avx512_features_type(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_op, loom_type_t source_type,
+    loom_type_t* out_low_type) {
+  (void)user_data;
+  (void)source_op;
+  const loom_x86_feature_bits_t feature_bits =
+      (loom_x86_feature_bits_t)loom_low_lower_context_bundle(context)
+          ->config->contract_feature_bits;
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx512_features_register_class_for_source_type(
+          source_type, feature_bits, &register_class)) {
+    return loom_x86_make_register_type(context, register_class, out_low_type);
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_map_avx512_features_value(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_op, loom_value_id_t source_value_id,
+    loom_type_t source_type, loom_type_t* out_low_type) {
+  if (loom_x86_avx512_predicate_type(source_type, NULL)) {
+    return loom_x86_map_avx512_value(user_data, context, source_op,
+                                     source_value_id, source_type,
+                                     out_low_type);
+  }
+  return loom_x86_map_avx512_features_type(user_data, context, source_op,
+                                           source_type, out_low_type);
+}
+
+static iree_status_t loom_x86_map_avx512_features_contract_value(
+    void* user_data,
+    const loom_target_contract_query_environment_t* environment,
+    const loom_op_t* source_op, loom_value_id_t source_value_id,
+    loom_low_lower_rule_mapped_value_t* out_mapped_value) {
+  const loom_type_t source_type =
+      loom_module_value_type(environment->module, source_value_id);
+  const loom_x86_feature_bits_t feature_bits =
+      (loom_x86_feature_bits_t)loom_target_contract_query_environment_bundle(
+          environment)
+          ->config->contract_feature_bits;
+  loom_x86_register_class_t register_class = 0;
+  if (loom_x86_avx512_features_register_class_for_source_type(
+          source_type, feature_bits, &register_class) &&
+      (loom_x86_type_is_scalar_f16(source_type) ||
+       (loom_x86_avx512_features_support_low_xmm_bf16(feature_bits) &&
+        loom_x86_type_is_low_xmm_16bit_payload(source_type,
+                                               LOOM_SCALAR_TYPE_SET_BF16)) ||
+       loom_x86_type_is_low_xmm_16bit_payload(
+           source_type, LOOM_SCALAR_TYPE_SET_F16 | LOOM_SCALAR_TYPE_SET_I16))) {
+    *out_mapped_value = loom_low_lower_rule_mapped_value_register(
+        register_class, LOOM_LOW_REPRESENTATION_ID_NONE, 1);
+    return iree_ok_status();
+  }
+  return loom_x86_map_avx512_contract_value(user_data, environment, source_op,
+                                            source_value_id, out_mapped_value);
+}
+
+static iree_status_t loom_x86_map_avx512_features_argument(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_function_op, uint16_t source_argument_index,
+    loom_value_id_t source_argument_id,
+    loom_low_lower_abi_argument_t* out_argument) {
+  (void)source_argument_index;
+  const loom_type_t source_type = loom_module_value_type(
+      loom_low_lower_context_module(context), source_argument_id);
+  *out_argument = (loom_low_lower_abi_argument_t){
+      .kind = LOOM_LOW_LOWER_ABI_ARGUMENT_DIRECT,
+      .abi_type = loom_type_none(),
+      .body_type = loom_type_none(),
+  };
+  return loom_x86_map_avx512_features_type(user_data, context,
+                                           source_function_op, source_type,
+                                           &out_argument->abi_type);
+}
+
+static bool loom_x86_abi_type_has_default_boundary(loom_type_t type) {
+  return loom_x86_type_is_address_gpr64(type) ||
+         loom_x86_type_is_scalar_i32(type) || loom_x86_type_is_scalar_i64(type);
+}
+
+static iree_status_t loom_x86_emit_abi_diagnostic(
+    void* user_data, const loom_diagnostic_emission_t* emission) {
+  return loom_low_lower_emit_error_ref(user_data, emission->op,
+                                       loom_error_def_ref(emission->error),
+                                       emission->params, emission->param_count);
+}
+
+static iree_status_t loom_x86_map_native_abi_layout(
+    void* user_data, loom_low_lower_context_t* context,
+    loom_low_lower_abi_layout_kind_t layout_kind, const loom_type_t* arg_types,
+    iree_host_size_t arg_count, const loom_type_t* result_types,
+    iree_host_size_t result_count, iree_arena_allocator_t* scratch_arena,
+    loom_named_attr_slice_t* out_abi_layout) {
+  (void)user_data;
+  (void)arg_types;
+  (void)arg_count;
+  (void)result_types;
+  (void)result_count;
+  *out_abi_layout = loom_make_named_attr_slice(NULL, 0);
+  const bool hal_kernel = layout_kind == LOOM_LOW_LOWER_ABI_LAYOUT_KIND_KERNEL;
+  if (layout_kind != LOOM_LOW_LOWER_ABI_LAYOUT_KIND_FUNC && !hal_kernel &&
+      loom_low_lower_context_bundle(context)->export_plan->abi_kind !=
+          LOOM_TARGET_ABI_OBJECT_FUNCTION) {
+    return iree_ok_status();
+  }
+  loom_module_t* module = loom_low_lower_context_module(context);
+  loom_func_like_t function = loom_low_lower_context_source_function(context);
+  uint16_t argument_count = 0;
+  const loom_value_id_t* arguments =
+      loom_func_like_arg_ids(function, &argument_count);
+  const loom_value_id_t* results = loom_op_const_results(function.op);
+  const iree_host_size_t type_count =
+      (iree_host_size_t)argument_count + function.op->result_count;
+  bool needs_signature = hal_kernel;
+  for (iree_host_size_t i = 0; i < type_count && !needs_signature; ++i) {
+    const loom_value_id_t value =
+        i < argument_count ? arguments[i] : results[i - argument_count];
+    needs_signature = !loom_x86_abi_type_has_default_boundary(
+        loom_module_value_type(module, value));
+  }
+  if (!needs_signature) {
+    return iree_ok_status();
+  }
+  loom_type_t* types = NULL;
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      scratch_arena, type_count, sizeof(*types), (void**)&types));
+  for (iree_host_size_t i = 0; i < type_count; ++i) {
+    const loom_value_id_t value =
+        i < argument_count ? arguments[i] : results[i - argument_count];
+    types[i] = loom_module_value_type(module, value);
+    // x86 maps each view directly to its data address. Shape dependencies are
+    // separate scalar parameters, not fields of a foreign view descriptor.
+    if (loom_type_is_view(types[i])) {
+      types[i] = loom_type_buffer();
+    }
+  }
+  if (hal_kernel) {
+    bool accepted = false;
+    return loom_task_parameter_layout_build(
+        module, function.op, types, argument_count,
+        (iree_diagnostic_emitter_t){.fn = loom_x86_emit_abi_diagnostic,
+                                    .user_data = context},
+        scratch_arena, &accepted, out_abi_layout);
+  }
+  loom_type_t signature;
+  IREE_RETURN_IF_ERROR(loom_module_intern_function_type(
+      module, types, argument_count, types + argument_count,
+      function.op->result_count, &signature));
+  loom_type_id_t signature_id = loom_module_lookup_type_id(module, signature);
+  loom_string_id_t signature_key;
+  IREE_RETURN_IF_ERROR(
+      loom_module_intern_string(module, IREE_SV("signature"), &signature_key));
+  const loom_named_attr_t entry = {
+      .name_id = signature_key,
+      .value = loom_attr_type(signature_id),
+  };
+  loom_attribute_t layout;
+  IREE_RETURN_IF_ERROR(loom_module_make_canonical_attr_dict(
+      module, loom_make_named_attr_slice(&entry, 1), &layout));
+  *out_abi_layout = loom_attr_as_dict(layout);
+  return iree_ok_status();
 }
 
 #include "loom/target/arch/x86/contracts/tables.inl"
 
+static const loom_low_lower_function_storage_mapping_t kX86FunctionStorage[] = {
+    {LOOM_VALUE_FACT_MEMORY_SPACE_PRIVATE, LOOM_STORAGE_SPACE_PRIVATE,
+     LOOM_X86_REGISTER_CLASS_GPR64},
+};
+
+static bool loom_x86_avx2_source_vector_carrier_supported(
+    void* user_data, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t source_type) {
+  (void)user_data;
+  (void)module;
+  (void)fact_table;
+  (void)value_id;
+  loom_x86_register_class_t register_class = 0;
+  return loom_x86_avx2_register_class_for_source_type(source_type,
+                                                      &register_class);
+}
+
+static bool loom_x86_avx512_source_vector_carrier_supported(
+    void* user_data, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t source_type) {
+  (void)user_data;
+  (void)module;
+  (void)fact_table;
+  (void)value_id;
+  loom_x86_register_class_t register_class = 0;
+  return loom_x86_avx512_register_class_for_source_type(source_type,
+                                                        &register_class);
+}
+
+static const uint16_t kX86Avx2VectorPacketBitCounts[] = {256u, 128u, 64u};
+static const uint16_t kX86Avx2VectorPacketLaneCounts[] = {32u, 16u, 8u, 4u, 2u};
+static const loom_target_vector_packet_lane_limit_t
+    kX86Avx2VectorPacketStructuralLaneLimits[] = {
+        {
+            .element_type = LOOM_SCALAR_TYPE_I1,
+            .maximum_lane_count = 32u,
+        },
+};
+static_assert(IREE_ARRAYSIZE(kX86Avx2VectorPacketLaneCounts) <=
+                  LOOM_TARGET_VECTOR_PACKET_LANE_COUNT_LIMIT,
+              "packet lane candidates exceed the shared planner capacity");
+
+static const loom_target_vector_packet_policy_t kX86Avx2VectorPacketPolicy = {
+    .native_bit_counts = kX86Avx2VectorPacketBitCounts,
+    .native_lane_counts = kX86Avx2VectorPacketLaneCounts,
+    .index_bit_count = 64u,
+    .offset_bit_count = 64u,
+    .flags = LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_MEMORY_ROOT_COMPONENTS |
+             LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_BOUNDARY_PROJECTION,
+    .structural_lane_limits = kX86Avx2VectorPacketStructuralLaneLimits,
+    .maximum_unpacketized_bit_count = 256u,
+    .native_bit_count_count = IREE_ARRAYSIZE(kX86Avx2VectorPacketBitCounts),
+    .native_lane_count_count = IREE_ARRAYSIZE(kX86Avx2VectorPacketLaneCounts),
+    .structural_lane_limit_count =
+        IREE_ARRAYSIZE(kX86Avx2VectorPacketStructuralLaneLimits),
+};
+
+static const loom_target_bitstream_policy_t kX86Avx2BitstreamPolicy = {
+    .word_bit_count = 64u,
+    .packet_carrier_supported =
+        {
+            .fn = loom_x86_avx2_source_vector_carrier_supported,
+            .user_data = NULL,
+        },
+};
+
+static const uint16_t kX86Avx512VectorPacketBitCounts[] = {512u, 256u, 128u,
+                                                           64u};
+static const uint16_t kX86Avx512VectorPacketLaneCounts[] = {64u, 32u, 16u,
+                                                            8u,  4u,  2u};
+static const loom_target_vector_packet_lane_limit_t
+    kX86Avx512VectorPacketStructuralLaneLimits[] = {
+        {
+            .element_type = LOOM_SCALAR_TYPE_I1,
+            .maximum_lane_count = 64u,
+        },
+};
+static_assert(IREE_ARRAYSIZE(kX86Avx512VectorPacketLaneCounts) <=
+                  LOOM_TARGET_VECTOR_PACKET_LANE_COUNT_LIMIT,
+              "packet lane candidates exceed the shared planner capacity");
+
+static const loom_target_vector_packet_policy_t kX86Avx512VectorPacketPolicy = {
+    .native_bit_counts = kX86Avx512VectorPacketBitCounts,
+    .native_lane_counts = kX86Avx512VectorPacketLaneCounts,
+    .index_bit_count = 64u,
+    .offset_bit_count = 64u,
+    .flags = LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_MEMORY_ROOT_COMPONENTS |
+             LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_BOUNDARY_PROJECTION,
+    .structural_lane_limits = kX86Avx512VectorPacketStructuralLaneLimits,
+    .maximum_unpacketized_bit_count = 512u,
+    .native_bit_count_count = IREE_ARRAYSIZE(kX86Avx512VectorPacketBitCounts),
+    .native_lane_count_count = IREE_ARRAYSIZE(kX86Avx512VectorPacketLaneCounts),
+    .structural_lane_limit_count =
+        IREE_ARRAYSIZE(kX86Avx512VectorPacketStructuralLaneLimits),
+};
+
+static const loom_target_bitstream_policy_t kX86Avx512BitstreamPolicy = {
+    .word_bit_count = 64u,
+    .packet_carrier_supported =
+        {
+            .fn = loom_x86_avx512_source_vector_carrier_supported,
+            .user_data = NULL,
+        },
+};
+
+static iree_status_t loom_x86_query_op_contract(
+    void* user_data,
+    const loom_target_contract_query_environment_t* environment,
+    const loom_op_t* source_op,
+    loom_target_contract_query_result_t* out_result) {
+  IREE_RETURN_IF_ERROR(loom_low_task_query_kernel_builtin(
+      user_data, environment, source_op, out_result));
+  if (out_result->outcome != LOOM_TARGET_CONTRACT_QUERY_UNHANDLED) {
+    return iree_ok_status();
+  }
+  return loom_x86_query_vector_construct_contract(environment, source_op,
+                                                  out_result);
+}
+
+static iree_status_t loom_x86_preselect_op(void* user_data,
+                                           loom_low_lower_context_t* context,
+                                           const loom_op_t* source_op,
+                                           loom_low_lower_plan_t* out_plan) {
+  IREE_RETURN_IF_ERROR(loom_low_task_select_kernel_builtin(
+      user_data, context, source_op, out_plan));
+  if (!loom_low_lower_plan_is_empty(*out_plan)) {
+    return iree_ok_status();
+  }
+  return loom_x86_select_vector_construct_plan(context, source_op, out_plan);
+}
+
+static void loom_x86_mark_plan_storage_demands(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_op, loom_low_lower_plan_t plan) {
+  (void)user_data;
+  if (loom_x86_vector_construct_plan_isa(plan)) {
+    loom_x86_mark_vector_construct_plan_storage_demands(context, source_op,
+                                                        plan);
+  }
+}
+
+static iree_status_t loom_x86_describe_plan(
+    void* user_data, loom_low_lower_context_t* context,
+    const loom_op_t* source_op, loom_low_lower_plan_t plan, bool is_elided,
+    uint64_t execution_count_plus_one,
+    loom_low_lower_plan_report_t* out_report) {
+  (void)user_data;
+  (void)context;
+  (void)source_op;
+  (void)is_elided;
+  (void)execution_count_plus_one;
+  *out_report = (loom_low_lower_plan_report_t){0};
+  if (loom_x86_vector_construct_plan_isa(plan)) {
+    loom_x86_describe_vector_construct_plan(plan, out_report);
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_x86_emit_op(void* user_data,
+                                      loom_low_lower_context_t* context,
+                                      const loom_op_t* source_op,
+                                      loom_low_lower_plan_t plan) {
+  if (loom_x86_vector_construct_plan_isa(plan)) {
+    return loom_x86_emit_vector_construct_plan(context, source_op, plan);
+  }
+  return loom_low_task_emit_kernel_builtin(user_data, context, source_op, plan);
+}
+
 static const loom_low_lower_policy_t kX86Avx512LowLowerPolicy = {
     .name = IREE_SVL("x86-avx512-low-lower"),
+    .vector_packet_policy = &kX86Avx512VectorPacketPolicy,
+    .bitstream_policy = &kX86Avx512BitstreamPolicy,
+    .function_storage = {kX86FunctionStorage,
+                         IREE_ARRAYSIZE(kX86FunctionStorage)},
     .error_catalog = &loom_error_catalog_core,
+    .map_abi_layout = {.fn = loom_x86_map_native_abi_layout},
+    .emit_preamble = {.fn = loom_low_task_emit_kernel_preamble},
+    .preselect_op = {.fn = loom_x86_preselect_op},
+    .mark_plan_storage_demands = {.fn = loom_x86_mark_plan_storage_demands},
+    .describe_plan = {.fn = loom_x86_describe_plan},
+    .emit_op = {.fn = loom_x86_emit_op},
+    .query_op_contract = {.fn = loom_x86_query_op_contract},
     .map_type = {.fn = loom_x86_map_avx512_type, .user_data = NULL},
+    .map_value = {.fn = loom_x86_map_avx512_value, .user_data = NULL},
+    .map_contract_value = {.fn = loom_x86_map_avx512_contract_value,
+                           .user_data = NULL},
     .map_argument = {.fn = loom_x86_map_avx512_argument, .user_data = NULL},
     .source_type_supported = {.fn = loom_x86_source_type_supported,
                               .user_data = NULL},
+    .source_vector_carrier_supported =
+        {
+            .fn = loom_x86_avx512_source_vector_carrier_supported,
+            .user_data = NULL,
+        },
+    .source_plan_observer = &loom_x86_avx512_predicate_representation_observer,
     .contract = LOOM_X86_AVX512_CONTRACT,
 };
 
 static const loom_low_lower_policy_t kX86Avx2LowLowerPolicy = {
     .name = IREE_SVL("x86-avx2-low-lower"),
+    .vector_packet_policy = &kX86Avx2VectorPacketPolicy,
+    .bitstream_policy = &kX86Avx2BitstreamPolicy,
+    .function_storage = {kX86FunctionStorage,
+                         IREE_ARRAYSIZE(kX86FunctionStorage)},
     .error_catalog = &loom_error_catalog_core,
+    .map_abi_layout = {.fn = loom_x86_map_native_abi_layout},
+    .emit_preamble = {.fn = loom_low_task_emit_kernel_preamble},
+    .preselect_op = {.fn = loom_x86_preselect_op},
+    .mark_plan_storage_demands = {.fn = loom_x86_mark_plan_storage_demands},
+    .describe_plan = {.fn = loom_x86_describe_plan},
+    .emit_op = {.fn = loom_x86_emit_op},
+    .query_op_contract = {.fn = loom_x86_query_op_contract},
     .map_type = {.fn = loom_x86_map_avx2_type, .user_data = NULL},
+    .map_value = {.fn = loom_x86_map_avx2_value, .user_data = NULL},
+    .map_contract_value = {.fn = loom_x86_map_avx2_contract_value,
+                           .user_data = NULL},
     .map_argument = {.fn = loom_x86_map_avx2_argument, .user_data = NULL},
     .source_type_supported = {.fn = loom_x86_source_type_supported,
                               .user_data = NULL},
+    .source_vector_carrier_supported =
+        {
+            .fn = loom_x86_avx2_source_vector_carrier_supported,
+            .user_data = NULL,
+        },
+    .source_plan_observer = &loom_x86_avx2_predicate_representation_observer,
     .contract = LOOM_X86_AVX2_CONTRACT,
+};
+
+static const loom_low_lower_policy_t kX86Avx2FeaturesLowLowerPolicy = {
+    .name = IREE_SVL("x86-avx2-features-low-lower"),
+    .vector_packet_policy = &kX86Avx2VectorPacketPolicy,
+    .bitstream_policy = &kX86Avx2BitstreamPolicy,
+    .function_storage = {kX86FunctionStorage,
+                         IREE_ARRAYSIZE(kX86FunctionStorage)},
+    .error_catalog = &loom_error_catalog_core,
+    .map_abi_layout = {.fn = loom_x86_map_native_abi_layout},
+    .emit_preamble = {.fn = loom_low_task_emit_kernel_preamble},
+    .preselect_op = {.fn = loom_x86_preselect_op},
+    .mark_plan_storage_demands = {.fn = loom_x86_mark_plan_storage_demands},
+    .describe_plan = {.fn = loom_x86_describe_plan},
+    .emit_op = {.fn = loom_x86_emit_op},
+    .query_op_contract = {.fn = loom_x86_query_op_contract},
+    .map_type = {.fn = loom_x86_map_avx2_features_type, .user_data = NULL},
+    .map_value = {.fn = loom_x86_map_avx2_features_value, .user_data = NULL},
+    .map_contract_value = {.fn = loom_x86_map_avx2_features_contract_value,
+                           .user_data = NULL},
+    .map_argument = {.fn = loom_x86_map_avx2_features_argument,
+                     .user_data = NULL},
+    .source_type_supported = {.fn = loom_x86_source_type_supported,
+                              .user_data = NULL},
+    .source_vector_carrier_supported =
+        {
+            .fn = loom_x86_avx2_source_vector_carrier_supported,
+            .user_data = NULL,
+        },
+    .descriptor_matrix =
+        {
+            .options = loom_x86_descriptor_matrix_options,
+            .query = loom_x86_descriptor_matrix_query,
+        },
+    .source_plan_observer = &loom_x86_avx2_predicate_representation_observer,
+    .contract = LOOM_X86_AVX2_FEATURES_CONTRACT,
 };
 
 static const loom_low_lower_policy_t kX86ScalarLowLowerPolicy = {
     .name = IREE_SVL("x86-scalar-low-lower"),
+    .function_storage = {kX86FunctionStorage,
+                         IREE_ARRAYSIZE(kX86FunctionStorage)},
     .error_catalog = &loom_error_catalog_core,
+    .map_abi_layout = {.fn = loom_x86_map_native_abi_layout},
+    .emit_preamble = {.fn = loom_low_task_emit_kernel_preamble},
+    .preselect_op = {.fn = loom_low_task_select_kernel_builtin},
+    .emit_op = {.fn = loom_low_task_emit_kernel_builtin},
+    .query_op_contract = {.fn = loom_low_task_query_kernel_builtin},
     .map_type = {.fn = loom_x86_map_scalar_type, .user_data = NULL},
     .map_argument = {.fn = loom_x86_map_scalar_argument, .user_data = NULL},
     .source_type_supported = {.fn = loom_x86_source_type_supported,
@@ -360,6 +995,11 @@ static const loom_low_lower_policy_t kX86ScalarLowLowerPolicy = {
 static const loom_low_lower_policy_t kX86PackedDotLowLowerPolicy = {
     .name = IREE_SVL("x86-packed-dot-low-lower"),
     .error_catalog = &loom_error_catalog_core,
+    .map_abi_layout = {.fn = loom_x86_map_native_abi_layout},
+    .emit_preamble = {.fn = loom_low_task_emit_kernel_preamble},
+    .preselect_op = {.fn = loom_low_task_select_kernel_builtin},
+    .emit_op = {.fn = loom_low_task_emit_kernel_builtin},
+    .query_op_contract = {.fn = loom_low_task_query_kernel_builtin},
     .map_type = {.fn = loom_x86_map_packed_dot_type, .user_data = NULL},
     .descriptor_matrix =
         {
@@ -369,18 +1009,38 @@ static const loom_low_lower_policy_t kX86PackedDotLowLowerPolicy = {
     .contract = LOOM_X86_PACKED_DOT_CONTRACT,
 };
 
-static const loom_low_lower_policy_t kX86Avx512PackedDotLowLowerPolicy = {
-    .name = IREE_SVL("x86-avx512-packed-dot-low-lower"),
+static const loom_low_lower_policy_t kX86Avx512FeaturesLowLowerPolicy = {
+    .name = IREE_SVL("x86-avx512-features-low-lower"),
+    .vector_packet_policy = &kX86Avx512VectorPacketPolicy,
+    .bitstream_policy = &kX86Avx512BitstreamPolicy,
+    .function_storage = {kX86FunctionStorage,
+                         IREE_ARRAYSIZE(kX86FunctionStorage)},
     .error_catalog = &loom_error_catalog_core,
-    .map_type = {.fn = loom_x86_map_avx512_packed_dot_type, .user_data = NULL},
-    .map_argument = {.fn = loom_x86_map_avx512_packed_dot_argument,
+    .map_abi_layout = {.fn = loom_x86_map_native_abi_layout},
+    .emit_preamble = {.fn = loom_low_task_emit_kernel_preamble},
+    .preselect_op = {.fn = loom_x86_preselect_op},
+    .mark_plan_storage_demands = {.fn = loom_x86_mark_plan_storage_demands},
+    .describe_plan = {.fn = loom_x86_describe_plan},
+    .emit_op = {.fn = loom_x86_emit_op},
+    .query_op_contract = {.fn = loom_x86_query_op_contract},
+    .map_type = {.fn = loom_x86_map_avx512_features_type, .user_data = NULL},
+    .map_value = {.fn = loom_x86_map_avx512_features_value, .user_data = NULL},
+    .map_contract_value = {.fn = loom_x86_map_avx512_features_contract_value,
+                           .user_data = NULL},
+    .map_argument = {.fn = loom_x86_map_avx512_features_argument,
                      .user_data = NULL},
+    .source_vector_carrier_supported =
+        {
+            .fn = loom_x86_avx512_source_vector_carrier_supported,
+            .user_data = NULL,
+        },
     .descriptor_matrix =
         {
             .options = loom_x86_descriptor_matrix_options,
             .query = loom_x86_descriptor_matrix_query,
         },
-    .contract = LOOM_X86_AVX512_PACKED_DOT_CONTRACT,
+    .source_plan_observer = &loom_x86_avx512_predicate_representation_observer,
+    .contract = LOOM_X86_AVX512_FEATURES_CONTRACT,
 };
 
 const loom_low_lower_policy_t* loom_x86_avx512_low_lower_policy(void) {
@@ -409,6 +1069,10 @@ void loom_x86_low_lower_policy_registry_initialize(
       {
           .contract_set_key = IREE_SVL("x86.avx2.core"),
           .policy = &kX86Avx2LowLowerPolicy,
+      },
+      {
+          .contract_set_key = IREE_SVL("x86.avx2_features.core"),
+          .policy = &kX86Avx2FeaturesLowLowerPolicy,
       },
       {
           .contract_set_key = IREE_SVL("x86.avx512.core"),
@@ -443,8 +1107,8 @@ void loom_x86_low_lower_policy_registry_initialize(
           .policy = &kX86PackedDotLowLowerPolicy,
       },
       {
-          .contract_set_key = IREE_SVL("x86.avx512_packed_dot.core"),
-          .policy = &kX86Avx512PackedDotLowLowerPolicy,
+          .contract_set_key = IREE_SVL("x86.avx512_features.core"),
+          .policy = &kX86Avx512FeaturesLowLowerPolicy,
       },
   };
   loom_low_lower_policy_registry_initialize_from_entries(

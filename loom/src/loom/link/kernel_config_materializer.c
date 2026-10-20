@@ -19,6 +19,7 @@
 #include "loom/ops/kernel/launch_config.h"
 #include "loom/ops/kernel/ops.h"
 #include "loom/ops/op_defs.h"
+#include "loom/ops/pipeline/ops.h"
 #include "loom/ops/type_registry.h"
 #include "loom/rewrite/materialize.h"
 #include "loom/rewrite/remap.h"
@@ -145,33 +146,51 @@ static iree_status_t loom_link_kernel_config_add_helper_symbol(
 
 static iree_status_t loom_link_kernel_config_build_declaration(
     loom_module_t* module, const loom_bytecode_function_header_t* header,
-    loom_builder_t* builder, loom_op_t** out_declaration) {
+    loom_link_plan_symbol_projection_t projection, loom_builder_t* builder,
+    loom_op_t** out_declaration) {
   if (header->result_count != 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "kernel definition has function results");
   }
+  const bool is_entry =
+      projection == LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_ENTRY;
+  const bool is_pipeline =
+      projection == LOOM_LINK_PLAN_SYMBOL_PROJECTION_PIPELINE_CONTRACT;
+  const uint16_t workload_count =
+      is_entry ? 0 : header->workload_argument_count;
   const iree_host_size_t operand_count =
-      (iree_host_size_t)header->workload_argument_count +
-      header->argument_count;
+      (iree_host_size_t)workload_count + header->argument_count;
   if (operand_count > UINT16_MAX) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "kernel signature exceeds operand capacity");
   }
+  const loom_op_kind_t op_kind = is_pipeline ? LOOM_OP_PIPELINE_DECL
+                                 : is_entry  ? LOOM_OP_KERNEL_ENTRY_DECL
+                                             : LOOM_OP_KERNEL_DECL;
   const loom_op_vtable_t* vtable =
-      loom_context_resolve_op(module->context, LOOM_OP_KERNEL_DECL);
+      loom_context_resolve_op(module->context, op_kind);
   IREE_ASSERT(vtable != NULL);
-  const uint16_t operand_segments[] = {
-      header->workload_argument_count,
-      header->argument_count,
-  };
   loom_op_t* declaration = NULL;
-  IREE_RETURN_IF_ERROR(loom_builder_allocate_segmented_op(
-      builder, LOOM_OP_KERNEL_DECL, (uint16_t)operand_count, operand_segments,
-      IREE_ARRAYSIZE(operand_segments), /*result_count=*/0, /*region_count=*/0,
-      /*tied_result_count=*/0, vtable->attribute_count, header->location,
-      &declaration));
+  if (is_entry || is_pipeline) {
+    IREE_RETURN_IF_ERROR(loom_builder_allocate_op(
+        builder, op_kind, (uint16_t)operand_count, /*result_count=*/0,
+        /*region_count=*/0, /*tied_result_count=*/0, vtable->attribute_count,
+        header->location, &declaration));
+  } else {
+    const uint16_t operand_segments[] = {workload_count,
+                                         header->argument_count};
+    IREE_RETURN_IF_ERROR(loom_builder_allocate_segmented_op(
+        builder, op_kind, (uint16_t)operand_count, operand_segments,
+        IREE_ARRAYSIZE(operand_segments), /*result_count=*/0,
+        /*region_count=*/0,
+        /*tied_result_count=*/0, vtable->attribute_count, header->location,
+        &declaration));
+  }
   if (operand_count != 0) {
-    memcpy(loom_op_operands(declaration), header->signature_values,
+    const uint16_t first_operand =
+        is_entry ? header->workload_argument_count : 0;
+    memcpy(loom_op_operands(declaration),
+           header->signature_values + first_operand,
            operand_count * sizeof(loom_value_id_t));
   }
   loom_attribute_t* attributes = loom_op_attrs(declaration);
@@ -179,17 +198,38 @@ static iree_status_t loom_link_kernel_config_build_declaration(
       header->attributes[header->func_like->callee_attr_index];
   attributes[vtable->func_like->target_attr_index] =
       header->attributes[header->func_like->target_attr_index];
-  const loom_attribute_t source_predicates =
-      header->attributes[header->func_like->predicates_attr_index];
-  if (!loom_attr_is_absent(source_predicates)) {
-    loom_predicate_t* predicates = NULL;
-    IREE_RETURN_IF_ERROR(
-        iree_arena_allocate_array(&module->arena, source_predicates.count,
-                                  sizeof(*predicates), (void**)&predicates));
-    memcpy(predicates, source_predicates.predicate_list,
-           source_predicates.count * sizeof(*predicates));
-    attributes[vtable->func_like->predicates_attr_index] =
-        loom_attr_predicate_list(predicates, source_predicates.count);
+  attributes[vtable->symbol_def->retain_attr_index_plus_one - 1] =
+      header
+          ->attributes[header->vtable->symbol_def->retain_attr_index_plus_one -
+                       1];
+  if (is_pipeline) {
+    attributes[vtable->func_like->visibility_attr_index] =
+        header->attributes[header->func_like->visibility_attr_index];
+    attributes[vtable->func_like->specialization_count_attr_index] =
+        header->attributes[header->func_like->specialization_count_attr_index];
+    attributes[loom_symbol_definition_product_carrier_attr_index(
+        vtable->symbol_def)] =
+        header->attributes[loom_symbol_definition_product_carrier_attr_index(
+            header->vtable->symbol_def)];
+  } else if (!is_entry) {
+    attributes[vtable->func_like->export_symbol_attr_index] =
+        header->attributes[header->func_like->export_symbol_attr_index];
+    attributes[vtable->func_like->export_linkage_attr_index] =
+        header->attributes[header->func_like->export_linkage_attr_index];
+  }
+  if (!is_entry) {
+    const loom_attribute_t source_predicates =
+        header->attributes[header->func_like->predicates_attr_index];
+    if (!loom_attr_is_absent(source_predicates)) {
+      loom_predicate_t* predicates = NULL;
+      IREE_RETURN_IF_ERROR(
+          iree_arena_allocate_array(&module->arena, source_predicates.count,
+                                    sizeof(*predicates), (void**)&predicates));
+      memcpy(predicates, source_predicates.predicate_list,
+             source_predicates.count * sizeof(*predicates));
+      attributes[vtable->func_like->predicates_attr_index] =
+          loom_attr_predicate_list(predicates, source_predicates.count);
+    }
   }
   IREE_RETURN_IF_ERROR(loom_builder_finalize_op(builder, declaration));
   *out_declaration = declaration;
@@ -302,7 +342,7 @@ static iree_status_t loom_link_kernel_config_build_helper(
                                            ? loom_symbol_ref_null()
                                            : loom_attr_as_symbol(target_attr);
   loom_func_def_build_flags_t build_flags =
-      LOOM_FUNC_DEF_BUILD_FLAG_HAS_PURITY |
+      LOOM_FUNC_DEF_BUILD_FLAG_HAS_EFFECT_CONTRACT |
       LOOM_FUNC_DEF_BUILD_FLAG_HAS_INLINE_POLICY;
   if (loom_symbol_ref_is_valid(target_ref)) {
     build_flags |= LOOM_FUNC_DEF_BUILD_FLAG_HAS_TARGET;
@@ -310,7 +350,8 @@ static iree_status_t loom_link_kernel_config_build_helper(
   loom_op_t* helper_op = NULL;
   IREE_RETURN_IF_ERROR(loom_func_def_build(
       builder, build_flags,
-      /*visibility=*/0, /*retain=*/0, /*cc=*/0, LOOM_FUNC_PURITY_PURE,
+      /*visibility=*/0, /*linkage=*/0, /*retain=*/0, /*cc=*/0,
+      LOOM_CALLABLE_EFFECT_CONTRACT_UNSPECIFIED,
       /*temperature=*/0, LOOM_INLINE_POLICY_INLINE, target_ref,
       /*abi=*/0, loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
       loom_named_attr_slice_empty(), config_ref, argument_types,
@@ -323,6 +364,19 @@ static iree_status_t loom_link_kernel_config_build_helper(
       module, header, helper, scratch_arena));
   *out_helper = helper;
   return iree_ok_status();
+}
+
+// Finalizes the projected helper with the source verifier's retained effect
+// result. Launch configuration admits only deterministic reads, and the region
+// summary distinguishes their presence without rescanning the projected body.
+static void loom_link_kernel_config_finalize_helper(loom_module_t* module,
+                                                    loom_func_like_t helper) {
+  const loom_region_t* body = loom_func_like_body(helper);
+  const loom_callable_effect_contract_t contract =
+      loom_region_has_memory_accesses(body)
+          ? LOOM_CALLABLE_EFFECT_CONTRACT_READONLY
+          : LOOM_CALLABLE_EFFECT_CONTRACT_PURE;
+  loom_func_like_set_effect_contract(module, helper, contract);
 }
 
 static iree_status_t loom_link_kernel_config_materialize_body(
@@ -353,15 +407,18 @@ static iree_status_t loom_link_kernel_config_materialize_body(
   IREE_RETURN_IF_ERROR(loom_op_erase(module, launch_config));
   loom_builder_initialize(module, &module->arena, block, builder);
   loom_op_t* return_op = NULL;
-  return loom_func_return_build(builder, return_values,
-                                IREE_ARRAYSIZE(return_values), location,
-                                &return_op);
+  IREE_RETURN_IF_ERROR(loom_func_return_build(builder, return_values,
+                                              IREE_ARRAYSIZE(return_values),
+                                              location, &return_op));
+  loom_link_kernel_config_finalize_helper(module, helper);
+  return iree_ok_status();
 }
 
 static iree_status_t loom_link_kernel_config_materialize_projection_body(
     const loom_link_bytecode_kernel_config_source_t* source,
     loom_bytecode_function_projection_reader_t* reader,
     iree_arena_allocator_t* scratch_arena, loom_module_t* module,
+    loom_link_plan_symbol_projection_t projection,
     loom_symbol_ref_t config_ref) {
   loom_bytecode_function_header_t header = {0};
   iree_status_t status = loom_bytecode_function_projection_reader_read_header(
@@ -372,15 +429,17 @@ static iree_status_t loom_link_kernel_config_materialize_projection_body(
   if (iree_status_is_ok(status)) {
     loom_builder_initialize(module, &module->arena, loom_module_block(module),
                             &builder);
-    status = loom_link_kernel_config_build_declaration(module, &header,
-                                                       &builder, &declaration);
+    status = loom_link_kernel_config_build_declaration(
+        module, &header, projection, &builder, &declaration);
   }
   loom_func_like_t helper = {0};
-  if (iree_status_is_ok(status)) {
+  if (iree_status_is_ok(status) &&
+      projection == LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_CONFIGURATION) {
     status = loom_link_kernel_config_build_helper(
         module, &header, config_ref, scratch_arena, &builder, &helper);
   }
-  if (iree_status_is_ok(status)) {
+  if (iree_status_is_ok(status) &&
+      projection == LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_CONFIGURATION) {
     status = loom_link_kernel_config_materialize_body(source, reader, &header,
                                                       module, &builder, helper);
   }
@@ -390,30 +449,7 @@ static iree_status_t loom_link_kernel_config_materialize_projection_body(
 
 static bool loom_link_kernel_config_selection_is_partial(
     const loom_link_plan_module_symbol_t* selection) {
-  return selection->plan_symbol->selected_facet_count !=
-         selection->source_symbol->facets.schema.facet_count;
-}
-
-static iree_status_t loom_link_kernel_config_validate_partial_selection(
-    const loom_link_plan_t* plan,
-    const loom_link_plan_module_symbol_t* selection) {
-  const iree_host_size_t symbol_ordinal = selection->source_symbol->ordinal;
-  if (!iree_all_bits_set(selection->source_symbol->facets.schema.interfaces,
-                         LOOM_SYMBOL_INTERFACE_KERNEL) ||
-      !loom_link_plan_contains_facet(plan, symbol_ordinal,
-                                     LOOM_LINK_SYMBOL_FACET_KERNEL_CONTRACT) ||
-      !loom_link_plan_contains_facet(
-          plan, symbol_ordinal, LOOM_LINK_SYMBOL_FACET_KERNEL_CONFIGURATION) ||
-      loom_link_plan_contains_facet(
-          plan, symbol_ordinal, LOOM_LINK_SYMBOL_FACET_KERNEL_IMPLEMENTATION)) {
-    return iree_make_status(
-        IREE_STATUS_UNIMPLEMENTED,
-        "partial materialization of symbol '@%.*s' is not a kernel "
-        "contract-plus-configuration projection",
-        (int)selection->source_symbol->name.size,
-        selection->source_symbol->name.data);
-  }
-  return iree_ok_status();
+  return selection->projection != LOOM_LINK_PLAN_SYMBOL_PROJECTION_COMPLETE;
 }
 
 static const loom_link_plan_module_symbol_t*
@@ -598,8 +634,14 @@ static iree_status_t loom_link_kernel_config_build_ir_declaration(
     loom_builder_t* builder, loom_op_t** out_declaration) {
   loom_func_like_t source_function =
       loom_func_like_const_cast(projection->source_module, source_op);
+  const bool is_entry =
+      selected->projection == LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_ENTRY;
+  const bool is_pipeline = selected->projection ==
+                           LOOM_LINK_PLAN_SYMBOL_PROJECTION_PIPELINE_CONTRACT;
   const loom_value_slice_t source_workloads =
-      loom_kernel_workload_arg_ids(projection->source_module, source_op);
+      is_entry || is_pipeline
+          ? (loom_value_slice_t){0}
+          : loom_kernel_workload_arg_ids(projection->source_module, source_op);
   uint16_t source_argument_count = 0;
   const loom_value_id_t* source_arguments =
       loom_func_like_arg_ids(source_function, &source_argument_count);
@@ -621,40 +663,81 @@ static iree_status_t loom_link_kernel_config_build_ir_declaration(
   loom_symbol_ref_t target = loom_symbol_ref_null();
   IREE_RETURN_IF_ERROR(loom_ir_remap_symbol_ref(
       &remap, loom_func_like_target(source_function), &target));
-  loom_string_id_t export_symbol = LOOM_STRING_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_ir_remap_string_id(
-      &remap, loom_func_like_export_symbol(source_function),
-      /*allow_invalid=*/true, &export_symbol));
   loom_location_id_t location = LOOM_LOCATION_UNKNOWN;
   IREE_RETURN_IF_ERROR(
       loom_ir_remap_location_id(&remap, source_op->location, &location));
 
-  loom_kernel_decl_build_flags_t build_flags = 0;
-  if (loom_kernel_def_has_retain(source_op)) {
-    build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_RETAIN;
-  }
-  if (loom_symbol_ref_is_valid(target)) {
-    build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_TARGET;
-  }
-  if (export_symbol != LOOM_STRING_ID_INVALID) {
-    build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_EXPORT_SYMBOL;
-  }
-  if (loom_kernel_def_has_export_linkage(source_op)) {
-    build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_EXPORT_LINKAGE;
-  }
   const loom_symbol_ref_t target_callee = {
       .module_id = 0,
       .symbol_id = (uint16_t)selected->materialized_symbol_ordinal,
   };
-  IREE_RETURN_IF_ERROR(loom_kernel_decl_build(
-      builder, build_flags, loom_kernel_def_retain(source_op), target,
-      export_symbol, loom_kernel_def_export_linkage(source_op), target_callee,
-      workload_types, source_workloads.count, argument_types,
-      source_argument_count, /*predicates=*/NULL, /*predicates_count=*/0,
-      location, out_declaration));
+  if (is_pipeline) {
+    loom_pipeline_decl_build_flags_t build_flags = 0;
+    if (loom_pipeline_def_has_scope(source_op)) {
+      build_flags |= LOOM_PIPELINE_DECL_BUILD_FLAG_HAS_SCOPE;
+    }
+    if (loom_pipeline_def_has_visibility(source_op)) {
+      build_flags |= LOOM_PIPELINE_DECL_BUILD_FLAG_HAS_VISIBILITY;
+    }
+    if (loom_pipeline_def_has_retain(source_op)) {
+      build_flags |= LOOM_PIPELINE_DECL_BUILD_FLAG_HAS_RETAIN;
+    }
+    if (loom_symbol_ref_is_valid(target)) {
+      build_flags |= LOOM_PIPELINE_DECL_BUILD_FLAG_HAS_TARGET;
+    }
+    const uint16_t specialization_count =
+        (uint16_t)loom_func_like_specialization_count(source_function);
+    IREE_RETURN_IF_ERROR(loom_pipeline_decl_build(
+        builder, build_flags, loom_pipeline_def_scope(source_op),
+        loom_pipeline_def_visibility(source_op),
+        loom_pipeline_def_retain(source_op), target, target_callee,
+        argument_types, specialization_count,
+        argument_types ? argument_types + specialization_count : NULL,
+        source_argument_count - specialization_count,
+        /*predicates=*/NULL, /*predicates_count=*/0, location,
+        out_declaration));
+  } else if (is_entry) {
+    loom_kernel_entry_decl_build_flags_t build_flags = 0;
+    if (loom_kernel_def_has_retain(source_op)) {
+      build_flags |= LOOM_KERNEL_ENTRY_DECL_BUILD_FLAG_HAS_RETAIN;
+    }
+    if (loom_symbol_ref_is_valid(target)) {
+      build_flags |= LOOM_KERNEL_ENTRY_DECL_BUILD_FLAG_HAS_TARGET;
+    }
+    IREE_RETURN_IF_ERROR(loom_kernel_entry_decl_build(
+        builder, build_flags, loom_kernel_def_retain(source_op), target,
+        target_callee, argument_types, source_argument_count, location,
+        out_declaration));
+  } else {
+    loom_string_id_t export_symbol = LOOM_STRING_ID_INVALID;
+    IREE_RETURN_IF_ERROR(loom_ir_remap_string_id(
+        &remap, loom_func_like_export_symbol(source_function),
+        /*allow_invalid=*/true, &export_symbol));
+    loom_kernel_decl_build_flags_t build_flags = 0;
+    if (loom_kernel_def_has_retain(source_op)) {
+      build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_RETAIN;
+    }
+    if (loom_symbol_ref_is_valid(target)) {
+      build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_TARGET;
+    }
+    if (export_symbol != LOOM_STRING_ID_INVALID) {
+      build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_EXPORT_SYMBOL;
+    }
+    if (loom_kernel_def_has_export_linkage(source_op)) {
+      build_flags |= LOOM_KERNEL_DECL_BUILD_FLAG_HAS_EXPORT_LINKAGE;
+    }
+    IREE_RETURN_IF_ERROR(loom_kernel_decl_build(
+        builder, build_flags, loom_kernel_def_retain(source_op), target,
+        export_symbol, loom_kernel_def_export_linkage(source_op), target_callee,
+        workload_types, source_workloads.count, argument_types,
+        source_argument_count, /*predicates=*/NULL, /*predicates_count=*/0,
+        location, out_declaration));
+  }
 
   const loom_value_slice_t target_workloads =
-      loom_kernel_workload_arg_ids(projection->target_module, *out_declaration);
+      is_pipeline ? (loom_value_slice_t){0}
+                  : loom_kernel_workload_arg_ids(projection->target_module,
+                                                 *out_declaration);
   loom_func_like_t target_function =
       loom_func_like_cast(projection->target_module, *out_declaration);
   uint16_t target_argument_count = 0;
@@ -673,6 +756,9 @@ static iree_status_t loom_link_kernel_config_build_ir_declaration(
   IREE_RETURN_IF_ERROR(loom_link_kernel_config_configure_ir_values(
       projection, source_arguments, target_arguments, source_argument_count,
       &remap));
+  if (is_entry) {
+    return iree_ok_status();
+  }
   return loom_link_kernel_config_copy_ir_predicates(
       projection, source_function, &remap,
       LOOM_LINK_KERNEL_CONFIG_PREDICATE_PROJECTION_ALL, target_function);
@@ -709,7 +795,7 @@ static iree_status_t loom_link_kernel_config_build_ir_helper(
   IREE_RETURN_IF_ERROR(
       loom_ir_remap_location_id(&remap, source_op->location, &location));
   loom_func_def_build_flags_t build_flags =
-      LOOM_FUNC_DEF_BUILD_FLAG_HAS_PURITY |
+      LOOM_FUNC_DEF_BUILD_FLAG_HAS_EFFECT_CONTRACT |
       LOOM_FUNC_DEF_BUILD_FLAG_HAS_INLINE_POLICY;
   if (loom_symbol_ref_is_valid(target)) {
     build_flags |= LOOM_FUNC_DEF_BUILD_FLAG_HAS_TARGET;
@@ -717,7 +803,8 @@ static iree_status_t loom_link_kernel_config_build_ir_helper(
   loom_op_t* helper_op = NULL;
   IREE_RETURN_IF_ERROR(loom_func_def_build(
       builder, build_flags,
-      /*visibility=*/0, /*retain=*/0, /*cc=*/0, LOOM_FUNC_PURITY_PURE,
+      /*visibility=*/0, /*linkage=*/0, /*retain=*/0, /*cc=*/0,
+      LOOM_CALLABLE_EFFECT_CONTRACT_UNSPECIFIED,
       /*temperature=*/0, LOOM_INLINE_POLICY_INLINE, target,
       /*abi=*/0, loom_named_attr_slice_empty(), LOOM_STRING_ID_INVALID,
       loom_named_attr_slice_empty(),
@@ -777,9 +864,11 @@ static iree_status_t loom_link_kernel_config_build_ir_helper(
   IREE_RETURN_IF_ERROR(loom_ir_remap_location_id(
       &remap, launch_config->location, &return_location));
   loom_op_t* return_op = NULL;
-  return loom_func_return_build(&body_builder, return_values,
-                                IREE_ARRAYSIZE(return_values), return_location,
-                                &return_op);
+  IREE_RETURN_IF_ERROR(loom_func_return_build(&body_builder, return_values,
+                                              IREE_ARRAYSIZE(return_values),
+                                              return_location, &return_op));
+  loom_link_kernel_config_finalize_helper(projection->target_module, helper);
+  return iree_ok_status();
 }
 
 static iree_status_t loom_link_kernel_config_initialize_output_symbols(
@@ -814,7 +903,8 @@ static iree_status_t loom_link_kernel_config_initialize_output_symbols(
   for (iree_host_size_t i = 0; i < selection->symbols.count; ++i) {
     const loom_link_plan_module_symbol_t* selected =
         &selection->symbols.values[i];
-    if (!loom_link_kernel_config_selection_is_partial(selected)) {
+    if (selected->projection !=
+        LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_CONFIGURATION) {
       continue;
     }
     IREE_RETURN_IF_ERROR(loom_link_kernel_config_add_helper_symbol(
@@ -909,7 +999,9 @@ static iree_status_t loom_link_kernel_config_project_ir_module(
     loom_op_t* declaration = NULL;
     status = loom_link_kernel_config_build_ir_declaration(
         &projection, selected, ordered->source_op, &builder, &declaration);
-    if (iree_status_is_ok(status)) {
+    if (iree_status_is_ok(status) &&
+        selected->projection ==
+            LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_CONFIGURATION) {
       status = loom_link_kernel_config_build_ir_helper(
           &projection, ordered->selection_ordinal, ordered->source_op,
           &builder);
@@ -979,12 +1071,15 @@ iree_status_t loom_link_plan_project_kernel_config_module(
   }
 
   for (iree_host_size_t i = 0; i < selection->symbols.count; ++i) {
-    if (!loom_link_kernel_config_selection_is_partial(
-            &selection->symbols.values[i])) {
-      continue;
+    const loom_link_plan_module_symbol_t* symbol =
+        &selection->symbols.values[i];
+    if (symbol->projection == LOOM_LINK_PLAN_SYMBOL_PROJECTION_UNSUPPORTED) {
+      return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                              "partial materialization of symbol '@%.*s' has "
+                              "no contract projection",
+                              (int)symbol->source_symbol->name.size,
+                              symbol->source_symbol->name.data);
     }
-    IREE_RETURN_IF_ERROR(loom_link_kernel_config_validate_partial_selection(
-        plan, &selection->symbols.values[i]));
   }
 
   loom_symbol_ref_t* configuration_functions = NULL;
@@ -1090,7 +1185,9 @@ iree_status_t loom_link_plan_project_kernel_config_module(
     }
     const loom_bytecode_symbol_metadata_t* source_symbol =
         &source_module->symbols[symbol->source_symbol->module_symbol_ordinal];
-    if (source_symbol->kernel_workload_region_payload_ordinal_plus_one == 0) {
+    if (symbol->projection ==
+            LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_CONFIGURATION &&
+        source_symbol->kernel_workload_region_payload_ordinal_plus_one == 0) {
       status = iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
           "selected kernel '@%.*s' has no launch-configuration payload",
@@ -1105,10 +1202,16 @@ iree_status_t loom_link_plan_project_kernel_config_module(
         .symbol_ordinal =
             (uint32_t)symbol->source_symbol->module_symbol_ordinal,
         .config_payload_ordinal =
-            source_symbol->kernel_workload_region_payload_ordinal_plus_one - 1,
+            symbol->projection ==
+                    LOOM_LINK_PLAN_SYMBOL_PROJECTION_KERNEL_CONFIGURATION
+                ? source_symbol
+                          ->kernel_workload_region_payload_ordinal_plus_one -
+                      1
+                : 0,
     };
     status = loom_link_kernel_config_materialize_projection_body(
-        &source, reader, arena, module, configuration_functions[i]);
+        &source, reader, arena, module, symbol->projection,
+        configuration_functions[i]);
   }
   loom_bytecode_function_projection_reader_deinitialize(reader);
 

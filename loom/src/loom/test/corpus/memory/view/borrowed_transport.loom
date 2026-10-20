@@ -1,0 +1,116 @@
+// Caller-owned storage keeps the complete view coordinate observable across
+// selection, calls and loop rotation without requiring private allocation.
+func.def inline @copy_payload(%source: view<16xi32>, %destination: view<32xi32>) {
+  %begin = index.constant 0 : index
+  %end = index.constant 8 : index
+  %step = index.constant 4 : index
+  %unroll = index.constant 2 : index
+  scf.for %position = [%begin to %end step %step] unroll(%unroll) {
+    %output_position = index.add %position, %step : index
+    %values = vector.load %source[%position] : view<16xi32> -> vector<4xi32>
+    vector.store %values, %destination[%output_position] : vector<4xi32>, view<32xi32>
+  }
+  func.return
+}
+
+func.def noinline @rotate_records(%first: view<16xi32>, %second: view<16xi32>, %count: index, %seed: i32) -> (view<16xi32>) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %last, %other = scf.for %position = [%begin to %count step %step](%current = %first : view<16xi32>, %next = %second : view<16xi32>) -> (view<16xi32>, view<16xi32>) {
+    %ordinal = index.cast %position : index to i32
+    %value = scalar.addi %seed, %ordinal : i32
+    view.store %value, %current[0] : i32, view<16xi32>
+    scf.yield %next, %current : view<16xi32>, view<16xi32>
+  }
+  func.return %last : view<16xi32>
+}
+
+func.def noinline @record_window(%input: view<16xi32>, %position: index) -> (view<3xi32>) where [range(%position, 0, 3)] {
+  %outer = view.subview %input[1] : view<16xi32> -> view<15xi32>
+  %inner = view.subview %outer[%position] : view<15xi32> -> view<3xi32>
+  func.return %inner : view<3xi32>
+}
+
+func.def noinline @read_window(%input: view<3xi32>) -> (i32) {
+  %value = view.load %input[1] : view<3xi32> -> i32
+  func.return %value : i32
+}
+
+func.def @borrowed_transport_observations(%ordinal_input: index, %first_input: buffer, %second_input: buffer, %output_input: buffer) {
+  %ordinal = index.assume %ordinal_input [range(%ordinal_input, 0, 23)] : index
+  %c0 = index.constant 0 : index
+  %c2 = index.constant 2 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %c5 = index.constant 5 : index
+  %c16 = index.constant 16 : index
+  %c32 = index.constant 32 : index
+  %c257 = index.constant 257 : index
+  %first_prefix = index.constant 16 : offset
+  %second_prefix = index.constant 32 : offset
+  %output_origin = index.constant 48 : offset
+  %variant = index.rem %ordinal, %c3 : index
+  %origin_index = index.mul %variant, %c16 : index
+  %origin_delta = index.cast %origin_index : index to offset
+  %first_origin = index.add %first_prefix, %origin_delta : offset
+  %second_origin = index.add %second_prefix, %origin_delta : offset
+  %parity = index.rem %ordinal, %c2 : index
+  %choose_first = index.cmp eq, %parity, %c0 : index
+  %position = index.rem %ordinal, %c4 : index
+  %count_variant = index.div %ordinal, %c4 : index
+  %long_odd = index.cmp eq, %count_variant, %c5 : index
+  %long_even = index.cmp eq, %count_variant, %c4 : index
+  %short_or_even = scf.select %long_even, %c32, %count_variant : index
+  %count = scf.select %long_odd, %c257, %short_or_even : index
+
+  %first_storage = buffer.assume.alignment %first_input {minimum_alignment = 16} : buffer
+  %second_storage = buffer.assume.alignment %second_input {minimum_alignment = 16} : buffer
+  %output_storage = buffer.assume.alignment %output_input {minimum_alignment = 16} : buffer
+  %first = buffer.view %first_storage[%first_origin] : buffer -> view<16xi32>
+  %second = buffer.view %second_storage[%second_origin] : buffer -> view<16xi32>
+  %output = buffer.view %output_storage[%output_origin] : buffer -> view<32xi32>
+  %selected = scf.select %choose_first, %first, %second : view<16xi32>
+  func.call @copy_payload(%selected, %output) : (view<16xi32>, view<32xi32>)
+
+  %seed = scalar.constant 2147483600 : i32
+  %last = func.call @rotate_records(%first, %second, %count, %seed) : (view<16xi32>, view<16xi32>, index, i32) -> (view<16xi32>)
+  %last_value = view.load %last[0] : view<16xi32> -> i32
+  %window = func.call @record_window(%last, %position) : (view<16xi32>, index) -> (view<3xi32>)
+  %window_value = func.call @read_window(%window) : (view<3xi32>) -> (i32)
+  %opposite = scf.select %choose_first, %second, %first : view<16xi32>
+  %other_window = func.call @record_window(%opposite, %position) : (view<16xi32>, index) -> (view<3xi32>)
+  %other_value = func.call @read_window(%other_window) : (view<3xi32>) -> (i32)
+  view.store %last_value, %output[0] : i32, view<32xi32>
+  view.store %window_value, %output[1] : i32, view<32xi32>
+  view.store %other_value, %output[2] : i32, view<32xi32>
+  func.return
+}
+
+check.scenario @borrowed_transport_values {
+  // Each direction occurs at every loop boundary: zero, one, even, odd and
+  // longer rotations. Distinct tensor subspans add a caller-owned base offset
+  // before the function forms its own view origins.
+  check.trial[24](%trial: index, %entropy: check.entropy) {
+    %first_storage = check.generate.iota offset(17) step(37) : tensor<64xi32>
+    %second_storage = check.generate.iota offset(191) step(-11) : tensor<64xi32>
+    %first = check.tensor.view %first_storage offset(16) : tensor<64xi32> -> tensor<48xi32>
+    %second = check.tensor.view %second_storage offset(32) : tensor<64xi32> -> tensor<48xi32>
+    %output_storage = check.generate.fill value(-889275714) : tensor<64xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<64xi32> -> tensor<48xi32>
+    %prefix = check.tensor.view %output_storage offset(0) : tensor<64xi32> -> tensor<16xi32>
+    %header_guard = check.tensor.view %output_storage offset(76) : tensor<64xi32> -> tensor<1xi32>
+    %suffix = check.tensor.view %output_storage offset(112) : tensor<64xi32> -> tensor<36xi32>
+    %prefix_guard = check.generate.fill value(-889275714) : tensor<16xi32>
+    %word_guard = check.generate.fill value(-889275714) : tensor<1xi32>
+    %suffix_guard = check.generate.fill value(-889275714) : tensor<36xi32>
+    check.compare<@borrowed_transport_observations>(%trial, %first, %second, %output) : (index, tensor<48xi32>, tensor<48xi32>, tensor<48xi32>) -> () {
+      check.expect.bitwise actual(%first_storage) expected(%first_storage) : tensor<64xi32>
+      check.expect.bitwise actual(%second_storage) expected(%second_storage) : tensor<64xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<64xi32>
+      check.expect.bitwise actual(%prefix) expected(%prefix_guard) : tensor<16xi32>
+      check.expect.bitwise actual(%header_guard) expected(%word_guard) : tensor<1xi32>
+      check.expect.bitwise actual(%suffix) expected(%suffix_guard) : tensor<36xi32>
+    }
+  }
+  check.return
+}

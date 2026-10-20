@@ -9,14 +9,14 @@
 from __future__ import annotations
 
 from collections.abc import Hashable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from loom.dsl import Op
 from loom.gen.support.c import c_identifier as _c_identifier
 from loom.gen.support.files import write_text_file
 from loom.gen.support.generated_file import line_comment_header
-from loom.gen.support.string_pool import CStringPool, emit_c_string_pool
+from loom.gen.support.string_pool import CStringBank, CStringPool, emit_c_string_pool, layout_c_string_pool
 from loom.gen.target.contracts import lower_rule_rows, lower_rule_spelling
 from loom.target.contracts import (
     LOWER_EMIT_FLAG_BIND_RESULTS_TO_REFS,
@@ -28,11 +28,14 @@ from loom.target.contracts import (
     SOURCE_NODE_COUNT_BITS,
     CompiledLowerRuleSet,
     ContractFragment,
+    DescriptorOperandMaterialization,
     GuardKind,
+    LowerAttrCopyKind,
     LowerDiagnosticParam,
     LowerEmitKind,
     SourceMemoryAddressMaterializer,
     SourceMemoryByteOffsetMaterializer,
+    SourceMemoryRejectionReason,
     SourceNodeRelation,
     SourceValueKind,
     TypePattern,
@@ -53,7 +56,25 @@ _STRUCTURAL_EMIT_KINDS = (
     LowerEmitKind.REGISTER_SLICE,
     LowerEmitKind.REGISTER_CONCAT,
     LowerEmitKind.REGISTER_COPY,
+    LowerEmitKind.REGISTER_MOVE,
 )
+
+
+def _rule_root_producer_closure_bits(
+    table: CompiledLowerRuleSet,
+) -> tuple[int, ...]:
+    """Packs rules requiring projected producer closure into a bitset."""
+
+    bit_words = [0] * ((len(table.rules) + 63) // 64)
+    for rule_index, rule in enumerate(table.rules):
+        for guard in table.guards[rule.guard_start : rule.guard_start + rule.guard_count]:
+            if guard.kind is not GuardKind.VALUE_TYPE:
+                continue
+            value_ref = table.value_refs[guard.value_ref_index]
+            if value_ref.source_node_index == 0 and value_ref.kind is SourceValueKind.EXACT_LANE_ORIGIN_OPERAND:
+                bit_words[rule_index // 64] |= 1 << (rule_index % 64)
+                break
+    return tuple(bit_words) if any(bit_words) else ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +99,62 @@ def _intern_rows[RowT: Hashable](
             unique_rows.append(row)
         row_refs.append(ordinal)
     return tuple(unique_rows), tuple(row_refs)
+
+
+def _primary_descriptor_feature_classes(
+    table: CompiledLowerRuleSet,
+) -> tuple[tuple[int, ...], tuple[int, ...], bool]:
+    """Interns primary descriptor feature masks and returns rule classes."""
+
+    masks: list[int] = []
+    mask_classes: dict[int, int] = {}
+    rule_classes: list[int] = []
+    has_dynamic_class = False
+    for rule in table.rules:
+        if rule.primary_emit_ordinal == LOWER_RULE_PRIMARY_EMIT_NONE:
+            rule_classes.append(_U8_MAX)
+            continue
+        emit = table.emits[rule.emit_start + rule.primary_emit_ordinal]
+        descriptor = emit.descriptor
+        feature_mask_words = descriptor.feature_mask_words if descriptor is not None else ()
+        if rule.primary_emit_ordinal >= _U8_MAX:
+            rule_classes.append(_U8_MAX)
+            if any(feature_mask_words):
+                has_dynamic_class = True
+            continue
+        if any(feature_mask_words[1:]):
+            rule_classes.append(_U8_MAX)
+            has_dynamic_class = True
+            continue
+        mask = feature_mask_words[0] if feature_mask_words else 0
+        if mask == 0:
+            rule_classes.append(0)
+            continue
+        feature_class = mask_classes.get(mask)
+        if feature_class is None:
+            if len(masks) == _U8_MAX - 1:
+                rule_classes.append(_U8_MAX)
+                has_dynamic_class = True
+                continue
+            masks.append(mask)
+            feature_class = len(masks)
+            mask_classes[mask] = feature_class
+        rule_classes.append(feature_class)
+    return tuple(masks), tuple(rule_classes), has_dynamic_class
+
+
+def required_primary_descriptor_feature_class(
+    table: CompiledLowerRuleSet,
+) -> int:
+    """Returns one feature class required by every rule, or zero if mixed."""
+
+    _, rule_classes, _ = _primary_descriptor_feature_classes(table)
+    if not rule_classes:
+        return 0
+    required_class = rule_classes[0]
+    if required_class in (0, _U8_MAX):
+        return 0
+    return required_class if all(rule_class == required_class for rule_class in rule_classes) else 0
 
 
 def _intern_optional_rows[RowT: Hashable](
@@ -130,6 +207,11 @@ def _intern_diagnostic_params(
     return tuple(unique_rows), tuple(row_refs)
 
 
+def diagnostic_descriptor_names(table: CompiledLowerRuleSet) -> frozenset[str]:
+    """Returns spellings owned by generated descriptor-availability diagnostics."""
+    return frozenset(row.descriptor.key for row in table.guards if row.kind == GuardKind.DESCRIPTOR_AVAILABLE and row.descriptor is not None)
+
+
 def generate_lower_rule_set(
     table: ContractFragment,
     *,
@@ -145,6 +227,7 @@ def generate_lower_rule_set_from_compiled(
     table: ContractFragment,
     *,
     compiled: CompiledLowerRuleSet,
+    shared_strings: CStringBank | None = None,
 ) -> GeneratedLowerRuleSet:
     """Generates C/H text from compiled target-low lower-rule rows."""
 
@@ -163,6 +246,7 @@ def generate_lower_rule_set_from_compiled(
             public_header=public_header,
             symbol_name=symbol_name,
             c_table_prefix=c_table_prefix,
+            shared_strings=shared_strings,
         ),
     )
 
@@ -221,6 +305,7 @@ def _generate_source(
     public_header: str,
     symbol_name: str,
     c_table_prefix: str,
+    shared_strings: CStringBank | None,
 ) -> str:
     lines: list[str] = []
     lines.extend(
@@ -247,6 +332,7 @@ def _generate_source(
             f"#if LOOM_LOW_LOWER_MAX_DIAGNOSTIC_PARAMS != {MAX_TARGET_DIAGNOSTIC_PARAMS}",
             '#error "target diagnostic parameter capacity mismatch"',
             "#endif",
+            f'static_assert(LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT == {len(SourceMemoryRejectionReason)}, "source-memory rejection reason count mismatch");',
         ]
     )
     lines.append("")
@@ -263,25 +349,62 @@ def _generate_source(
     ) = _intern_optional_rows(tuple(row.address_materializer for row in table.source_memories))
     source_memory_diagnostics, source_memory_diagnostic_indices = _intern_rows(tuple(lower_rule_rows.source_memory_diagnostic_indices(row) for row in table.source_memories))
     _validate_c_table_shape(table, source_contract, descriptor_ref_keys)
+    (
+        primary_descriptor_feature_masks,
+        primary_descriptor_feature_classes,
+        has_dynamic_primary_descriptor_features,
+    ) = _primary_descriptor_feature_classes(table)
     descriptor_refs = {key: index for index, key in enumerate(descriptor_ref_keys)}
     report_key_ordinals = {key: index + 1 for index, key in enumerate(report_keys)}
+    wide_report_keys = tuple(
+        (rule_index, report_key_ordinals[rule.report_key])
+        for rule_index, rule in enumerate(table.rules)
+        if rule.report_key and report_key_ordinals[rule.report_key] > lower_rule_rows.LOWER_RULE_REPORT_KEY_ORDINAL_MAX
+    )
     string_pool = _build_string_pool(
         table,
-        descriptor_ref_keys=descriptor_ref_keys,
         report_keys=report_keys,
         source_memory_byte_offset_materializers=source_memory_byte_offset_materializers,
         source_memory_address_materializers=source_memory_address_materializers,
         c_enum_prefix=f"{_c_identifier(table.name).upper()}_LOWER",
     )
     string_data_name = f"k{c_table_prefix}StringData"
-    lines.extend(emit_c_string_pool(string_pool, string_data_name))
+    string_layout = layout_c_string_pool(string_pool, shared_strings)
+    if string_layout.shared is not None:
+        lines.extend([f'#include "{string_layout.shared.header}"', ""])
+    lines.extend(emit_c_string_pool(string_pool, string_data_name, layout=string_layout))
+
+    literal_data_name = f"k{c_table_prefix}LiteralData"
+    lines.extend(
+        lower_rule_rows.emit_optional_value_array(
+            literal_data_name,
+            "uint8_t",
+            [f"UINT8_C(0x{byte:02X})" for byte in table.literal_data],
+        )
+    )
+
+    type_pattern_ranges, type_pattern_range_refs = _intern_optional_rows(tuple(lower_rule_rows.type_pattern_range(row.type_pattern) for row in table.type_patterns))
+    type_pattern_ranges_name = f"k{c_table_prefix}TypePatternRanges"
+    lines.extend(
+        lower_rule_rows.emit_optional_array(
+            type_pattern_ranges_name,
+            "loom_low_lower_type_pattern_range_t",
+            [lower_rule_rows.type_pattern_range_row(shape_range) for shape_range in type_pattern_ranges],
+        )
+    )
 
     type_patterns_name = f"k{c_table_prefix}TypePatterns"
     lines.extend(
         lower_rule_rows.emit_optional_array(
             type_patterns_name,
             "loom_low_lower_type_pattern_t",
-            [lower_rule_rows.type_pattern_row(row.type_pattern) for row in table.type_patterns],
+            [
+                lower_rule_rows.type_pattern_row(
+                    row.type_pattern,
+                    range_ref=type_pattern_range_refs[index],
+                )
+                for index, row in enumerate(table.type_patterns)
+            ],
         )
     )
 
@@ -311,7 +434,9 @@ def _generate_source(
             [
                 [
                     f".can_materialize = {materializer.can_materialize}",
-                    f".materialize = {materializer.materialize}",
+                    f".result_type = {materializer.result_type}",
+                    *([f".prepare = {materializer.prepare}"] if materializer.prepare else []),
+                    f".emit.{'planned' if materializer.prepare else 'direct'} = {materializer.materialize}",
                 ]
                 for materializer in source_contract.materializers
             ],
@@ -323,7 +448,7 @@ def _generate_source(
         lower_rule_rows.emit_optional_array(
             descriptor_refs_name,
             "loom_low_lower_rule_descriptor_ref_t",
-            [lower_rule_rows.descriptor_ref_row(string_pool.ref(_descriptor_ref_string_label(index))) for index, _ in enumerate(descriptor_ref_keys)],
+            [lower_rule_rows.descriptor_ref_row(key) for key in descriptor_ref_keys],
         )
     )
 
@@ -378,6 +503,16 @@ def _generate_source(
         )
     )
 
+    source_memory_shapes, source_memory_shape_indices = _intern_rows(tuple(lower_rule_rows.source_memory_shape(row) for row in table.source_memories))
+    source_memory_shapes_name = f"k{c_table_prefix}SourceMemoryShapes"
+    lines.extend(
+        lower_rule_rows.emit_optional_array(
+            source_memory_shapes_name,
+            "loom_low_lower_source_memory_shape_t",
+            [lower_rule_rows.source_memory_shape_row(shape) for shape in source_memory_shapes],
+        )
+    )
+
     source_memories_name = f"k{c_table_prefix}SourceMemories"
     lines.extend(
         lower_rule_rows.emit_optional_array(
@@ -386,12 +521,14 @@ def _generate_source(
             [
                 lower_rule_rows.source_memory_row(
                     row,
+                    shape_index=shape_index,
                     byte_offset_materializer_ordinal=byte_offset_ordinal,
                     address_materializer_ordinal=address_ordinal,
                     diagnostics_index=diagnostics_index,
                 )
-                for row, byte_offset_ordinal, address_ordinal, diagnostics_index in zip(
+                for row, shape_index, byte_offset_ordinal, address_ordinal, diagnostics_index in zip(
                     table.source_memories,
+                    source_memory_shape_indices,
                     byte_offset_materializer_ordinals,
                     address_materializer_ordinals,
                     source_memory_diagnostic_indices,
@@ -416,13 +553,21 @@ def _generate_source(
         diagnostic_rows.append(fields)
 
     unique_diagnostic_params, diagnostic_param_refs = _intern_diagnostic_params(diagnostic_param_rows)
-    diagnostic_params_name = f"k{c_table_prefix}DiagnosticParams"
+    diagnostic_param_kinds_name = f"k{c_table_prefix}DiagnosticParamKinds"
+    lines.extend(
+        lower_rule_rows.emit_optional_value_array(
+            diagnostic_param_kinds_name,
+            "loom_low_lower_diagnostic_param_kind_t",
+            [lower_rule_spelling.DIAGNOSTIC_PARAM_KIND_C_NAMES[row.kind] for row, _ in unique_diagnostic_params],
+        )
+    )
+    diagnostic_param_values_name = f"k{c_table_prefix}DiagnosticParamValues"
     lines.extend(
         lower_rule_rows.emit_optional_array(
-            diagnostic_params_name,
-            "loom_low_lower_diagnostic_param_t",
+            diagnostic_param_values_name,
+            "loom_low_lower_diagnostic_value_t",
             [
-                lower_rule_rows.diagnostic_param_row(
+                lower_rule_rows.diagnostic_value_row(
                     row,
                     string_value_ref=(string_pool.ref(_diagnostic_param_string_label(source_index)) if row.kind == DiagnosticParamKind.STRING_LITERAL else None),
                 )
@@ -450,12 +595,46 @@ def _generate_source(
     )
 
     unique_guards, guard_refs = _intern_rows(table.guards)
+    storage_operand_schemas, _ = _intern_rows(tuple(row.storage_operand_schema for row in unique_guards if row.storage_operand_schema is not None))
+    storage_operand_schema_ordinals = {schema: ordinal for ordinal, schema in enumerate(storage_operand_schemas)}
+    storage_operand_schemas_name = f"k{c_table_prefix}StorageOperandSchemas"
+    lines.extend(
+        lower_rule_rows.emit_optional_array(
+            storage_operand_schemas_name,
+            "loom_encoding_operand_summary_t",
+            [lower_rule_rows.storage_operand_schema_row(schema) for schema in storage_operand_schemas],
+        )
+    )
+
+    guard_payload_candidates: list[tuple[str, ...] | None] = []
+    for row in unique_guards:
+        payload_fields = lower_rule_rows.guard_payload_row(row)
+        guard_payload_candidates.append(tuple(payload_fields) if payload_fields else None)
+    # Each guard contributes at most one payload, so the validated uint16 guard
+    # count also bounds these one-based payload ordinals.
+    guard_payloads, guard_payload_ordinals = _intern_optional_rows(guard_payload_candidates)
+    guard_payloads_name = f"k{c_table_prefix}GuardPayloads"
+    lines.extend(
+        lower_rule_rows.emit_optional_array(
+            guard_payloads_name,
+            "loom_low_lower_guard_payload_t",
+            [list(payload_fields) for payload_fields in guard_payloads],
+        )
+    )
     guards_name = f"k{c_table_prefix}Guards"
     lines.extend(
         lower_rule_rows.emit_optional_array(
             guards_name,
             "loom_low_lower_guard_t",
-            [lower_rule_rows.guard_row(descriptor_refs, row) for row in unique_guards],
+            [
+                lower_rule_rows.guard_row(
+                    descriptor_refs,
+                    row,
+                    storage_operand_schema_ordinals=storage_operand_schema_ordinals,
+                    payload_ordinal=guard_payload_ordinals[index],
+                )
+                for index, row in enumerate(unique_guards)
+            ],
         )
     )
 
@@ -492,22 +671,24 @@ def _generate_source(
         )
     )
 
-    unique_emits, emit_refs = _intern_rows(table.emits)
+    # Descriptor identity belongs to the program position, so instructions with
+    # identical bindings share one behavior row across types and opcode families.
+    unique_emits, emit_refs = _intern_rows(tuple(replace(row, descriptor=None) for row in table.emits))
     emits_name = f"k{c_table_prefix}Emits"
     lines.extend(
         lower_rule_rows.emit_optional_array(
             emits_name,
             "loom_low_lower_emit_t",
-            [lower_rule_rows.emit_row(descriptor_refs, row) for row in unique_emits],
+            [lower_rule_rows.emit_row(row) for row in unique_emits],
         )
     )
 
     emit_refs_name = f"k{c_table_prefix}EmitRefs"
     lines.extend(
-        lower_rule_rows.emit_optional_value_array(
+        lower_rule_rows.emit_optional_array(
             emit_refs_name,
             "loom_low_lower_emit_ref_t",
-            [str(ref) for ref in emit_refs],
+            [lower_rule_rows.emit_ref_row(descriptor_refs, row, ref) for row, ref in zip(table.emits, emit_refs, strict=True)],
         )
     )
 
@@ -520,12 +701,49 @@ def _generate_source(
         )
     )
 
+    wide_report_keys_name = f"k{c_table_prefix}WideReportKeys"
+    lines.extend(
+        lower_rule_rows.emit_optional_array(
+            wide_report_keys_name,
+            "loom_low_lower_wide_report_key_t",
+            [lower_rule_rows.wide_report_key_row(rule_index, report_key_ordinal) for rule_index, report_key_ordinal in wide_report_keys],
+        )
+    )
+
     rules_name = f"k{c_table_prefix}Rules"
+    rule_root_producer_closure_bits = _rule_root_producer_closure_bits(table)
+    rule_root_producer_closure_bits_name = f"k{c_table_prefix}RuleRootProducerClosureBits"
+    primary_descriptor_feature_masks_name = f"k{c_table_prefix}PrimaryDescriptorFeatureMasks"
+    lines.extend(
+        lower_rule_rows.emit_optional_value_array(
+            primary_descriptor_feature_masks_name,
+            "uint64_t",
+            [f"UINT64_C(0x{mask:x})" for mask in primary_descriptor_feature_masks],
+        )
+    )
     lines.extend(
         lower_rule_rows.emit_optional_array(
             rules_name,
             "loom_low_lower_rule_t",
-            [lower_rule_rows.rule_row(row, report_key_ordinals) for row in table.rules],
+            [
+                lower_rule_rows.rule_row(
+                    row,
+                    report_key_ordinals,
+                    primary_descriptor_feature_class=feature_class,
+                )
+                for row, feature_class in zip(
+                    table.rules,
+                    primary_descriptor_feature_classes,
+                    strict=True,
+                )
+            ],
+        )
+    )
+    lines.extend(
+        lower_rule_rows.emit_optional_value_array(
+            rule_root_producer_closure_bits_name,
+            "uint64_t",
+            [f"UINT64_C(0x{bits:x})" for bits in rule_root_producer_closure_bits],
         )
     )
 
@@ -544,17 +762,27 @@ def _generate_source(
         for field in lower_rule_rows.rule_set_row(
             table=table,
             source_contract=source_contract,
-            string_pool=string_pool,
-            string_data_name=string_data_name,
+            string_pool_initializer=string_layout.initializer(string_data_name) if string_pool.entries else None,
             spans_name=spans_name,
             rules_name=rules_name,
+            rule_root_producer_closure_bits=(rule_root_producer_closure_bits),
+            rule_root_producer_closure_bits_name=(rule_root_producer_closure_bits_name),
+            primary_descriptor_feature_masks=primary_descriptor_feature_masks,
+            primary_descriptor_feature_masks_name=(primary_descriptor_feature_masks_name),
+            has_dynamic_primary_descriptor_features=(has_dynamic_primary_descriptor_features),
             report_keys=report_keys,
             report_keys_name=report_keys_name,
+            wide_report_keys=wide_report_keys,
+            wide_report_keys_name=wide_report_keys_name,
             type_patterns_name=type_patterns_name,
+            type_pattern_ranges=type_pattern_ranges,
+            type_pattern_ranges_name=type_pattern_ranges_name,
             value_refs_name=value_refs_name,
             source_nodes_name=source_nodes_name,
             materializers_name=materializers_name,
             source_memories_name=source_memories_name,
+            source_memory_shapes=source_memory_shapes,
+            source_memory_shapes_name=source_memory_shapes_name,
             source_memory_diagnostics=source_memory_diagnostics,
             source_memory_diagnostics_name=source_memory_diagnostics_name,
             source_memory_byte_offset_materializers=(source_memory_byte_offset_materializers),
@@ -564,13 +792,19 @@ def _generate_source(
             descriptor_ref_keys=descriptor_ref_keys,
             descriptor_refs_name=descriptor_refs_name,
             diagnostic_param_rows=unique_diagnostic_params,
-            diagnostic_params_name=diagnostic_params_name,
+            diagnostic_param_kinds_name=diagnostic_param_kinds_name,
+            diagnostic_param_values_name=diagnostic_param_values_name,
             diagnostic_param_refs=diagnostic_param_refs,
             diagnostic_param_refs_name=diagnostic_param_refs_name,
+            guard_payloads=guard_payloads,
+            guard_payloads_name=guard_payloads_name,
             guard_rows=unique_guards,
             guards_name=guards_name,
+            storage_operand_schemas=storage_operand_schemas,
+            storage_operand_schemas_name=storage_operand_schemas_name,
             guard_refs=guard_refs,
             guard_refs_name=guard_refs_name,
+            literal_data_name=literal_data_name,
             attr_copies_name=attr_copies_name,
             tied_results_name=tied_results_name,
             emit_rows=unique_emits,
@@ -582,10 +816,6 @@ def _generate_source(
     )
     lines.extend(["};", ""])
     return "\n".join(lines)
-
-
-def _descriptor_ref_string_label(index: int) -> str:
-    return f"descriptor_ref_{index}_key"
 
 
 def _source_memory_conversion_string_label(index: int, source_type: str) -> str:
@@ -615,15 +845,12 @@ def _report_key_string_label(index: int) -> str:
 def _build_string_pool(
     table: CompiledLowerRuleSet,
     *,
-    descriptor_ref_keys: tuple[str, ...],
     report_keys: tuple[str, ...],
     source_memory_byte_offset_materializers: tuple[SourceMemoryByteOffsetMaterializer, ...],
     source_memory_address_materializers: tuple[SourceMemoryAddressMaterializer, ...],
     c_enum_prefix: str,
 ) -> CStringPool:
     pool = CStringPool(c_enum_prefix)
-    for index, key in enumerate(descriptor_ref_keys):
-        pool.intern(_descriptor_ref_string_label(index), key)
     for index, row in enumerate(source_memory_byte_offset_materializers):
         pool.intern(
             _source_memory_byte_offset_string_label(index),
@@ -700,6 +927,7 @@ def _validate_c_table_shape(
     _require_u16(len(descriptor_ref_keys), f"{subject} descriptor-ref count")
     _require_u16(len(table.guards), f"{subject} guard count")
     _require_u16(len(table.attr_copies), f"{subject} attr-copy count")
+    _require_u16(len(table.literal_data), f"{subject} literal-data byte count")
     _require_u16(len(table.tied_results), f"{subject} tied-result count")
     _require_u16(len(table.emits), f"{subject} emit count")
     _require_u16(len(table.diagnostics), f"{subject} diagnostic count")
@@ -790,11 +1018,11 @@ def _validate_c_table_shape(
     for index, row in enumerate(table.source_memories):
         row_subject = f"{subject} source-memory {index}"
         constraint = row.constraint
-        _require_u32(
+        _require_u8(
             constraint.element_byte_count,
             f"{row_subject} element byte count",
         )
-        _require_u32(
+        _require_u16(
             constraint.vector_lane_count,
             f"{row_subject} vector lane count",
         )
@@ -810,7 +1038,7 @@ def _validate_c_table_shape(
             constraint.static_byte_offset_maximum,
             f"{row_subject} static byte offset maximum",
         )
-        _require_u32(
+        _require_u16(
             constraint.minimum_alignment,
             f"{row_subject} minimum alignment",
         )
@@ -835,27 +1063,32 @@ def _validate_c_table_shape(
                 f"{row_subject} dynamic byte stride",
             )
         _require_u8(
-            constraint.dynamic_offset_unsigned_bit_count,
-            f"{row_subject} dynamic offset unsigned bit count",
+            constraint.byte_offset_unsigned_bit_count,
+            f"{row_subject} byte offset unsigned bit count",
         )
-        for diagnostic_name, diagnostic_index in (
-            ("constraint", row.diagnostic_index),
-            ("dynamic-offset", row.dynamic_offset_diagnostic_index),
-            ("address-layout", row.address_layout_diagnostic_index),
-            ("address", row.address_diagnostic_index),
+        _require_u8(
+            constraint.dynamic_offset_unsigned_bit_count,
+            f"{row_subject} dynamic byte offset unsigned bit count",
+        )
+        if len(row.rejection_diagnostic_indices) != len(SourceMemoryRejectionReason):
+            raise ValueError(f"{row_subject} rejection diagnostic count disagrees with source-memory rejection reasons")
+        for reason, diagnostic_index in zip(
+            SourceMemoryRejectionReason,
+            row.rejection_diagnostic_indices,
+            strict=True,
         ):
             _require_u16(
                 diagnostic_index,
-                f"{row_subject} {diagnostic_name} diagnostic index",
+                f"{row_subject} {reason.value} diagnostic index",
             )
             _require_optional_table_index(
                 diagnostic_index,
                 len(table.diagnostics),
-                f"{row_subject} {diagnostic_name} diagnostic index",
+                f"{row_subject} {reason.value} diagnostic index",
                 "diagnostic",
             )
         if constraint.cache_policy_build_flags is not None:
-            _require_u32(
+            _require_u8(
                 constraint.cache_policy_build_flags,
                 f"{row_subject} cache policy build flags",
             )
@@ -923,7 +1156,14 @@ def _validate_c_table_shape(
 
     for index, row in enumerate(table.attr_copies):
         row_subject = f"{subject} attr-copy {index}"
-        _require_u16(row.source_attr_index, f"{row_subject} source attr index")
+        _require_u8(row.source_node_index, f"{row_subject} source-node index")
+        if row.source_node_index and not lower_rule_rows.attr_copy_uses_source_attr(row.kind):
+            raise ValueError(f"{row_subject} kind cannot select a related source node")
+        _require_u8(row.source_attr_index, f"{row_subject} source attr index")
+        _require_u8(
+            row.source_operand_field_index,
+            f"{row_subject} source operand field index",
+        )
         _require_u16(
             row.other_source_attr_index,
             f"{row_subject} other source attr index",
@@ -932,7 +1172,7 @@ def _validate_c_table_shape(
             row.source_element_index,
             f"{row_subject} source element index",
         )
-        _require_u16(
+        _require_u8(
             row.source_element_count,
             f"{row_subject} source element count",
         )
@@ -949,8 +1189,23 @@ def _validate_c_table_shape(
                 f"{row_subject} value-ref index",
                 "value-ref",
             )
+        _require_u16(row.other_value_ref_index, f"{row_subject} other value-ref index")
+        if lower_rule_rows.attr_copy_uses_other_value_ref(row.kind):
+            _require_table_index(
+                row.other_value_ref_index,
+                len(table.value_refs),
+                f"{row_subject} other value-ref index",
+                "value-ref",
+            )
         _require_u8(row.dynamic_term_index, f"{row_subject} dynamic term index")
         _require_i64(row.literal_i64, f"{row_subject} literal i64")
+        _require_u16(row.literal_data_offset, f"{row_subject} literal-data offset")
+        _require_u8(row.literal_data_length, f"{row_subject} literal-data length")
+        if row.kind == LowerAttrCopyKind.READ_ONLY_DATA_LITERAL:
+            if row.literal_data_length == 0:
+                raise ValueError(f"{row_subject} literal-data length must be positive")
+            if row.literal_data_offset + row.literal_data_length > len(table.literal_data):
+                raise ValueError(f"{row_subject} literal-data range exceeds the generated pool")
 
     for index, row in enumerate(table.tied_results):
         row_subject = f"{subject} tied-result {index}"
@@ -973,8 +1228,16 @@ def _validate_c_table_shape(
         elif row.structural_offset != 0 or row.structural_unit_count != 0:
             raise ValueError(f"{row_subject} descriptor emit cannot carry a structural payload")
         _require_u8(row.flags, f"{row_subject} flags")
+        if not isinstance(row.operand_materialization, DescriptorOperandMaterialization):
+            raise ValueError(f"{row_subject} has invalid operand materialization: {row.operand_materialization!r}")
+        if is_structural_emit and row.operand_materialization is not DescriptorOperandMaterialization.DIRECT:
+            raise ValueError(f"{row_subject} structural emit cannot materialize descriptor operands")
         _require_u16(row.operand_ref_start, f"{row_subject} operand-ref start")
-        _require_u8(row.operand_ref_count, f"{row_subject} operand-ref count")
+        _require_unsigned_bits(
+            row.operand_ref_count,
+            3,
+            f"{row_subject} operand-ref count",
+        )
         _require_table_range(
             row.operand_ref_start,
             row.operand_ref_count,
@@ -987,8 +1250,9 @@ def _validate_c_table_shape(
             allowed_operand_mask = (1 << row.operand_ref_count) - 1
             if row.copy_operand_mask & ~allowed_operand_mask:
                 raise ValueError(f"{row_subject} copy operand mask references an operand outside operand-ref range: {row.copy_operand_mask}")
-        _require_u8(
+        _require_unsigned_bits(
             row.accumulator_operand_index,
+            2,
             f"{row_subject} accumulator operand index",
         )
         if row.kind == LowerEmitKind.DESCRIPTOR_OP_ACCUMULATE_LANES and row.accumulator_operand_index >= row.operand_ref_count:
@@ -998,7 +1262,11 @@ def _validate_c_table_shape(
             row.result_type_pattern_start,
             f"{row_subject} result type-pattern start",
         )
-        _require_u8(row.result_ref_count, f"{row_subject} result-ref count")
+        _require_unsigned_bits(
+            row.result_ref_count,
+            2,
+            f"{row_subject} result-ref count",
+        )
         if row.flags & LOWER_EMIT_FLAG_RESULT_TYPE_PATTERN and row.flags & LOWER_EMIT_FLAG_RESULT_DESCRIPTOR_TYPE:
             raise ValueError(f"{row_subject} cannot use both result type-pattern and descriptor result-type flags")
         if row.flags & LOWER_EMIT_FLAG_RESULT_TYPE_PATTERN and row.result_ref_count != 0 and not row.flags & LOWER_EMIT_FLAG_BIND_RESULTS_TO_REFS:
@@ -1032,7 +1300,11 @@ def _validate_c_table_shape(
                 "value-ref",
             )
         _require_u16(row.attr_copy_start, f"{row_subject} attr-copy start")
-        _require_u8(row.attr_copy_count, f"{row_subject} attr-copy count")
+        _require_unsigned_bits(
+            row.attr_copy_count,
+            5,
+            f"{row_subject} attr-copy count",
+        )
         _require_table_range(
             row.attr_copy_start,
             row.attr_copy_count,
@@ -1040,8 +1312,15 @@ def _validate_c_table_shape(
             f"{row_subject} attr-copy range",
             "attr-copy",
         )
+        has_read_only_data_attributes = any(attr_copy.kind.is_read_only_data for attr_copy in table.attr_copies[row.attr_copy_start : row.attr_copy_start + row.attr_copy_count])
+        if row.has_read_only_data_attributes != has_read_only_data_attributes:
+            raise ValueError(f"{row_subject} read-only data flag does not match its attribute projections")
         _require_u16(row.tied_result_start, f"{row_subject} tied-result start")
-        _require_u8(row.tied_result_count, f"{row_subject} tied-result count")
+        _require_unsigned_bits(
+            row.tied_result_count,
+            2,
+            f"{row_subject} tied-result count",
+        )
         _require_table_range(
             row.tied_result_start,
             row.tied_result_count,
@@ -1063,6 +1342,7 @@ def _validate_c_table_shape(
 
     for index, row in enumerate(table.rules):
         row_subject = f"{subject} rule {index}"
+        _require_u8(row.flags, f"{row_subject} flags")
         action_range_count = int(row.emit_count != 0) + int(row.alias_ref_count != 0) + int(row.elide_ref_count != 0)
         if action_range_count > 1:
             raise ValueError(f"{row_subject} cannot carry more than one action range")
@@ -1074,7 +1354,7 @@ def _validate_c_table_shape(
             raise ValueError(f"{row_subject} inactive elide-ref range has a nonzero start")
         if row.report_key:
             _require_report_key(row.report_key, f"{row_subject} report key")
-        _require_u16(row.temporary_count, f"{row_subject} temporary count")
+        _require_u8(row.temporary_count, f"{row_subject} temporary count")
         if row.source_node_start >= 1 << (16 - SOURCE_NODE_COUNT_BITS):
             raise ValueError(f"{row_subject} source-node start exceeds packed capacity")
         _require_u8(row.source_node_count, f"{row_subject} source-node count")
@@ -1101,10 +1381,16 @@ def _validate_c_table_shape(
                 raise ValueError(f"{node_subject} parent value-ref selects source node {parent_ref.source_node_index}, expected {source_node.parent_node_index}")
             if node_ref.source_node_index != source_node_index:
                 raise ValueError(f"{node_subject} local value-ref selects source node {node_ref.source_node_index}, expected {source_node_index}")
-            if source_node.relation is SourceNodeRelation.ADJACENT_UNIQUE_USER:
+            if source_node.relation in (
+                SourceNodeRelation.ADJACENT_UNIQUE_USER,
+                SourceNodeRelation.EXCLUSIVE_USER,
+            ):
                 parent_kind = SourceValueKind.RESULT
                 node_kind = SourceValueKind.OPERAND
-            elif source_node.relation is SourceNodeRelation.ADJACENT_DEFINITION:
+            elif source_node.relation in (
+                SourceNodeRelation.ADJACENT_DEFINITION,
+                SourceNodeRelation.EXCLUSIVE_DEFINITION,
+            ):
                 parent_kind = SourceValueKind.OPERAND
                 node_kind = SourceValueKind.RESULT
             else:
@@ -1119,7 +1405,7 @@ def _validate_c_table_shape(
             f"{row_subject} aggregate guard count",
         )
         _require_u16(row.guard_start, f"{row_subject} guard start")
-        _require_u16(row.guard_count, f"{row_subject} guard count")
+        _require_u8(row.guard_count, f"{row_subject} guard count")
         _require_table_range(
             row.guard_start,
             row.guard_count,
@@ -1199,8 +1485,12 @@ def _validate_c_table_shape(
                 emit.attr_copy_start + emit.attr_copy_count,
             ):
                 attr_copy = table.attr_copies[attr_copy_index]
+                if attr_copy.source_node_index > row.source_node_count:
+                    raise ValueError(f"{row_subject} attr-copy {attr_copy_index} selects source node {attr_copy.source_node_index} outside its source graph")
                 if lower_rule_rows.attr_copy_uses_value_ref(attr_copy.kind):
                     visible_value_ref_indices.append(attr_copy.value_ref_index)
+                if lower_rule_rows.attr_copy_uses_other_value_ref(attr_copy.kind):
+                    visible_value_ref_indices.append(attr_copy.other_value_ref_index)
         for value_ref_index in visible_value_ref_indices:
             source_node_index = table.value_refs[value_ref_index].source_node_index
             if source_node_index > row.source_node_count:
@@ -1228,20 +1518,35 @@ def _validate_type_pattern_c_shape(subject: str, type_pattern: TypePattern) -> N
         return
     _require_u8(len(type_pattern.dims), f"{subject} rank")
     for index, dim in enumerate(type_pattern.dims):
-        _require_i64(dim, f"{subject} static dim {index}")
+        _require_u16(dim, f"{subject} static dim {index}")
     if type_pattern.kind == "view":
         return
     if type_pattern.lanes is not None:
-        _require_i64(type_pattern.lanes, f"{subject} static lanes")
+        _require_u16(type_pattern.lanes, f"{subject} static lanes")
     if isinstance(type_pattern.minimum_lanes, int):
-        _require_i64(type_pattern.minimum_lanes, f"{subject} minimum lanes")
+        _require_u64(type_pattern.minimum_lanes, f"{subject} minimum lanes")
     if isinstance(type_pattern.maximum_lanes, int):
-        _require_i64(type_pattern.maximum_lanes, f"{subject} maximum lanes")
+        _require_u64(type_pattern.maximum_lanes, f"{subject} maximum lanes")
+    if isinstance(type_pattern.minimum_static_elements, int):
+        _require_u64(
+            type_pattern.minimum_static_elements,
+            f"{subject} minimum static elements",
+        )
+    if isinstance(type_pattern.maximum_static_elements, int):
+        _require_u64(
+            type_pattern.maximum_static_elements,
+            f"{subject} maximum static elements",
+        )
 
 
 def _require_u8(value: int, subject: str) -> None:
     if not 0 <= value <= _U8_MAX:
         raise ValueError(f"{subject} exceeds uint8_t: {value}")
+
+
+def _require_unsigned_bits(value: int, bit_count: int, subject: str) -> None:
+    if not 0 <= value < 1 << bit_count:
+        raise ValueError(f"{subject} exceeds {bit_count}-bit unsigned storage: {value}")
 
 
 def _require_u8_not_reserved_any(value: int, subject: str) -> None:
@@ -1329,7 +1634,11 @@ def _require_table_range(
 
 
 def _op_header_includes(table: CompiledLowerRuleSet) -> tuple[str, ...]:
-    dialect_names = {rule.source_op.group.name for rule in table.rules if rule.source_op.group is not None}
+    source_ops = (
+        *(rule.source_op for rule in table.rules),
+        *(source_node.source_op for source_node in table.source_nodes),
+    )
+    dialect_names = {source_op.group.name for source_op in source_ops if source_op.group is not None}
     return tuple(f"loom/ops/{name}/ops.h" for name in sorted(dialect_names))
 
 
@@ -1338,11 +1647,18 @@ def _materializer_includes(table: ContractFragment) -> tuple[str, ...]:
 
 
 def _collect_report_keys(table: CompiledLowerRuleSet) -> tuple[str, ...]:
-    report_keys: list[str] = []
-    seen: set[str] = set()
+    report_key_counts: dict[str, int] = {}
     for rule in table.rules:
-        if not rule.report_key or rule.report_key in seen:
+        if not rule.report_key:
             continue
-        report_keys.append(rule.report_key)
-        seen.add(rule.report_key)
-    return tuple(report_keys)
+        report_key_counts[rule.report_key] = report_key_counts.get(rule.report_key, 0) + 1
+    report_keys = tuple(report_key_counts)
+    if len(report_keys) <= lower_rule_rows.LOWER_RULE_REPORT_KEY_ORDINAL_MAX:
+        return report_keys
+    first_ordinals = {key: index for index, key in enumerate(report_keys)}
+    return tuple(
+        sorted(
+            report_keys,
+            key=lambda key: (-report_key_counts[key], first_ordinals[key]),
+        )
+    )

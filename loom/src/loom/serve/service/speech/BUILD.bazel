@@ -1,0 +1,217 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_library", "loom_cc_test")
+
+package(
+    default_visibility = ["//loom/src/loom/serve:implementation"],
+    features = ["layering_check"],
+    licenses = ["notice"],
+)
+
+loom_cc_library(
+    name = "request",
+    srcs = ["request.c"],
+    hdrs = ["request.h"],
+    deps = [
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:json",
+        "//runtime/src/iree/base/internal:unicode",
+    ],
+)
+
+loom_cc_test(
+    name = "request_test",
+    srcs = ["request_test.cc"],
+    deps = [
+        ":request",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_library(
+    name = "generator",
+    hdrs = ["generator.h"],
+    deps = [
+        ":request",
+        "//loom/src/loom/serve/runtime/execution",
+        "//loom/src/loom/serve/runtime/parameter:residency",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/tokenizer",
+    ],
+)
+
+loom_cc_library(
+    name = "consumer",
+    hdrs = ["consumer.h"],
+    deps = [
+        ":generator",
+        "//loom/src/loom/serve/telemetry:record",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "stream",
+    srcs = ["stream.c"],
+    hdrs = ["stream.h"],
+    deps = [
+        ":consumer",
+        ":generator",
+        "//loom/src/loom/serve/telemetry:record",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "model",
+    srcs = ["model.c"],
+    hdrs = ["model.h"],
+    deps = [
+        ":generator",
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/serve/runtime/device",
+        "//loom/src/loom/serve/runtime/execution",
+        "//loom/src/loom/serve/runtime/execution:dispatch",
+        "//loom/src/loom/serve/runtime/execution:retirement",
+        "//loom/src/loom/serve/runtime/host",
+        "//loom/src/loom/serve/runtime/parameter:residency",
+        "//loom/src/loom/serve/runtime/parameter:weights",
+        "//loom/src/loom/serve/runtime/program",
+        "//loom/src/loom/serve/runtime/program:compilation",
+        "//loom/src/loom/serve/runtime/program:input",
+        "//loom/src/loom/serve/runtime/program:jit",
+        "//loom/src/loom/serve/runtime/program:json",
+        "//loom/src/loom/serve/runtime/program:module",
+        "//loom/src/loom/serve/runtime/program:preparation",
+        "//loom/src/loom/serve/runtime/program:sources",
+        "//loom/src/loom/serve/runtime/program:stage_set",
+        "//loom/src/loom/serve/runtime/program:tokenizer_load",
+        "//loom/src/loom/serve/runtime/storage:rows",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/module/hal:types",
+        "//runtime/src/iree/tokenizer",
+        "//runtime/src/iree/tooling:device_profiling",
+        "//runtime/src/iree/vm",
+    ],
+)
+
+# Compiled suite shared by physical target registrations; helpers stay private.
+loom_cc_library(
+    name = "source_service_tests",
+    testonly = True,
+    srcs = [
+        "readiness_test.cc",
+        "service_test.cc",
+        "source_service_test.cc",
+    ],
+    hdrs = ["service_test.h"],
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":generator",
+        ":model",
+        ":request",
+        ":service",
+        ":stream",
+        "//loom/src/loom/serve/runtime/device",
+        "//loom/src/loom/serve/runtime/execution",
+        "//loom/src/loom/serve/runtime/host",
+        "//loom/src/loom/serve/runtime/parameter:residency",
+        "//loom/src/loom/serve/server:model_registration",
+        "//loom/src/loom/serve/server:registry",
+        "//loom/src/loom/serve/server:router",
+        "//loom/src/loom/serve/service",
+        "//loom/src/loom/serve/telemetry:latency",
+        "//loom/src/loom/serve/testing:http_harness",
+        "//loom/src/loom/serve/testing:model",
+        "//loom/src/loom/serve/testing:native_allocator",
+        "//loom/src/loom/serve/testing:package",
+        "//loom/src/loom/serve/testing:service_application",
+        "//loom/src/loom/serve/testing:stalled_http_client",
+        "//loom/src/loom/serve/testing:worker_gate",
+        "//loom/src/loom/serve/transport/http:listener",
+        "//loom/src/loom/serve/transport/http:server",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/base/tooling:flags",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:temp_file",
+    ],
+    alwayslink = True,
+)
+
+loom_cc_library(
+    name = "output",
+    srcs = ["output.c"],
+    hdrs = ["output.h"],
+    deps = ["//runtime/src/iree/base"],
+)
+
+loom_cc_test(
+    name = "output_test",
+    srcs = ["output_test.cc"],
+    deps = [
+        ":output",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_library(
+    name = "http",
+    srcs = ["http.c"],
+    hdrs = ["http.h"],
+    deps = [
+        ":consumer",
+        ":generator",
+        ":output",
+        "//loom/src/loom/serve/telemetry:record",
+        "//loom/src/loom/serve/transport/http:server",
+        "//loom/src/loom/util:json",
+        "//loom/src/loom/util:stream",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "service",
+    srcs = ["service.c"],
+    hdrs = ["service.h"],
+    deps = [
+        ":consumer",
+        ":generator",
+        ":http",
+        ":request",
+        ":stream",
+        "//loom/src/loom/serve/runtime/execution",
+        "//loom/src/loom/serve/runtime/host",
+        "//loom/src/loom/serve/runtime/host:timer",
+        "//loom/src/loom/serve/runtime/host:wake",
+        "//loom/src/loom/serve/runtime/parameter:telemetry",
+        "//loom/src/loom/serve/service",
+        "//loom/src/loom/serve/service:kind",
+        "//loom/src/loom/serve/telemetry:latency",
+        "//loom/src/loom/serve/telemetry:record",
+        "//loom/src/loom/serve/telemetry:stream",
+        "//loom/src/loom/serve/transport/http:request",
+        "//loom/src/loom/serve/transport/http:server",
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/task",
+    ],
+)

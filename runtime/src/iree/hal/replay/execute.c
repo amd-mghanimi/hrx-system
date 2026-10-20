@@ -20,9 +20,8 @@ typedef enum iree_hal_replay_plan_record_kind_e {
   IREE_HAL_REPLAY_PLAN_RECORD_KIND_GENERIC = 0u,
   IREE_HAL_REPLAY_PLAN_RECORD_KIND_SKIP = 1u,
   IREE_HAL_REPLAY_PLAN_RECORD_KIND_SCOPE = 2u,
-  IREE_HAL_REPLAY_PLAN_RECORD_KIND_COMMAND_BUFFER_EXECUTION_BARRIER = 3u,
-  IREE_HAL_REPLAY_PLAN_RECORD_KIND_COMMAND_BUFFER_DISPATCH = 4u,
-  IREE_HAL_REPLAY_PLAN_RECORD_KIND_QUEUE_EXECUTE = 5u,
+  IREE_HAL_REPLAY_PLAN_RECORD_KIND_COMMAND_BUFFER_DISPATCH = 3u,
+  IREE_HAL_REPLAY_PLAN_RECORD_KIND_QUEUE_EXECUTE = 4u,
 } iree_hal_replay_plan_record_kind_t;
 
 typedef struct iree_hal_replay_plan_scope_t {
@@ -31,25 +30,6 @@ typedef struct iree_hal_replay_plan_scope_t {
   // Scope name borrowed from the replay file.
   iree_string_view_t name;
 } iree_hal_replay_plan_scope_t;
-
-typedef struct iree_hal_replay_plan_command_buffer_execution_barrier_t {
-  // Captured command buffer object id.
-  iree_hal_replay_object_id_t command_buffer_id;
-  // Source execution stages for the barrier.
-  iree_hal_execution_stage_t source_stage_mask;
-  // Target execution stages for the barrier.
-  iree_hal_execution_stage_t target_stage_mask;
-  // Barrier flags captured from the original call.
-  iree_hal_execution_barrier_flags_t flags;
-  // Number of serialized memory barriers.
-  iree_host_size_t memory_barrier_count;
-  // Unaligned serialized memory barrier bytes borrowed from the replay file.
-  const uint8_t* memory_barrier_data;
-  // Number of serialized buffer barriers.
-  iree_host_size_t buffer_barrier_count;
-  // Unaligned serialized buffer barrier bytes borrowed from the replay file.
-  const uint8_t* buffer_barrier_data;
-} iree_hal_replay_plan_command_buffer_execution_barrier_t;
 
 typedef struct iree_hal_replay_plan_command_buffer_dispatch_t {
   // Captured command buffer object id.
@@ -138,9 +118,6 @@ typedef struct iree_hal_replay_plan_record_t {
   union {
     // Prepared scope marker payload.
     iree_hal_replay_plan_scope_t scope;
-    // Prepared command buffer execution barrier payload.
-    iree_hal_replay_plan_command_buffer_execution_barrier_t
-        command_buffer_execution_barrier;
     // Prepared command buffer dispatch payload.
     iree_hal_replay_plan_command_buffer_dispatch_t command_buffer_dispatch;
     // Prepared queue execute payload.
@@ -189,51 +166,6 @@ static iree_status_t iree_hal_replay_plan_prepare_scope(
   out_scope->name =
       iree_make_string_view((const char*)record->payload.data + sizeof(payload),
                             (iree_host_size_t)payload.name_length);
-  return iree_ok_status();
-}
-
-static iree_status_t
-iree_hal_replay_plan_prepare_command_buffer_execution_barrier(
-    const iree_hal_replay_file_record_t* record,
-    iree_hal_replay_plan_command_buffer_execution_barrier_t* out_barrier) {
-  IREE_RETURN_IF_ERROR(iree_hal_replay_executor_require_payload(
-      record, IREE_HAL_REPLAY_PAYLOAD_TYPE_COMMAND_BUFFER_EXECUTION_BARRIER,
-      sizeof(iree_hal_replay_command_buffer_execution_barrier_payload_t)));
-  iree_hal_replay_command_buffer_execution_barrier_payload_t payload;
-  memcpy(&payload, record->payload.data, sizeof(payload));
-  iree_host_size_t memory_payloads_size = 0;
-  iree_host_size_t buffer_payloads_size = 0;
-  iree_host_size_t total_payload_size = 0;
-  if (IREE_UNLIKELY(
-          payload.memory_barrier_count > IREE_HOST_SIZE_MAX ||
-          payload.buffer_barrier_count > IREE_HOST_SIZE_MAX ||
-          !iree_host_size_checked_mul(
-              (iree_host_size_t)payload.memory_barrier_count,
-              sizeof(iree_hal_replay_memory_barrier_payload_t),
-              &memory_payloads_size) ||
-          !iree_host_size_checked_mul(
-              (iree_host_size_t)payload.buffer_barrier_count,
-              sizeof(iree_hal_replay_buffer_barrier_payload_t),
-              &buffer_payloads_size) ||
-          !iree_host_size_checked_add(sizeof(payload), memory_payloads_size,
-                                      &total_payload_size) ||
-          !iree_host_size_checked_add(total_payload_size, buffer_payloads_size,
-                                      &total_payload_size) ||
-          total_payload_size != record->payload.data_length)) {
-    return iree_make_status(IREE_STATUS_DATA_LOSS,
-                            "replay execution barrier payload length mismatch");
-  }
-  out_barrier->command_buffer_id = record->header.object_id;
-  out_barrier->source_stage_mask = payload.source_stage_mask;
-  out_barrier->target_stage_mask = payload.target_stage_mask;
-  out_barrier->flags = payload.flags;
-  out_barrier->memory_barrier_count =
-      (iree_host_size_t)payload.memory_barrier_count;
-  out_barrier->memory_barrier_data = record->payload.data + sizeof(payload);
-  out_barrier->buffer_barrier_count =
-      (iree_host_size_t)payload.buffer_barrier_count;
-  out_barrier->buffer_barrier_data =
-      out_barrier->memory_barrier_data + memory_payloads_size;
   return iree_ok_status();
 }
 
@@ -622,9 +554,42 @@ static iree_status_t iree_hal_replay_plan_prepare_queue_dependency(
           payload.wait_semaphore_count, payload.signal_semaphore_count,
           /*trailing_payload_length=*/0, out_dependency);
     }
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_MAP: {
+      IREE_RETURN_IF_ERROR(iree_hal_replay_executor_require_payload(
+          record, IREE_HAL_REPLAY_PAYLOAD_TYPE_QUEUE_MAP,
+          sizeof(iree_hal_replay_queue_map_payload_t)));
+      iree_hal_replay_queue_map_payload_t payload;
+      memcpy(&payload, record->payload.data, sizeof(payload));
+      uint64_t mapping_payload_length = 0;
+      if (!iree_checked_mul_u64(
+              payload.mapping_count,
+              sizeof(iree_hal_replay_memory_mapping_payload_t),
+              &mapping_payload_length)) {
+        return iree_make_status(IREE_STATUS_DATA_LOSS,
+                                "replay mapping batch size overflows");
+      }
+      return iree_hal_replay_plan_prepare_queue_dependency_lists(
+          record, IREE_HAL_REPLAY_PAYLOAD_TYPE_QUEUE_MAP, sizeof(payload),
+          payload.wait_semaphore_count, payload.signal_semaphore_count,
+          mapping_payload_length, out_dependency);
+    }
     default:
       return iree_ok_status();
   }
+}
+
+static bool iree_hal_replay_plan_queue_waits_satisfied(
+    const iree_hal_replay_plan_queue_dependency_t* dependency,
+    const iree_hal_replay_plan_semaphore_state_t* semaphore_states) {
+  for (iree_host_size_t i = 0; i < dependency->wait_semaphore_count; ++i) {
+    iree_hal_replay_semaphore_timepoint_payload_t wait;
+    memcpy(&wait, dependency->wait_semaphore_data + i * sizeof(wait),
+           sizeof(wait));
+    if (semaphore_states[wait.semaphore_id].known_value < wait.value) {
+      return false;
+    }
+  }
+  return true;
 }
 
 static bool iree_hal_replay_plan_queue_dependency_can_complete(
@@ -638,15 +603,8 @@ static bool iree_hal_replay_plan_queue_dependency_can_complete(
       command_buffer_may_wait_on_device_memory[dependency->command_buffer_id]) {
     return false;
   }
-  for (iree_host_size_t i = 0; i < dependency->wait_semaphore_count; ++i) {
-    iree_hal_replay_semaphore_timepoint_payload_t wait;
-    memcpy(&wait, dependency->wait_semaphore_data + i * sizeof(wait),
-           sizeof(wait));
-    if (semaphore_states[wait.semaphore_id].known_value < wait.value) {
-      return false;
-    }
-  }
-  return true;
+  return iree_hal_replay_plan_queue_waits_satisfied(dependency,
+                                                    semaphore_states);
 }
 
 static void iree_hal_replay_plan_publish_queue_signals(
@@ -664,14 +622,16 @@ static void iree_hal_replay_plan_publish_queue_signals(
 static bool iree_hal_replay_plan_is_completion_boundary(
     const iree_hal_replay_file_record_t* record) {
   if (record->header.record_type !=
-          IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION ||
-      record->header.status_code != IREE_STATUS_OK) {
+      IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION) {
     return false;
   }
-  return record->header.operation_code ==
-             IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_VIRTUAL_MEMORY_UNMAP ||
-         record->header.operation_code ==
-             IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_VIRTUAL_MEMORY_PROTECT;
+  return record->header.status_code == IREE_STATUS_OK &&
+         (record->header.operation_code ==
+              IREE_HAL_REPLAY_OPERATION_CODE_VIRTUAL_BUFFER_DETACH ||
+          record->header.operation_code ==
+              IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_VIRTUAL_MEMORY_UNMAP ||
+          record->header.operation_code ==
+              IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_VIRTUAL_MEMORY_PROTECT);
 }
 
 static iree_status_t iree_hal_replay_plan_verify_completion_dependencies(
@@ -835,9 +795,17 @@ static iree_status_t iree_hal_replay_plan_verify_completion_dependencies(
             "device-memory dependency",
             dependency.sequence_ordinal);
       } else if (dependency.signal_semaphore_count != 0) {
-        // Captured-signal submissions already wait immediately. If one cannot
-        // be proven to complete then replay cannot reach following records;
-        // leave that existing behavior outside this private-boundary check.
+        // Replay waits before proceeding past captured-signal submissions.
+        // A producer in a later record (or an unrecorded host signal) cannot
+        // satisfy this wait. Device-memory readiness remains runtime-owned.
+        if (!iree_hal_replay_plan_queue_waits_satisfied(&dependency,
+                                                        semaphore_states)) {
+          status = iree_make_status(
+              IREE_STATUS_FAILED_PRECONDITION,
+              "replay queue operation at sequence %" PRIu64
+              " waits for a semaphore value with no preceding producer",
+              dependency.sequence_ordinal);
+        }
         reaches_following_records = false;
       } else {
         pending_dependencies[pending_dependency_count++] = dependency;
@@ -898,7 +866,9 @@ static iree_status_t iree_hal_replay_plan_prepare_record(
       IREE_HAL_REPLAY_FILE_RECORD_TYPE_OPERATION) {
     return iree_ok_status();
   }
-  if (record->header.status_code != IREE_STATUS_OK) {
+  if (record->header.status_code != IREE_STATUS_OK &&
+      record->header.operation_code !=
+          IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_UNMAP_RANGE) {
     plan_record->kind = IREE_HAL_REPLAY_PLAN_RECORD_KIND_SKIP;
     return iree_ok_status();
   }
@@ -913,11 +883,6 @@ static iree_status_t iree_hal_replay_plan_prepare_record(
       return iree_hal_replay_plan_prepare_scope(
           record, IREE_HAL_REPLAY_SCOPE_EVENT_TYPE_END,
           &plan_record->payload.scope);
-    case IREE_HAL_REPLAY_OPERATION_CODE_COMMAND_BUFFER_EXECUTION_BARRIER:
-      plan_record->kind =
-          IREE_HAL_REPLAY_PLAN_RECORD_KIND_COMMAND_BUFFER_EXECUTION_BARRIER;
-      return iree_hal_replay_plan_prepare_command_buffer_execution_barrier(
-          record, &plan_record->payload.command_buffer_execution_barrier);
     case IREE_HAL_REPLAY_OPERATION_CODE_COMMAND_BUFFER_DISPATCH:
       plan_record->kind =
           IREE_HAL_REPLAY_PLAN_RECORD_KIND_COMMAND_BUFFER_DISPATCH;
@@ -932,8 +897,7 @@ static iree_status_t iree_hal_replay_plan_prepare_record(
   }
 }
 
-IREE_API_EXPORT void iree_hal_replay_plan_destroy(
-    iree_hal_replay_plan_t* plan) {
+IREE_API_EXPORT void iree_hal_replay_plan_free(iree_hal_replay_plan_t* plan) {
   if (!plan) {
     return;
   }
@@ -942,7 +906,7 @@ IREE_API_EXPORT void iree_hal_replay_plan_destroy(
   iree_allocator_free(host_allocator, plan);
 }
 
-IREE_API_EXPORT iree_status_t iree_hal_replay_plan_create(
+IREE_API_EXPORT iree_status_t iree_hal_replay_plan_allocate(
     iree_const_byte_span_t file_contents, iree_allocator_t host_allocator,
     iree_hal_replay_plan_t** out_plan) {
   IREE_ASSERT_ARGUMENT(out_plan);
@@ -1026,7 +990,7 @@ IREE_API_EXPORT iree_status_t iree_hal_replay_plan_create(
   if (iree_status_is_ok(status)) {
     *out_plan = plan;
   } else {
-    iree_hal_replay_plan_destroy(plan);
+    iree_hal_replay_plan_free(plan);
   }
   return status;
 }
@@ -1046,100 +1010,6 @@ static iree_status_t iree_hal_replay_plan_execute_scope(
       .name = scope->name,
   };
   return callback.fn(callback.user_data, &event);
-}
-
-static iree_status_t
-iree_hal_replay_plan_execute_command_buffer_execution_barrier(
-    iree_hal_replay_executor_t* executor,
-    const iree_hal_replay_plan_command_buffer_execution_barrier_t* barrier) {
-  iree_hal_memory_barrier_t inline_memory_barriers
-      [IREE_HAL_REPLAY_INLINE_MEMORY_BARRIER_LIST_CAPACITY];
-  iree_hal_memory_barrier_t* memory_barriers = NULL;
-  bool memory_barriers_allocated = false;
-  if (barrier->memory_barrier_count <=
-      IREE_HAL_REPLAY_INLINE_MEMORY_BARRIER_LIST_CAPACITY) {
-    memory_barriers = inline_memory_barriers;
-  } else {
-    iree_host_size_t memory_barriers_size = 0;
-    if (IREE_UNLIKELY(!iree_host_size_checked_mul(barrier->memory_barrier_count,
-                                                  sizeof(*memory_barriers),
-                                                  &memory_barriers_size))) {
-      return iree_make_status(
-          IREE_STATUS_OUT_OF_RANGE,
-          "replay execution barrier memory barrier count overflow");
-    }
-    IREE_RETURN_IF_ERROR(iree_allocator_malloc(executor->host_allocator,
-                                               memory_barriers_size,
-                                               (void**)&memory_barriers));
-    memory_barriers_allocated = true;
-  }
-  for (iree_host_size_t i = 0; i < barrier->memory_barrier_count; ++i) {
-    iree_hal_replay_memory_barrier_payload_t memory_payload;
-    memcpy(&memory_payload,
-           barrier->memory_barrier_data +
-               i * sizeof(iree_hal_replay_memory_barrier_payload_t),
-           sizeof(memory_payload));
-    memory_barriers[i].source_scope = memory_payload.source_scope;
-    memory_barriers[i].target_scope = memory_payload.target_scope;
-  }
-
-  iree_hal_buffer_barrier_t inline_buffer_barriers
-      [IREE_HAL_REPLAY_INLINE_BUFFER_BARRIER_LIST_CAPACITY];
-  iree_hal_buffer_barrier_t* buffer_barriers = NULL;
-  iree_status_t status = iree_ok_status();
-  bool buffer_barriers_allocated = false;
-  if (barrier->buffer_barrier_count <=
-      IREE_HAL_REPLAY_INLINE_BUFFER_BARRIER_LIST_CAPACITY) {
-    buffer_barriers = inline_buffer_barriers;
-  } else {
-    iree_host_size_t buffer_barriers_size = 0;
-    if (IREE_UNLIKELY(!iree_host_size_checked_mul(barrier->buffer_barrier_count,
-                                                  sizeof(*buffer_barriers),
-                                                  &buffer_barriers_size))) {
-      status = iree_make_status(
-          IREE_STATUS_OUT_OF_RANGE,
-          "replay execution barrier buffer barrier count overflow");
-    }
-    if (iree_status_is_ok(status)) {
-      status =
-          iree_allocator_malloc(executor->host_allocator, buffer_barriers_size,
-                                (void**)&buffer_barriers);
-    }
-    buffer_barriers_allocated = iree_status_is_ok(status);
-  }
-  for (iree_host_size_t i = 0;
-       i < barrier->buffer_barrier_count && iree_status_is_ok(status); ++i) {
-    iree_hal_replay_buffer_barrier_payload_t buffer_payload;
-    memcpy(&buffer_payload,
-           barrier->buffer_barrier_data +
-               i * sizeof(iree_hal_replay_buffer_barrier_payload_t),
-           sizeof(buffer_payload));
-    buffer_barriers[i].source_scope = buffer_payload.source_scope;
-    buffer_barriers[i].target_scope = buffer_payload.target_scope;
-    status = iree_hal_replay_executor_make_buffer_ref(
-        executor, &buffer_payload.buffer_ref, &buffer_barriers[i].buffer_ref);
-  }
-
-  iree_hal_replay_object_entry_t* command_buffer_entry = NULL;
-  if (iree_status_is_ok(status)) {
-    status = iree_hal_replay_executor_lookup(
-        executor, barrier->command_buffer_id,
-        IREE_HAL_REPLAY_OBJECT_TYPE_COMMAND_BUFFER, &command_buffer_entry);
-  }
-  if (iree_status_is_ok(status)) {
-    status = iree_hal_command_buffer_execution_barrier(
-        command_buffer_entry->value.command_buffer, barrier->source_stage_mask,
-        barrier->target_stage_mask, barrier->flags,
-        barrier->memory_barrier_count, memory_barriers,
-        barrier->buffer_barrier_count, buffer_barriers);
-  }
-  if (buffer_barriers_allocated) {
-    iree_allocator_free(executor->host_allocator, buffer_barriers);
-  }
-  if (memory_barriers_allocated) {
-    iree_allocator_free(executor->host_allocator, memory_barriers);
-  }
-  return status;
 }
 
 static iree_status_t iree_hal_replay_plan_execute_command_buffer_dispatch(
@@ -1298,9 +1168,6 @@ static iree_status_t iree_hal_replay_plan_execute_record(
           return iree_ok_status();
         case IREE_HAL_REPLAY_PLAN_RECORD_KIND_SCOPE:
           return iree_hal_replay_plan_execute_scope(executor, plan_record);
-        case IREE_HAL_REPLAY_PLAN_RECORD_KIND_COMMAND_BUFFER_EXECUTION_BARRIER:
-          return iree_hal_replay_plan_execute_command_buffer_execution_barrier(
-              executor, &plan_record->payload.command_buffer_execution_barrier);
         case IREE_HAL_REPLAY_PLAN_RECORD_KIND_COMMAND_BUFFER_DISPATCH:
           return iree_hal_replay_plan_execute_command_buffer_dispatch(
               executor, &plan_record->payload.command_buffer_dispatch);
@@ -1380,9 +1247,9 @@ IREE_API_EXPORT iree_status_t iree_hal_replay_execute_file(
     iree_allocator_t host_allocator) {
   iree_hal_replay_plan_t* plan = NULL;
   IREE_RETURN_IF_ERROR(
-      iree_hal_replay_plan_create(file_contents, host_allocator, &plan));
+      iree_hal_replay_plan_allocate(file_contents, host_allocator, &plan));
   iree_status_t status =
       iree_hal_replay_plan_execute(plan, device_group, options, host_allocator);
-  iree_hal_replay_plan_destroy(plan);
+  iree_hal_replay_plan_free(plan);
   return status;
 }

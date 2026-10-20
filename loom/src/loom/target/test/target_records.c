@@ -8,14 +8,7 @@
 
 #include <stdint.h>
 
-const loom_target_fact_type_t loom_test_target_fact_type = {
-    .name = IREE_SVL("test"),
-    .storage_size = sizeof(loom_target_facts_t),
-    .satisfies_identity_requirement =
-        loom_target_facts_selector_satisfies_identity_requirement,
-    .satisfies_specialization_requirement =
-        loom_target_facts_structural_satisfy_specialization_requirement,
-};
+#include "loom/target/facts_builder.h"
 
 static const loom_target_snapshot_t kTestLowSnapshot = {
     .name = IREE_SVL("test-low"),
@@ -81,10 +74,54 @@ static const loom_target_bundle_t kTestLowTargetBundleQuirky = {
     .config = &kTestLowConfig,
 };
 
+static const loom_target_export_plan_t kTestDeviceExportPlan = {
+    .name = IREE_SVL("test-device-program"),
+    .abi_kind = LOOM_TARGET_ABI_ARRAY_PROGRAM,
+    .linkage = LOOM_TARGET_LINKAGE_DSO_LOCAL,
+};
+
+static const loom_target_config_t kTestDeviceConfig = {
+    .name = IREE_SVL("test.device"),
+    .contract_set_key = IREE_SVL("test.device"),
+};
+
+static const loom_target_bundle_t kTestDeviceTargetBundle = {
+    .name = IREE_SVL("test-device"),
+    .snapshot = &kTestLowSnapshot,
+    .export_plan = &kTestDeviceExportPlan,
+    .config = &kTestDeviceConfig,
+};
+
+static iree_status_t loom_test_target_facts_project_worker(
+    const loom_target_facts_t* facts, iree_arena_allocator_t* arena,
+    const loom_target_facts_t** out_facts) {
+  *out_facts = facts;
+  if (facts->selector != LOOM_TEST_TARGET_KIND_DEVICE) {
+    return iree_ok_status();
+  }
+  loom_target_facts_t* worker = NULL;
+  IREE_RETURN_IF_ERROR(loom_target_facts_builder_clone(facts, arena, &worker));
+  loom_target_facts_builder_set_worker_contract(
+      LOOM_TEST_TARGET_KIND_LOW_CORE, &kTestLowTargetBundleCore, worker);
+  *out_facts = worker;
+  return iree_ok_status();
+}
+
+const loom_target_fact_type_t loom_test_target_fact_type = {
+    .name = IREE_SVL("test"),
+    .storage_size = sizeof(loom_target_facts_t),
+    .satisfies_identity_requirement =
+        loom_target_facts_selector_satisfies_identity_requirement,
+    .satisfies_specialization_requirement =
+        loom_target_facts_structural_satisfy_specialization_requirement,
+    .project_worker = loom_test_target_facts_project_worker,
+};
+
 static const loom_target_bundle_t* const kTestTargetBundleValues[] = {
     NULL,
     &kTestLowTargetBundleCore,
     &kTestLowTargetBundleQuirky,
+    &kTestDeviceTargetBundle,
 };
 
 const loom_target_bundle_table_t loom_test_target_bundles = {

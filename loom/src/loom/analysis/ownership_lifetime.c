@@ -12,26 +12,21 @@
 #include "iree/base/internal/math.h"
 #include "loom/analysis/liveness.h"
 #include "loom/analysis/ownership.h"
+#include "loom/analysis/ownership_callable.h"
 #include "loom/analysis/scc.h"
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 #include "loom/ir/local_value_domain.h"
 #include "loom/ir/module.h"
 #include "loom/ops/cfg/ops.h"
 #include "loom/ops/op_defs.h"
 #include "loom/util/cfg_graph.h"
-#include "loom/util/walk.h"
 
 enum {
   LOOM_OWNERSHIP_LIFETIME_ARG_INDEX_NONE = UINT16_MAX,
   LOOM_OWNERSHIP_LIFETIME_SUCCESSOR_INDEX_NONE = UINT16_MAX,
 };
-
-typedef enum loom_ownership_lifetime_value_state_e {
-  LOOM_OWNERSHIP_LIFETIME_VALUE_UNKNOWN = 0,
-  LOOM_OWNERSHIP_LIFETIME_VALUE_BORROWED = 1,
-  LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED = 2,
-} loom_ownership_lifetime_value_state_t;
 
 typedef struct loom_ownership_lifetime_bitset_t {
   // Dense 64-bit words keyed by function-local value ordinal.
@@ -94,61 +89,6 @@ typedef struct loom_ownership_lifetime_split_edge_t {
   loom_op_t* branch;
 } loom_ownership_lifetime_split_edge_t;
 
-typedef struct loom_ownership_lifetime_function_summary_t {
-  // Function-like op this summary describes.
-  loom_func_like_t function;
-  // Body region analyzed for this summary, or NULL for conservative callees.
-  loom_region_t* body;
-  // Declared body exit kind, or UNKNOWN for bodyless callables.
-  loom_op_kind_t body_exit_kind;
-  // Number of operands in the callable signature.
-  uint16_t arg_count;
-  // Number of results in the callable signature.
-  uint16_t result_count;
-  // Per-argument flag set when the body requires the corresponding operand to
-  // arrive owned.
-  bool* arg_consumed;
-  // Per-result state inferred from returned values.
-  loom_ownership_lifetime_value_state_t* result_states;
-  // True when suppressed analysis saw a possible diagnostic on this summary.
-  bool needs_diagnostic_rerun;
-} loom_ownership_lifetime_function_summary_t;
-
-typedef struct loom_ownership_lifetime_module_state_t {
-  // Module being checked.
-  loom_module_t* module;
-  // Caller-owned analysis options.
-  const loom_ownership_lifetime_options_t* options;
-  // Caller-owned materialization options, or NULL for analysis-only mode.
-  const loom_ownership_lifetime_materialize_options_t* materialize_options;
-  // Result object receiving final diagnostic and traversal counters.
-  loom_ownership_lifetime_result_t* result;
-  // Dense summaries indexed by module symbol ID.
-  loom_ownership_lifetime_function_summary_t* summaries;
-  // Number of entries in |summaries|.
-  iree_host_size_t summary_count;
-} loom_ownership_lifetime_module_state_t;
-
-typedef struct loom_ownership_lifetime_graph_node_t {
-  // Summary owned by the module state for this bodyful function.
-  loom_ownership_lifetime_function_summary_t* summary;
-} loom_ownership_lifetime_graph_node_t;
-
-typedef struct loom_ownership_lifetime_graph_t {
-  // Module-level analysis state.
-  loom_ownership_lifetime_module_state_t* module_state;
-  // Reset before each graph successor walk.
-  iree_arena_allocator_t* walk_arena;
-  // Dense bodyful function nodes.
-  loom_ownership_lifetime_graph_node_t* nodes;
-  // Number of entries in |nodes|.
-  iree_host_size_t node_count;
-  // Symbol ID to graph node index map, or IREE_HOST_SIZE_MAX.
-  iree_host_size_t* symbol_to_node;
-  // Number of entries in |symbol_to_node|.
-  iree_host_size_t symbol_to_node_count;
-} loom_ownership_lifetime_graph_t;
-
 typedef struct loom_ownership_lifetime_state_t {
   // Module whose function body is being checked.
   loom_module_t* module;
@@ -160,8 +100,9 @@ typedef struct loom_ownership_lifetime_state_t {
   loom_ownership_lifetime_function_summary_t* summary;
   // Caller-owned analysis options.
   const loom_ownership_lifetime_options_t* options;
-  // Caller-owned materialization options, or NULL for analysis-only mode.
-  const loom_ownership_lifetime_materialize_options_t* materialize_options;
+  // Caller-owned cleanup policies, also restricting inference to their resource
+  // families; NULL for unrestricted analysis-only mode.
+  const loom_ownership_lifetime_options_t* materialize_options;
   // Result object receiving diagnostic and traversal counters.
   loom_ownership_lifetime_result_t* result;
   // Function body region being checked.
@@ -174,6 +115,8 @@ typedef struct loom_ownership_lifetime_state_t {
   iree_host_size_t value_count;
   // Function argument index that a local value aliases, or NONE.
   uint16_t* value_origin_args;
+  // Pre-transfer argument origins, sized for the largest block argument list.
+  uint16_t* edge_origin_args;
   // Number of 64-bit words in local value bitsets.
   iree_host_size_t word_count;
   // Values matched by the active materialization policies.
@@ -299,7 +242,7 @@ static iree_status_t loom_ownership_lifetime_initialize_policy_values(
     const loom_value_id_t value_id = state->value_ids[i];
     for (iree_host_size_t j = 0; j < state->materialize_options->policy_count;
          ++j) {
-      const loom_ownership_lifetime_materialization_policy_t* policy =
+      const loom_ownership_lifetime_policy_t* policy =
           &state->materialize_options->policies[j];
       if (loom_ownership_value_matches(state->module, &policy->family,
                                        value_id)) {
@@ -606,15 +549,14 @@ static bool loom_ownership_lifetime_value_live_in_block(
 
 static bool loom_ownership_lifetime_is_materializing(
     const loom_ownership_lifetime_state_t* state) {
-  return state->materialize_options != NULL;
+  return state->materialize_options != NULL && !state->inference;
 }
 
-static const loom_ownership_lifetime_materialization_policy_t*
+static const loom_ownership_lifetime_policy_t*
 loom_ownership_lifetime_find_policy(
     const loom_ownership_lifetime_state_t* state, loom_value_id_t value_id,
     uint16_t* out_policy_index) {
-  const loom_ownership_lifetime_materialize_options_t* options =
-      state->materialize_options;
+  const loom_ownership_lifetime_options_t* options = state->materialize_options;
   if (!options) {
     return NULL;
   }
@@ -626,44 +568,6 @@ loom_ownership_lifetime_find_policy(
     }
   }
   return NULL;
-}
-
-static bool loom_ownership_lifetime_policy_type_matches(
-    const loom_ownership_lifetime_materialization_policy_t* policy,
-    loom_type_t type) {
-  return policy->family.type_matches(type, policy->family.user_data);
-}
-
-static bool loom_ownership_lifetime_type_has_policy_flags(
-    const loom_ownership_lifetime_module_state_t* module_state,
-    loom_type_t type,
-    loom_ownership_lifetime_materialization_policy_flags_t flags) {
-  const loom_ownership_lifetime_materialize_options_t* options =
-      module_state->materialize_options;
-  if (!options) {
-    return false;
-  }
-  for (iree_host_size_t i = 0; i < options->policy_count; ++i) {
-    const loom_ownership_lifetime_materialization_policy_t* policy =
-        &options->policies[i];
-    if (iree_all_bits_set(policy->flags, flags) &&
-        loom_ownership_lifetime_policy_type_matches(policy, type)) {
-      return true;
-    }
-  }
-  return false;
-}
-
-static bool loom_ownership_lifetime_value_has_policy_flags(
-    const loom_ownership_lifetime_module_state_t* module_state,
-    loom_value_id_t value_id,
-    loom_ownership_lifetime_materialization_policy_flags_t flags) {
-  if (value_id >= module_state->module->values.count) {
-    return false;
-  }
-  return loom_ownership_lifetime_type_has_policy_flags(
-      module_state, loom_module_value_type(module_state->module, value_id),
-      flags);
 }
 
 static iree_status_t loom_ownership_lifetime_append_action(
@@ -687,7 +591,7 @@ static iree_status_t loom_ownership_lifetime_record_release(
     loom_op_t* before_op, loom_op_t* terminator, uint16_t successor_index,
     loom_value_id_t value_id, loom_location_id_t location) {
   uint16_t policy_index = 0;
-  const loom_ownership_lifetime_materialization_policy_t* policy =
+  const loom_ownership_lifetime_policy_t* policy =
       loom_ownership_lifetime_find_policy(state, value_id, &policy_index);
   if (!policy) {
     const loom_op_t* diagnostic_op =
@@ -749,6 +653,7 @@ static bool loom_ownership_lifetime_promote_arg_consumed(
     return false;
   }
   state->summary->arg_consumed[arg_index] = true;
+  state->summary->transfers_ownership = true;
   state->summary_changed = true;
   state->needs_restart = true;
   return true;
@@ -773,6 +678,8 @@ static iree_status_t loom_ownership_lifetime_merge_summary_result(
        current_state == LOOM_OWNERSHIP_LIFETIME_VALUE_BORROWED &&
        incoming_state == LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED)) {
     state->summary->result_states[result_index] = incoming_state;
+    state->summary->transfers_ownership |=
+        incoming_state == LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED;
     state->summary_changed = true;
     return iree_ok_status();
   }
@@ -945,13 +852,6 @@ static iree_status_t loom_ownership_lifetime_apply_result_effect(
   return iree_ok_status();
 }
 
-static bool loom_ownership_lifetime_call_kind_is_runtime(
-    loom_call_like_kind_t kind) {
-  return kind == LOOM_CALL_LIKE_KIND_SEMANTIC ||
-         kind == LOOM_CALL_LIKE_KIND_LOW_INTERNAL ||
-         kind == LOOM_CALL_LIKE_KIND_LOW_INVOKE;
-}
-
 static loom_ownership_lifetime_function_summary_t*
 loom_ownership_lifetime_callee_summary(loom_ownership_lifetime_state_t* state,
                                        loom_call_like_t call) {
@@ -968,17 +868,7 @@ loom_ownership_lifetime_call_result_state(
     const loom_ownership_lifetime_state_t* state,
     const loom_ownership_lifetime_function_summary_t* summary,
     uint16_t result_index) {
-  if (!summary || !summary->body || result_index >= summary->result_count) {
-    if (summary && !summary->body && result_index < summary->result_count) {
-      const loom_value_id_t* result_ids =
-          loom_op_const_results(summary->function.op);
-      if (result_ids &&
-          loom_ownership_lifetime_value_has_policy_flags(
-              state->module_state, result_ids[result_index],
-              LOOM_OWNERSHIP_LIFETIME_MATERIALIZATION_POLICY_OWNED_BODYLESS_RESULTS)) {
-        return LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED;
-      }
-    }
+  if (!summary || result_index >= summary->result_count) {
     return LOOM_OWNERSHIP_LIFETIME_VALUE_BORROWED;
   }
   loom_ownership_lifetime_value_state_t result_state =
@@ -1001,8 +891,7 @@ static iree_status_t loom_ownership_lifetime_transfer_call(
   for (uint16_t i = 0;
        i < operands.count && !state->failed && !state->needs_restart; ++i) {
     loom_operand_ownership_effect_t effect_kind =
-        summary && summary->body && i < summary->arg_count &&
-                summary->arg_consumed[i]
+        summary && i < summary->arg_count && summary->arg_consumed[i]
             ? LOOM_OPERAND_OWNERSHIP_CONSUME
             : LOOM_OPERAND_OWNERSHIP_BORROW;
     loom_ownership_operand_effect_t effect = {
@@ -1148,12 +1037,18 @@ static iree_status_t loom_ownership_lifetime_allocate_block_states(
       state->options->arena, block_count, sizeof(*state->blocks),
       (void**)&state->blocks));
   memset(state->blocks, 0, block_count * sizeof(*state->blocks));
+  uint16_t maximum_arg_count = 0;
   for (iree_host_size_t i = 0; i < block_count; ++i) {
+    uint16_t arg_count = loom_region_const_block(state->body, i)->arg_count;
+    maximum_arg_count = iree_max(maximum_arg_count, arg_count);
     IREE_RETURN_IF_ERROR(loom_ownership_lifetime_state_bits_allocate(
         state->options->arena, state->word_count, &state->blocks[i].in));
     IREE_RETURN_IF_ERROR(loom_ownership_lifetime_state_bits_allocate(
         state->options->arena, state->word_count, &state->blocks[i].out));
   }
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+      state->options->arena, maximum_arg_count,
+      sizeof(*state->edge_origin_args), (void**)&state->edge_origin_args));
   state->queue_capacity = block_count > 0 ? block_count : 1;
   IREE_RETURN_IF_ERROR(
       iree_arena_allocate_array(state->options->arena, state->queue_capacity,
@@ -1219,6 +1114,7 @@ static bool loom_ownership_lifetime_dequeue_block(
 
 static iree_status_t loom_ownership_lifetime_apply_cfg_br_payload(
     loom_ownership_lifetime_state_t* state,
+    loom_ownership_lifetime_state_bits_t source_bits,
     loom_ownership_lifetime_state_bits_t edge_state,
     const loom_cfg_edge_info_t* edge) {
   if (!loom_cfg_br_isa(edge->terminator)) {
@@ -1227,9 +1123,11 @@ static iree_status_t loom_ownership_lifetime_apply_cfg_br_payload(
   const loom_block_t* target =
       loom_region_const_block(state->body, edge->target_block_index);
   const loom_value_id_t* operands = loom_op_const_operands(edge->terminator);
-  iree_host_size_t count = edge->terminator->operand_count < target->arg_count
-                               ? edge->terminator->operand_count
-                               : target->arg_count;
+  iree_host_size_t count = target->arg_count;
+  // A branch transfers its arguments in parallel. Retire owned source names
+  // before assigning destinations, preserving the original states and origins
+  // for backedges that permute their own block arguments. Borrowed sources
+  // remain available under their dominating SSA names.
   for (iree_host_size_t i = 0; i < count; ++i) {
     loom_value_ordinal_t source_ordinal =
         loom_ownership_lifetime_try_ordinal(state, operands[i]);
@@ -1240,23 +1138,60 @@ static iree_status_t loom_ownership_lifetime_apply_cfg_br_payload(
       continue;
     }
     loom_ownership_lifetime_value_state_t source_state =
-        loom_ownership_lifetime_state_bits_get(edge_state, source_ordinal);
+        loom_ownership_lifetime_state_bits_get(source_bits, source_ordinal);
     bool source_seen =
         loom_ownership_lifetime_value_ever_seen(state, source_ordinal);
-    if (source_state == LOOM_OWNERSHIP_LIFETIME_VALUE_UNKNOWN && source_seen) {
+    bool already_transferred =
+        source_state == LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED &&
+        loom_ownership_lifetime_state_bits_get(edge_state, source_ordinal) !=
+            LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED;
+    if ((source_state == LOOM_OWNERSHIP_LIFETIME_VALUE_UNKNOWN &&
+         source_seen) ||
+        already_transferred) {
       return loom_ownership_lifetime_emit_use_after_consume(
           state, edge->terminator, (uint16_t)i, operands[i]);
     }
-    loom_ownership_lifetime_state_bits_set(
-        edge_state, source_ordinal, LOOM_OWNERSHIP_LIFETIME_VALUE_UNKNOWN);
+    state->edge_origin_args[i] =
+        loom_ownership_lifetime_origin_arg(state, source_ordinal);
+    if (source_state == LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED) {
+      loom_ownership_lifetime_state_bits_set(
+          edge_state, source_ordinal, LOOM_OWNERSHIP_LIFETIME_VALUE_UNKNOWN);
+    }
+  }
+  for (iree_host_size_t i = 0; i < count && !state->failed; ++i) {
+    loom_value_ordinal_t source_ordinal =
+        loom_ownership_lifetime_try_ordinal(state, operands[i]);
+    loom_value_ordinal_t target_ordinal = loom_ownership_lifetime_try_ordinal(
+        state, loom_block_arg_id(target, (uint16_t)i));
+    if (source_ordinal == LOOM_VALUE_ORDINAL_INVALID ||
+        target_ordinal == LOOM_VALUE_ORDINAL_INVALID) {
+      continue;
+    }
+    if (loom_ownership_lifetime_state_bits_get(edge_state, target_ordinal) ==
+        LOOM_OWNERSHIP_LIFETIME_VALUE_OWNED) {
+      IREE_RETURN_IF_ERROR(loom_ownership_lifetime_end_owned_value(
+          state, edge_state, edge->terminator->parent_block,
+          (loom_op_t*)edge->terminator, (loom_op_t*)edge->terminator,
+          edge->successor_index, target_ordinal, edge->terminator->location));
+      if (state->failed) {
+        return iree_ok_status();
+      }
+    }
+    loom_ownership_lifetime_value_state_t source_state =
+        loom_ownership_lifetime_state_bits_get(source_bits, source_ordinal);
+    // The source check above distinguishes consumed values from ordinary
+    // values without ownership effects. Forward the latter as available
+    // borrows, just like callable arguments. Otherwise a scalar initialized
+    // by a constant and updated by a call can appear consumed on the first
+    // exit path after its backedge establishes borrowed state.
+    if (source_state == LOOM_OWNERSHIP_LIFETIME_VALUE_UNKNOWN) {
+      source_state = LOOM_OWNERSHIP_LIFETIME_VALUE_BORROWED;
+    }
     loom_ownership_lifetime_state_bits_set(edge_state, target_ordinal,
                                            source_state);
-    loom_ownership_lifetime_set_origin_arg(
-        state, target_ordinal,
-        loom_ownership_lifetime_origin_arg(state, source_ordinal));
-    if (source_state != LOOM_OWNERSHIP_LIFETIME_VALUE_UNKNOWN) {
-      loom_ownership_lifetime_mark_ever_seen(state, target_ordinal);
-    }
+    loom_ownership_lifetime_set_origin_arg(state, target_ordinal,
+                                           state->edge_origin_args[i]);
+    loom_ownership_lifetime_mark_ever_seen(state, target_ordinal);
   }
   return iree_ok_status();
 }
@@ -1368,8 +1303,8 @@ static iree_status_t loom_ownership_lifetime_propagate_edge(
   loom_ownership_lifetime_block_state_t* target_state =
       &state->blocks[edge->target_block_index];
   loom_ownership_lifetime_state_bits_copy(scratch, source_state->out);
-  IREE_RETURN_IF_ERROR(
-      loom_ownership_lifetime_apply_cfg_br_payload(state, scratch, edge));
+  IREE_RETURN_IF_ERROR(loom_ownership_lifetime_apply_cfg_br_payload(
+      state, source_state->out, scratch, edge));
   IREE_RETURN_IF_ERROR(
       loom_ownership_lifetime_materialize_edge_lifetimes(state, scratch, edge));
   if (state->failed) {
@@ -1476,8 +1411,8 @@ static iree_status_t loom_ownership_lifetime_run_cfg(
         const loom_cfg_edge_info_t* edge =
             loom_cfg_graph_edge(graph, successor_edges.values[j]);
         loom_ownership_lifetime_state_bits_copy(scratch, state->blocks[i].out);
-        IREE_RETURN_IF_ERROR(
-            loom_ownership_lifetime_apply_cfg_br_payload(state, scratch, edge));
+        IREE_RETURN_IF_ERROR(loom_ownership_lifetime_apply_cfg_br_payload(
+            state, state->blocks[i].out, scratch, edge));
         IREE_RETURN_IF_ERROR(loom_ownership_lifetime_materialize_edge_lifetimes(
             state, scratch, edge));
       }
@@ -1524,86 +1459,13 @@ static iree_status_t loom_ownership_lifetime_run_linear_regions(
 }
 
 //===----------------------------------------------------------------------===//
-// Module summaries
-//===----------------------------------------------------------------------===//
-
-static iree_status_t loom_ownership_lifetime_initialize_summary(
-    loom_ownership_lifetime_module_state_t* module_state,
-    const loom_symbol_t* symbol,
-    loom_ownership_lifetime_function_summary_t* summary) {
-  if (!loom_symbol_implements(symbol, LOOM_SYMBOL_INTERFACE_FUNC_LIKE) ||
-      !symbol->defining_op) {
-    return iree_ok_status();
-  }
-  loom_func_like_t function =
-      loom_func_like_cast(module_state->module, symbol->defining_op);
-  if (!loom_func_like_isa(function)) {
-    return iree_ok_status();
-  }
-  uint16_t arg_count = 0;
-  const loom_value_id_t* arg_ids = loom_func_like_arg_ids(function, &arg_count);
-  const loom_region_descriptor_t* body_descriptor =
-      loom_func_like_body_region_descriptor(module_state->module, function);
-  *summary = (loom_ownership_lifetime_function_summary_t){
-      .function = function,
-      .body = loom_func_like_body(function),
-      .body_exit_kind =
-          body_descriptor ? body_descriptor->terminator : LOOM_OP_KIND_UNKNOWN,
-      .arg_count = arg_count,
-      .result_count = function.op->result_count,
-  };
-  if (summary->arg_count > 0) {
-    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-        module_state->options->arena, summary->arg_count,
-        sizeof(*summary->arg_consumed), (void**)&summary->arg_consumed));
-    memset(summary->arg_consumed, 0,
-           summary->arg_count * sizeof(*summary->arg_consumed));
-    if (arg_ids) {
-      for (uint16_t i = 0; i < summary->arg_count; ++i) {
-        summary->arg_consumed[i] =
-            loom_ownership_lifetime_value_has_policy_flags(
-                module_state, arg_ids[i],
-                LOOM_OWNERSHIP_LIFETIME_MATERIALIZATION_POLICY_OWNED_ARGUMENTS);
-      }
-    }
-  }
-  if (summary->result_count > 0) {
-    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-        module_state->options->arena, summary->result_count,
-        sizeof(*summary->result_states), (void**)&summary->result_states));
-    memset(summary->result_states, 0,
-           summary->result_count * sizeof(*summary->result_states));
-  }
-  return iree_ok_status();
-}
-
-static iree_status_t loom_ownership_lifetime_initialize_module_summaries(
-    loom_ownership_lifetime_module_state_t* module_state) {
-  module_state->summary_count = module_state->module->symbols.count;
-  if (module_state->summary_count == 0) {
-    return iree_ok_status();
-  }
-  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-      module_state->options->arena, module_state->summary_count,
-      sizeof(*module_state->summaries), (void**)&module_state->summaries));
-  memset(module_state->summaries, 0,
-         module_state->summary_count * sizeof(*module_state->summaries));
-  for (iree_host_size_t i = 0; i < module_state->summary_count; ++i) {
-    IREE_RETURN_IF_ERROR(loom_ownership_lifetime_initialize_summary(
-        module_state, &module_state->module->symbols.entries[i],
-        &module_state->summaries[i]));
-  }
-  return iree_ok_status();
-}
-
-//===----------------------------------------------------------------------===//
 // Function analysis
 //===----------------------------------------------------------------------===//
 
 static iree_status_t loom_ownership_lifetime_build_release_action(
     loom_ownership_lifetime_state_t* state, loom_builder_t* builder,
     const loom_ownership_lifetime_action_t* action, loom_op_t** out_op) {
-  const loom_ownership_lifetime_materialization_policy_t* policy =
+  const loom_ownership_lifetime_policy_t* policy =
       &state->materialize_options->policies[action->policy_index];
   return policy->build_release(builder, action->value_id, action->location,
                                policy->user_data, out_op);
@@ -1736,13 +1598,33 @@ static iree_status_t loom_ownership_lifetime_analyze_function(
     loom_ownership_lifetime_module_state_t* module_state,
     loom_ownership_lifetime_function_summary_t* summary,
     iree_arena_allocator_t* arena, bool inference, bool emit_diagnostics,
-    bool count_statistics, bool materialize, bool* out_changed) {
+    bool count_statistics, bool* out_changed) {
   *out_changed = false;
   if (!summary->body) {
     return iree_ok_status();
   }
   if (!emit_diagnostics) {
     summary->needs_diagnostic_rerun = false;
+  }
+
+  const loom_op_t* boundary = loom_ownership_lifetime_cfg_boundary(summary);
+  if (boundary) {
+    loom_ownership_lifetime_state_t diagnostic_state = {
+        .module = module_state->module,
+        .summary = summary,
+        .options = module_state->options,
+        .result = module_state->result,
+        .emit_diagnostics = emit_diagnostics,
+    };
+    loom_diagnostic_param_t params[] = {
+        loom_param_string(
+            loom_ownership_lifetime_phase_name(&diagnostic_state)),
+        loom_param_string(
+            loom_ownership_lifetime_op_name(&diagnostic_state, boundary)),
+    };
+    return loom_ownership_lifetime_emit(&diagnostic_state, boundary,
+                                        LOOM_ERR_DOMINANCE_018, params,
+                                        IREE_ARRAYSIZE(params));
   }
 
   loom_local_value_domain_t value_domain = {0};
@@ -1756,8 +1638,7 @@ static iree_status_t loom_ownership_lifetime_analyze_function(
       .function = summary->function,
       .summary = summary,
       .options = &function_options,
-      .materialize_options =
-          materialize ? module_state->materialize_options : NULL,
+      .materialize_options = module_state->materialize_options,
       .result = module_state->result,
       .body = summary->body,
       .value_domain = &value_domain,
@@ -1838,128 +1719,6 @@ static iree_status_t loom_ownership_lifetime_analyze_function(
 }
 
 //===----------------------------------------------------------------------===//
-// Function graph
-//===----------------------------------------------------------------------===//
-
-static bool loom_ownership_lifetime_graph_callee_node(
-    const loom_ownership_lifetime_graph_t* graph, loom_symbol_ref_t callee,
-    iree_host_size_t* out_node) {
-  if (!loom_symbol_ref_is_valid(callee) || callee.module_id != 0 ||
-      callee.symbol_id >= graph->symbol_to_node_count) {
-    return false;
-  }
-  iree_host_size_t node = graph->symbol_to_node[callee.symbol_id];
-  if (node == IREE_HOST_SIZE_MAX) {
-    return false;
-  }
-  *out_node = node;
-  return true;
-}
-
-typedef struct loom_ownership_lifetime_successor_walk_t {
-  // Function graph adapter.
-  const loom_ownership_lifetime_graph_t* graph;
-  // SCC successor visitor.
-  loom_scc_successor_callback_t visitor;
-} loom_ownership_lifetime_successor_walk_t;
-
-static iree_status_t loom_ownership_lifetime_visit_successor_call(
-    void* user_data, loom_op_t* op, const loom_walk_context_t* context,
-    loom_walk_result_t* out_result) {
-  (void)context;
-  *out_result = LOOM_WALK_CONTINUE;
-  loom_ownership_lifetime_successor_walk_t* walk =
-      (loom_ownership_lifetime_successor_walk_t*)user_data;
-  loom_call_like_t call =
-      loom_call_like_cast(walk->graph->module_state->module, op);
-  if (!loom_call_like_isa(call) ||
-      !loom_ownership_lifetime_call_kind_is_runtime(
-          loom_call_like_kind(call))) {
-    return iree_ok_status();
-  }
-  iree_host_size_t callee_node = IREE_HOST_SIZE_MAX;
-  if (!loom_ownership_lifetime_graph_callee_node(
-          walk->graph, loom_call_like_callee(call), &callee_node)) {
-    return iree_ok_status();
-  }
-  return walk->visitor.fn(walk->visitor.user_data, callee_node);
-}
-
-static iree_status_t loom_ownership_lifetime_visit_successors(
-    void* user_data, iree_host_size_t node,
-    loom_scc_successor_callback_t visitor) {
-  const loom_ownership_lifetime_graph_t* graph =
-      (const loom_ownership_lifetime_graph_t*)user_data;
-  loom_ownership_lifetime_successor_walk_t walk = {
-      .graph = graph,
-      .visitor = visitor,
-  };
-  loom_walk_result_t walk_result = LOOM_WALK_CONTINUE;
-  iree_arena_reset(graph->walk_arena);
-  return loom_walk_function(
-      graph->module_state->module, graph->nodes[node].summary->function,
-      LOOM_WALK_PRE_ORDER,
-      (loom_walk_callback_t){loom_ownership_lifetime_visit_successor_call,
-                             &walk},
-      graph->walk_arena, &walk_result);
-}
-
-static iree_status_t loom_ownership_lifetime_build_graph(
-    loom_ownership_lifetime_module_state_t* module_state,
-    iree_arena_allocator_t* arena, iree_arena_allocator_t* walk_arena,
-    loom_ownership_lifetime_graph_t* out_graph, loom_scc_list_t* out_sccs) {
-  memset(out_graph, 0, sizeof(*out_graph));
-  out_graph->module_state = module_state;
-  out_graph->walk_arena = walk_arena;
-  out_graph->symbol_to_node_count = module_state->summary_count;
-  if (module_state->summary_count == 0) {
-    *out_sccs = (loom_scc_list_t){0};
-    return iree_ok_status();
-  }
-
-  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-      arena, module_state->summary_count, sizeof(*out_graph->symbol_to_node),
-      (void**)&out_graph->symbol_to_node));
-  for (iree_host_size_t i = 0; i < module_state->summary_count; ++i) {
-    out_graph->symbol_to_node[i] = IREE_HOST_SIZE_MAX;
-  }
-
-  iree_host_size_t function_count = 0;
-  for (iree_host_size_t i = 0; i < module_state->summary_count; ++i) {
-    if (module_state->summaries[i].body) {
-      ++function_count;
-    }
-  }
-  if (function_count == 0) {
-    *out_sccs = (loom_scc_list_t){0};
-    return iree_ok_status();
-  }
-
-  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(arena, function_count,
-                                                 sizeof(*out_graph->nodes),
-                                                 (void**)&out_graph->nodes));
-  out_graph->node_count = function_count;
-  iree_host_size_t node = 0;
-  for (iree_host_size_t i = 0; i < module_state->summary_count; ++i) {
-    if (!module_state->summaries[i].body) {
-      continue;
-    }
-    out_graph->nodes[node] = (loom_ownership_lifetime_graph_node_t){
-        .summary = &module_state->summaries[i],
-    };
-    out_graph->symbol_to_node[i] = node;
-    ++node;
-  }
-
-  loom_scc_graph_t scc_graph = {
-      .node_count = function_count,
-      .visit_successors = loom_scc_visit_successors_callback_make(
-          loom_ownership_lifetime_visit_successors, out_graph),
-  };
-  return loom_scc_compute(&scc_graph, NULL, arena, out_sccs);
-}
-
-//===----------------------------------------------------------------------===//
 // Module analysis
 //===----------------------------------------------------------------------===//
 
@@ -1990,7 +1749,7 @@ static iree_status_t loom_ownership_lifetime_analyze_scc(
       bool function_changed = false;
       IREE_RETURN_IF_ERROR(loom_ownership_lifetime_analyze_function(
           graph->module_state, summary, arena, true, false, true,
-          /*materialize=*/false, &function_changed));
+          &function_changed));
       changed = changed || function_changed;
     }
     if (!changed) {
@@ -2016,7 +1775,7 @@ static iree_status_t loom_ownership_lifetime_analyze_scc(
     bool ignored_changed = false;
     IREE_RETURN_IF_ERROR(loom_ownership_lifetime_analyze_function(
         graph->module_state, summary, arena, false, true, false,
-        graph->module_state->materialize_options != NULL, &ignored_changed));
+        &ignored_changed));
   }
   return iree_ok_status();
 }
@@ -2036,7 +1795,7 @@ static iree_status_t loom_ownership_lifetime_analyze_sccs(
 //===----------------------------------------------------------------------===//
 
 static iree_status_t loom_ownership_lifetime_validate_materialize_options(
-    const loom_ownership_lifetime_materialize_options_t* options) {
+    const loom_ownership_lifetime_options_t* options) {
   if (!options || !options->arena || !options->policies ||
       options->policy_count == 0) {
     return iree_make_status(
@@ -2049,8 +1808,7 @@ static iree_status_t loom_ownership_lifetime_validate_materialize_options(
                             "resource policy count exceeds uint16_t range");
   }
   for (iree_host_size_t i = 0; i < options->policy_count; ++i) {
-    const loom_ownership_lifetime_materialization_policy_t* policy =
-        &options->policies[i];
+    const loom_ownership_lifetime_policy_t* policy = &options->policies[i];
     if (!policy->family.type_matches || !policy->build_release) {
       return iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
@@ -2064,7 +1822,7 @@ static iree_status_t loom_ownership_lifetime_validate_materialize_options(
 
 static iree_status_t loom_ownership_lifetime_run_module(
     loom_module_t* module, const loom_ownership_lifetime_options_t* options,
-    const loom_ownership_lifetime_materialize_options_t* materialize_options,
+    const loom_ownership_lifetime_options_t* materialize_options,
     loom_ownership_lifetime_result_t* out_result) {
   if (!module || !options || !options->arena || !out_result) {
     return iree_make_status(
@@ -2081,22 +1839,19 @@ static iree_status_t loom_ownership_lifetime_run_module(
   };
 
   iree_arena_allocator_t analysis_arena = {0};
-  iree_arena_allocator_t walk_arena = {0};
   iree_arena_initialize(options->arena->block_pool, &analysis_arena);
-  iree_arena_initialize(options->arena->block_pool, &walk_arena);
   iree_status_t status =
       loom_ownership_lifetime_initialize_module_summaries(&module_state);
   if (iree_status_is_ok(status)) {
     loom_ownership_lifetime_graph_t graph = {0};
     loom_scc_list_t sccs = {0};
     status = loom_ownership_lifetime_build_graph(&module_state, options->arena,
-                                                 &walk_arena, &graph, &sccs);
+                                                 &graph, &sccs);
     if (iree_status_is_ok(status)) {
       status =
           loom_ownership_lifetime_analyze_sccs(&graph, &sccs, &analysis_arena);
     }
   }
-  iree_arena_deinitialize(&walk_arena);
   iree_arena_deinitialize(&analysis_arena);
   return status;
 }
@@ -2110,16 +1865,10 @@ iree_status_t loom_ownership_lifetime_analyze_module(
 }
 
 iree_status_t loom_ownership_lifetime_materialize_module(
-    loom_module_t* module,
-    const loom_ownership_lifetime_materialize_options_t* options,
+    loom_module_t* module, const loom_ownership_lifetime_options_t* options,
     loom_ownership_lifetime_result_t* out_result) {
   IREE_RETURN_IF_ERROR(
       loom_ownership_lifetime_validate_materialize_options(options));
-  loom_ownership_lifetime_options_t analysis_options = {
-      .arena = options->arena,
-      .emitter = options->emitter,
-      .phase_name = options->phase_name,
-  };
-  return loom_ownership_lifetime_run_module(module, &analysis_options, options,
+  return loom_ownership_lifetime_run_module(module, options, options,
                                             out_result);
 }

@@ -9,8 +9,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TypeVar
 
+from loom.target.arch.x86.feature_bits import FEATURE_AVX512_VL
 from loom.target.arch.x86.packed_dot_data import (
     CONTRACT_FLAG_SATURATING,
     NUMERIC_BF16,
@@ -24,6 +24,11 @@ from loom.target.arch.x86.packed_dot_data import (
     PackedDotDescriptor,
     packed_dot_native_layout,
 )
+from loom.target.arch.x86.vector_encoding import (
+    VectorEncodingPrefix,
+    VectorMachineInstruction,
+    vector_descriptor_bit_width,
+)
 from loom.target.low_descriptors import (
     AsmForm,
     AsmImmediate,
@@ -31,9 +36,7 @@ from loom.target.low_descriptors import (
     ConstraintKind,
     Descriptor,
     DescriptorFlag,
-    Effect,
-    EffectFlag,
-    EffectKind,
+    DescriptorSet,
     EnumDomain,
     Immediate,
     ImmediateFlag,
@@ -47,7 +50,7 @@ from loom.target.low_descriptors import (
     ScheduleClass,
 )
 
-_T = TypeVar("_T", RegClass, Resource, ScheduleClass, EnumDomain)
+from .encoding import Flag
 
 _REG_GPR32 = "x86.gpr32"
 _REG_GPR64 = "x86.gpr64"
@@ -64,16 +67,21 @@ _RESOURCE_LOAD = "x86.load"
 _RESOURCE_STORE = "x86.store"
 _RESOURCE_ADDRESS = "x86.address"
 _RESOURCE_CONTROL = "x86.control"
+_RESOURCE_DIVISION = "x86.division"
 
 _SCHEDULE_SCALAR = "x86.scalar"
 _SCHEDULE_ADDRESS = "x86.address"
 _SCHEDULE_VECTOR_I32_XMM = "x86.vector.i32.128"
+_SCHEDULE_VECTOR_I32_YMM = "x86.vector.i32.256"
 _SCHEDULE_VECTOR_I32_ZMM = "x86.vector.i32.512"
 _SCHEDULE_VECTOR_F32_XMM = "x86.vector.f32.128"
+_SCHEDULE_VECTOR_F32_YMM = "x86.vector.f32.256"
 _SCHEDULE_VECTOR_F32_ZMM = "x86.vector.f32.512"
 _SCHEDULE_VECTOR_FMA_F32_XMM = "x86.vector.fma.f32.128"
+_SCHEDULE_VECTOR_FMA_F32_YMM = "x86.vector.fma.f32.256"
 _SCHEDULE_VECTOR_FMA_F32_ZMM = "x86.vector.fma.f32.512"
 _SCHEDULE_VECTOR_COMPARE_XMM = "x86.vector.compare.128"
+_SCHEDULE_VECTOR_COMPARE_YMM = "x86.vector.compare.256"
 _SCHEDULE_VECTOR_COMPARE_ZMM = "x86.vector.compare.512"
 _SCHEDULE_VECTOR_DOT_XMM = "x86.vector.dot.128"
 _SCHEDULE_VECTOR_DOT_YMM = "x86.vector.dot.256"
@@ -81,6 +89,8 @@ _SCHEDULE_VECTOR_DOT_ZMM = "x86.vector.dot.512"
 _SCHEDULE_MASK = "x86.mask"
 _SCHEDULE_MEMORY_LOAD_GPR32 = "x86.memory.load.gpr32"
 _SCHEDULE_MEMORY_LOAD_GPR64 = "x86.memory.load.gpr64"
+_SCHEDULE_MEMORY_ALU_GPR32 = "x86.memory.alu.gpr32"
+_SCHEDULE_MEMORY_ALU_GPR64 = "x86.memory.alu.gpr64"
 _SCHEDULE_MEMORY_LOAD_XMM = "x86.memory.load.128"
 _SCHEDULE_MEMORY_LOAD_YMM = "x86.memory.load.256"
 _SCHEDULE_MEMORY_LOAD_ZMM = "x86.memory.load"
@@ -89,7 +99,10 @@ _SCHEDULE_MEMORY_STORE_GPR64 = "x86.memory.store.gpr64"
 _SCHEDULE_MEMORY_STORE_XMM = "x86.memory.store.128"
 _SCHEDULE_MEMORY_STORE_YMM = "x86.memory.store.256"
 _SCHEDULE_MEMORY_STORE_ZMM = "x86.memory.store"
+_SCHEDULE_SCALAR_CONTROL = "x86.scalar.control"
 _SCHEDULE_CONTROL = "x86.control"
+_SCHEDULE_DIVISION_GPR32 = "x86.division.gpr32"
+_SCHEDULE_DIVISION_GPR64 = "x86.division.gpr64"
 
 _GPR32_ALT = (RegClassAlt(_REG_GPR32),)
 _GPR64_ALT = (RegClassAlt(_REG_GPR64),)
@@ -99,11 +112,119 @@ _ZMM_ALT = (RegClassAlt(_REG_ZMM),)
 _K_ALT = (RegClassAlt(_REG_K),)
 
 
+def _merge_named_items[ItemT: (RegClass, Resource, ScheduleClass, EnumDomain)](
+    item_groups: tuple[tuple[ItemT, ...], ...],
+) -> tuple[ItemT, ...]:
+    """Merges descriptor support tables by stable item name."""
+    merged_items: list[ItemT] = []
+    seen_names: set[str] = set()
+    for items in item_groups:
+        for item in items:
+            if item.name in seen_names:
+                continue
+            merged_items.append(item)
+            seen_names.add(item.name)
+    return tuple(merged_items)
+
+
 def _low_subset_operand(operand: Operand, addressable_unit_count: int) -> Operand:
     return replace(
         operand,
         address_map_kind=OperandAddressMapKind.LOW_SUBSET,
         addressable_unit_count=addressable_unit_count,
+    )
+
+
+def _vex_descriptor(
+    descriptor: Descriptor, instruction: VectorMachineInstruction
+) -> Descriptor:
+    return instruction.bind(descriptor, VectorEncodingPrefix.VEX)
+
+
+def _avx512_descriptor(
+    descriptor: Descriptor,
+    instruction: VectorMachineInstruction,
+    *,
+    scalar: bool,
+    vector_bit_width: int | None = None,
+    required_feature_bits: int = 0,
+) -> Descriptor:
+    """Binds one AVX-512 row and derives its width-dependent feature mask."""
+    if descriptor.feature_mask_words:
+        raise ValueError(f"{descriptor.key}: AVX-512 binding owns feature masks")
+    if required_feature_bits & FEATURE_AVX512_VL:
+        raise ValueError(f"{descriptor.key}: AVX512VL is derived from encoding width")
+    encoding_bit_width = (
+        vector_bit_width
+        if vector_bit_width is not None
+        else vector_descriptor_bit_width(descriptor)
+    )
+    if encoding_bit_width not in (128, 256, 512):
+        raise ValueError(f"{descriptor.key}: AVX-512 binding requires an encoded width")
+    if scalar:
+        if encoding_bit_width != 128:
+            raise ValueError(f"{descriptor.key}: scalar AVX-512 encoding must use XMM")
+    elif encoding_bit_width < 512:
+        required_feature_bits |= FEATURE_AVX512_VL
+    descriptor = replace(
+        descriptor,
+        feature_mask_words=(required_feature_bits,) if required_feature_bits else (),
+    )
+    return instruction.bind(
+        descriptor,
+        VectorEncodingPrefix.EVEX,
+        vector_bit_width=vector_bit_width,
+    )
+
+
+def _descriptor_support_tables(
+    descriptors: tuple[Descriptor, ...], source: DescriptorSet
+) -> tuple[tuple[RegClass, ...], tuple[Resource, ...], tuple[ScheduleClass, ...]]:
+    """Selects the register, resource, and schedule closure used by rows."""
+    schedule_names = frozenset(
+        schedule_name
+        for descriptor in descriptors
+        for schedule_name in (
+            descriptor.schedule_class,
+            *descriptor.schedule_alternatives,
+        )
+    )
+    schedule_classes = tuple(
+        schedule
+        for schedule in source.schedule_classes
+        if schedule.name in schedule_names
+    )
+    resource_names = frozenset(
+        issue_use.resource
+        for schedule in schedule_classes
+        for issue_use in schedule.issue_uses
+    ) | frozenset(
+        hazard.resource
+        for schedule in schedule_classes
+        for hazard in schedule.hazards
+        if hazard.resource is not None
+    )
+    reg_class_names = frozenset(
+        alternative.reg_class
+        for descriptor in descriptors
+        for operand in descriptor.operands
+        for alternative in operand.reg_alts
+        if alternative.reg_class is not None
+    ) | frozenset(
+        delta.reg_class
+        for schedule in schedule_classes
+        for delta in schedule.pressure_deltas
+    )
+    return (
+        tuple(
+            reg_class
+            for reg_class in source.reg_classes
+            if reg_class.name in reg_class_names
+        ),
+        tuple(
+            resource for resource in source.resources if resource.name in resource_names
+        ),
+        schedule_classes,
     )
 
 
@@ -129,6 +250,8 @@ def _vector_i32_schedule_class(vector_bit_width: int) -> str:
     match vector_bit_width:
         case 128:
             return _SCHEDULE_VECTOR_I32_XMM
+        case 256:
+            return _SCHEDULE_VECTOR_I32_YMM
         case 512:
             return _SCHEDULE_VECTOR_I32_ZMM
         case _:
@@ -137,8 +260,10 @@ def _vector_i32_schedule_class(vector_bit_width: int) -> str:
 
 def _vector_f32_schedule_class(vector_bit_width: int) -> str:
     match vector_bit_width:
-        case 128:
+        case 64 | 128:
             return _SCHEDULE_VECTOR_F32_XMM
+        case 256:
+            return _SCHEDULE_VECTOR_F32_YMM
         case 512:
             return _SCHEDULE_VECTOR_F32_ZMM
         case _:
@@ -149,6 +274,8 @@ def _vector_fma_f32_schedule_class(vector_bit_width: int) -> str:
     match vector_bit_width:
         case 128:
             return _SCHEDULE_VECTOR_FMA_F32_XMM
+        case 256:
+            return _SCHEDULE_VECTOR_FMA_F32_YMM
         case 512:
             return _SCHEDULE_VECTOR_FMA_F32_ZMM
         case _:
@@ -159,6 +286,8 @@ def _vector_compare_schedule_class(vector_bit_width: int) -> str:
     match vector_bit_width:
         case 128:
             return _SCHEDULE_VECTOR_COMPARE_XMM
+        case 256:
+            return _SCHEDULE_VECTOR_COMPARE_YMM
         case 512:
             return _SCHEDULE_VECTOR_COMPARE_ZMM
         case _:
@@ -168,7 +297,6 @@ def _vector_compare_schedule_class(vector_bit_width: int) -> str:
 def _asm(
     *,
     mnemonic: str | None = None,
-    native_assembly_mnemonic: str | None = None,
     results: tuple[str, ...] = (),
     operands: tuple[str, ...] = (),
     immediates: tuple[str, ...] = (),
@@ -177,7 +305,6 @@ def _asm(
     return (
         AsmForm(
             mnemonic=mnemonic,
-            native_assembly_mnemonic=native_assembly_mnemonic,
             results=results,
             operands=operands,
             immediates=tuple(
@@ -208,6 +335,20 @@ def _gpr32_operand(field_name: str) -> Operand:
     return Operand(field_name, OperandRole.OPERAND, _GPR32_ALT)
 
 
+def _gpr_width_flags(bit_count: int) -> Flag:
+    if bit_count == 8:
+        return Flag.BYTE
+    if bit_count == 16:
+        return Flag.OPERAND_16
+    if bit_count == 64:
+        return Flag.REX_W
+    return Flag(0)
+
+
+def _gpr_width_operand(bit_count: int, field_name: str) -> Operand:
+    return _gpr64_operand(field_name) if bit_count == 64 else _gpr32_operand(field_name)
+
+
 def _xmm_operand(field_name: str) -> Operand:
     return Operand(field_name, OperandRole.OPERAND, _XMM_ALT)
 
@@ -226,7 +367,7 @@ def _zmm_operand(field_name: str) -> Operand:
 
 def _vector_reg_alt(vector_bit_width: int) -> tuple[RegClassAlt, ...]:
     match vector_bit_width:
-        case 128:
+        case 64 | 128:
             return _XMM_ALT
         case 256:
             return _YMM_ALT
@@ -266,6 +407,10 @@ def _k_operand(field_name: str) -> Operand:
     return Operand(field_name, OperandRole.OPERAND, _K_ALT)
 
 
+def _evex_writemask_operand(field_name: str = "mask") -> Operand:
+    return _low_subset_operand(_k_operand(field_name), 7)
+
+
 _DISP32_IMMEDIATE = Immediate(
     "disp32",
     ImmediateKind.SIGNED,
@@ -280,6 +425,22 @@ _IMM32_IMMEDIATE = Immediate(
     bit_width=32,
     signed_min=-(2**31),
     unsigned_max=(2**31) - 1,
+)
+
+_IMM8_IMMEDIATE = Immediate(
+    "imm8",
+    ImmediateKind.SIGNED,
+    bit_width=8,
+    signed_min=-(2**7),
+    unsigned_max=(2**7) - 1,
+)
+
+_IMM16_IMMEDIATE = Immediate(
+    "imm16",
+    ImmediateKind.SIGNED,
+    bit_width=16,
+    signed_min=-(2**15),
+    unsigned_max=(2**15) - 1,
 )
 
 _IMM64_IMMEDIATE = Immediate(
@@ -311,7 +472,7 @@ _LANE_I32X4_IMMEDIATE = Immediate(
     unsigned_max=3,
 )
 
-_LANE_I64X2_IMMEDIATE = Immediate(
+_TWO_LANE_IMMEDIATE = Immediate(
     "lane",
     ImmediateKind.UNSIGNED,
     bit_width=8,
@@ -332,6 +493,18 @@ _SHUFFLE_4X2_CONTROL_IMMEDIATE = Immediate(
     unsigned_max=255,
 )
 
+_READ_ONLY_DATA_IMMEDIATE = Immediate(
+    "data",
+    ImmediateKind.ORDINAL,
+    flags=(
+        ImmediateFlag.SYMBOLIC,
+        ImmediateFlag.RELATIVE,
+        ImmediateFlag.READ_ONLY_DATA,
+    ),
+    bit_width=32,
+    unsigned_max=(2**32) - 1,
+)
+
 _INSERTPS_CONTROL_IMMEDIATE = Immediate(
     "control",
     ImmediateKind.UNSIGNED,
@@ -347,20 +520,6 @@ _ADDRESS_SCALE_IMMEDIATE = Immediate(
     enum_domain=_ADDRESS_SCALE_ENUM,
     bit_width=8,
     unsigned_max=8,
-)
-
-_TARGET_BLOCK_IMMEDIATE = Immediate(
-    "target_block",
-    ImmediateKind.ORDINAL,
-    flags=(ImmediateFlag.SYMBOLIC, ImmediateFlag.RELATIVE),
-    bit_width=32,
-    unsigned_max=(2**32) - 1,
-)
-
-
-_CONTROL_EFFECT = Effect(
-    EffectKind.CONTROL,
-    flags=(EffectFlag.ORDERED,),
 )
 
 _DESTRUCTIVE_ACCUMULATOR_CONSTRAINTS = (
@@ -414,13 +573,10 @@ def _packed_dot_asm_form(
     qualify_family: bool,
 ) -> tuple[AsmForm, ...]:
     mnemonic = _vector_asm_mnemonic(descriptor.mnemonic, descriptor.vector_bit_width)
-    native_assembly_mnemonic: str | None = None
     if qualify_family:
-        native_assembly_mnemonic = mnemonic
         mnemonic = f"{_packed_dot_asm_family_prefix(descriptor.key)}.{mnemonic}"
     return _asm(
         mnemonic=mnemonic,
-        native_assembly_mnemonic=native_assembly_mnemonic,
         results=("dst",),
         operands=("acc", "lhs", "rhs"),
     )
@@ -449,9 +605,6 @@ def _qualify_packed_dot_descriptor_asm_forms(descriptor: Descriptor) -> Descript
             replace(
                 asm_form,
                 mnemonic=f"{family_prefix}.{mnemonic}",
-                native_assembly_mnemonic=(
-                    asm_form.native_assembly_mnemonic or mnemonic
-                ),
             )
         )
     return replace(descriptor, asm_forms=tuple(qualified_forms))
@@ -491,20 +644,6 @@ def _packed_dot_descriptor(
         schedule_class=_vector_dot_schedule_class(descriptor.vector_bit_width),
         feature_mask_words=(descriptor.required_feature_bits,),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
-    )
-
-
-def _zmm_i32_binary_descriptor(
-    *,
-    key: str,
-    mnemonic: str,
-    semantic_tag: str,
-) -> Descriptor:
-    return _vector_i32_binary_descriptor(
-        vector_bit_width=512,
-        key=key,
-        mnemonic=mnemonic,
-        semantic_tag=semantic_tag,
     )
 
 
@@ -560,7 +699,80 @@ def _vector_f32_binary_descriptor(
     )
 
 
-def _scalar_f32_binary_descriptor(
+def _vector_float_unary_descriptor(
+    *,
+    vector_bit_width: int,
+    key: str,
+    mnemonic: str,
+    semantic_tag: str,
+) -> Descriptor:
+    return Descriptor(
+        key=key,
+        mnemonic=mnemonic,
+        semantic_tag=semantic_tag,
+        operands=(
+            _vector_result(vector_bit_width),
+            _vector_operand(vector_bit_width, "input"),
+        ),
+        asm_forms=_asm(
+            mnemonic=_vector_asm_mnemonic(mnemonic, vector_bit_width),
+            results=("dst",),
+            operands=("input",),
+        ),
+        schedule_class=_vector_f32_schedule_class(vector_bit_width),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _vector_fma_descriptor(
+    *,
+    vector_bit_width: int,
+    key: str,
+    mnemonic: str,
+    semantic_tag: str,
+) -> Descriptor:
+    return Descriptor(
+        key=key,
+        mnemonic=mnemonic,
+        semantic_tag=semantic_tag,
+        operands=(
+            _vector_result(vector_bit_width),
+            _vector_operand(vector_bit_width, "acc"),
+            _vector_operand(vector_bit_width, "lhs"),
+            _vector_operand(vector_bit_width, "rhs"),
+        ),
+        constraints=_DESTRUCTIVE_ACCUMULATOR_CONSTRAINTS,
+        asm_forms=_asm(
+            mnemonic=_vector_asm_mnemonic(mnemonic, vector_bit_width),
+            results=("dst",),
+            operands=("acc", "lhs", "rhs"),
+        ),
+        schedule_class=_vector_fma_f32_schedule_class(vector_bit_width),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _vector_zero_descriptor(
+    *,
+    vector_bit_width: int,
+    key: str,
+) -> Descriptor:
+    return Descriptor(
+        key=key,
+        mnemonic="vxorps",
+        semantic_tag=f"bits.const.zero.{vector_bit_width}",
+        operands=(_vector_result(vector_bit_width),),
+        constraints=(Constraint(ConstraintKind.REMATERIALIZABLE, 0),),
+        asm_forms=_asm(
+            mnemonic=_vector_asm_mnemonic("vxorps.zero", vector_bit_width),
+            results=("dst",),
+        ),
+        schedule_class=_vector_f32_schedule_class(vector_bit_width),
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
+    )
+
+
+def _scalar_float_binary_descriptor(
     *,
     key: str,
     mnemonic: str,
@@ -585,21 +797,28 @@ def _scalar_f32_binary_descriptor(
     )
 
 
-def _zmm_splat_descriptor(
+def _scalar_float_unary_descriptor(
     *,
     key: str,
     mnemonic: str,
     semantic_tag: str,
-    operand: Operand,
-    schedule_class: str,
 ) -> Descriptor:
-    return _vector_splat_descriptor(
-        vector_bit_width=512,
+    return Descriptor(
         key=key,
         mnemonic=mnemonic,
         semantic_tag=semantic_tag,
-        operand=operand,
-        schedule_class=schedule_class,
+        operands=(
+            _xmm_result(),
+            _xmm_operand("passthrough"),
+            _xmm_operand("input"),
+        ),
+        asm_forms=_asm(
+            mnemonic=f"{mnemonic}.xmm",
+            results=("dst",),
+            operands=("passthrough", "input"),
+        ),
+        schedule_class=_SCHEDULE_VECTOR_F32_XMM,
+        flags=(DescriptorFlag.DEAD_REMOVABLE,),
     )
 
 
@@ -611,14 +830,20 @@ def _vector_splat_descriptor(
     semantic_tag: str,
     operand: Operand,
     schedule_class: str,
+    asm_mnemonic: str | None = None,
 ) -> Descriptor:
     return Descriptor(
         key=key,
         mnemonic=mnemonic,
         semantic_tag=semantic_tag,
         operands=(_vector_result(vector_bit_width), operand),
+        constraints=(Constraint(ConstraintKind.REMATERIALIZABLE, 0, 1),),
         asm_forms=_asm(
-            mnemonic=_vector_asm_mnemonic(mnemonic, vector_bit_width),
+            mnemonic=(
+                _vector_asm_mnemonic(mnemonic, vector_bit_width)
+                if asm_mnemonic is None
+                else asm_mnemonic
+            ),
             results=("dst",),
             operands=("value",),
         ),
@@ -627,21 +852,7 @@ def _vector_splat_descriptor(
     )
 
 
-def _zmm_i32_compare_descriptor(
-    *,
-    key: str,
-    mnemonic: str,
-    semantic_tag: str,
-) -> Descriptor:
-    return _vector_i32_compare_descriptor(
-        vector_bit_width=512,
-        key=key,
-        mnemonic=mnemonic,
-        semantic_tag=semantic_tag,
-    )
-
-
-def _vector_i32_compare_descriptor(
+def _vector_mask_compare_descriptor(
     *,
     vector_bit_width: int,
     key: str,
@@ -657,50 +868,19 @@ def _vector_i32_compare_descriptor(
             _vector_operand(vector_bit_width, "lhs"),
             _vector_operand(vector_bit_width, "rhs"),
         ),
-        asm_forms=_asm(
-            mnemonic=_vector_asm_mnemonic(mnemonic, vector_bit_width),
-            results=("dst",),
-            operands=("lhs", "rhs"),
-        ),
-        schedule_class=_vector_compare_schedule_class(vector_bit_width),
-        flags=(DescriptorFlag.DEAD_REMOVABLE,),
-    )
-
-
-def _zmm_f32_compare_descriptor(
-    *,
-    key: str,
-    mnemonic: str,
-    semantic_tag: str,
-) -> Descriptor:
-    return _vector_f32_compare_descriptor(
-        vector_bit_width=512,
-        key=key,
-        mnemonic=mnemonic,
-        semantic_tag=semantic_tag,
-    )
-
-
-def _vector_f32_compare_descriptor(
-    *,
-    vector_bit_width: int,
-    key: str,
-    mnemonic: str,
-    semantic_tag: str,
-) -> Descriptor:
-    return Descriptor(
-        key=key,
-        mnemonic=mnemonic,
-        semantic_tag=semantic_tag,
-        operands=(
-            _k_result(),
-            _vector_operand(vector_bit_width, "lhs"),
-            _vector_operand(vector_bit_width, "rhs"),
+        immediates=(
+            Immediate(
+                "predicate",
+                ImmediateKind.UNSIGNED,
+                bit_width=5,
+                unsigned_max=31,
+            ),
         ),
         asm_forms=_asm(
             mnemonic=_vector_asm_mnemonic(mnemonic, vector_bit_width),
             results=("dst",),
             operands=("lhs", "rhs"),
+            immediates=("predicate",),
         ),
         schedule_class=_vector_compare_schedule_class(vector_bit_width),
         flags=(DescriptorFlag.DEAD_REMOVABLE,),
@@ -737,7 +917,7 @@ def _vector_mask_select_descriptor(
         semantic_tag=semantic_tag,
         operands=(
             _vector_result(vector_bit_width),
-            _k_operand("mask"),
+            _evex_writemask_operand(),
             _vector_operand(vector_bit_width, "true_value"),
             _vector_operand(vector_bit_width, "false_value"),
         ),

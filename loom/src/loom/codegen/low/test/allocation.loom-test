@@ -1,4 +1,4 @@
-// RUN: emit low-allocation-json @rotating_header_values
+// RUN: emit low-allocation-query @rotating_header_values values=%seed0,%seed1,%x,%y,%next,%sum
 
 // The backedge's old y is consumed, but the next iteration defines new x and y
 // together. Recoloring x onto y would also overwrite the distinct entry seeds
@@ -19,11 +19,36 @@ low.func.def target<test.low.core>(@test_target) @rotating_header_values(%condit
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"rotating_header_values","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":8,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":2,"name":"seed1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":3,"value":{"id":4,"name":"x","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":5,"name":"y","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":5,"value":{"id":6,"name":"one","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":6,"value":{"id":7,"name":"next","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":7,"value":{"id":8,"name":"sum","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %seed0: test.i32 -> target_id[0:1]
+value %seed1: test.i32 -> target_id[1:1]
+value %x: test.i32 -> target_id[0:1]
+value %y: test.i32 -> target_id[1:1]
+value %next: test.i32 -> target_id[0:1]
+value %sum: test.i32 -> target_id[0:1]
 
 // ====
 
-// RUN: emit low-allocation @alloc
+// Descriptor-backed branches consume their register operands through the
+// ordinary schedule and allocation path.
+// RUN: emit low-allocation-query @descriptor_cond_br values=%lhs,%rhs
+
+test.target<low_core> @test_target {contract_feature_bits = 1}
+
+low.func.def target<test.low.core>(@test_target) @descriptor_cond_br(%lhs: reg<test.i32>, %rhs: reg<test.i32>) -> (reg<test.i32>) asm {
+  low.op.cond_br<test.native.cond_br.i32>(%lhs, %rhs) {predicate = 2}, ^less, ^greater_equal : (reg<test.i32>, reg<test.i32>)
+^less:
+  return %lhs
+^greater_equal:
+  return %rhs
+}
+
+// ----
+value %lhs: test.i32 -> target_id[0:1]
+value %rhs: test.i32 -> target_id[1:1]
+
+// ====
+
+// RUN: emit low-allocation-query @alloc values=%lhs,%rhs,%sum
 
 test.target<low_core> @test_target
 
@@ -33,20 +58,13 @@ low.func.def target<test.low.core>(@test_target) @alloc(%lhs: reg<test.i32>, %rh
 }
 
 // ----
-low-allocation @alloc
-target: test_target
-descriptor_set: test.low.core
-mode: virtual
-assignments: 3
-remarks: 0
-spills: 0
-copies: coalesced=0 materialized=0
-classes:
-  test.i32: assignments=3 units=3 target_ids=2 physical=0 spill_slots=0 unassigned=0
+value %lhs: test.i32 -> target_id[0:1]
+value %rhs: test.i32 -> target_id[1:1]
+value %sum: test.i32 -> target_id[0:1]
 
 // ====
 
-// RUN: emit low-allocation-json @ordinary_packet_reuses_dead_input test.i32=8
+// RUN: emit low-allocation-query @ordinary_packet_reuses_dead_input values=%lhs,%rhs,%sum test.i32=8
 
 test.target<low_core> @test_target
 
@@ -56,11 +74,13 @@ low.func.def target<test.low.core>(@test_target) @ordinary_packet_reuses_dead_in
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"ordinary_packet_reuses_dead_input","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":3,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"lhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":1,"name":"rhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}},{"index":2,"value":{"id":3,"name":"sum","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %lhs: test.i32 -> target_id[0:4]
+value %rhs: test.i32 -> target_id[4:4]
+value %sum: test.i32 -> target_id[0:4]
 
 // ====
 
-// RUN: emit low-allocation-json @early_clobber_preserves_input test.i32=8
+// RUN: emit low-allocation-query @early_clobber_preserves_input values=%source,%result test.i32=8
 
 test.target<low_core> @test_target
 
@@ -70,11 +90,80 @@ low.func.def target<test.low.core>(@test_target) @early_clobber_preserves_input(
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"early_clobber_preserves_input","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"source","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":2,"name":"result","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %source: test.i32 -> target_id[0:4]
+value %result: test.i32 -> target_id[4:4]
 
 // ====
 
-// RUN: emit low-allocation-json @early_tied_reuses_input test.i32=4
+// RUN: emit low-allocation-query @contiguous_early_clobber_read values=%source,%result spill-count test.i32=8
+
+test.target<low_core> @test_target
+
+// The source spans three blocks but has one contiguous semantic segment. Its
+// final physical read still overlaps the early-clobber destination write.
+low.func.def target<test.low.core>(@test_target) @contiguous_early_clobber_read(%source: reg<test.i32 x4>) -> (reg<test.i32 x4>) asm {
+  low.br ^forward
+^forward:
+  low.br ^read
+^read:
+  %result = test.early_clobber.v4i32 %source
+  return %result
+}
+
+// ----
+spills: 0
+value %source: test.i32 -> target_id[0:4]
+value %result: test.i32 -> target_id[4:4]
+
+// ====
+
+// RUN: emit low-allocation-query @sparse_early_clobber_read values=%source,%rhs,%result spill-count test.i32=8
+
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) @sparse_early_clobber_read(%condition: reg<test.i32>, %source: reg<test.i32 x4>, %pointer: reg<test.ptr>) -> (reg<test.i32 x4>) asm {
+  low.cond_br %condition, ^other_path, ^read_path : reg<test.i32>
+^other_path:
+  %lhs = test.load.v4i32 %pointer
+  %rhs = test.load.v4i32 %pointer
+  %sum = test.add.v4i32 %lhs, %rhs
+  return %sum
+^read_path:
+  %result = test.early_clobber.v4i32 %source
+  return %result
+}
+
+// ----
+spills: 0
+value %source: test.i32 -> target_id[4:4]
+value %rhs: test.i32 -> target_id[4:4]
+value %result: test.i32 -> target_id[0:4]
+
+// ====
+
+// RUN: emit low-allocation-query @sparse_late_read values=%source,%other copies=%other test.phys=1
+
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) @sparse_late_read(%condition: reg<test.i32>, %source: reg<test.phys>, %seed: reg<test.i32>) asm {
+  low.cond_br %condition, ^other_path, ^read_path : reg<test.i32>
+^other_path:
+  %other = copy %seed : reg<test.i32> -> reg<test.phys>
+  test.event.read.late.phys %other
+  return
+^read_path:
+  test.event.read.late.phys %source
+  return
+}
+
+// ----
+value %source: test.phys -> physical_register[0:1]
+value %other: test.phys -> physical_register[0:1]
+copy %seed -> %other: materialized
+
+// ====
+
+// RUN: emit low-allocation-query @early_tied_reuses_input values=%source,%result test.i32=4
 
 test.target<low_core> @test_target
 
@@ -84,11 +173,12 @@ low.func.def target<test.low.core>(@test_target) @early_tied_reuses_input(%sourc
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"early_tied_reuses_input","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"source","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":2,"name":"result","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %source: test.i32 -> target_id[0:4]
+value %result: test.i32 -> target_id[0:4]
 
 // ====
 
-// RUN: emit low-allocation-json @fact_identity_reuses_input test.i32=4
+// RUN: emit low-allocation-query @fact_identity_reuses_input values=%source,%assumed test.i32=4
 
 test.target<low_core> @test_target
 
@@ -98,11 +188,12 @@ low.func.def target<test.low.core>(@test_target) @fact_identity_reuses_input(%so
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"fact_identity_reuses_input","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"source","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":2,"name":"assumed","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %source: test.i32 -> target_id[0:4]
+value %assumed: test.i32 -> target_id[0:4]
 
 // ====
 
-// RUN: emit low-allocation-json @branch_concat_destination_layout
+// RUN: emit low-allocation-query @branch_concat_destination_layout values=%state,%out0,%out1
 
 test.target<low_core> @test_target
 
@@ -124,11 +215,13 @@ low.func.def target<test.low.core>(@test_target) @branch_concat_destination_layo
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"branch_concat_destination_layout","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":11,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"cond","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":1,"name":"lhs","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":6,"unit_count":2,"location":{"kind":"target_id","base":2,"count":2}},{"index":2,"value":{"id":2,"name":"rhs","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":12,"unit_count":2,"location":{"kind":"target_id","base":4,"count":2}},{"index":3,"value":{"id":4,"name":"lhs0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":4,"value":{"id":5,"name":"rhs0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":5,"value":{"id":10,"name":"out","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":10,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":6,"value":{"id":6,"name":"out0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":7,"value":{"id":7,"name":"lhs1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":8,"value":{"id":8,"name":"rhs1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":5,"count":1}},{"index":9,"value":{"id":9,"name":"out1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":10,"value":{"id":11,"name":"state","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":13,"end_point":14,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:2]
+value %out0: test.i32 -> target_id[0:1]
+value %out1: test.i32 -> target_id[1:1]
 
 // ====
 
-// RUN: emit low-allocation-json @multiple_edge_concats_remain_distinct
+// RUN: emit low-allocation-query @multiple_edge_concats_remain_distinct values=%first_state,%second_state
 
 test.target<low_core> @test_target
 
@@ -150,11 +243,12 @@ low.func.def target<test.low.core>(@test_target) @multiple_edge_concats_remain_d
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"multiple_edge_concats_remain_distinct","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":13,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":1,"name":"lhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":2,"name":"rhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":3,"value":{"id":6,"name":"first_pair","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":7,"unit_count":2,"location":{"kind":"target_id","base":4,"count":2}},{"index":4,"value":{"id":3,"name":"zero","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":5,"count":1}},{"index":5,"value":{"id":5,"name":"first","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":6,"value":{"id":8,"name":"second_pair","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":7,"value":{"id":7,"name":"second","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":8,"value":{"id":9,"name":"first_state","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":9,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":9,"value":{"id":10,"name":"second_state","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":10,"unit_count":2,"location":{"kind":"target_id","base":2,"count":2}},{"index":10,"value":{"id":11,"name":"first_value","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":11,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":11,"value":{"id":12,"name":"second_value","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":10,"end_point":11,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":12,"value":{"id":13,"name":"sum","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":11,"end_point":12,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %first_state: test.i32 -> target_id[2:2]
+value %second_state: test.i32 -> target_id[0:2]
 
 // ====
 
-// RUN: emit low-allocation-json @loop_backedge_concat_destination_layout
+// RUN: emit low-allocation-query @loop_backedge_concat_destination_layout values=%state,%n0,%n1,%n2,%n3,%next
 
 test.target<low_core> @test_target
 
@@ -178,11 +272,16 @@ low.func.def target<test.low.core>(@test_target) @loop_backedge_concat_destinati
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"loop_backedge_concat_destination_layout","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":16,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"init","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":2,"value":{"id":2,"name":"a0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":5,"count":1}},{"index":3,"value":{"id":3,"name":"a1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":6,"count":1}},{"index":4,"value":{"id":4,"name":"a2","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":7,"count":1}},{"index":5,"value":{"id":5,"name":"a3","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":8,"count":1}},{"index":6,"value":{"id":7,"name":"state","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":16,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":7,"value":{"id":8,"name":"s0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":8,"value":{"id":9,"name":"s1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":9,"value":{"id":10,"name":"s2","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":11,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":10,"value":{"id":11,"name":"s3","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":12,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":11,"value":{"id":12,"name":"n0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":12,"value":{"id":13,"name":"n1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":10,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":13,"value":{"id":14,"name":"n2","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":11,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":14,"value":{"id":15,"name":"n3","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":12,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":15,"value":{"id":16,"name":"next","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":13,"end_point":14,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:4]
+value %n0: test.i32 -> target_id[0:1]
+value %n1: test.i32 -> target_id[1:1]
+value %n2: test.i32 -> target_id[2:1]
+value %n3: test.i32 -> target_id[3:1]
+value %next: test.i32 -> target_id[0:4]
 
 // ====
 
-// RUN: emit low-allocation-json @loop_backedge_disjoint_update_precedes_old_read
+// RUN: emit low-allocation-query @loop_backedge_disjoint_update_precedes_old_read values=%state,%next0,%old1,%next1,%next
 
 test.target<low_core> @test_target
 
@@ -201,11 +300,15 @@ low.func.def target<test.low.core>(@test_target) @loop_backedge_disjoint_update_
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"loop_backedge_disjoint_update_precedes_old_read","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":9,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":2,"value":{"id":2,"name":"lhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":3,"value":{"id":3,"name":"rhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":4,"value":{"id":5,"name":"state","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":11,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":5,"value":{"id":6,"name":"next0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":6,"value":{"id":7,"name":"old1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":7,"value":{"id":8,"name":"next1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":8,"value":{"id":9,"name":"next","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":9,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:2]
+value %next0: test.i32 -> target_id[0:1]
+value %old1: test.i32 -> target_id[1:1]
+value %next1: test.i32 -> target_id[1:1]
+value %next: test.i32 -> target_id[0:2]
 
 // ====
 
-// RUN: emit low-allocation-json @loop_backedge_update_precedes_old_read
+// RUN: emit low-allocation-query @loop_backedge_update_precedes_old_read values=%state,%next,%late_read
 
 test.target<low_core> @test_target
 
@@ -222,11 +325,13 @@ low.func.def target<test.low.core>(@test_target) @loop_backedge_update_precedes_
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"loop_backedge_update_precedes_old_read","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":6,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":2,"name":"rhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":3,"value":{"id":4,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":5,"name":"next","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":5,"value":{"id":6,"name":"late_read","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %next: test.i32 -> target_id[3:1]
+value %late_read: test.i32 -> target_id[0:1]
 
 // ====
 
-// RUN: emit low-allocation-json @loop_body_chain_reuses_exit_live_state test.i32=4
+// RUN: emit low-allocation-query @loop_body_chain_reuses_exit_live_state values=%state,%scaled,%next test.i32=4
 
 test.target<low_core> @test_target
 
@@ -243,11 +348,13 @@ low.func.def target<test.low.core>(@test_target) @loop_body_chain_reuses_exit_li
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"loop_body_chain_reuses_exit_live_state","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":7,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":2,"name":"scale","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":3,"value":{"id":3,"name":"addend","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":4,"value":{"id":5,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":5,"value":{"id":6,"name":"scaled","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":6,"value":{"id":7,"name":"next","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %scaled: test.i32 -> target_id[0:1]
+value %next: test.i32 -> target_id[0:1]
 
 // ====
 
-// RUN: emit low-allocation-json @loop_backedge_concat_preserves_late_old_read
+// RUN: emit low-allocation-query @loop_backedge_concat_preserves_late_old_read values=%state,%next,%next0,%old0,%next1
 
 test.target<low_core> @test_target
 
@@ -266,11 +373,15 @@ low.func.def target<test.low.core>(@test_target) @loop_backedge_concat_preserves
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"loop_backedge_concat_preserves_late_old_read","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":9,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":2,"value":{"id":2,"name":"lhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":3,"value":{"id":3,"name":"rhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":4,"value":{"id":5,"name":"state","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":11,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":5,"value":{"id":9,"name":"next","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":9,"unit_count":2,"location":{"kind":"target_id","base":6,"count":2}},{"index":6,"value":{"id":6,"name":"next0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":6,"count":1}},{"index":7,"value":{"id":7,"name":"old0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":8,"value":{"id":8,"name":"next1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":7,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:2]
+value %next: test.i32 -> target_id[5:2]
+value %next0: test.i32 -> target_id[5:1]
+value %old0: test.i32 -> target_id[0:1]
+value %next1: test.i32 -> target_id[6:1]
 
 // ====
 
-// RUN: emit low-allocation-json @edge_copy_tail_enters_cycle fixed=%source_b:physical_register:1:1 fixed=%source_c:physical_register:2:1 fixed=%dst_a:physical_register:0:1 fixed=%dst_b:physical_register:1:1 fixed=%dst_c:physical_register:2:1 output=none
+// RUN: emit low-allocation-query @edge_copy_tail_enters_cycle edge-moves values=%source_b,%source_c,%dst_a,%dst_b,%dst_c fixed=%source_b:physical_register:1:1 fixed=%source_c:physical_register:2:1 fixed=%dst_a:physical_register:0:1 fixed=%dst_b:physical_register:1:1 fixed=%dst_c:physical_register:2:1
 
 test.target<low_core> @test_target
 
@@ -280,9 +391,21 @@ low.func.def target<test.low.core>(@test_target) @edge_copy_tail_enters_cycle(%s
   return %dst_a, %dst_b, %dst_c
 }
 
+// ----
+edge moves: 4
+move test.phys:physical_register[0] <- test.phys:physical_register[1]
+move test.phys:physical_register[3] <- test.phys:physical_register[2]
+move test.phys:physical_register[2] <- test.phys:physical_register[1]
+move test.phys:physical_register[1] <- test.phys:physical_register[3]
+value %source_b: test.phys -> physical_register[1:1]
+value %source_c: test.phys -> physical_register[2:1]
+value %dst_a: test.phys -> physical_register[0:1]
+value %dst_b: test.phys -> physical_register[1:1]
+value %dst_c: test.phys -> physical_register[2:1]
+
 // ====
 
-// RUN: emit low-allocation-json @edge_cycle_without_scratch test.phys=2 fixed=%lhs:physical_register:0:1 fixed=%rhs:physical_register:1:1 fixed=%dst_lhs:physical_register:1:1 fixed=%dst_rhs:physical_register:0:1 output=none
+// RUN: emit low-allocation-query @edge_cycle_without_scratch failure test.phys=2 fixed=%lhs:physical_register:0:1 fixed=%rhs:physical_register:1:1 fixed=%dst_lhs:physical_register:1:1 fixed=%dst_rhs:physical_register:0:1
 
 test.target<low_core> @test_target
 
@@ -293,9 +416,72 @@ low.func.def target<test.low.core>(@test_target) @edge_cycle_without_scratch(%lh
   return %dst_lhs, %dst_rhs
 }
 
+// ----
+failure: parallel-move-no-scratch-unit kind=unknown class=test.phys required=1 budget=2 peak=1
+
 // ====
 
-// RUN: emit low-allocation-json @structural_physical_span_rebased_at_capacity fixed=%wide:physical_register:20:12 fixed=%tail:physical_register:0:1
+// RUN: emit low-allocation-json @edge_cycle_uses_other_branch_hole test.phys=3 fixed=%lhs:physical_register:0:1 fixed=%rhs:physical_register:1:1 fixed=%other:physical_register:2:1 fixed=%dst_lhs:physical_register:1:1 fixed=%dst_rhs:physical_register:0:1
+
+// Register 2 is live toward exit, but available for cycle scratch on swap.
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) @edge_cycle_uses_other_branch_hole(%condition: reg<test.i32>, %lhs: reg<test.phys>, %rhs: reg<test.phys>, %other: reg<test.phys>) -> (reg<test.phys>, reg<test.phys>) asm {
+  low.cond_br %condition, ^swap, ^exit : reg<test.i32>
+^swap:
+  low.br ^join(%lhs: reg<test.phys>, %rhs: reg<test.phys>)
+^join(%dst_lhs: reg<test.phys>, %dst_rhs: reg<test.phys>):
+  return %dst_lhs, %dst_rhs
+^exit:
+  return %other, %other
+}
+
+// ----
+{"format":"loom.low.allocation.v0","function":"edge_cycle_uses_other_branch_hole","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":6,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":1,"name":"lhs","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}},{"index":2,"value":{"id":2,"name":"rhs","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"physical_register","base":1,"count":1}},{"index":3,"value":{"id":3,"name":"other","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":7,"unit_count":1,"location":{"kind":"physical_register","base":2,"count":1}},{"index":4,"value":{"id":6,"name":"dst_lhs","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"physical_register","base":1,"count":1}},{"index":5,"value":{"id":7,"name":"dst_rhs","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+
+// ====
+
+// RUN: emit low-allocation-json @target_id_cycle_uses_other_branch_hole test.f32=3 fixed=%lhs:target_id:0:1 fixed=%rhs:target_id:1:1 fixed=%other:target_id:2:1 fixed=%dst_lhs:target_id:1:1 fixed=%dst_rhs:target_id:0:1
+
+// Target IDs share the same sparse-lifetime contract as physical registers.
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) @target_id_cycle_uses_other_branch_hole(%condition: reg<test.i32>, %lhs: reg<test.f32>, %rhs: reg<test.f32>, %other: reg<test.f32>) -> (reg<test.f32>, reg<test.f32>) asm {
+  low.cond_br %condition, ^swap, ^exit : reg<test.i32>
+^swap:
+  low.br ^join(%lhs: reg<test.f32>, %rhs: reg<test.f32>)
+^join(%dst_lhs: reg<test.f32>, %dst_rhs: reg<test.f32>):
+  return %dst_lhs, %dst_rhs
+^exit:
+  return %other, %other
+}
+
+// ----
+{"format":"loom.low.allocation.v0","function":"target_id_cycle_uses_other_branch_hole","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":6,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":1,"name":"lhs","type":"reg<test.f32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.f32"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":2,"value":{"id":2,"name":"rhs","type":"reg<test.f32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.f32"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":3,"value":{"id":3,"name":"other","type":"reg<test.f32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.f32"},"start_point":0,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":4,"value":{"id":6,"name":"dst_lhs","type":"reg<test.f32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.f32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":5,"value":{"id":7,"name":"dst_rhs","type":"reg<test.f32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.f32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+
+// ====
+
+// RUN: emit low-allocation-json @explicit_cycle_uses_other_branch_hole test.explicit32=3 fixed=%lhs:physical_register:0:1 fixed=%rhs:physical_register:1:1 fixed=%other:physical_register:2:1 fixed=%dst_lhs:physical_register:1:1 fixed=%dst_rhs:physical_register:0:1
+
+// Explicit physical IDs map to atomic storage through the descriptor table.
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) @explicit_cycle_uses_other_branch_hole(%condition: reg<test.i32>, %lhs: reg<test.explicit32>, %rhs: reg<test.explicit32>, %other: reg<test.explicit32>) -> (reg<test.explicit32>, reg<test.explicit32>) asm {
+  low.cond_br %condition, ^swap, ^exit : reg<test.i32>
+^swap:
+  low.br ^join(%lhs: reg<test.explicit32>, %rhs: reg<test.explicit32>)
+^join(%dst_lhs: reg<test.explicit32>, %dst_rhs: reg<test.explicit32>):
+  return %dst_lhs, %dst_rhs
+^exit:
+  return %other, %other
+}
+
+// ----
+{"format":"loom.low.allocation.v0","function":"explicit_cycle_uses_other_branch_hole","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":6,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":1,"name":"lhs","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}},{"index":2,"value":{"id":2,"name":"rhs","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"physical_register","base":1,"count":1}},{"index":3,"value":{"id":3,"name":"other","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":7,"unit_count":1,"location":{"kind":"physical_register","base":2,"count":1}},{"index":4,"value":{"id":6,"name":"dst_lhs","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"physical_register","base":1,"count":1}},{"index":5,"value":{"id":7,"name":"dst_rhs","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+
+// ====
+
+// RUN: emit low-allocation-query @structural_physical_span_rebased_at_capacity values=%wide,%tail,%packed fixed=%wide:physical_register:20:12 fixed=%tail:physical_register:0:1
 
 test.target<low_core> @test_target
 
@@ -305,11 +491,13 @@ low.func.def target<test.low.core>(@test_target) @structural_physical_span_rebas
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"structural_physical_span_rebased_at_capacity","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":3,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"wide","type":"reg<test.phys x12>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":1,"unit_count":12,"location":{"kind":"physical_register","base":20,"count":12}},{"index":1,"value":{"id":1,"name":"tail","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}},{"index":2,"value":{"id":3,"name":"packed","type":"reg<test.phys x13>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":1,"end_point":2,"unit_count":13,"location":{"kind":"physical_register","base":0,"count":13}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %wide: test.phys -> physical_register[20:12]
+value %tail: test.phys -> physical_register[0:1]
+value %packed: test.phys -> physical_register[0:13]
 
 // ====
 
-// RUN: emit low-allocation-json @explicit_physical_aggregate_views
+// RUN: emit low-allocation-query @explicit_physical_aggregate_views values=%wide,%low,%high,%packed
 
 test.target<low_core> @test_target
 
@@ -321,11 +509,14 @@ low.func.def target<test.low.core>(@test_target) @explicit_physical_aggregate_vi
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"explicit_physical_aggregate_views","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":4,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"wide","type":"reg<test.explicit32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":2,"unit_count":2,"location":{"kind":"physical_register","base":4,"count":2}},{"index":1,"value":{"id":4,"name":"packed","type":"reg<test.explicit32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":3,"end_point":4,"unit_count":2,"location":{"kind":"physical_register","base":4,"count":2}},{"index":2,"value":{"id":2,"name":"low","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":1,"end_point":3,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}},{"index":3,"value":{"id":3,"name":"high","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":2,"end_point":3,"unit_count":1,"location":{"kind":"physical_register","base":2,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %wide: test.explicit32 -> physical_register[4:2]
+value %low: test.explicit32 -> physical_register[0:1]
+value %high: test.explicit32 -> physical_register[2:1]
+value %packed: test.explicit32 -> physical_register[4:2]
 
 // ====
 
-// RUN: emit low-allocation-json @same_register_ordinal_selects_matching_tuple fixed=%primary:physical_register:1:1
+// RUN: emit low-allocation-query @same_register_ordinal_selects_matching_tuple values=%primary,%partner fixed=%primary:physical_register:1:1
 
 test.target<low_core> @test_target
 
@@ -335,11 +526,12 @@ low.func.def target<test.low.core>(@test_target) @same_register_ordinal_selects_
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"same_register_ordinal_selects_matching_tuple","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":2,"name":"primary","type":"reg<test.packed.narrow>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.packed.narrow"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"physical_register","base":1,"count":1}},{"index":1,"value":{"id":3,"name":"partner","type":"reg<test.coindexed.partner>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.coindexed.partner"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"physical_register","base":3,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %primary: test.packed.narrow -> physical_register[1:1]
+value %partner: test.coindexed.partner -> physical_register[3:1]
 
 // ====
 
-// RUN: emit low-allocation-json @singleton_physical_class_reserves_future_interval
+// RUN: emit low-allocation-query @singleton_physical_class_reserves_future_interval values=%flexible,%fixed copies=%fixed
 
 test.target<low_core> @test_target
 
@@ -349,11 +541,13 @@ low.func.def target<test.low.core>(@test_target) @singleton_physical_class_reser
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"singleton_physical_class_reserves_future_interval","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":3,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":1,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":0,"name":"flexible","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":2,"unit_count":1,"location":{"kind":"physical_register","base":2,"count":1}},{"index":2,"value":{"id":4,"name":"fixed","type":"reg<test.fixed.r0>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.fixed.r0"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"materialized","source_value":{"id":1,"name":"condition","type":"reg<test.i32>"},"result_value":{"id":4,"name":"fixed","type":"reg<test.fixed.r0>"},"source_assignment":0,"result_assignment":2}],"remarks":[]}
+value %flexible: test.explicit32 -> physical_register[2:1]
+value %fixed: test.fixed.r0 -> physical_register[0:1]
+copy %condition -> %fixed: materialized
 
 // ====
 
-// RUN: emit low-allocation-json @overlapping_singleton_physical_values
+// RUN: emit low-allocation-query @overlapping_singleton_physical_values failure
 
 test.target<low_core> @test_target
 
@@ -363,11 +557,11 @@ low.func.def target<test.low.core>(@test_target) @overlapping_singleton_physical
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"overlapping_singleton_physical_values","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":0,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[],"spill_plans":[],"copy_decisions":[],"remarks":[],"failure":{"code":"unspillable-register-exhausted","blocking_kind":"location-constraint","value":{"id":0,"name":"lhs","type":"reg<test.fixed.r0>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.fixed.r0"},"start_point":0,"end_point":1,"required_units":1,"budget_units":1,"peak_live_units":2,"location":{"kind":"physical_register","base":0,"count":1},"conflict":null}}
+failure: unspillable-register-exhausted kind=location-constraint value=%lhs class=test.fixed.r0 required=1 budget=1 peak=2 location=physical_register[0:1]
 
 // ====
 
-// RUN: emit low-allocation-json @wide_concat_source_pressure_cliff fixed=%high_blocker:target_id:28:1
+// RUN: emit low-allocation-query @wide_concat_source_pressure_cliff values=%high_blocker,%early,%late,%packed fixed=%high_blocker:target_id:28:1
 
 test.target<low_core> @test_target
 
@@ -385,11 +579,14 @@ low.func.def target<test.low.core>(@test_target) @wide_concat_source_pressure_cl
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"wide_concat_source_pressure_cliff","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":16,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"lhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":2,"name":"block0","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}},{"index":2,"value":{"id":1,"name":"rhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":8,"count":4}},{"index":3,"value":{"id":3,"name":"block1","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":12,"count":4}},{"index":4,"value":{"id":4,"name":"block2","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":4,"unit_count":4,"location":{"kind":"target_id","base":16,"count":4}},{"index":5,"value":{"id":5,"name":"block3","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":4,"unit_count":4,"location":{"kind":"target_id","base":20,"count":4}},{"index":6,"value":{"id":6,"name":"high_blocker","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":28,"count":1}},{"index":7,"value":{"id":16,"name":"packed","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":10,"unit_count":8,"location":{"kind":"target_id","base":24,"count":8}},{"index":8,"value":{"id":8,"name":"early","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":9,"unit_count":4,"location":{"kind":"target_id","base":24,"count":4}},{"index":9,"value":{"id":9,"name":"hold0","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":5,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":10,"value":{"id":10,"name":"hold1","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":6,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}},{"index":11,"value":{"id":11,"name":"hold2","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":5,"unit_count":4,"location":{"kind":"target_id","base":8,"count":4}},{"index":12,"value":{"id":12,"name":"hold3","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":6,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":13,"value":{"id":13,"name":"late","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":9,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":14,"value":{"id":14,"name":"late0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":15,"value":{"id":15,"name":"consume","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %high_blocker: test.i32 -> target_id[28:1]
+value %early: test.i32 -> target_id[24:4]
+value %late: test.i32 -> target_id[0:4]
+value %packed: test.i32 -> target_id[24:8]
 
 // ====
 
-// RUN: emit low-allocation-json @compact_wide_concat_reserves_fragmented_span fixed=%middle_blocker:target_id:12:4
+// RUN: emit low-allocation-query @compact_wide_concat_reserves_fragmented_span values=%middle_blocker,%first,%second,%packed fixed=%middle_blocker:target_id:12:4
 
 test.target<low_core> @test_target
 
@@ -403,15 +600,18 @@ low.func.def target<test.low.core>(@test_target) @compact_wide_concat_reserves_f
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"compact_wide_concat_reserves_fragmented_span","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":8,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"lhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":1,"name":"rhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}},{"index":2,"value":{"id":2,"name":"middle_blocker","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":6,"unit_count":4,"location":{"kind":"target_id","base":12,"count":4}},{"index":3,"value":{"id":8,"name":"packed","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":6,"unit_count":8,"location":{"kind":"target_id","base":16,"count":8}},{"index":4,"value":{"id":6,"name":"first","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":16,"count":4}},{"index":5,"value":{"id":7,"name":"second","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":20,"count":4}},{"index":6,"value":{"id":9,"name":"packed0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":16,"count":1}},{"index":7,"value":{"id":10,"name":"consume","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %middle_blocker: test.i32 -> target_id[12:4]
+value %first: test.i32 -> target_id[16:4]
+value %second: test.i32 -> target_id[20:4]
+value %packed: test.i32 -> target_id[16:8]
 
 // ====
 
-// RUN: emit low-allocation-json @compact_wide_concat_respects_result_alignment
+// RUN: emit low-allocation-query @compact_wide_concat_reuses_packet_storage values=%first,%second,%packed
 
 test.target<low_core> @test_target
 
-low.func.def target<test.low.core>(@test_target) @compact_wide_concat_respects_result_alignment(%input: reg<test.i32 x4>) -> (reg<test.i32 x8>, reg<test.i32>) asm {
+low.func.def target<test.low.core>(@test_target) @compact_wide_concat_reuses_packet_storage(%input: reg<test.i32 x4>) -> (reg<test.i32 x8>, reg<test.i32>) asm {
   %first = test.add.v4i32 %input, %input
   %second = test.add.v4i32 %input, %input
   %packed = concat(%first, %second) : (reg<test.i32 x4>, reg<test.i32 x4>) -> reg<test.i32 x8>
@@ -421,15 +621,17 @@ low.func.def target<test.low.core>(@test_target) @compact_wide_concat_respects_r
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"compact_wide_concat_respects_result_alignment","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":6,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"input","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":5,"name":"packed","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":6,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}},{"index":2,"value":{"id":3,"name":"first","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":8,"count":4}},{"index":3,"value":{"id":4,"name":"second","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":12,"count":4}},{"index":4,"value":{"id":6,"name":"packed0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":8,"count":1}},{"index":5,"value":{"id":7,"name":"consume","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %first: test.i32 -> target_id[4:4]
+value %second: test.i32 -> target_id[8:4]
+value %packed: test.i32 -> target_id[4:8]
 
 // ====
 
-// RUN: emit low-allocation-json @wide_tied_concat_sources_reserve_result_alignment
+// RUN: emit low-allocation-query @wide_tied_concat_sources_share_unaligned_storage values=%packed,%source0,%tied0,%source1,%tied1
 
 test.target<low_core> @test_target
 
-low.func.def target<test.low.core>(@test_target) @wide_tied_concat_sources_reserve_result_alignment(%lhs: reg<test.i32 x4>, %rhs: reg<test.i32 x4>, %pressure: reg<test.i32>) -> (reg<test.i32 x8>, reg<test.i32>) asm {
+low.func.def target<test.low.core>(@test_target) @wide_tied_concat_sources_share_unaligned_storage(%lhs: reg<test.i32 x4>, %rhs: reg<test.i32 x4>, %pressure: reg<test.i32>) -> (reg<test.i32 x8>, reg<test.i32>) asm {
   %source0 = test.add.v4i32 %lhs, %rhs
   %tied0 = test.early_tied.v4i32 %source0
   %source1 = test.add.v4i32 %lhs, %rhs
@@ -439,11 +641,15 @@ low.func.def target<test.low.core>(@test_target) @wide_tied_concat_sources_reser
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"wide_tied_concat_sources_reserve_result_alignment","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":8,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"lhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":1,"name":"rhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}},{"index":2,"value":{"id":2,"name":"pressure","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":8,"count":1}},{"index":3,"value":{"id":9,"name":"packed","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":6,"unit_count":8,"location":{"kind":"target_id","base":16,"count":8}},{"index":4,"value":{"id":5,"name":"source0","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":5,"unit_count":4,"location":{"kind":"target_id","base":16,"count":4}},{"index":5,"value":{"id":6,"name":"tied0","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":5,"unit_count":4,"location":{"kind":"target_id","base":16,"count":4}},{"index":6,"value":{"id":7,"name":"source1","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":5,"unit_count":4,"location":{"kind":"target_id","base":20,"count":4}},{"index":7,"value":{"id":8,"name":"tied1","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":5,"unit_count":4,"location":{"kind":"target_id","base":20,"count":4}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %packed: test.i32 -> target_id[9:8]
+value %source0: test.i32 -> target_id[9:4]
+value %tied0: test.i32 -> target_id[9:4]
+value %source1: test.i32 -> target_id[13:4]
+value %tied1: test.i32 -> target_id[13:4]
 
 // ====
 
-// RUN: emit low-allocation-json @packet_local_wide_concat_reserves_span
+// RUN: emit low-allocation-query @packet_local_wide_concat_reserves_span values=%first,%second,%packed,%blocker
 
 test.target<low_core> @test_target
 
@@ -456,11 +662,14 @@ low.func.def target<test.low.core>(@test_target) @packet_local_wide_concat_reser
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"packet_local_wide_concat_reserves_span","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":6,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"lhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":0,"count":4}},{"index":1,"value":{"id":1,"name":"rhs","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}},{"index":2,"value":{"id":7,"name":"packed","type":"reg<test.i32 x8>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":5,"unit_count":8,"location":{"kind":"target_id","base":8,"count":8}},{"index":3,"value":{"id":4,"name":"first","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":4,"unit_count":4,"location":{"kind":"target_id","base":8,"count":4}},{"index":4,"value":{"id":5,"name":"blocker","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":5,"unit_count":4,"location":{"kind":"target_id","base":16,"count":4}},{"index":5,"value":{"id":6,"name":"second","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":4,"unit_count":4,"location":{"kind":"target_id","base":12,"count":4}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %first: test.i32 -> target_id[8:4]
+value %second: test.i32 -> target_id[12:4]
+value %packed: test.i32 -> target_id[8:8]
+value %blocker: test.i32 -> target_id[16:4]
 
 // ====
 
-// RUN: emit low-allocation-json @slice_uses_source_subrange fixed=%wide:target_id:4:4
+// RUN: emit low-allocation-query @slice_uses_source_subrange values=%wide,%middle fixed=%wide:target_id:4:4
 
 test.target<low_core> @test_target
 
@@ -470,11 +679,12 @@ low.func.def target<test.low.core>(@test_target) @slice_uses_source_subrange(%wi
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"slice_uses_source_subrange","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"wide","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":4,"location":{"kind":"target_id","base":4,"count":4}},{"index":1,"value":{"id":2,"name":"middle","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":6,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %wide: test.i32 -> target_id[4:4]
+value %middle: test.i32 -> target_id[6:1]
 
 // ====
 
-// RUN: emit low-allocation-json @fixed_physical_span_exceeds_capacity fixed=%value:physical_register:40:1 output=none
+// RUN: emit low-allocation-query @fixed_physical_span_exceeds_capacity fixed=%value:physical_register:40:1
 
 test.target<low_core> @test_target
 
@@ -482,10 +692,9 @@ test.target<low_core> @test_target
 low.func.def target<test.low.core>(@test_target) @fixed_physical_span_exceeds_capacity(%value: reg<test.phys>) -> (reg<test.phys>) asm {
   return %value
 }
-
 // ====
 
-// RUN: emit low-allocation-json @missing_low_allocation_symbol output=none
+// RUN: emit low-allocation-query @missing_low_allocation_symbol
 
 // ERROR@+1: SYMBOL/002 {symbol_name="missing_low_allocation_symbol"}
 test.target<low_core> @test_target
@@ -493,10 +702,9 @@ test.target<low_core> @test_target
 low.func.def target<test.low.core>(@test_target) @low_allocation_symbol_anchor(%value: reg<test.i32>) -> (reg<test.i32>) asm {
   return %value
 }
-
 // ====
 
-// RUN: emit low-allocation-json @unknown_budget_register_class test.missing=1 output=none
+// RUN: emit low-allocation-query @unknown_budget_register_class test.missing=1
 
 test.target<low_core> @test_target
 
@@ -504,10 +712,9 @@ test.target<low_core> @test_target
 low.func.def target<test.low.core>(@test_target) @unknown_budget_register_class(%value: reg<test.i32>) -> (reg<test.i32>) asm {
   return %value
 }
-
 // ====
 
-// RUN: emit low-allocation-json @duplicate_budget_register_class test.i32=1 test.i32=2 output=none
+// RUN: emit low-allocation-query @duplicate_budget_register_class test.i32=1 test.i32=2
 
 test.target<low_core> @test_target
 
@@ -515,10 +722,9 @@ test.target<low_core> @test_target
 low.func.def target<test.low.core>(@test_target) @duplicate_budget_register_class(%value: reg<test.i32>) -> (reg<test.i32>) asm {
   return %value
 }
-
 // ====
 
-// RUN: emit low-allocation-json @unknown_fixed_value_selector fixed=%missing:target_id:0:1 output=none
+// RUN: emit low-allocation-query @unknown_fixed_value_selector fixed=%missing:target_id:0:1
 
 test.target<low_core> @test_target
 
@@ -526,10 +732,9 @@ test.target<low_core> @test_target
 low.func.def target<test.low.core>(@test_target) @unknown_fixed_value_selector(%value: reg<test.i32>) -> (reg<test.i32>) asm {
   return %value
 }
-
 // ====
 
-// RUN: emit low-allocation-json @fixed_value_unit_count_mismatch fixed=%value:target_id:0:1 output=none
+// RUN: emit low-allocation-query @fixed_value_unit_count_mismatch fixed=%value:target_id:0:1
 
 test.target<low_core> @test_target
 
@@ -537,10 +742,9 @@ test.target<low_core> @test_target
 low.func.def target<test.low.core>(@test_target) @fixed_value_unit_count_mismatch(%value: reg<test.i32 x2>) -> (reg<test.i32 x2>) asm {
   return %value
 }
-
 // ====
 
-// RUN: emit low-allocation-json @unspillable_interval_exceeds_budget_reports_failure test.special=1
+// RUN: emit low-allocation-query @unspillable_interval_exceeds_budget_reports_failure failure test.special=1
 
 test.target<low_core> @test_target
 
@@ -550,11 +754,11 @@ low.func.def target<test.low.core>(@test_target) @unspillable_interval_exceeds_b
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"unspillable_interval_exceeds_budget_reports_failure","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":0,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[],"spill_plans":[],"copy_decisions":[],"remarks":[],"failure":{"code":"unspillable-register-exhausted","blocking_kind":"interval-exceeds-budget","value":{"id":0,"name":"wide","type":"reg<test.special x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.special"},"start_point":0,"end_point":1,"required_units":2,"budget_units":1,"peak_live_units":2,"location":{"kind":"physical_register","base":null,"count":0},"conflict":null}}
+failure: unspillable-register-exhausted kind=interval-exceeds-budget value=%wide class=test.special required=2 budget=1 peak=2
 
 // ====
 
-// RUN: emit low-allocation-json @explicit_register_view_unavailable
+// RUN: emit low-allocation-query @explicit_register_view_unavailable failure
 
 test.target<low_core> @test_target
 
@@ -564,11 +768,11 @@ low.func.def target<test.low.core>(@test_target) @explicit_register_view_unavail
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"explicit_register_view_unavailable","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":0,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[],"spill_plans":[],"copy_decisions":[],"remarks":[],"failure":{"code":"unspillable-register-exhausted","blocking_kind":"no-assignable-location","value":{"id":0,"name":"wide","type":"reg<test.explicit32 x3>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":1,"required_units":3,"budget_units":4,"peak_live_units":3,"location":{"kind":"physical_register","base":null,"count":0},"conflict":null}}
+failure: unspillable-register-exhausted kind=no-assignable-location value=%wide class=test.explicit32 required=3 budget=4 peak=3
 
 // ====
 
-// RUN: emit low-allocation-json @unspillable_active_conflict_reports_failure test.special=1
+// RUN: emit low-allocation-query @unspillable_active_conflict_reports_failure failure test.special=1
 
 test.target<low_core> @test_target
 
@@ -578,11 +782,12 @@ low.func.def target<test.low.core>(@test_target) @unspillable_active_conflict_re
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"unspillable_active_conflict_reports_failure","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":1,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"leader","type":"reg<test.special>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.special"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[],"failure":{"code":"unspillable-register-exhausted","blocking_kind":"active-assignment","value":{"id":1,"name":"blocked","type":"reg<test.special>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.special"},"start_point":0,"end_point":1,"required_units":1,"budget_units":1,"peak_live_units":2,"location":{"kind":"physical_register","base":0,"count":1},"conflict":{"assignment":0,"value":{"id":0,"name":"leader","type":"reg<test.special>"},"start_point":0,"end_point":1,"location":{"kind":"physical_register","base":0,"count":1}}}}
+failure: unspillable-register-exhausted kind=active-assignment value=%blocked class=test.special required=1 budget=1 peak=2 location=physical_register[0:1]
+conflict: %leader physical_register[0:1]
 
 // ====
 
-// RUN: emit low-allocation @unspillable_evicts_spillable_physical_blocker
+// RUN: emit low-allocation-query @unspillable_evicts_spillable_physical_blocker spill-count values=%protected
 
 test.target<low_core> @test_target
 
@@ -599,22 +804,12 @@ low.func.def target<test.low.core>(@test_target) @unspillable_evicts_spillable_p
 }
 
 // ----
-low-allocation @unspillable_evicts_spillable_physical_blocker
-target: test_target
-descriptor_set: test.low.core
-mode: virtual
-assignments: 13
-remarks: 1
 spills: 1
-copies: coalesced=0 materialized=5
-classes:
-  test.i32: assignments=8 units=8 target_ids=4 physical=0 spill_slots=0 unassigned=0
-  test.explicit32: assignments=1 units=1 target_ids=0 physical=4 spill_slots=0 unassigned=0
-  test.spillable.explicit32: assignments=4 units=4 target_ids=0 physical=3 spill_slots=1 unassigned=0
+value %protected: test.explicit32 -> physical_register[3:1]
 
 // ====
 
-// RUN: emit low-allocation-json @dead_result_clobber_window
+// RUN: emit low-allocation-query @dead_result_clobber_window values=%lhs,%rhs,%leader,%dead
 
 test.target<low_core> @test_target
 
@@ -624,11 +819,14 @@ low.func.def target<test.low.core>(@test_target) @dead_result_clobber_window(%le
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"dead_result_clobber_window","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":4,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"lhs","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}},{"index":1,"value":{"id":2,"name":"rhs","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"physical_register","base":1,"count":1}},{"index":2,"value":{"id":0,"name":"leader","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":0,"end_point":2,"unit_count":1,"location":{"kind":"physical_register","base":2,"count":1}},{"index":3,"value":{"id":4,"name":"dead","type":"reg<test.phys>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.phys"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"physical_register","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %lhs: test.phys -> physical_register[0:1]
+value %rhs: test.phys -> physical_register[1:1]
+value %leader: test.phys -> physical_register[2:1]
+value %dead: test.phys -> physical_register[0:1]
 
 // ====
 
-// RUN: emit low-allocation-json @placement_affinity_accepted diagnostics=placement-decisions output=none
+// RUN: emit low-allocation-query @placement_affinity_accepted diagnostics=placement-decisions
 
 test.target<low_core> @test_target
 
@@ -638,9 +836,11 @@ low.func.def target<test.low.core>(@test_target) @placement_affinity_accepted(%s
   return %copy
 }
 
+// ----
+
 // ====
 
-// RUN: emit low-allocation-json @placement_affinity_rejected diagnostics=placement-decisions fixed=%state:target_id:0:1 fixed=%copy:target_id:1:1 output=none
+// RUN: emit low-allocation-query @placement_affinity_rejected diagnostics=placement-decisions fixed=%state:target_id:0:1 fixed=%copy:target_id:1:1
 
 test.target<low_core> @test_target
 
@@ -650,9 +850,11 @@ low.func.def target<test.low.core>(@test_target) @placement_affinity_rejected(%s
   return %copy, %state
 }
 
+// ----
+
 // ====
 
-// RUN: emit low-allocation-json @detached_copy_materializes
+// RUN: emit low-allocation-query @detached_copy_materializes values=%state,%copy copies=%copy
 
 test.target<low_core> @test_target
 
@@ -662,11 +864,13 @@ low.func.def target<test.low.core>(@test_target) @detached_copy_materializes(%st
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"detached_copy_materializes","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":0,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":3,"name":"copy","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"materialized","source_value":{"id":0,"name":"state","type":"reg<test.i32>"},"result_value":{"id":3,"name":"copy","type":"reg<test.i32>"},"source_assignment":0,"result_assignment":1}],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %copy: test.i32 -> target_id[1:1]
+copy %state -> %copy: materialized
 
 // ====
 
-// RUN: emit low-allocation-json @detached_copy_materializes_after_source_dies
+// RUN: emit low-allocation-query @detached_copy_materializes_after_source_dies values=%state,%copy copies=%copy
 
 test.target<low_core> @test_target
 
@@ -676,11 +880,13 @@ low.func.def target<test.low.core>(@test_target) @detached_copy_materializes_aft
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"detached_copy_materializes_after_source_dies","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":0,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":2,"name":"copy","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"materialized","source_value":{"id":0,"name":"state","type":"reg<test.i32>"},"result_value":{"id":2,"name":"copy","type":"reg<test.i32>"},"source_assignment":0,"result_assignment":1}],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %copy: test.i32 -> target_id[1:1]
+copy %state -> %copy: materialized
 
 // ====
 
-// RUN: emit low-allocation-json @move_coalesces_after_source_dies
+// RUN: emit low-allocation-query @move_coalesces_after_source_dies values=%state,%moved
 
 test.target<low_core> @test_target
 
@@ -690,11 +896,12 @@ low.func.def target<test.low.core>(@test_target) @move_coalesces_after_source_di
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"move_coalesces_after_source_dies","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":2,"name":"moved","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %moved: test.i32 -> target_id[0:1]
 
 // ====
 
-// RUN: emit low-allocation-json @detached_move_materializes_after_source_dies
+// RUN: emit low-allocation-query @detached_move_materializes_after_source_dies values=%state,%moved
 
 test.target<low_core> @test_target
 
@@ -704,11 +911,12 @@ low.func.def target<test.low.core>(@test_target) @detached_move_materializes_aft
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"detached_move_materializes_after_source_dies","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":2,"name":"moved","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %moved: test.i32 -> target_id[1:1]
 
 // ====
 
-// RUN: emit low-allocation-json @structured_for_storage_affinity diagnostics=placement-decisions output=none
+// RUN: emit low-allocation-query @structured_for_storage_affinity diagnostics=placement-decisions
 
 test.target<low_core> @test_target
 
@@ -724,9 +932,11 @@ low.func.def target<test.low.core>(@test_target) @structured_for_storage_affinit
   return %result
 }
 
+// ----
+
 // ====
 
-// RUN: with-checks emit low-allocation @structured_for_concat_backedge_destination_layout diagnostics=placement-decisions
+// RUN: emit low-allocation-query @structured_for_concat_backedge_destination_layout spill-count diagnostics=placement-decisions
 
 test.target<low_core> @test_target
 
@@ -758,11 +968,11 @@ low.func.def target<test.low.core>(@test_target) @structured_for_concat_backedge
 }
 
 // ----
-CHECK: spills: 0
+spills: 0
 
 // ====
 
-// RUN: emit low-allocation-json @tied_source_uses_extended_endpoint fixed=%future_source0:target_id:10:1 fixed=%future_source1:target_id:11:1 fixed=%future:target_id:0:2
+// RUN: emit low-allocation-query @tied_source_uses_extended_endpoint values=%source,%tied,%future fixed=%future_source0:target_id:10:1 fixed=%future_source1:target_id:11:1 fixed=%future:target_id:0:2
 
 test.target<low_core> @test_target
 
@@ -777,11 +987,36 @@ low.func.def target<test.low.core>(@test_target) @tied_source_uses_extended_endp
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"tied_source_uses_extended_endpoint","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":6,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"future_source0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":10,"count":1}},{"index":1,"value":{"id":2,"name":"future_source1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":11,"count":1}},{"index":2,"value":{"id":3,"name":"source","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":3,"value":{"id":4,"name":"tied","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":4,"value":{"id":5,"name":"future","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":6,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":5,"value":{"id":6,"name":"use","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %source: test.i32 -> target_id[2:1]
+value %tied: test.i32 -> target_id[2:1]
+value %future: test.i32 -> target_id[0:2]
 
 // ====
 
-// RUN: emit low-allocation-json @tied_copy_loop_carried_value
+// RUN: emit low-allocation-query @transitive_tied_source_uses_terminal_endpoint values=%source,%first,%last,%future fixed=%future_source0:target_id:10:1 fixed=%future_source1:target_id:11:1 fixed=%future:target_id:0:2
+
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) @transitive_tied_source_uses_terminal_endpoint() -> (reg<test.i32>) asm {
+  %future_source0 = test.const.i32 0
+  %future_source1 = test.const.i32 1
+  %source = test.const.i32 2
+  %first = test.tied.any %source
+  %last = test.tied.any %first
+  %future = concat(%future_source0, %future_source1) : (reg<test.i32>, reg<test.i32>) -> reg<test.i32 x2>
+  %use = test.add.i32 %last, %last
+  return %use
+}
+
+// ----
+value %source: test.i32 -> target_id[2:1]
+value %first: test.i32 -> target_id[2:1]
+value %last: test.i32 -> target_id[2:1]
+value %future: test.i32 -> target_id[0:2]
+
+// ====
+
+// RUN: emit low-allocation-query @tied_copy_loop_carried_value values=%state,%copy,%next copies=%copy
 
 test.target<low_core> @test_target
 
@@ -798,11 +1033,14 @@ low.func.def target<test.low.core>(@test_target) @tied_copy_loop_carried_value(%
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"tied_copy_loop_carried_value","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":5,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":1,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":3,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":3,"value":{"id":4,"name":"copy","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":5,"name":"next","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"coalesced","source_value":{"id":3,"name":"state","type":"reg<test.i32>"},"result_value":{"id":4,"name":"copy","type":"reg<test.i32>"},"source_assignment":2,"result_assignment":3}],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %copy: test.i32 -> target_id[0:1]
+value %next: test.i32 -> target_id[0:1]
+copy %state -> %copy: coalesced
 
 // ====
 
-// RUN: emit low-allocation-json @nested_tied_copy_loop_carried_value
+// RUN: emit low-allocation-query @nested_tied_copy_loop_carried_value values=%outer_state,%inner_state,%copy,%next copies=%copy
 
 test.target<low_core> @test_target
 
@@ -825,11 +1063,15 @@ low.func.def target<test.low.core>(@test_target) @nested_tied_copy_loop_carried_
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"nested_tied_copy_loop_carried_value","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":7,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":1,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":2,"name":"seed","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":0,"name":"outer_condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":1,"name":"inner_condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":3,"value":{"id":4,"name":"outer_state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":5,"name":"inner_state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":13,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":5,"value":{"id":6,"name":"copy","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":11,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":6,"value":{"id":7,"name":"next","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":10,"end_point":11,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"coalesced","source_value":{"id":5,"name":"inner_state","type":"reg<test.i32>"},"result_value":{"id":6,"name":"copy","type":"reg<test.i32>"},"source_assignment":4,"result_assignment":5}],"remarks":[]}
+value %outer_state: test.i32 -> target_id[0:1]
+value %inner_state: test.i32 -> target_id[0:1]
+value %copy: test.i32 -> target_id[0:1]
+value %next: test.i32 -> target_id[0:1]
+copy %inner_state -> %copy: coalesced
 
 // ====
 
-// RUN: emit low-allocation-json @tied_copy_chained_loop_carried_value
+// RUN: emit low-allocation-query @tied_copy_chained_loop_carried_value values=%state,%copy0,%next0,%copy1,%next1 copies=%copy0,%copy1
 
 test.target<low_core> @test_target
 
@@ -848,11 +1090,17 @@ low.func.def target<test.low.core>(@test_target) @tied_copy_chained_loop_carried
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"tied_copy_chained_loop_carried_value","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":7,"remark_count":0,"copy_decision_count":2,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":2,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":3,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":11,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":3,"value":{"id":4,"name":"copy0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":5,"name":"next0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":5,"value":{"id":6,"name":"copy1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":6,"value":{"id":7,"name":"next1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"coalesced","source_value":{"id":3,"name":"state","type":"reg<test.i32>"},"result_value":{"id":4,"name":"copy0","type":"reg<test.i32>"},"source_assignment":2,"result_assignment":3},{"index":1,"kind":"coalesced","source_value":{"id":5,"name":"next0","type":"reg<test.i32>"},"result_value":{"id":6,"name":"copy1","type":"reg<test.i32>"},"source_assignment":4,"result_assignment":5}],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %copy0: test.i32 -> target_id[0:1]
+value %next0: test.i32 -> target_id[0:1]
+value %copy1: test.i32 -> target_id[0:1]
+value %next1: test.i32 -> target_id[0:1]
+copy %state -> %copy0: coalesced
+copy %next0 -> %copy1: coalesced
 
 // ====
 
-// RUN: emit low-allocation-json @parallel_tied_copies_use_distinct_storage
+// RUN: emit low-allocation-query @parallel_tied_copies_use_distinct_storage values=%seed,%copy0,%copy1,%next0,%next1 copies=%copy0,%copy1
 
 test.target<low_core> @test_target
 
@@ -865,11 +1113,17 @@ low.func.def target<test.low.core>(@test_target) @parallel_tied_copies_use_disti
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"parallel_tied_copies_use_distinct_storage","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":5,"remark_count":0,"copy_decision_count":2,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":1,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":0,"name":"seed","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":3,"name":"copy0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":2,"value":{"id":4,"name":"copy1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":3,"value":{"id":5,"name":"next0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":3,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":6,"name":"next1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":4,"end_point":5,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"coalesced","source_value":{"id":0,"name":"seed","type":"reg<test.i32>"},"result_value":{"id":3,"name":"copy0","type":"reg<test.i32>"},"source_assignment":0,"result_assignment":1},{"index":1,"kind":"materialized","source_value":{"id":0,"name":"seed","type":"reg<test.i32>"},"result_value":{"id":4,"name":"copy1","type":"reg<test.i32>"},"source_assignment":0,"result_assignment":2}],"remarks":[]}
+value %seed: test.i32 -> target_id[0:1]
+value %copy0: test.i32 -> target_id[0:1]
+value %copy1: test.i32 -> target_id[1:1]
+value %next0: test.i32 -> target_id[0:1]
+value %next1: test.i32 -> target_id[1:1]
+copy %seed -> %copy0: coalesced
+copy %seed -> %copy1: materialized
 
 // ====
 
-// RUN: emit low-allocation-json @tied_copy_preserves_later_source_use
+// RUN: emit low-allocation-query @tied_copy_preserves_later_source_use values=%state,%copy,%next copies=%copy
 
 test.target<low_core> @test_target
 
@@ -880,11 +1134,14 @@ low.func.def target<test.low.core>(@test_target) @tied_copy_preserves_later_sour
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"tied_copy_preserves_later_source_use","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":3,"remark_count":0,"copy_decision_count":1,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":1,"assignments":[{"index":0,"value":{"id":0,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":3,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":3,"name":"copy","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":3,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":4,"name":"next","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":3,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}}],"spill_plans":[],"copy_decisions":[{"index":0,"kind":"materialized","source_value":{"id":0,"name":"state","type":"reg<test.i32>"},"result_value":{"id":3,"name":"copy","type":"reg<test.i32>"},"source_assignment":0,"result_assignment":1}],"remarks":[]}
+value %state: test.i32 -> target_id[0:1]
+value %copy: test.i32 -> target_id[1:1]
+value %next: test.i32 -> target_id[1:1]
+copy %state -> %copy: materialized
 
 // ====
 
-// RUN: emit low-allocation-json @physical_budget_clamps_to_allocatable_count test.alias32=64 diagnostics=predicted-spills output=none
+// RUN: emit low-allocation-query @physical_budget_clamps_to_allocatable_count test.alias32=64 diagnostics=predicted-spills
 
 test.target<low_core> @test_target
 
@@ -893,9 +1150,11 @@ low.func.def target<test.low.core>(@test_target) @physical_budget_clamps_to_allo
   return %lhs, %rhs
 }
 
+// ----
+
 // ====
 
-// RUN: emit low-allocation-json @physical_alias_classes_share_storage test.alias32=64 diagnostics=predicted-spills output=none
+// RUN: emit low-allocation-query @physical_alias_classes_share_storage test.alias32=64 diagnostics=predicted-spills
 
 test.target<low_core> @test_target
 
@@ -904,9 +1163,11 @@ low.func.def target<test.low.core>(@test_target) @physical_alias_classes_share_s
   return %wide, %narrow
 }
 
+// ----
+
 // ====
 
-// RUN: emit low-allocation-json @multi_victim_spill test.i32=4 diagnostics=predicted-spills output=none
+// RUN: emit low-allocation-query @multi_victim_spill test.i32=4 diagnostics=predicted-spills
 
 test.target<low_core> @test_target
 
@@ -930,7 +1191,7 @@ low.func.def target<test.low.core>(@test_target) @multi_victim_spill(%row: reg<t
 
 // ====
 
-// RUN: emit low-allocation-json @provisional_spill_skips_packet_move_planning test.i32=2 diagnostics=predicted-spills fixed=%lhs:target_id:1:1 fixed=%rhs:target_id:0:1 fixed=%packed:target_id:0:2 output=none
+// RUN: emit low-allocation-query @provisional_spill_skips_packet_move_planning test.i32=2 diagnostics=predicted-spills fixed=%lhs:target_id:1:1 fixed=%rhs:target_id:0:1 fixed=%packed:target_id:0:2
 
 test.target<low_core> @test_target
 
@@ -944,7 +1205,7 @@ low.func.def target<test.low.core>(@test_target) @provisional_spill_skips_packet
 
 // ====
 
-// RUN: emit low-allocation-json @active_and_direct_spill_slot_ranges test.i32=4
+// RUN: emit low-allocation-query @active_and_direct_spill_slot_ranges spill-count values=%wide,%huge spill-plans=%wide,%huge test.i32=4
 
 test.target<low_core> @test_target
 
@@ -954,15 +1215,22 @@ low.func.def target<test.low.core>(@test_target) @active_and_direct_spill_slot_r
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"active_and_direct_spill_slot_ranges","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":5,"remark_count":2,"copy_decision_count":0,"spill_count":2,"spill_plan_count":2,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"scalar0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":2,"name":"scalar1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":0,"name":"wide","type":"reg<test.i32 x4>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":4,"location":{"kind":"spill_slot","slot":0,"count":4}},{"index":3,"value":{"id":3,"name":"huge","type":"reg<test.i32 x5>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":2,"unit_count":5,"location":{"kind":"spill_slot","slot":4,"count":5}},{"index":4,"value":{"id":7,"name":"use0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[{"index":0,"assignment":2,"slot":0,"space":"private","value":{"id":0,"name":"wide","type":"reg<test.i32 x4>"},"byte_size":16,"byte_alignment":16,"store_count":1,"reload_count":1},{"index":1,"assignment":3,"slot":4,"space":"private","value":{"id":3,"name":"huge","type":"reg<test.i32 x5>"},"byte_size":20,"byte_alignment":16,"store_count":1,"reload_count":1}],"copy_decisions":[],"remarks":[{"kind":"spill","assignment":2,"budget_units":4,"required_units":4},{"kind":"spill","assignment":3,"budget_units":4,"required_units":5}]}
+spills: 2
+value %wide: test.i32 -> spill_slot[0:4]
+value %huge: test.i32 -> spill_slot[4:5]
+spill %wide: private[0] bytes=16 align=16 stores=1 reloads=1
+spill %huge: private[4] bytes=20 align=16 stores=1 reloads=1
 
 // ====
 
-// RUN: emit low-allocation-json @loop_backedge_layout_recolors_shared_storage
+// RUN: emit low-allocation-query @loop_backedge_layout_recolors_shared_storage values=%seed0,%seed1,%state0,%state1,%next0,%next1,%gap fixed=%gap:target_id:3:1
 
 test.target<low_core> @test_target
 
-low.func.def target<test.low.core>(@test_target) @loop_backedge_layout_recolors_shared_storage(%condition: reg<test.i32>, %seed0: reg<test.i32>, %seed1: reg<test.i32>, %lhs: reg<test.i32>, %rhs: reg<test.i32>) -> (reg<test.i32>, reg<test.i32>) asm {
+// %gap occupies the hole between the two queried loop-edge locations. The
+// header-local envelope may retain it, but exact overlap must exclude it from
+// relocation conflicts.
+low.func.def target<test.low.core>(@test_target) @loop_backedge_layout_recolors_shared_storage(%condition: reg<test.i32>, %seed0: reg<test.i32>, %seed1: reg<test.i32>, %lhs: reg<test.i32>, %rhs: reg<test.i32>, %gap: reg<test.i32>) -> (reg<test.i32>, reg<test.i32>, reg<test.i32>) asm {
   low.br ^loop(%seed0: reg<test.i32>, %seed1: reg<test.i32>)
 ^loop(%state0: reg<test.i32>, %state1: reg<test.i32>):
   low.cond_br %condition, ^body, ^exit : reg<test.i32>
@@ -978,15 +1246,92 @@ low.func.def target<test.low.core>(@test_target) @loop_backedge_layout_recolors_
   %sink = test.mul.i32 %helper, %rhs
   low.br ^loop(%next0: reg<test.i32>, %next1: reg<test.i32>)
 ^exit:
-  return %state0, %state1
+  return %state0, %state1, %gap
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"loop_backedge_layout_recolors_shared_storage","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":16,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":2,"name":"seed1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":3,"value":{"id":3,"name":"lhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":3,"count":1}},{"index":4,"value":{"id":4,"name":"rhs","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":15,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":5,"value":{"id":7,"name":"state0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":16,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":6,"value":{"id":8,"name":"state1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":16,"unit_count":1,"location":{"kind":"target_id","base":5,"count":1}},{"index":7,"value":{"id":9,"name":"early0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":8,"value":{"id":10,"name":"early1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":7,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":9,"value":{"id":11,"name":"early2","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":10,"value":{"id":12,"name":"used0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":11,"value":{"id":13,"name":"used1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":12,"value":{"id":14,"name":"helper","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":10,"end_point":13,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":13,"value":{"id":15,"name":"next0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":11,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":14,"value":{"id":16,"name":"next1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":12,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":5,"count":1}},{"index":15,"value":{"id":17,"name":"sink","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":13,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %seed0: test.i32 -> target_id[0:1]
+value %seed1: test.i32 -> target_id[1:1]
+value %state0: test.i32 -> target_id[1:1]
+value %state1: test.i32 -> target_id[6:1]
+value %next0: test.i32 -> target_id[1:1]
+value %next1: test.i32 -> target_id[6:1]
+value %gap: test.i32 -> target_id[3:1]
 
 // ====
 
-// RUN: emit low-allocation-json @tied_concat_loop_edge_inherits_alias_proof
+// RUN: emit low-allocation-query @sequential_loop_relocation_rebuilds_queries values=%seed,%first_state,%first_next,%second_state,%second_next fixed=%seed:target_id:0:1 fixed=%first_next:target_id:5:1 fixed=%second_next:target_id:6:1
+
+test.target<low_core> @test_target
+
+// Relocating the first header changes the assignment that enters the second.
+// The second header must query that current assignment instead of a
+// function-wide snapshot from before the first relocation.
+low.func.def target<test.low.core>(@test_target) @sequential_loop_relocation_rebuilds_queries(%condition: reg<test.i32>, %seed: reg<test.i32>) -> (reg<test.i32>) asm {
+  low.br ^first_loop(%seed: reg<test.i32>)
+^first_loop(%first_state: reg<test.i32>):
+  low.cond_br %condition, ^first_body, ^first_exit : reg<test.i32>
+^first_body:
+  %first_next = test.const.i32 1
+  low.br ^first_loop(%first_next: reg<test.i32>)
+^first_exit:
+  low.br ^second_loop(%first_state: reg<test.i32>)
+^second_loop(%second_state: reg<test.i32>):
+  low.cond_br %condition, ^second_body, ^exit : reg<test.i32>
+^second_body:
+  %second_next = test.const.i32 2
+  low.br ^second_loop(%second_next: reg<test.i32>)
+^exit:
+  return %second_state
+}
+
+// ----
+value %seed: test.i32 -> target_id[0:1]
+value %first_state: test.i32 -> target_id[5:1]
+value %first_next: test.i32 -> target_id[5:1]
+value %second_state: test.i32 -> target_id[6:1]
+value %second_next: test.i32 -> target_id[6:1]
+
+// ====
+
+// RUN: emit low-allocation-query @loop_relocation_requires_augmenting_path spill-count values=%state0,%state1,%short,%long fixed=%condition:target_id:2:1 fixed=%lhs:target_id:3:1 fixed=%rhs:target_id:4:1 fixed=%state1_used:target_id:7:1 fixed=%short_used:target_id:8:1 fixed=%blocker:target_id:1:1 fixed=%long_used:target_id:9:1 fixed=%state0_used:target_id:10:1 fixed=%next0:target_id:5:1 fixed=%next1:target_id:6:1 fixed=%sink:target_id:11:1
+
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) @loop_relocation_requires_augmenting_path(%condition: reg<test.i32>, %seed0: reg<test.i32>, %seed1: reg<test.i32>, %lhs: reg<test.i32>, %rhs: reg<test.i32>) -> (reg<test.i32>, reg<test.i32>) asm {
+  low.br ^loop(%seed0: reg<test.i32>, %seed1: reg<test.i32>)
+^loop(%state0: reg<test.i32>, %state1: reg<test.i32>):
+  low.cond_br %condition, ^body, ^exit : reg<test.i32>
+^body:
+  %short = test.add.i32 %lhs, %rhs
+  %long = test.mul.i32 %lhs, %rhs
+  %state1_used = test.add.i32 %state1, %rhs
+  %short_used = test.add.i32 %short, %rhs
+  %blocker = test.add.i32 %state1_used, %short_used
+  %long_used = test.add.i32 %long, %blocker
+  %state0_used = test.add.i32 %state0, %long_used
+  %next0 = test.mul.i32 %lhs, %rhs
+  %next1 = test.add.i32 %lhs, %rhs
+  %sink = test.mul.i32 %state0_used, %rhs
+  low.br ^loop(%next0: reg<test.i32>, %next1: reg<test.i32>)
+^exit:
+  return %state0, %state1
+}
+
+// The first eviction color can use either vacated header location. The second
+// overlaps %blocker at location 1 and can use only location 0, so retaining
+// both header moves requires an augmenting path that rematches the first color.
+
+// ----
+spills: 0
+value %state0: test.i32 -> target_id[5:1]
+value %state1: test.i32 -> target_id[6:1]
+value %short: test.i32 -> target_id[1:1]
+value %long: test.i32 -> target_id[0:1]
+
+// ====
+
+// RUN: emit low-allocation-query @tied_concat_loop_edge_inherits_alias_proof values=%source0,%next0,%next
 
 test.target<low_core> @test_target
 
@@ -1005,11 +1350,13 @@ low.func.def target<test.low.core>(@test_target) @tied_concat_loop_edge_inherits
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"tied_concat_loop_edge_inherits_alias_proof","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":7,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":2,"value":{"id":3,"name":"state","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":11,"unit_count":2,"location":{"kind":"target_id","base":4,"count":2}},{"index":3,"value":{"id":4,"name":"source0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":5,"name":"next0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":5,"value":{"id":6,"name":"next1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":9,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":6,"value":{"id":7,"name":"next","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":9,"unit_count":2,"location":{"kind":"target_id","base":4,"count":2}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %source0: test.i32 -> target_id[0:1]
+value %next0: test.i32 -> target_id[0:1]
+value %next: test.i32 -> target_id[0:2]
 
 // ====
 
-// RUN: emit low-allocation-json @tied_concat_loop_edge_preserves_live_destination
+// RUN: emit low-allocation-query @tied_concat_loop_edge_preserves_live_destination values=%state,%next,%source0,%next0,%state0,%next1
 
 test.target<low_core> @test_target
 
@@ -1029,11 +1376,16 @@ low.func.def target<test.low.core>(@test_target) @tied_concat_loop_edge_preserve
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"tied_concat_loop_edge_preserves_live_destination","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":8,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":11,"unit_count":1,"location":{"kind":"target_id","base":2,"count":1}},{"index":2,"value":{"id":3,"name":"state","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":12,"unit_count":2,"location":{"kind":"target_id","base":0,"count":2}},{"index":3,"value":{"id":8,"name":"next","type":"reg<test.i32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":10,"unit_count":2,"location":{"kind":"target_id","base":4,"count":2}},{"index":4,"value":{"id":4,"name":"source0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":5,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":5,"value":{"id":5,"name":"next0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":6,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":4,"count":1}},{"index":6,"value":{"id":6,"name":"state0","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":7,"end_point":8,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":7,"value":{"id":7,"name":"next1","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":8,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":5,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %state: test.i32 -> target_id[0:2]
+value %next: test.i32 -> target_id[3:2]
+value %source0: test.i32 -> target_id[3:1]
+value %next0: test.i32 -> target_id[3:1]
+value %state0: test.i32 -> target_id[0:1]
+value %next1: test.i32 -> target_id[4:1]
 
 // ====
 
-// RUN: emit low-allocation-json @contract_only_capacity_error fixed=%value:physical_register:40:1 output=none
+// RUN: emit low-allocation-query @contract_only_capacity_error fixed=%value:physical_register:40:1
 
 // A representation contract is sufficient for Low allocation. Export/config
 // context is absent when the optional target-symbol witness is omitted.
@@ -1041,10 +1393,9 @@ low.func.def target<test.low.core>(@test_target) @tied_concat_loop_edge_preserve
 low.func.def target<test.low.core> @contract_only_capacity_error(%value: reg<test.phys>) -> (reg<test.phys>) asm {
   return %value
 }
-
 // ====
 
-// RUN: emit low-allocation-json @explicit_physical_noncanonical_slice
+// RUN: emit low-allocation-query @explicit_physical_noncanonical_slice values=%wide,%high
 
 test.target<low_core> @test_target
 
@@ -1054,11 +1405,12 @@ low.func.def target<test.low.core>(@test_target) @explicit_physical_noncanonical
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"explicit_physical_noncanonical_slice","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":2,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":0,"name":"wide","type":"reg<test.explicit32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":1,"unit_count":2,"location":{"kind":"physical_register","base":4,"count":2}},{"index":1,"value":{"id":2,"name":"high","type":"reg<test.explicit32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":1,"end_point":2,"unit_count":1,"location":{"kind":"physical_register","base":2,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %wide: test.explicit32 -> physical_register[4:2]
+value %high: test.explicit32 -> physical_register[2:1]
 
 // ====
 
-// RUN: emit low-allocation-json @loop_swaps_physical_tuples
+// RUN: emit low-allocation-query @loop_swaps_physical_tuples failure values=%first,%second,%lhs,%rhs
 
 test.target<low_core> @test_target
 
@@ -1074,11 +1426,15 @@ low.func.def target<test.low.core>(@test_target) @loop_swaps_physical_tuples(%co
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"loop_swaps_physical_tuples","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":5,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"first","type":"reg<test.explicit32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":1,"unit_count":2,"location":{"kind":"physical_register","base":4,"count":2}},{"index":1,"value":{"id":2,"name":"second","type":"reg<test.explicit32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":0,"end_point":1,"unit_count":2,"location":{"kind":"physical_register","base":5,"count":2}},{"index":2,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":6,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":3,"value":{"id":5,"name":"lhs","type":"reg<test.explicit32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":2,"end_point":7,"unit_count":2,"location":{"kind":"physical_register","base":4,"count":2}},{"index":4,"value":{"id":6,"name":"rhs","type":"reg<test.explicit32 x2>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":2,"end_point":7,"unit_count":2,"location":{"kind":"physical_register","base":5,"count":2}}],"spill_plans":[],"copy_decisions":[],"remarks":[],"failure":{"code":"parallel-move-no-scratch-unit","blocking_kind":"unknown","value":null,"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.explicit32"},"start_point":null,"end_point":null,"required_units":1,"budget_units":4,"peak_live_units":1,"location":{"kind":"unassigned","base":null,"count":0},"conflict":null}}
+failure: parallel-move-no-scratch-unit kind=unknown class=test.explicit32 required=1 budget=4 peak=1
+value %first: test.explicit32 -> physical_register[4:2]
+value %second: test.explicit32 -> physical_register[5:2]
+value %lhs: test.explicit32 -> physical_register[4:2]
+value %rhs: test.explicit32 -> physical_register[5:2]
 
 // ====
 
-// RUN: emit low-allocation-json @sparse_tied_join fixed=%state:target_id:0:1 fixed=%joined:target_id:0:1 fixed=%condition:target_id:1:1
+// RUN: emit low-allocation-query @sparse_tied_join values=%seed,%state,%refilled,%joined,%next,%final fixed=%state:target_id:0:1 fixed=%joined:target_id:0:1 fixed=%condition:target_id:1:1
 
 // Mutually exclusive refill and exit results reserve the original state
 // without occupying the joined body. Both state generations use one location.
@@ -1104,4 +1460,9 @@ low.func.def target<test.low.core>(@test_target) @sparse_tied_join(%condition: r
 }
 
 // ----
-{"format":"loom.low.allocation.v0","function":"sparse_tied_join","target":"test_target","descriptor_set":"test.low.core","allocation_mode":"virtual","assignment_count":7,"remark_count":0,"copy_decision_count":0,"spill_count":0,"spill_plan_count":0,"coalesced_copy_count":0,"materialized_copy_count":0,"assignments":[{"index":0,"value":{"id":1,"name":"seed","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":1,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":1,"value":{"id":0,"name":"condition","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":0,"end_point":14,"unit_count":1,"location":{"kind":"target_id","base":1,"count":1}},{"index":2,"value":{"id":3,"name":"state","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":2,"end_point":16,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":3,"value":{"id":4,"name":"refilled","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":9,"end_point":10,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":4,"value":{"id":5,"name":"joined","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":11,"end_point":13,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":5,"value":{"id":6,"name":"next","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":12,"end_point":13,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}},{"index":6,"value":{"id":7,"name":"final","type":"reg<test.i32>"},"class":{"type_kind":12,"type_kind_name":"register","element_type":0,"element_type_name":null,"register_class":"test.i32"},"start_point":15,"end_point":16,"unit_count":1,"location":{"kind":"target_id","base":0,"count":1}}],"spill_plans":[],"copy_decisions":[],"remarks":[]}
+value %seed: test.i32 -> target_id[0:1]
+value %state: test.i32 -> target_id[0:1]
+value %refilled: test.i32 -> target_id[0:1]
+value %joined: test.i32 -> target_id[0:1]
+value %next: test.i32 -> target_id[0:1]
+value %final: test.i32 -> target_id[0:1]

@@ -1,0 +1,144 @@
+// RUN: pass canonicalize
+
+// Both signed boundaries use the coordinate payload width, not host i64.
+func.def @byte_coordinate_boundaries() -> (i8, i8) {
+  %high = scalar.constant 120 : i8
+  %low = scalar.constant -120 : i8
+  %forward = scalar.constant 16 : i8
+  %backward = scalar.constant -16 : i8
+  %ascending = vector.iota %high step %forward : vector<2xi8>
+  %descending = vector.iota %low step %backward : vector<2xi8>
+  %wrapped_forward = vector.extract %ascending[1] : vector<2xi8> -> i8
+  %wrapped_backward = vector.extract %descending[1] : vector<2xi8> -> i8
+  func.return %wrapped_forward, %wrapped_backward : i8, i8
+}
+
+// ----
+func.def @byte_coordinate_boundaries() -> (i8, i8) {
+  %wrapped_forward = scalar.constant -120 : i8
+  %wrapped_backward = scalar.constant 120 : i8
+  func.return %wrapped_forward, %wrapped_backward : i8, i8
+}
+
+// ====
+
+// A larger sequence retains structural facts instead of materializing lanes.
+func.def @halfword_coordinate_boundaries() -> (i16, i16) {
+  %high = scalar.constant 32760 : i16
+  %low = scalar.constant -32760 : i16
+  %forward = scalar.constant 16 : i16
+  %backward = scalar.constant -16 : i16
+  %ascending = vector.iota %high step %forward : vector<32xi16>
+  %descending = vector.iota %low step %backward : vector<32xi16>
+  %wrapped_forward = vector.extract %ascending[1] : vector<32xi16> -> i16
+  %wrapped_backward = vector.extract %descending[1] : vector<32xi16> -> i16
+  func.return %wrapped_forward, %wrapped_backward : i16, i16
+}
+
+// ----
+func.def @halfword_coordinate_boundaries() -> (i16, i16) {
+  %wrapped_forward = scalar.constant -32760 : i16
+  %wrapped_backward = scalar.constant 32760 : i16
+  func.return %wrapped_forward, %wrapped_backward : i16, i16
+}
+
+// ====
+
+func.def @word_coordinate_boundaries() -> (i32, i32) {
+  %high = scalar.constant 2147483647 : i32
+  %low = scalar.constant -2147483648 : i32
+  %forward = scalar.constant 1 : i32
+  %backward = scalar.constant -1 : i32
+  %ascending = vector.iota %high step %forward : vector<2xi32>
+  %descending = vector.iota %low step %backward : vector<2xi32>
+  %wrapped_forward = vector.extract %ascending[1] : vector<2xi32> -> i32
+  %wrapped_backward = vector.extract %descending[1] : vector<2xi32> -> i32
+  func.return %wrapped_forward, %wrapped_backward : i32, i32
+}
+
+// ----
+func.def @word_coordinate_boundaries() -> (i32, i32) {
+  %wrapped_forward = scalar.constant -2147483648 : i32
+  %wrapped_backward = scalar.constant 2147483647 : i32
+  func.return %wrapped_forward, %wrapped_backward : i32, i32
+}
+
+// ====
+
+// Overflow of both multiplication and addition is defined for i64 payloads.
+func.def @doubleword_coordinate_boundaries() -> (i64, i64, i64) {
+  %high = scalar.constant 9223372036854775807 : i64
+  %low = scalar.constant -9223372036854775808 : i64
+  %forward = scalar.constant 1 : i64
+  %backward = scalar.constant -1 : i64
+  %cycle_origin = scalar.constant 0 : i64
+  %ascending = vector.iota %high step %forward : vector<2xi64>
+  %descending = vector.iota %low step %backward : vector<2xi64>
+  %cycling = vector.iota %cycle_origin step %low : vector<3xi64>
+  %wrapped_forward = vector.extract %ascending[1] : vector<2xi64> -> i64
+  %wrapped_backward = vector.extract %descending[1] : vector<2xi64> -> i64
+  %wrapped_product = vector.extract %cycling[2] : vector<3xi64> -> i64
+  func.return %wrapped_forward, %wrapped_backward, %wrapped_product : i64, i64, i64
+}
+
+// ----
+func.def @doubleword_coordinate_boundaries() -> (i64, i64, i64) {
+  %wrapped_forward = scalar.constant -9223372036854775808 : i64
+  %wrapped_backward = scalar.constant 9223372036854775807 : i64
+  %wrapped_product = scalar.constant 0 : i64
+  func.return %wrapped_forward, %wrapped_backward, %wrapped_product : i64, i64, i64
+}
+
+// ====
+
+// Comparisons consuming iota facts must see the sign after payload wrapping.
+func.def @wrapped_lane_signed_comparison() -> (i1) {
+  %base = scalar.constant 120 : i8
+  %step = scalar.constant 16 : i8
+  %sign_boundary = scalar.constant 0 : i8
+  %coordinates = vector.iota %base step %step : vector<2xi8>
+  %coordinate = vector.extract %coordinates[1] : vector<2xi8> -> i8
+  %negative = scalar.cmpi slt, %coordinate, %sign_boundary : i8
+  func.return %negative : i1
+}
+
+// ----
+func.def @wrapped_lane_signed_comparison() -> (i1) {
+  %negative = scalar.constant true : i1
+  func.return %negative : i1
+}
+
+// ====
+// RUN: pass canonicalize
+
+// Ordinals beyond the signed payload range are not contiguous memory offsets.
+func.def @wrapped_gather_is_not_a_load(%input: buffer) -> (vector<256xi32>) {
+  %base = index.constant 0 : offset
+  %view = buffer.view %input[%base] : buffer -> view<256xi32>
+  %origin = index.constant 0 : index
+  %first = scalar.constant 0 : i8
+  %step = scalar.constant 1 : i8
+  %offsets = vector.iota %first step %step : vector<256xi8>
+  %result = vector.gather %view[%origin][%offsets] : view<256xi32>, vector<256xi8> -> vector<256xi32>
+  func.return %result : vector<256xi32>
+}
+
+// ====
+// RUN: pass vector-to-scalar,canonicalize
+
+// Scalarization uses the same modular coordinate arithmetic.
+func.def @wrapped_lane_signed_comparison() -> (i1) {
+  %base = scalar.constant 120 : i8
+  %step = scalar.constant 16 : i8
+  %sign_boundary = scalar.constant 0 : i8
+  %coordinates = vector.iota %base step %step : vector<2xi8>
+  %coordinate = vector.extract %coordinates[1] : vector<2xi8> -> i8
+  %negative = scalar.cmpi slt, %coordinate, %sign_boundary : i8
+  func.return %negative : i1
+}
+
+// ----
+func.def @wrapped_lane_signed_comparison() -> (i1) {
+  %negative = scalar.constant true : i1
+  func.return %negative : i1
+}

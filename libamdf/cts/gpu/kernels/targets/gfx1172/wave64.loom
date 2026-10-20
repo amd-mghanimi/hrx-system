@@ -1,0 +1,1 @@
+amdgpu.target<gfx1172> @cts_kernel_target {subgroup_size = 64}

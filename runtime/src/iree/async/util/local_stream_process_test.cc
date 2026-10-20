@@ -104,7 +104,7 @@ void CloseStream(iree_async_proactor_t* proactor,
   CheckStatus(iree_async_local_stream_deactivate(
       stream, {+[](void* user_data) {
                  auto* join = static_cast<Join*>(user_data);
-                 iree_async_local_stream_destroy(join->stream);
+                 iree_async_local_stream_free(join->stream);
                  join->done = true;
                },
                &join}));
@@ -121,8 +121,7 @@ std::string PipeName(const char* directory) {
 }
 #else
 sockaddr_un SocketAddress(const char* directory) {
-  sockaddr_un address = {};
-  address.sun_family = AF_UNIX;
+  sockaddr_un address = {.sun_family = AF_UNIX};
   std::string path = std::string(directory) + "/carrier.sock";
   ROLE_CHECK(path.size() < sizeof(address.sun_path));
   memcpy(address.sun_path, path.c_str(), path.size() + 1);
@@ -158,8 +157,8 @@ int Exporter(int, char**, const char* directory) {
   channel = iree_async_primitive_from_fd(descriptor);
 #endif
   iree_async_local_stream_t* stream = nullptr;
-  CheckStatus(iree_async_local_stream_create(proactor, channel, 3,
-                                             iree_allocator_system(), &stream));
+  CheckStatus(iree_async_local_stream_allocate(
+      proactor, channel, 3, iree_allocator_system(), &stream));
 #if defined(IREE_PLATFORM_WINDOWS)
   Transfer accepted;
   CheckStatus(iree_async_local_stream_pipe_accept(stream, accepted.callback()));
@@ -241,8 +240,8 @@ int Importer(int, char**, const char* directory) {
   channel = iree_async_primitive_from_fd(descriptor);
 #endif
   iree_async_local_stream_t* stream = nullptr;
-  CheckStatus(iree_async_local_stream_create(proactor, channel, 3,
-                                             iree_allocator_system(), &stream));
+  CheckStatus(iree_async_local_stream_allocate(
+      proactor, channel, 3, iree_allocator_system(), &stream));
   uint64_t process_id = 0;
   iree_async_primitive_t resources[3] = {};
   Transfer offered;

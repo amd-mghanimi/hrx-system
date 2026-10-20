@@ -13,24 +13,25 @@
 #ifndef LOOM_TARGET_ARCH_X86_REGISTER_CLASSES_H_
 #define LOOM_TARGET_ARCH_X86_REGISTER_CLASSES_H_
 
-#include "loom/target/arch/x86/descriptors/avx512_packed_dot_descriptors.h"
+#include "loom/target/arch/x86/descriptors/avx512_features_descriptors.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef enum loom_x86_register_class_e {
-  LOOM_X86_REGISTER_CLASS_GPR32 = X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_GPR32,
-  LOOM_X86_REGISTER_CLASS_GPR64 = X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_GPR64,
-  LOOM_X86_REGISTER_CLASS_XMM = X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_XMM,
-  LOOM_X86_REGISTER_CLASS_YMM = X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_YMM,
-  LOOM_X86_REGISTER_CLASS_ZMM = X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_ZMM,
-  LOOM_X86_REGISTER_CLASS_K = X86_AVX512_PACKED_DOT_CORE_REG_CLASS_ID_K,
+  LOOM_X86_REGISTER_CLASS_GPR32 = X86_AVX512_FEATURES_CORE_REG_CLASS_ID_GPR32,
+  LOOM_X86_REGISTER_CLASS_GPR64 = X86_AVX512_FEATURES_CORE_REG_CLASS_ID_GPR64,
+  LOOM_X86_REGISTER_CLASS_XMM = X86_AVX512_FEATURES_CORE_REG_CLASS_ID_XMM,
+  LOOM_X86_REGISTER_CLASS_YMM = X86_AVX512_FEATURES_CORE_REG_CLASS_ID_YMM,
+  LOOM_X86_REGISTER_CLASS_ZMM = X86_AVX512_FEATURES_CORE_REG_CLASS_ID_ZMM,
+  LOOM_X86_REGISTER_CLASS_K = X86_AVX512_FEATURES_CORE_REG_CLASS_ID_K,
 } loom_x86_register_class_t;
 
-// Maps a SIMD/vector architectural width to its logical x86 register class.
-// Returns false for unsupported widths and stores GPR32 in |out_register_class|
-// so callers never observe an uninitialized value.
+// Maps a logical vector payload width to its physical x86 register class.
+// Payloads narrower than 128 bits occupy the corresponding low XMM bits.
+// Returns false for unsupported widths and stores GPR32 in
+// |out_register_class| so callers never observe an uninitialized value.
 bool loom_x86_register_class_for_vector_bit_width(
     uint32_t vector_bit_width, loom_x86_register_class_t* out_register_class);
 

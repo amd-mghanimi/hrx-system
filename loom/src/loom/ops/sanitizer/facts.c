@@ -40,7 +40,7 @@ iree_status_t loom_sanitizer_assert_layout_facts(
       loom_module_value_type(module, loom_sanitizer_assert_layout_view(op));
   loom_type_t result_type =
       loom_module_value_type(module, loom_sanitizer_assert_layout_result(op));
-  return loom_view_reference_make_refine(
+  return loom_view_reference_make_reinterpret(
       context, module, loom_sanitizer_assert_layout_view(op), operand_facts[0],
       source_type, result_type, &result_facts[0]);
 }

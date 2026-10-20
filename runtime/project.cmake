@@ -90,6 +90,8 @@ option(IREE_HAL_DRIVER_VULKAN
 option(IREE_HAL_DRIVER_WEBGPU
   "Enables the WebGPU runtime HAL driver."
   ${IREE_HAL_DRIVER_WEBGPU_DEFAULT})
+option(IREE_HAL_DRIVER_XDNA
+  "Enables the native libamdf XDNA runtime HAL driver." OFF)
 
 option(IREE_HAL_EXECUTABLE_LOADER_DEFAULTS
   "Sets the default value for all runtime HAL executable loaders." ON)
@@ -108,6 +110,11 @@ set(IREE_HAL_AMDGPU_TARGETS
   "gfx9-generic;gfx90a;gfx9-4-generic;gfx10-1-generic;gfx10-3-generic;gfx11-generic;gfx12-generic"
   CACHE STRING
   "AMDGPU target selectors supported by this runtime build.")
+
+set(IREE_HAL_AMD_GPU_TARGETS
+  "gfx9-generic;gfx90a;gfx9-4-generic;gfx10-1-generic;gfx10-3-generic;gfx11-generic;gfx12-generic"
+  CACHE STRING
+  "AMD GPU target selectors supported by the libamdf-backed runtime build.")
 
 include(binary)
 include(selectors)

@@ -384,7 +384,14 @@ static iree_status_t TestProfileSinkWrite(
               records[i].flags,
               IREE_HAL_PROFILE_MEMORY_EVENT_FLAG_QUEUE_OPERATION)) {
         EXPECT_NE(UINT32_MAX, records[i].queue_ordinal);
-        EXPECT_NE(0u, records[i].submission_id);
+        // Pool reserve/wait/materialize events can precede native submission.
+        // Accepted queue transitions must identify the submitted operation.
+        if (records[i].type ==
+                IREE_HAL_PROFILE_MEMORY_EVENT_TYPE_QUEUE_ALLOCA ||
+            records[i].type ==
+                IREE_HAL_PROFILE_MEMORY_EVENT_TYPE_QUEUE_DEALLOCA) {
+          EXPECT_NE(0u, records[i].submission_id);
+        }
       }
     }
     test_sink->memory_events.insert(test_sink->memory_events.end(), records,
@@ -465,10 +472,10 @@ static iree_status_t TestProfileSinkEndSession(
 }
 
 static const iree_hal_profile_sink_vtable_t kTestProfileSinkVTable = {
-    /*.destroy=*/TestProfileSinkDestroy,
-    /*.begin_session=*/TestProfileSinkBeginSession,
-    /*.write=*/TestProfileSinkWrite,
-    /*.end_session=*/TestProfileSinkEndSession,
+    .destroy = TestProfileSinkDestroy,
+    .begin_session = TestProfileSinkBeginSession,
+    .write = TestProfileSinkWrite,
+    .end_session = TestProfileSinkEndSession,
 };
 
 void TestProfileSinkInitialize(TestProfileSink* sink) {

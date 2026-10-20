@@ -35,12 +35,17 @@ loom_cc_library(
     srcs = ["combine_patterns.c"],
     hdrs = ["combine_patterns.h"],
     deps = [
+        "//loom/src/loom/analysis:symbolic_expr",
         "//loom/src/loom/ir",
+        "//loom/src/loom/ops/index:comparison",
         "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/vector",
         "//loom/src/loom/rewrite:pattern_registry",
         "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/transforms/cleanup:patterns",
+        "//loom/src/loom/transforms/conversion:chain",
         "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
     ],
 )
 
@@ -106,7 +111,7 @@ loom_cc_library(
     srcs = ["sink_single_use_reads.c"],
     hdrs = ["sink_single_use_reads.h"],
     deps = [
-        "//loom/src/loom/analysis:motion",
+        "//loom/src/loom/analysis:read_motion",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/pass:types",
@@ -152,6 +157,7 @@ loom_cc_library(
         "//loom/src/loom/analysis:matrix_fragment_layout",
         "//loom/src/loom/analysis:motion",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:combining",
         "//loom/src/loom/ops:op_defs",
@@ -174,17 +180,138 @@ loom_cc_library(
 )
 
 loom_cc_library(
+    name = "bitstream_packet_legalization",
+    srcs = ["bitstream_packet_legalization.c"],
+    hdrs = ["bitstream_packet_legalization.h"],
+    deps = [
+        ":packet_legalization",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:legalization",
+        "//loom/src/loom/util:fact_table",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "cast_packet_legalization",
+    srcs = ["cast_packet_legalization.c"],
+    hdrs = ["cast_packet_legalization.h"],
+    deps = [
+        ":packet_legalization",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:legalization",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "component_packet_legalization",
+    srcs = ["component_packet_legalization.c"],
+    hdrs = ["component_packet_legalization.h"],
+    deps = [
+        ":packet_legalization",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:contract",
+        "//loom/src/loom/target:legalization",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "packet_boundary_projection",
+    srcs = ["packet_boundary_projection.c"],
+    hdrs = ["packet_boundary_projection.h"],
+    deps = [
+        "//loom/src/loom/codegen/low/pipeline:pass_environment",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/target:contract",
+        "//loom/src/loom/target:facts",
+        "//loom/src/loom/target:function_version",
+        "//loom/src/loom/transforms/boundary:projection_core",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
     name = "packet_legalization",
-    srcs = ["packet_legalization.c"],
-    hdrs = ["packet_legalization.h"],
+    srcs = [
+        "packet_insert_legalization.c",
+        "packet_legalization.c",
+        "packet_materialization.c",
+        "packet_materialization.h",
+        "packet_plan.c",
+    ],
+    hdrs = [
+        "packet_insert_legalization.h",
+        "packet_legalization.h",
+        "packet_plan.h",
+    ],
     deps = [
         "//loom/src/loom/analysis:motion",
         "//loom/src/loom/analysis:view_regions",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/buffer",
         "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/vector",
+        "//loom/src/loom/ops/view",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:contract",
+        "//loom/src/loom/target:legalization",
+        "//loom/src/loom/util:fact_table",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
+    ],
+)
+
+loom_cc_library(
+    name = "reduction_legalization",
+    srcs = ["reduction_legalization.c"],
+    hdrs = ["reduction_legalization.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/rewrite:rewriter",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "table_legalization",
+    srcs = ["table_legalization.c"],
+    hdrs = ["table_legalization.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:legalization",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "shape_legalization",
+    srcs = ["shape_legalization.c"],
+    hdrs = ["shape_legalization.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/ops/view",
         "//loom/src/loom/rewrite:rewriter",
         "//loom/src/loom/target:legalization",
         "//runtime/src/iree/base",
@@ -193,15 +320,28 @@ loom_cc_library(
 
 loom_cc_library(
     name = "target_legalization",
-    srcs = ["target_legalization.c"],
-    hdrs = ["target_legalization.h"],
+    srcs = [
+        "memory_legalization.c",
+        "target_legalization.c",
+    ],
+    hdrs = [
+        "memory_legalization.h",
+        "target_legalization.h",
+    ],
     deps = [
+        ":bitstream_packet_legalization",
+        ":cast_packet_legalization",
+        ":packet_legalization",
+        ":reduction_legalization",
         ":to_scalar",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/kernel",
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/vector",
+        "//loom/src/loom/rewrite:rewriter",
         "//loom/src/loom/target:legalization",
+        "//loom/src/loom/util:fact_table",
+        "//loom/src/loom/util:numeric_format",
         "//runtime/src/iree/base",
     ],
 )

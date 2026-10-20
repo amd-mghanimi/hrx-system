@@ -85,3 +85,174 @@ kernel.def target(@target) @wide_shared_producer_noalias() {
   }
   kernel.return
 }
+
+// ====
+
+// Shared producers remain one record each while the packet graph grows. The
+// source and destination do not alias, so the whole graph streams in one loop.
+amdgpu.target<gfx11-generic> @target
+
+func.def target(@target) @shared_packet_graph(%source: buffer, %destination: buffer, %bias: i32) {
+  %base = index.constant 0 : offset
+  %source_noalias, %destination_noalias = buffer.assume.noalias %source, %destination : buffer, buffer
+  %source_view = buffer.view %source_noalias[%base] : buffer -> view<36xi32>
+  %destination_view = buffer.view %destination_noalias[%base] : buffer -> view<36xi32>
+  %observed = vector.load %source_view[0] : view<36xi32> -> vector<36xi32>
+  %bias_vector = vector.splat %bias : vector<36xi32>
+  %biased = vector.addi %observed, %bias_vector : vector<36xi32>
+  %left = vector.addi %biased, %observed : vector<36xi32>
+  %right = vector.addi %biased, %bias_vector : vector<36xi32>
+  %combined = vector.addi %left, %right : vector<36xi32>
+  %biased_combined = vector.addi %combined, %biased : vector<36xi32>
+  %left_accumulated = vector.addi %biased_combined, %left : vector<36xi32>
+  %right_accumulated = vector.addi %left_accumulated, %right : vector<36xi32>
+  %combined_accumulated = vector.addi %right_accumulated, %combined : vector<36xi32>
+  %biased_accumulated = vector.addi %combined_accumulated, %biased_combined : vector<36xi32>
+  %left_recombined = vector.addi %biased_accumulated, %left_accumulated : vector<36xi32>
+  %result = vector.addi %left_recombined, %right_accumulated : vector<36xi32>
+  vector.store %result, %destination_view[0] : vector<36xi32>, view<36xi32>
+  func.return
+}
+
+// ----
+amdgpu.target<gfx11-generic> @target
+
+func.def target(@target) @shared_packet_graph(%source: buffer, %destination: buffer, %bias: i32) {
+  %base = index.constant 0 : offset
+  %source_noalias, %destination_noalias = buffer.assume.noalias %source, %destination : buffer, buffer
+  %source_view = buffer.view %source_noalias[%base] : buffer -> view<36xi32>
+  %destination_view = buffer.view %destination_noalias[%base] : buffer -> view<36xi32>
+  %21 = index.constant 0 : index
+  %22 = index.constant 36 : index
+  %23 = index.constant 4 : index
+  scf.for %24 = [%21 to %22 step %23] {
+    %25 = vector.load %source_view[%24] : view<36xi32> -> vector<4xi32>
+    %26 = vector.splat %bias : vector<4xi32>
+    %27 = vector.addi %25, %26 : vector<4xi32>
+    %28 = vector.addi %27, %25 : vector<4xi32>
+    %29 = vector.addi %27, %26 : vector<4xi32>
+    %30 = vector.addi %28, %29 : vector<4xi32>
+    %31 = vector.addi %30, %27 : vector<4xi32>
+    %32 = vector.addi %31, %28 : vector<4xi32>
+    %33 = vector.addi %32, %29 : vector<4xi32>
+    %34 = vector.addi %33, %30 : vector<4xi32>
+    %35 = vector.addi %34, %31 : vector<4xi32>
+    %36 = vector.addi %35, %32 : vector<4xi32>
+    %37 = vector.addi %36, %33 : vector<4xi32>
+    vector.store %37, %destination_view[%24] : vector<4xi32>, view<36xi32>
+  }
+  func.return
+}
+
+// ====
+
+amdgpu.target<gfx11-generic> @target
+
+kernel.def target(@target) @selected_lookup_consumer_packets() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%input: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<17xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<16xi8>
+  %target = buffer.view %output[%base] : buffer -> view<34xf32>
+  %packed = vector.load %source[0] : view<17xi8> -> vector<17xi8>
+  %indices = vector.bitunpacku<4> %packed : vector<17xi8> -> vector<34xi8>
+  %entries = vector.load %table_view[0] : view<16xi8> -> vector<16xi8>
+  %values = vector.table.lookup %entries[%indices] : vector<16xi8>, vector<34xi8> -> vector<34xi8>
+  %converted = vector.sitofp %values : vector<34xi8> to vector<34xf32>
+  vector.store %converted, %target[0] : vector<34xf32>, view<34xf32>
+  kernel.return
+}
+
+// ----
+amdgpu.target<gfx11-generic> @target
+
+kernel.def target(@target) @selected_lookup_consumer_packets() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%input: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<17xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<16xi8>
+  %target = buffer.view %output[%base] : buffer -> view<34xf32>
+  %packed = vector.load %source[0] : view<17xi8> -> vector<17xi8>
+  %indices = vector.bitunpacku<4> %packed : vector<17xi8> -> vector<34xi8>
+  %entries = vector.load %table_view[0] : view<16xi8> -> vector<16xi8>
+  %values = vector.table.lookup %entries[%indices] : vector<16xi8>, vector<34xi8> -> vector<34xi8>
+  %13 = vector.slice %values[0] : vector<34xi8> -> vector<4xi8>
+  %14 = vector.sitofp %13 : vector<4xi8> to vector<4xf32>
+  vector.store %14, %target[0] : vector<4xf32>, view<34xf32>
+  %15 = vector.slice %values[4] : vector<34xi8> -> vector<4xi8>
+  %16 = vector.sitofp %15 : vector<4xi8> to vector<4xf32>
+  vector.store %16, %target[4] : vector<4xf32>, view<34xf32>
+  %17 = vector.slice %values[8] : vector<34xi8> -> vector<4xi8>
+  %18 = vector.sitofp %17 : vector<4xi8> to vector<4xf32>
+  vector.store %18, %target[8] : vector<4xf32>, view<34xf32>
+  %19 = vector.slice %values[12] : vector<34xi8> -> vector<4xi8>
+  %20 = vector.sitofp %19 : vector<4xi8> to vector<4xf32>
+  vector.store %20, %target[12] : vector<4xf32>, view<34xf32>
+  %21 = vector.slice %values[16] : vector<34xi8> -> vector<4xi8>
+  %22 = vector.sitofp %21 : vector<4xi8> to vector<4xf32>
+  vector.store %22, %target[16] : vector<4xf32>, view<34xf32>
+  %23 = vector.slice %values[20] : vector<34xi8> -> vector<4xi8>
+  %24 = vector.sitofp %23 : vector<4xi8> to vector<4xf32>
+  vector.store %24, %target[20] : vector<4xf32>, view<34xf32>
+  %25 = vector.slice %values[24] : vector<34xi8> -> vector<4xi8>
+  %26 = vector.sitofp %25 : vector<4xi8> to vector<4xf32>
+  vector.store %26, %target[24] : vector<4xf32>, view<34xf32>
+  %27 = vector.slice %values[28] : vector<34xi8> -> vector<4xi8>
+  %28 = vector.sitofp %27 : vector<4xi8> to vector<4xf32>
+  vector.store %28, %target[28] : vector<4xf32>, view<34xf32>
+  %29 = vector.slice %values[32] : vector<34xi8> -> vector<2xi8>
+  %30 = vector.sitofp %29 : vector<2xi8> to vector<2xf32>
+  vector.store %30, %target[32] : vector<2xf32>, view<34xf32>
+  kernel.return
+}
+
+// ====
+
+// Packed i16 carriers stop at 32 lanes on AMDGPU even though vector<64xi16>
+// fits the target-neutral aggregate-bit budget. Packet planning must consult
+// the target carrier contract before replaying the truncation component.
+amdgpu.target<gfx11-generic> @target
+
+func.def target(@target) @packed_i16_truncation(%source: buffer, %destination: buffer) {
+  %base = index.constant 0 : offset
+  %source_noalias, %destination_noalias = buffer.assume.noalias %source, %destination : buffer, buffer
+  %source_view = buffer.view %source_noalias[%base] : buffer -> view<64xi16>
+  %destination_view = buffer.view %destination_noalias[%base] : buffer -> view<64xi8>
+  %source_values = vector.load %source_view[0] : view<64xi16> -> vector<64xi16>
+  %destination_values = vector.trunci %source_values : vector<64xi16> to vector<64xi8>
+  vector.store %destination_values, %destination_view[0] : vector<64xi8>, view<64xi8>
+  func.return
+}
+
+// ----
+amdgpu.target<gfx11-generic> @target
+
+func.def target(@target) @packed_i16_truncation(%source: buffer, %destination: buffer) {
+  %base = index.constant 0 : offset
+  %source_noalias, %destination_noalias = buffer.assume.noalias %source, %destination : buffer, buffer
+  %source_view = buffer.view %source_noalias[%base] : buffer -> view<64xi16>
+  %destination_view = buffer.view %destination_noalias[%base] : buffer -> view<64xi8>
+  %9 = vector.load %source_view[0] : view<64xi16> -> vector<8xi16>
+  %10 = vector.load %source_view[8] : view<64xi16> -> vector<8xi16>
+  %11 = vector.load %source_view[16] : view<64xi16> -> vector<8xi16>
+  %12 = vector.load %source_view[24] : view<64xi16> -> vector<8xi16>
+  %13 = vector.load %source_view[32] : view<64xi16> -> vector<8xi16>
+  %14 = vector.load %source_view[40] : view<64xi16> -> vector<8xi16>
+  %15 = vector.load %source_view[48] : view<64xi16> -> vector<8xi16>
+  %16 = vector.load %source_view[56] : view<64xi16> -> vector<8xi16>
+  %18 = vector.trunci %9 : vector<8xi16> to vector<8xi8>
+  %19 = vector.trunci %10 : vector<8xi16> to vector<8xi8>
+  %20 = vector.trunci %11 : vector<8xi16> to vector<8xi8>
+  %21 = vector.trunci %12 : vector<8xi16> to vector<8xi8>
+  %22 = vector.trunci %13 : vector<8xi16> to vector<8xi8>
+  %23 = vector.trunci %14 : vector<8xi16> to vector<8xi8>
+  %24 = vector.trunci %15 : vector<8xi16> to vector<8xi8>
+  %25 = vector.trunci %16 : vector<8xi16> to vector<8xi8>
+  %destination_values = vector.concat<0> %18, %19, %20, %21, %22, %23, %24, %25 : vector<8xi8>, vector<8xi8>, vector<8xi8>, vector<8xi8>, vector<8xi8>, vector<8xi8>, vector<8xi8>, vector<8xi8> -> vector<64xi8>
+  vector.store %destination_values, %destination_view[0] : vector<64xi8>, view<64xi8>
+  func.return
+}

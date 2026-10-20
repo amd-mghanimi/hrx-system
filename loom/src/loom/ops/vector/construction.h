@@ -13,6 +13,14 @@
 extern "C" {
 #endif
 
+// Projects a static rank-one slice or scalar extraction into one retained
+// regular vector component. The indexed partition preserves the component's
+// SSA value instead of rematerializing its producer. Spanning or dynamic
+// projections and sources without a regular partition remain unchanged.
+iree_status_t loom_vector_project_regular_partition(loom_op_t* op,
+                                                    loom_rewriter_t* rewriter,
+                                                    bool* out_changed);
+
 // Folds a pure single-vector-result operation to vector.from_elements when
 // retained small-static-lane facts provide an exact constant for every lane.
 // The caller selects operations whose constant construction is canonical;
@@ -35,6 +43,15 @@ iree_status_t loom_vector_from_elements_fold_source(loom_op_t* op,
 iree_status_t loom_vector_from_elements_combine_lanes(loom_op_t* op,
                                                       loom_rewriter_t* rewriter,
                                                       bool* out_changed);
+
+// Combines a complete rank-one chain of static scalar vector.insert operations
+// into vector.from_elements. The outermost write to each lane wins; lanes not
+// written by the chain can be retained from vector.splat or
+// vector.from_elements bases. Only run before target legalization, which may
+// deliberately linearize vector.from_elements back into scalar insertions.
+iree_status_t loom_vector_insert_combine_elements(loom_op_t* op,
+                                                  loom_rewriter_t* rewriter,
+                                                  bool* out_changed);
 
 #ifdef __cplusplus
 }

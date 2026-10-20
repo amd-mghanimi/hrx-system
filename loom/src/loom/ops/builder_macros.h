@@ -76,6 +76,25 @@
     return loom_builder_finalize_op(builder, *out_op);                         \
   }
 
+// Defines a builder for a cast op with per-instance flags.
+// Pattern: %result = op<flags> %input : input_type to result_type
+#define LOOM_DEFINE_CAST_OP_WITH_FLAGS_BUILDER(func_name, kind_enum)           \
+  iree_status_t func_name(loom_builder_t* builder, uint8_t instance_flags,     \
+                          loom_value_id_t input, loom_type_t input_type,       \
+                          loom_type_t result_type,                             \
+                          loom_location_id_t location, loom_op_t** out_op) {   \
+    IREE_RETURN_IF_ERROR(loom_builder_allocate_op(builder, (kind_enum), 1, 1,  \
+                                                  0, 0, 0, location, out_op)); \
+    (*out_op)->instance_flags = instance_flags;                                \
+    loom_op_operands(*out_op)[0] = input;                                      \
+    (void)input_type;                                                          \
+    loom_value_id_t _result_id = LOOM_VALUE_ID_INVALID;                        \
+    IREE_RETURN_IF_ERROR(                                                      \
+        loom_builder_define_value(builder, result_type, &_result_id));         \
+    loom_op_results(*out_op)[0] = _result_id;                                  \
+    return loom_builder_finalize_op(builder, *out_op);                         \
+  }
+
 // Defines a builder for a comparison op: 2 operands, 1 result, 1 enum attr.
 // Pattern: %result = op predicate, %lhs, %rhs : operand_type
 // The result_type is separate from operand_type (comparisons typically

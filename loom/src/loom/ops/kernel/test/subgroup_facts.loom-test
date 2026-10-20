@@ -1,7 +1,7 @@
 // RUN: pass canonicalize
 
 // A workgroup with one active invocation still runs at the target's subgroup
-// width. Before that width is bound, only the lane and subgroup count fold.
+// width. Without a packing guarantee its active lane need not be lane zero.
 kernel.def @unbound_single_invocation() {
   %c1 = index.constant 1 : index
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
@@ -20,7 +20,7 @@ kernel.def @unbound_single_invocation() {
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
 } launch() {
   %width = kernel.subgroup.size : index
-  %lane = index.constant 0 : index
+  %lane = kernel.subgroup.lane.id : index
   %subgroup = index.constant 0 : index
   %count = index.constant 1 : index
   test.use %width, %lane, %subgroup, %count : index, index, index, index
@@ -29,7 +29,7 @@ kernel.def @unbound_single_invocation() {
 
 // ====
 
-// A partial subgroup bounds active lanes without fixing its execution width.
+// A partial workgroup bounds the number of active lanes, not their lane IDs.
 kernel.def @unbound_partial_subgroup() {
   %c1 = index.constant 1 : index
   %c3 = index.constant 3 : index
@@ -54,7 +54,7 @@ kernel.def @unbound_partial_subgroup() {
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c3, %c1, %c1) : index
 } launch() {
   %width = kernel.subgroup.size : index
-  %lane_hi = scalar.constant 2 : i64
+  %lane_hi = scalar.constant 127 : i64
   %subgroup_hi = scalar.constant 2 : i64
   %count_lo = scalar.constant 1 : i64
   %count_hi = scalar.constant 3 : i64
@@ -86,7 +86,7 @@ kernel.def target(@device) @bound_single_invocation() {
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
 } launch() {
   %width = index.constant 64 : index
-  %lane = index.constant 0 : index
+  %lane = kernel.subgroup.lane.id : index
   %subgroup = index.constant 0 : index
   %count = index.constant 1 : index
   test.use %width, %lane, %subgroup, %count : index, index, index, index
@@ -95,7 +95,7 @@ kernel.def target(@device) @bound_single_invocation() {
 
 // ====
 
-// The final partial subgroup still contributes to the subgroup count.
+// Width alone supplies a lower bound, not an exact subgroup count.
 target.generic<reference> @device {abi = hal_kernel, subgroup_size = 64}
 
 kernel.def target(@device) @bound_partial_final_subgroup() {
@@ -116,16 +116,15 @@ kernel.def target(@device) @bound_partial_final_subgroup() {
 // ----
 target.generic<reference> @device {abi = hal_kernel, subgroup_size = 64}
 
-// The final partial subgroup still contributes to the subgroup count.
 kernel.def target(@device) @bound_partial_final_subgroup() {
   %c1 = index.constant 1 : index
   %workgroup_size = index.constant 65 : index
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%workgroup_size, %c1, %c1) : index
 } launch() {
   %width = index.constant 64 : index
-  %count = index.constant 2 : index
+  %count = kernel.subgroup.count : index
   %lane_hi = scalar.constant 63 : i64
-  %subgroup_hi = scalar.constant 1 : i64
+  %subgroup_hi = scalar.constant 64 : i64
   test.use %width, %lane_hi, %subgroup_hi, %count : index, i64, i64, index
   kernel.return
 }
@@ -160,9 +159,305 @@ kernel.def target(@device) @bound_multidimensional_workgroup() {
   kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%x, %y, %c1) : index
 } launch() {
   %width = index.constant 32 : index
-  %count = index.constant 2 : index
+  %count = kernel.subgroup.count : index
   %lane_hi = scalar.constant 31 : i64
-  %subgroup_hi = scalar.constant 1 : i64
+  %subgroup_hi = scalar.constant 63 : i64
   test.use %width, %lane_hi, %subgroup_hi, %count : index, i64, i64, index
+  kernel.return
+}
+
+// ====
+
+// Width one has no inactive holes, independently of a packing guarantee.
+target.generic<reference> @device {abi = hal_kernel, subgroup_size = 1}
+
+kernel.def target(@device) @scalar_subgroups() {
+  %unit = index.constant 1 : index
+  %width = index.constant 3 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch() {
+  %lane = kernel.subgroup.lane.id : index
+  %count = kernel.subgroup.count : index
+  test.use %lane, %count : index, index
+  kernel.return
+}
+
+// ----
+target.generic<reference> @device {abi = hal_kernel, subgroup_size = 1}
+
+kernel.def target(@device) @scalar_subgroups() {
+  %unit = index.constant 1 : index
+  %width = index.constant 3 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch() {
+  %lane = index.constant 0 : index
+  %count = index.constant 3 : index
+  test.use %lane, %count : index, index
+  kernel.return
+}
+
+// ====
+
+// Full subgroups follow X alignment, including multidimensional launches.
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 32}
+
+kernel.def target(@device) @aligned_multidimensional_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 64 : index
+  %other = index.constant 2 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %other, %other) : index
+} launch() {
+  %subgroup = kernel.subgroup.id : index
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = test.fact_range_hi %subgroup : index -> i64
+  test.use %count, %subgroup_hi : index, i64
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 32}
+
+kernel.def target(@device) @aligned_multidimensional_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 64 : index
+  %other = index.constant 2 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %other, %other) : index
+} launch() {
+  %count = index.constant 8 : index
+  %subgroup_hi = scalar.constant 7 : i64
+  test.use %count, %subgroup_hi : index, i64
+  kernel.return
+}
+
+// ====
+
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@device) @aligned_wide_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %subgroup = kernel.subgroup.id : index
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = test.fact_range_hi %subgroup : index -> i64
+  test.use %count, %subgroup_hi : index, i64
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@device) @aligned_wide_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %count = index.constant 2 : index
+  %subgroup_hi = scalar.constant 1 : i64
+  test.use %count, %subgroup_hi : index, i64
+  kernel.return
+}
+
+// ====
+
+// Partial subgroups may leave holes among active lane IDs.
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 32}
+
+kernel.def target(@device) @partial_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 3 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %lane = kernel.subgroup.lane.id : index
+  %subgroup = kernel.subgroup.id : index
+  %count = kernel.subgroup.count : index
+  %lane_hi = test.fact_range_hi %lane : index -> i64
+  %subgroup_hi = test.fact_range_hi %subgroup : index -> i64
+  %count_lo = test.fact_range_lo %count : index -> i64
+  %count_hi = test.fact_range_hi %count : index -> i64
+  test.use %lane_hi, %subgroup_hi, %count_lo, %count_hi : i64, i64, i64, i64
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 32}
+
+kernel.def target(@device) @partial_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 3 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %lane_hi = scalar.constant 31 : i64
+  %subgroup_hi = scalar.constant 2 : i64
+  %count_lo = scalar.constant 1 : i64
+  %count_hi = scalar.constant 3 : i64
+  test.use %lane_hi, %subgroup_hi, %count_lo, %count_hi : i64, i64, i64, i64
+  kernel.return
+}
+
+// ====
+
+// An aligned total invocation count does not establish X alignment.
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 32}
+
+kernel.def target(@device) @unaligned_multidimensional_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 16 : index
+  %y = index.constant 4 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %y, %unit) : index
+} launch() {
+  %subgroup = kernel.subgroup.id : index
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = test.fact_range_hi %subgroup : index -> i64
+  %count_lo = test.fact_range_lo %count : index -> i64
+  %count_hi = test.fact_range_hi %count : index -> i64
+  test.use %count, %subgroup_hi, %count_lo, %count_hi : index, i64, i64, i64
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @device {abi = hal_kernel, subgroup_size = 32}
+
+kernel.def target(@device) @unaligned_multidimensional_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 16 : index
+  %y = index.constant 4 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %y, %unit) : index
+} launch() {
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = scalar.constant 63 : i64
+  %count_lo = scalar.constant 2 : i64
+  %count_hi = scalar.constant 64 : i64
+  test.use %count, %subgroup_hi, %count_lo, %count_hi : index, i64, i64, i64
+  kernel.return
+}
+
+// ====
+
+// A retained divisor proves alignment before the exact launch is specialized.
+spirv.target<vulkan1_3> @device {abi = hal_kernel, max_flat_workgroup_size = 128, subgroup_size = 32}
+
+kernel.def target(@device) @divisible_dynamic_partition(%groups: index) {
+  %unit = index.constant 1 : index
+  %width = index.constant 32 : index
+  %bounded = index.assume %groups [range(%groups, 1, 4)] : index
+  %x = index.mul %bounded, %width : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %subgroup = kernel.subgroup.id : index
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = test.fact_range_hi %subgroup : index -> i64
+  %count_hi = test.fact_range_hi %count : index -> i64
+  test.use %count, %subgroup_hi, %count_hi : index, i64, i64
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @device {abi = hal_kernel, max_flat_workgroup_size = 128, subgroup_size = 32}
+
+kernel.def target(@device) @divisible_dynamic_partition(%groups: index) {
+  %unit = index.constant 1 : index
+  %bounded = index.assume %groups [range(%groups, 1, 4)] : index
+  %9 = index.constant 5 : index
+  %x = index.shli %bounded, %9 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = scalar.constant 3 : i64
+  %count_hi = scalar.constant 4 : i64
+  test.use %count, %subgroup_hi, %count_hi : index, i64, i64
+  kernel.return
+}
+
+// ====
+
+spirv.target<vulkan1_3> @device {abi = hal_kernel, max_flat_workgroup_size = 128, subgroup_size = 32}
+
+kernel.def target(@device) @unknown_dynamic_partition(%x: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %subgroup = kernel.subgroup.id : index
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = test.fact_range_hi %subgroup : index -> i64
+  %count_hi = test.fact_range_hi %count : index -> i64
+  test.use %count, %subgroup_hi, %count_hi : index, i64, i64
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @device {abi = hal_kernel, max_flat_workgroup_size = 128, subgroup_size = 32}
+
+kernel.def target(@device) @unknown_dynamic_partition(%x: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %count = kernel.subgroup.count : index
+  %subgroup_hi = scalar.constant 127 : i64
+  %count_hi = scalar.constant 128 : i64
+  test.use %count, %subgroup_hi, %count_hi : index, i64, i64
+  kernel.return
+}
+
+// ====
+
+// A width must be selected before X alignment can establish full subgroups.
+spirv.target<vulkan1_3> @device {abi = hal_kernel}
+
+kernel.def target(@device) @unknown_width_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %width = kernel.subgroup.size : index
+  %count = kernel.subgroup.count : index
+  test.use %width, %count : index, index
+  kernel.return
+}
+
+// ----
+spirv.target<vulkan1_3> @device {abi = hal_kernel}
+
+kernel.def target(@device) @unknown_width_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %width = kernel.subgroup.size : index
+  %count = kernel.subgroup.count : index
+  test.use %width, %count : index, index
+  kernel.return
+}
+
+// ====
+
+// An aligned launch still needs an execution guarantee from its target.
+target.generic<reference> @device {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@device) @unspecified_aligned_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %count = kernel.subgroup.count : index
+  %count_lo = test.fact_range_lo %count : index -> i64
+  %count_hi = test.fact_range_hi %count : index -> i64
+  test.use %count, %count_lo, %count_hi : index, i64, i64
+  kernel.return
+}
+
+// ----
+target.generic<reference> @device {abi = hal_kernel, subgroup_size = 64}
+
+kernel.def target(@device) @unspecified_aligned_partition() {
+  %unit = index.constant 1 : index
+  %x = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%x, %unit, %unit) : index
+} launch() {
+  %count = kernel.subgroup.count : index
+  %count_lo = scalar.constant 2 : i64
+  %count_hi = scalar.constant 128 : i64
+  test.use %count, %count_lo, %count_hi : index, i64, i64
   kernel.return
 }

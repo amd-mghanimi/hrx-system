@@ -34,8 +34,21 @@ from loom.target.contracts import (
     value_type_param,
 )
 
-STORAGE_BUFFER_MEMORY_SPACES = ("unknown", "generic", "global", "descriptor")
+WRITABLE_STORAGE_BUFFER_MEMORY_SPACES = ("unknown", "generic", "global", "descriptor")
+STORAGE_BUFFER_MEMORY_SPACES = (*WRITABLE_STORAGE_BUFFER_MEMORY_SPACES, "constant")
 WORKGROUP_MEMORY_SPACES = ("workgroup",)
+
+
+def storage_buffer_memory_spaces(operation: SourceMemoryOperation) -> tuple[str, ...]:
+    # Constant device storage has the same address representation as global
+    # storage, but never admits writes or read-modify-write operations.
+    if operation in (
+        SourceMemoryOperation.LOAD,
+        SourceMemoryOperation.PREFETCH,
+        SourceMemoryOperation.VIEW_CARRIER,
+    ):
+        return STORAGE_BUFFER_MEMORY_SPACES
+    return WRITABLE_STORAGE_BUFFER_MEMORY_SPACES
 
 
 def storage_buffer_alignment_diagnostic(required_alignment: int) -> GuardDiagnostic:
@@ -121,7 +134,7 @@ def storage_buffer_source_memory(
     return SourceMemoryConstraint(
         operation=operation,
         root_kind=SourceMemoryRootKind.ANY,
-        memory_spaces=STORAGE_BUFFER_MEMORY_SPACES,
+        memory_spaces=storage_buffer_memory_spaces(operation),
         element_byte_count=scalar.byte_width,
         vector_lane_count=1,
         vector_lane_byte_stride=scalar.byte_width,
@@ -130,7 +143,7 @@ def storage_buffer_source_memory(
         minimum_alignment=scalar.byte_width,
         dynamic_term_count=None,
         dynamic_index_source=SourceMemoryDynamicIndexSource.NONE,
-        diagnostic=storage_buffer_alignment_diagnostic(scalar.byte_width),
+        alignment_diagnostic=storage_buffer_alignment_diagnostic(scalar.byte_width),
     )
 
 
@@ -150,7 +163,7 @@ def workgroup_source_memory(
         minimum_alignment=scalar.byte_width,
         dynamic_term_count=None,
         dynamic_index_source=SourceMemoryDynamicIndexSource.NONE,
-        diagnostic=storage_buffer_alignment_diagnostic(scalar.byte_width),
+        alignment_diagnostic=storage_buffer_alignment_diagnostic(scalar.byte_width),
     )
 
 
@@ -219,4 +232,21 @@ def workgroup_address_materializer(
 def workgroup_carrier_guard(scalar_suffix: str) -> Guard:
     return Guard.low_value_register_class(
         "view", f"spirv.ptr.workgroup.array.{scalar_suffix}"
+    )
+
+
+def storage_element_format_guards(
+    field: str,
+    scalar: StorageBufferScalar,
+) -> tuple[Guard, ...]:
+    if not scalar.source_type.startswith("i"):
+        return ()
+    numeric_format = scalar.numeric_format_c_expression
+    if numeric_format is None:
+        return ()
+    return (
+        Guard.value_storage_element_format(
+            field,
+            numeric_format,
+        ),
     )

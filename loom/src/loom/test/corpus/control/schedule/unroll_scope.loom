@@ -1,0 +1,359 @@
+// The two selected buffers are disjoint within each iteration, but exchange roles.
+kernel.def @scheduled_unroll_swapping_roots() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input_a: buffer, %input_b: buffer) {
+  %a = buffer.assume.memory_space<global> %input_a : buffer
+  %b = buffer.assume.memory_space<global> %input_b : buffer
+  %base = index.constant 0 : offset
+  %value0 = scalar.constant 1 : i32
+  %value1 = scalar.constant 2 : i32
+  %vec0 = vector.splat %value0 : vector<4xi32>
+  %vec1 = vector.splat %value1 : vector<4xi32>
+  %layout = encoding.layout.dense : encoding<layout>
+  %start = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
+    %first = index.cmp eq, %i, %start : index
+    %left = scf.select %first, %a, %b : buffer
+    %right = scf.select %first, %b, %a : buffer
+    %left_unique, %right_unique = buffer.assume.noalias %left, %right : buffer, buffer
+    %left_view = buffer.view %left_unique[%base] : buffer -> view<4xi32, %layout>
+    %right_view = buffer.view %right_unique[%base] : buffer -> view<4xi32, %layout>
+    vector.store %vec0, %left_view[0] : vector<4xi32>, view<4xi32, %layout>
+    vector.store %vec1, %right_view[0] : vector<4xi32>, view<4xi32, %layout>
+  }
+  kernel.return
+}
+
+// A selected byte origin changes between iterations without exposing the IV in the access.
+kernel.def @scheduled_unroll_selected_base() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  %first_value = scalar.constant 1 : i32
+  %second_value = scalar.constant 2 : i32
+  %vec_one = vector.splat %first_value : vector<4xi32>
+  %vec_two = vector.splat %second_value : vector<4xi32>
+  %layout = encoding.layout.dense : encoding<layout>
+  %start = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
+    %first = index.cmp eq, %i, %start : index
+    %base = scf.select %first, %origin, %next_origin : offset
+    %view = buffer.view %output[%base] : buffer -> view<8xi32, %layout>
+    vector.store %vec_one, %view[0] : vector<4xi32>, view<8xi32, %layout>
+    vector.store %vec_two, %view[4] : vector<4xi32>, view<8xi32, %layout>
+  }
+  kernel.return
+}
+
+// Loop-carried origins preserve the write order through the yielded dependency.
+kernel.def @scheduled_unroll_carried_base() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  %first_value = scalar.constant 1 : i32
+  %second_value = scalar.constant 2 : i32
+  %vec_one = vector.splat %first_value : vector<4xi32>
+  %vec_two = vector.splat %second_value : vector<4xi32>
+  %layout = encoding.layout.dense : encoding<layout>
+  %start = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  %final = scf.for %i = [%start to %end step %step](%base = %origin : offset) -> (offset) unroll schedule(interleaved) {
+    %view = buffer.view %output[%base] : buffer -> view<8xi32, %layout>
+    vector.store %vec_one, %view[0] : vector<4xi32>, view<8xi32, %layout>
+    vector.store %vec_two, %view[4] : vector<4xi32>, view<8xi32, %layout>
+    %next = index.sub %next_origin, %base : offset
+    scf.yield %next : offset
+  }
+  kernel.return
+}
+
+// Structured results have the same execution scope as scalar selects.
+kernel.def @scheduled_unroll_nested_roots() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input_a: buffer, %input_b: buffer) {
+  %a = buffer.assume.memory_space<global> %input_a : buffer
+  %b = buffer.assume.memory_space<global> %input_b : buffer
+  %base = index.constant 0 : offset
+  %value0 = scalar.constant 1 : i32
+  %value1 = scalar.constant 2 : i32
+  %vec0 = vector.splat %value0 : vector<4xi32>
+  %vec1 = vector.splat %value1 : vector<4xi32>
+  %layout = encoding.layout.dense : encoding<layout>
+  %start = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
+    %first = index.cmp eq, %i, %start : index
+    %left = scf.if %first -> (buffer) {
+      scf.yield %a : buffer
+    } else {
+      scf.yield %b : buffer
+    }
+    %right = scf.if %first -> (buffer) {
+      scf.yield %b : buffer
+    } else {
+      scf.yield %a : buffer
+    }
+    %left_unique, %right_unique = buffer.assume.noalias %left, %right : buffer, buffer
+    %left_view = buffer.view %left_unique[%base] : buffer -> view<4xi32, %layout>
+    %right_view = buffer.view %right_unique[%base] : buffer -> view<4xi32, %layout>
+    vector.store %vec0, %left_view[0] : vector<4xi32>, view<4xi32, %layout>
+    vector.store %vec1, %right_view[0] : vector<4xi32>, view<4xi32, %layout>
+  }
+  kernel.return
+}
+
+// A structured byte-origin choice must not cancel across iterations.
+kernel.def @scheduled_unroll_nested_base() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  %first_value = scalar.constant 1 : i32
+  %second_value = scalar.constant 2 : i32
+  %vec_one = vector.splat %first_value : vector<4xi32>
+  %vec_two = vector.splat %second_value : vector<4xi32>
+  %layout = encoding.layout.dense : encoding<layout>
+  %start = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
+    %first = index.cmp eq, %i, %start : index
+    %base = scf.if %first -> (offset) {
+      scf.yield %origin : offset
+    } else {
+      scf.yield %next_origin : offset
+    }
+    %view = buffer.view %output[%base] : buffer -> view<8xi32, %layout>
+    vector.store %vec_one, %view[0] : vector<4xi32>, view<8xi32, %layout>
+    vector.store %vec_two, %view[4] : vector<4xi32>, view<8xi32, %layout>
+  }
+  kernel.return
+}
+
+// An unchanged captured input can select the same byte origin in every iteration.
+kernel.def @scheduled_unroll_readonly_choice() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input, %output : buffer, buffer
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  %first_value = scalar.constant 1 : i32
+  %second_value = scalar.constant 2 : i32
+  %vec_one = vector.splat %first_value : vector<4xi32>
+  %vec_two = vector.splat %second_value : vector<4xi32>
+  %layout = encoding.layout.dense : encoding<layout>
+  %start = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  %input_view = buffer.view %input_unique[%origin] : buffer -> view<1xi32>
+  scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
+    %choice = view.load %input_view[0] : view<1xi32> -> i32
+    %first = scalar.cmpi ne, %choice, %first_value : i32
+    %base = scf.select %first, %origin, %next_origin : offset
+    %view = buffer.view %output_unique[%base] : buffer -> view<8xi32, %layout>
+    vector.store %vec_one, %view[0] : vector<4xi32>, view<8xi32, %layout>
+    vector.store %vec_two, %view[4] : vector<4xi32>, view<8xi32, %layout>
+  }
+  kernel.return
+}
+
+// A read from written storage may select a different origin in the next iteration.
+kernel.def @scheduled_unroll_mutable_choice() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  %first_value = scalar.constant 1 : i32
+  %second_value = scalar.constant 2 : i32
+  %vec_one = vector.splat %first_value : vector<4xi32>
+  %vec_two = vector.splat %second_value : vector<4xi32>
+  %layout = encoding.layout.dense : encoding<layout>
+  %start = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  %input_view = buffer.view %output[%origin] : buffer -> view<1xi32>
+  scf.for %i = [%start to %end step %step] unroll schedule(interleaved) {
+    %choice = view.load %input_view[0] : view<1xi32> -> i32
+    %first = scalar.cmpi ne, %choice, %first_value : i32
+    %base = scf.select %first, %origin, %next_origin : offset
+    %view = buffer.view %output[%base] : buffer -> view<8xi32, %layout>
+    vector.store %vec_one, %view[0] : vector<4xi32>, view<8xi32, %layout>
+    vector.store %vec_two, %view[4] : vector<4xi32>, view<8xi32, %layout>
+  }
+  kernel.return
+}
+
+// Scalar VM helpers preserve the source write order without sharing the
+// target's vector stores or interleaved unroll schedule.
+func.def inline @scheduled_unroll_fill_four(%output: buffer, %base: offset, %value: i32) {
+  %view = buffer.view %output[%base] : buffer -> view<4xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  scf.for %position = [%begin to %end step %step] {
+    view.store %value, %view[%position] : i32, view<4xi32>
+  }
+  func.return
+}
+
+func.def inline @scheduled_unroll_write_pair(%output: buffer, %base: offset) {
+  %next_offset = index.constant 16 : offset
+  %next_base = index.add %base, %next_offset : offset
+  %c1 = scalar.constant 1 : i32
+  %c2 = scalar.constant 2 : i32
+  func.call @scheduled_unroll_fill_four(%output, %base, %c1) : (buffer, offset, i32)
+  func.call @scheduled_unroll_fill_four(%output, %next_base, %c2) : (buffer, offset, i32)
+  func.return
+}
+
+func.def @scheduled_unroll_swapping_roots_oracle(%a: buffer, %b: buffer) {
+  %base = index.constant 0 : offset
+  %c1 = scalar.constant 1 : i32
+  %c2 = scalar.constant 2 : i32
+  func.call @scheduled_unroll_fill_four(%a, %base, %c1) : (buffer, offset, i32)
+  func.call @scheduled_unroll_fill_four(%b, %base, %c2) : (buffer, offset, i32)
+  func.call @scheduled_unroll_fill_four(%b, %base, %c1) : (buffer, offset, i32)
+  func.call @scheduled_unroll_fill_four(%a, %base, %c2) : (buffer, offset, i32)
+  func.return
+}
+
+func.def @scheduled_unroll_selected_base_oracle(%output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  func.call @scheduled_unroll_write_pair(%output, %origin) : (buffer, offset)
+  func.call @scheduled_unroll_write_pair(%output, %next_origin) : (buffer, offset)
+  func.return
+}
+
+func.def @scheduled_unroll_carried_base_oracle(%output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  func.call @scheduled_unroll_write_pair(%output, %origin) : (buffer, offset)
+  func.call @scheduled_unroll_write_pair(%output, %next_origin) : (buffer, offset)
+  func.return
+}
+
+func.def @scheduled_unroll_nested_roots_oracle(%a: buffer, %b: buffer) {
+  func.call @scheduled_unroll_swapping_roots_oracle(%a, %b) : (buffer, buffer)
+  func.return
+}
+
+func.def @scheduled_unroll_nested_base_oracle(%output: buffer) {
+  func.call @scheduled_unroll_selected_base_oracle(%output) : (buffer)
+  func.return
+}
+
+func.def @scheduled_unroll_readonly_choice_oracle(%input: buffer, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  %input_view = buffer.view %input[%origin] : buffer -> view<1xi32>
+  %choice = view.load %input_view[0] : view<1xi32> -> i32
+  %c1 = scalar.constant 1 : i32
+  %use_origin = scalar.cmpi ne, %choice, %c1 : i32
+  %base = scf.select %use_origin, %origin, %next_origin : offset
+  func.call @scheduled_unroll_write_pair(%output, %base) : (buffer, offset)
+  func.call @scheduled_unroll_write_pair(%output, %base) : (buffer, offset)
+  func.return
+}
+
+func.def @scheduled_unroll_mutable_choice_oracle(%output: buffer) {
+  %origin = index.constant 0 : offset
+  %next_origin = index.constant 16 : offset
+  %input_view = buffer.view %output[%origin] : buffer -> view<1xi32>
+  %c1 = scalar.constant 1 : i32
+  %begin = index.constant 0 : index
+  %end = index.constant 2 : index
+  %step = index.constant 1 : index
+  scf.for %iteration = [%begin to %end step %step] {
+    %choice = view.load %input_view[0] : view<1xi32> -> i32
+    %use_origin = scalar.cmpi ne, %choice, %c1 : i32
+    %base = scf.select %use_origin, %origin, %next_origin : offset
+    func.call @scheduled_unroll_write_pair(%output, %base) : (buffer, offset)
+  }
+  func.return
+}
+
+check.scenario @scheduled_unroll_scope_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %a_storage = check.generate.fill value(-9) : tensor<12xi32>
+    %a = check.tensor.view %a_storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    %b_storage = check.generate.fill value(-9) : tensor<12xi32>
+    %b = check.tensor.view %b_storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    check.compare<@scheduled_unroll_swapping_roots, @scheduled_unroll_swapping_roots_oracle>(%a, %b) : (tensor<4xi32>, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%a_storage) expected(%a_storage) : tensor<12xi32>
+      check.expect.bitwise actual(%b_storage) expected(%b_storage) : tensor<12xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(0) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@scheduled_unroll_selected_base, @scheduled_unroll_selected_base_oracle>(%output) : (tensor<12xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(0) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@scheduled_unroll_carried_base, @scheduled_unroll_carried_base_oracle>(%output) : (tensor<12xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %a_storage = check.generate.fill value(-9) : tensor<12xi32>
+    %a = check.tensor.view %a_storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    %b_storage = check.generate.fill value(-9) : tensor<12xi32>
+    %b = check.tensor.view %b_storage offset(16) : tensor<12xi32> -> tensor<4xi32>
+    check.compare<@scheduled_unroll_nested_roots, @scheduled_unroll_nested_roots_oracle>(%a, %b) : (tensor<4xi32>, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%a_storage) expected(%a_storage) : tensor<12xi32>
+      check.expect.bitwise actual(%b_storage) expected(%b_storage) : tensor<12xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(0) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@scheduled_unroll_nested_base, @scheduled_unroll_nested_base_oracle>(%output) : (tensor<12xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.fill value(0) : tensor<1xi32>
+    %storage = check.generate.fill value(0) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@scheduled_unroll_readonly_choice, @scheduled_unroll_readonly_choice_oracle>(%input, %output) : (tensor<1xi32>, tensor<12xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.fill value(1) : tensor<1xi32>
+    %storage = check.generate.fill value(0) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@scheduled_unroll_readonly_choice, @scheduled_unroll_readonly_choice_oracle>(%input, %output) : (tensor<1xi32>, tensor<12xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(0) : tensor<20xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<20xi32> -> tensor<12xi32>
+    check.compare<@scheduled_unroll_mutable_choice, @scheduled_unroll_mutable_choice_oracle>(%output) : (tensor<12xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<20xi32>
+    }
+  }
+  check.return
+}

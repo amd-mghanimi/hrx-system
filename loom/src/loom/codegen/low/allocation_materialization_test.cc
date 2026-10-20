@@ -28,6 +28,13 @@ static const loom_low_descriptor_set_provider_t kDescriptorSetProviders[] = {
     loom_test_low_core_descriptor_set,
 };
 
+static iree_status_t CountDiagnostic(
+    void* user_data, const loom_diagnostic_emission_t* emission) {
+  (void)emission;
+  ++*static_cast<iree_host_size_t*>(user_data);
+  return iree_ok_status();
+}
+
 class LowAllocationMaterializationTest : public ::testing::Test {
  protected:
   void SetUp() override {
@@ -104,7 +111,8 @@ class LowAllocationMaterializationTest : public ::testing::Test {
   loom_low_descriptor_registry_t descriptor_registry_ = {};
 };
 
-TEST_F(LowAllocationMaterializationTest, RecomputesTrafficAfterSliceRewrite) {
+TEST_F(LowAllocationMaterializationTest,
+       RecordsRecomputedTrafficWithoutImplicitDiagnostics) {
   ModulePtr module = ParseModule(R"(
 test.target<low_core> @test_target
 
@@ -118,79 +126,83 @@ low.func.def target<test.low.core>(@test_target) @stale_slice_plan(%wide: reg<te
       FindLowFunction(module.get(), IREE_SV("stale_slice_plan"));
   const loom_value_id_t wide = FindValueByName(module.get(), IREE_SV("wide"));
   const loom_value_id_t lane = FindValueByName(module.get(), IREE_SV("lane"));
-  const loom_liveness_value_class_t register_class = {
-      /*.type_kind=*/LOOM_TYPE_REGISTER,
-  };
   const loom_low_allocation_assignment_t assignments[] = {
       {
-          /*.value_id=*/wide,
-          /*.value_class=*/register_class,
-          /*.descriptor_reg_class_id=*/0,
-          /*.flags=*/{},
-          /*.start_point=*/0,
-          /*.end_point=*/4,
-          /*.unit_count=*/4,
-          /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
-          /*.location_base=*/0,
-          /*.location_count=*/4,
-          /*.unit_point_start=*/0,
+          .value_id = wide,
+          .descriptor_reg_class_id = 0,
+          .flags = {},
+          .start_point = 0,
+          .end_point = 4,
+          .unit_count = 4,
+          .location_kind = LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
+          .location_base = 0,
+          .location_count = 4,
+          .unit_point_start = 0,
       },
       {
-          /*.value_id=*/lane,
-          /*.value_class=*/register_class,
-          /*.descriptor_reg_class_id=*/0,
-          /*.flags=*/{},
-          /*.start_point=*/1,
-          /*.end_point=*/3,
-          /*.unit_count=*/1,
-          /*.location_kind=*/LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
-          /*.location_base=*/1,
-          /*.location_count=*/1,
-          /*.unit_point_start=*/0,
+          .value_id = lane,
+          .descriptor_reg_class_id = 0,
+          .flags = {},
+          .start_point = 1,
+          .end_point = 3,
+          .unit_count = 1,
+          .location_kind = LOOM_LOW_ALLOCATION_LOCATION_SPILL_SLOT,
+          .location_base = 1,
+          .location_count = 1,
+          .unit_point_start = 0,
       },
   };
   const loom_low_allocation_spill_plan_t spill_plans[] = {
       {
-          /*.value_id=*/wide,
-          /*.assignment_index=*/0,
-          /*.slot_index=*/0,
-          /*.slot_space=*/LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
-          /*.byte_size=*/16,
-          /*.byte_alignment=*/4,
-          /*.store_count=*/1,
-          /*.reload_count=*/1,
+          .value_id = wide,
+          .assignment_index = 0,
+          .slot_index = 0,
+          .slot_space = LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
+          .byte_size = 16,
+          .byte_alignment = 16,
+          .store_count = 1,
+          .reload_count = 1,
       },
       {
-          /*.value_id=*/lane,
-          /*.assignment_index=*/1,
-          /*.slot_index=*/1,
-          /*.slot_space=*/LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
-          /*.byte_size=*/4,
-          /*.byte_alignment=*/4,
-          /*.store_count=*/1,
-          /*.reload_count=*/1,
+          .value_id = lane,
+          .assignment_index = 1,
+          .slot_index = 1,
+          .slot_space = LOOM_LOW_SPILL_SLOT_SPACE_PRIVATE,
+          .byte_size = 4,
+          .byte_alignment = 4,
+          .store_count = 1,
+          .reload_count = 1,
       },
   };
-  loom_low_allocation_table_t table = {};
-  table.module = module.get();
-  table.function_op = function_op;
-  table.assignments = assignments;
-  table.assignment_count = IREE_ARRAYSIZE(assignments);
-  table.spill_plans = spill_plans;
-  table.spill_plan_count = IREE_ARRAYSIZE(spill_plans);
+  loom_low_allocation_table_t table = {
+      .module = module.get(),
+      .function_op = function_op,
+      .assignments = assignments,
+      .assignment_count = IREE_ARRAYSIZE(assignments),
+      .spill_plans = spill_plans,
+      .spill_plan_count = IREE_ARRAYSIZE(spill_plans),
+  };
   iree_arena_allocator_t arena;
   iree_arena_initialize(&block_pool_, &arena);
   loom_low_allocation_materialization_result_t result = {};
   loom_low_allocation_materialization_options_t options = {};
+  iree_host_size_t diagnostic_count = 0;
   options.has_supported_storage_spaces = true;
   options.supported_storage_spaces = LOOM_LOW_STORAGE_SPACE_SET_PRIVATE;
   options.record_materialized_spills = true;
-  IREE_ASSERT_OK(loom_low_allocation_materialize_spills(&table, &options,
-                                                        &arena, &result));
+  options.emitter = {
+      .fn = CountDiagnostic,
+      .user_data = &diagnostic_count,
+  };
+  IREE_ASSERT_OK(loom_low_allocation_materialize_spills(
+      &table, table.spill_plans, table.spill_plan_count, &options, &arena,
+      &result));
 
+  EXPECT_EQ(diagnostic_count, 0u);
   EXPECT_EQ(result.error_count, 0u);
   EXPECT_EQ(result.storage_count, 2u);
   EXPECT_EQ(result.storage_bytes, 20u);
+  EXPECT_EQ(result.storage_minimum_alignment, 16u);
   EXPECT_EQ(result.spill_count, 1u);
   EXPECT_EQ(result.spill_bytes, 16u);
   EXPECT_EQ(result.reload_count, 1u);
@@ -211,6 +223,25 @@ low.func.def target<test.low.core>(@test_target) @stale_slice_plan(%wide: reg<te
   EXPECT_EQ(result.materialized_spills[1].store_bytes, 0u);
   EXPECT_EQ(result.materialized_spills[1].reload_count, 0u);
   EXPECT_EQ(result.materialized_spills[1].reload_bytes, 0u);
+
+  ASSERT_EQ(result.required_register_values.count, 2u);
+  bool found_spill_input = false;
+  loom_value_id_t reload_result = LOOM_VALUE_ID_INVALID;
+  for (iree_host_size_t i = 0; i < result.required_register_values.count; ++i) {
+    const loom_value_id_t value_id = result.required_register_values.values[i];
+    if (value_id == wide) {
+      found_spill_input = true;
+      continue;
+    }
+    const loom_value_t* value = loom_module_value(module.get(), value_id);
+    ASSERT_NE(value, nullptr);
+    EXPECT_TRUE(loom_low_reload_isa(loom_value_def_op(value)));
+    reload_result = value_id;
+  }
+  EXPECT_TRUE(found_spill_input);
+  ASSERT_NE(reload_result, LOOM_VALUE_ID_INVALID);
+  ASSERT_EQ(result.per_user_placement_values.count, 1u);
+  EXPECT_EQ(result.per_user_placement_values.values[0], reload_result);
 
   iree_arena_deinitialize(&arena);
 }

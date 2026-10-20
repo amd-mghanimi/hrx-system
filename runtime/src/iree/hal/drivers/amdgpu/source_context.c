@@ -8,6 +8,15 @@
 
 #include <string.h>
 
+struct iree_hal_amdgpu_source_context_registry_entry_t {
+  // Next context owned by the same registry.
+  struct iree_hal_amdgpu_source_context_registry_entry_t* next;
+  // Immutable context addressed by device feedback packets.
+  iree_hal_amdgpu_source_context_t context;
+  // Owned sanitizer site-table bytes referenced by |context|.
+  uint8_t sanitizer_site_table_data[];
+};
+
 #define IREE_HAL_AMDGPU_LOOM_SITE_TABLE_MAGIC 0x5449534Cu
 #define IREE_HAL_AMDGPU_LOOM_SITE_TABLE_VERSION 1u
 #define IREE_HAL_AMDGPU_LOOM_SITE_TABLE_HEADER_LENGTH 32u
@@ -421,4 +430,76 @@ bool iree_hal_amdgpu_source_context_try_resolve_sanitizer_site(
 
   *out_site = site;
   return true;
+}
+
+void iree_hal_amdgpu_source_context_registry_initialize(
+    iree_allocator_t host_allocator,
+    iree_hal_amdgpu_source_context_registry_t* out_registry) {
+  IREE_ASSERT_ARGUMENT(out_registry);
+  memset(out_registry, 0, sizeof(*out_registry));
+  out_registry->host_allocator = host_allocator;
+  iree_slim_mutex_initialize(&out_registry->mutex);
+}
+
+void iree_hal_amdgpu_source_context_registry_deinitialize(
+    iree_hal_amdgpu_source_context_registry_t* registry) {
+  if (!registry) {
+    return;
+  }
+  iree_hal_amdgpu_source_context_registry_entry_t* entry = registry->entry_list;
+  while (entry) {
+    iree_hal_amdgpu_source_context_registry_entry_t* next_entry = entry->next;
+    iree_allocator_free(registry->host_allocator, entry);
+    entry = next_entry;
+  }
+  iree_slim_mutex_deinitialize(&registry->mutex);
+  memset(registry, 0, sizeof(*registry));
+}
+
+iree_status_t iree_hal_amdgpu_source_context_registry_register(
+    iree_hal_amdgpu_source_context_registry_t* registry,
+    const iree_hal_amdgpu_source_context_t* source_context,
+    const iree_hal_amdgpu_source_context_t** out_registered_context) {
+  IREE_ASSERT_ARGUMENT(registry);
+  IREE_ASSERT_ARGUMENT(source_context);
+  IREE_ASSERT_ARGUMENT(out_registered_context);
+  *out_registered_context = NULL;
+
+  const bool has_site_table =
+      iree_atomic_load(&source_context->sanitizer_site_table_published,
+                       iree_memory_order_acquire) != 0;
+  const iree_host_size_t site_table_length =
+      has_site_table ? source_context->sanitizer_site_table.data_length : 0;
+  iree_host_size_t allocation_size = 0;
+  if (IREE_UNLIKELY(!iree_host_size_checked_add(
+          sizeof(iree_hal_amdgpu_source_context_registry_entry_t),
+          site_table_length, &allocation_size))) {
+    return iree_make_status(
+        IREE_STATUS_RESOURCE_EXHAUSTED,
+        "AMDGPU source context registry entry size overflow");
+  }
+
+  iree_hal_amdgpu_source_context_registry_entry_t* entry = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(registry->host_allocator,
+                                             allocation_size, (void**)&entry));
+  memset(entry, 0, allocation_size);
+  iree_hal_amdgpu_source_context_initialize(
+      source_context->executable_id, source_context->code_object_hash,
+      /*physical_device_count=*/0, /*loaded_code_object_ranges=*/NULL,
+      &entry->context);
+  if (has_site_table) {
+    memcpy(entry->sanitizer_site_table_data,
+           source_context->sanitizer_site_table.data, site_table_length);
+    entry->context.sanitizer_site_table = source_context->sanitizer_site_table;
+    entry->context.sanitizer_site_table.data = entry->sanitizer_site_table_data;
+    iree_atomic_store(&entry->context.sanitizer_site_table_published, 1,
+                      iree_memory_order_release);
+  }
+
+  iree_slim_mutex_lock(&registry->mutex);
+  entry->next = registry->entry_list;
+  registry->entry_list = entry;
+  iree_slim_mutex_unlock(&registry->mutex);
+  *out_registered_context = &entry->context;
+  return iree_ok_status();
 }

@@ -1,0 +1,313 @@
+// RUN: pass canonicalize
+
+// Without a selected target, address parameters retain their source domains.
+func.def @targetless_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = test.fact_range_lo %position : index -> i64
+  %position_hi = test.fact_range_hi %position : index -> i64
+  %bytes_lo = test.fact_range_lo %bytes : offset -> i64
+  %bytes_hi = test.fact_range_hi %bytes : offset -> i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ----
+func.def @targetless_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = scalar.constant -9223372036854775808 : i64
+  %position_hi = scalar.constant 9223372036854775807 : i64
+  %bytes_lo = scalar.constant 0 : i64
+  %bytes_hi = scalar.constant 9223372036854775807 : i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ====
+
+// Selecting a narrow index carrier does not constrain byte-offset inputs.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @native_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = test.fact_range_lo %position : index -> i64
+  %position_hi = test.fact_range_hi %position : index -> i64
+  %bytes_lo = test.fact_range_lo %bytes : offset -> i64
+  %bytes_hi = test.fact_range_hi %bytes : offset -> i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @native_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = scalar.constant -2147483648 : i64
+  %position_hi = scalar.constant 2147483647 : i64
+  %bytes_lo = scalar.constant 0 : i64
+  %bytes_hi = scalar.constant 9223372036854775807 : i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ====
+
+// A wider native byte-address carrier leaves the same source offset domain.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@native) @mixed_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = test.fact_range_lo %position : index -> i64
+  %position_hi = test.fact_range_hi %position : index -> i64
+  %bytes_lo = test.fact_range_lo %bytes : offset -> i64
+  %bytes_hi = test.fact_range_hi %bytes : offset -> i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 64}
+
+func.def target(@native) @mixed_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = scalar.constant -2147483648 : i64
+  %position_hi = scalar.constant 2147483647 : i64
+  %bytes_lo = scalar.constant 0 : i64
+  %bytes_hi = scalar.constant 9223372036854775807 : i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ====
+
+test.target<low_core> @native {index_bitwidth = 64, offset_bitwidth = 64}
+
+func.def target(@native) @wide_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = test.fact_range_lo %position : index -> i64
+  %position_hi = test.fact_range_hi %position : index -> i64
+  %bytes_lo = test.fact_range_lo %bytes : offset -> i64
+  %bytes_hi = test.fact_range_hi %bytes : offset -> i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 64, offset_bitwidth = 64}
+
+func.def target(@native) @wide_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = scalar.constant -9223372036854775808 : i64
+  %position_hi = scalar.constant 9223372036854775807 : i64
+  %bytes_lo = scalar.constant 0 : i64
+  %bytes_hi = scalar.constant 9223372036854775807 : i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ====
+
+// Fixed-width payloads do not inherit the address carrier's width.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @fixed_parameters(%bit: i1, %byte: i8, %half: i16, %word: i32, %wide: i64) {
+  %bit_lo = test.fact_range_lo %bit : i1 -> i64
+  %bit_hi = test.fact_range_hi %bit : i1 -> i64
+  %byte_lo = test.fact_range_lo %byte : i8 -> i64
+  %byte_hi = test.fact_range_hi %byte : i8 -> i64
+  %half_lo = test.fact_range_lo %half : i16 -> i64
+  %half_hi = test.fact_range_hi %half : i16 -> i64
+  %word_lo = test.fact_range_lo %word : i32 -> i64
+  %word_hi = test.fact_range_hi %word : i32 -> i64
+  %wide_lo = test.fact_range_lo %wide : i64 -> i64
+  %wide_hi = test.fact_range_hi %wide : i64 -> i64
+  test.use %bit_lo, %bit_hi, %byte_lo, %byte_hi, %half_lo, %half_hi, %word_lo, %word_hi, %wide_lo, %wide_hi : i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+  func.return
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @fixed_parameters(%bit: i1, %byte: i8, %half: i16, %word: i32, %wide: i64) {
+  %bit_lo = scalar.constant 0 : i64
+  %bit_hi = scalar.constant 1 : i64
+  %byte_lo = scalar.constant -128 : i64
+  %byte_hi = scalar.constant 127 : i64
+  %half_lo = scalar.constant -32768 : i64
+  %half_hi = scalar.constant 32767 : i64
+  %word_lo = scalar.constant -2147483648 : i64
+  %word_hi = scalar.constant 2147483647 : i64
+  %wide_lo = scalar.constant -9223372036854775808 : i64
+  %wide_hi = scalar.constant 9223372036854775807 : i64
+  test.use %bit_lo, %bit_hi, %byte_lo, %byte_hi, %half_lo, %half_hi, %word_lo, %word_hi, %wide_lo, %wide_hi : i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+  func.return
+}
+
+// ====
+
+// Declaration predicates establish parameter domains before native defaults.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @constrained_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64, i64) where [range(%position, -7, 31), range(%bytes, 16, 64), multiple_of(%bytes, 16)] {
+  %position_lo = test.fact_range_lo %position : index -> i64
+  %position_hi = test.fact_range_hi %position : index -> i64
+  %bytes_lo = test.fact_range_lo %bytes : offset -> i64
+  %bytes_hi = test.fact_range_hi %bytes : offset -> i64
+  %bytes_divisor = test.fact_divisor %bytes : offset -> i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi, %bytes_divisor : i64, i64, i64, i64, i64
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @constrained_parameters(%position: index, %bytes: offset) -> (i64, i64, i64, i64, i64) where [range(%position, -7, 31), range(%bytes, 16, 64), multiple_of(%bytes, 16)] {
+  %position_lo = scalar.constant -7 : i64
+  %position_hi = scalar.constant 31 : i64
+  %bytes_lo = scalar.constant 16 : i64
+  %bytes_hi = scalar.constant 64 : i64
+  %bytes_divisor = scalar.constant 16 : i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi, %bytes_divisor : i64, i64, i64, i64, i64
+}
+
+// ====
+
+// An explicitly declared wide index domain is not an unconstrained parameter.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @declared_wide_parameter(%position: index) -> (i64, i64) where [range(%position, 4294967296, 4294967300)] {
+  %lo = test.fact_range_lo %position : index -> i64
+  %hi = test.fact_range_hi %position : index -> i64
+  func.return %lo, %hi : i64, i64
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @declared_wide_parameter(%position: index) -> (i64, i64) where [range(%position, 4294967296, 4294967300)] {
+  %lo = scalar.constant 4294967296 : i64
+  %hi = scalar.constant 4294967300 : i64
+  func.return %lo, %hi : i64, i64
+}
+
+// ====
+
+// Logical index arithmetic retains its mathematical source range. Offset
+// arithmetic wraps in the selected unsigned carrier.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @wide_computed_values(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %index_bias = index.constant 4294967296 : index
+  %offset_bias = index.constant 4294967296 : offset
+  %wide_position = index.add %position, %index_bias : index
+  %wide_bytes = index.add %bytes, %offset_bias : offset
+  %position_lo = test.fact_range_lo %wide_position : index -> i64
+  %position_hi = test.fact_range_hi %wide_position : index -> i64
+  %bytes_lo = test.fact_range_lo %wide_bytes : offset -> i64
+  %bytes_hi = test.fact_range_hi %wide_bytes : offset -> i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @wide_computed_values(%position: index, %bytes: offset) -> (i64, i64, i64, i64) {
+  %position_lo = scalar.constant 2147483648 : i64
+  %position_hi = scalar.constant 6442450943 : i64
+  %bytes_lo = scalar.constant 0 : i64
+  %bytes_hi = scalar.constant 4294967295 : i64
+  func.return %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+}
+
+// ====
+
+// CFG arguments carry producer facts even when they exceed the native domain.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @wide_cfg_arguments(%input: i64, %condition: i1) -> (i64, i64) {
+  %bounded = scalar.assume %input [range(%input, 4294967296, 4294967300)] : i64
+  %wide = index.cast %bounded : i64 to index
+  cfg.cond_br %condition, ^left, ^right
+^left:
+  cfg.br ^join(%wide: index)
+^right:
+  %alternate = index.constant 4294967304 : index
+  cfg.br ^join(%alternate: index)
+^join(%joined: index):
+  %lo = test.fact_range_lo %joined : index -> i64
+  %hi = test.fact_range_hi %joined : index -> i64
+  func.return %lo, %hi : i64, i64
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @wide_cfg_arguments(%input: i64, %condition: i1) -> (i64, i64) {
+  %bounded = scalar.assume %input [range(%input, 4294967296, 4294967300)] : i64
+  %wide = index.cast %bounded : i64 to index
+  cfg.cond_br %condition, ^left, ^right
+^left:
+  cfg.br ^join(%wide: index)
+^right:
+  %alternate = index.constant 4294967304 : index
+  cfg.br ^join(%alternate: index)
+^join(%joined: index):
+  %lo = scalar.constant 4294967296 : i64
+  %hi = scalar.constant 4294967304 : i64
+  func.return %lo, %hi : i64, i64
+}
+
+// ====
+
+// Structured loop arguments likewise retain wide initial and backedge values.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @wide_loop_arguments(%input: i64, %count: index) {
+  %bounded = scalar.assume %input [range(%input, 4294967296, 4294967300)] : i64
+  %initial = index.cast %bounded : i64 to index
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %result = scf.for %iv = [%begin to %count step %step](%carried = %initial : index) -> (index) {
+    %lo = test.fact_range_lo %carried : index -> i64
+    %hi = test.fact_range_hi %carried : index -> i64
+    test.use %lo, %hi : i64, i64
+    scf.yield %carried : index
+  }
+  test.use %result : index
+  func.return
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+func.def target(@native) @wide_loop_arguments(%input: i64, %count: index) {
+  %bounded = scalar.assume %input [range(%input, 4294967296, 4294967300)] : i64
+  %initial = index.cast %bounded : i64 to index
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  scf.for %iv = [%begin to %count step %step] {
+    %lo = scalar.constant 4294967296 : i64
+    %hi = scalar.constant 4294967300 : i64
+    test.use %lo, %hi : i64, i64
+  }
+  test.use %initial : index
+  func.return
+}
+
+// ====
+
+// Configuration and dispatch entries use the same selected target domains.
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+kernel.def target(@native) @kernel_parameters(%groups: index) {
+  %groups_hi = test.fact_range_hi %groups : index -> i64
+  %maximum_groups = index.cast %groups_hi : i64 to index
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%maximum_groups, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%position: index, %bytes: offset) {
+  %position_lo = test.fact_range_lo %position : index -> i64
+  %position_hi = test.fact_range_hi %position : index -> i64
+  %bytes_lo = test.fact_range_lo %bytes : offset -> i64
+  %bytes_hi = test.fact_range_hi %bytes : offset -> i64
+  test.use %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+  kernel.return
+}
+
+// ----
+test.target<low_core> @native {index_bitwidth = 32, offset_bitwidth = 32}
+
+kernel.def target(@native) @kernel_parameters(%groups: index) {
+  %maximum_groups = index.constant 2147483647 : index
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%maximum_groups, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%position: index, %bytes: offset) {
+  %position_lo = scalar.constant -2147483648 : i64
+  %position_hi = scalar.constant 2147483647 : i64
+  %bytes_lo = scalar.constant 0 : i64
+  %bytes_hi = scalar.constant 9223372036854775807 : i64
+  test.use %position_lo, %position_hi, %bytes_lo, %bytes_hi : i64, i64, i64, i64
+  kernel.return
+}

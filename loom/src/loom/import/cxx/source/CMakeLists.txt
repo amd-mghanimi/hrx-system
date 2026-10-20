@@ -14,6 +14,7 @@ iree_c_embed_data(
   NAME
     embedded_standard_headers
   SRCS
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/initializer_list"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/stdfloat"
   C_FILE_OUTPUT
     "embedded_standard_headers.c"
@@ -32,12 +33,22 @@ iree_c_embed_data(
     embedded_loomcxx_headers
   SRCS
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/atomic.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/buffer.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/cache.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/check.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/encoding.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/encoding_type.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/index.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/kernel.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/low.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/math.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/numeric.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/predicate.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/scalar.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/shape.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/target.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/target/amdgpu.h"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/vector.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/view.h"
   C_FILE_OUTPUT
     "embedded_loomcxx_headers.c"
@@ -45,7 +56,8 @@ iree_c_embed_data(
     "embedded_loomcxx_headers.h"
   IDENTIFIER
     "loom_cxx_embedded_loomcxx_headers"
-  FLATTEN
+  STRIP_PREFIX
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/include/loomcxx/"
   PUBLIC
 )
 endif()
@@ -126,6 +138,75 @@ endif()
 if(LOOM_IMPORT_CXX)
 loom_cc_library(
   NAME
+    contents
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "contents.h"
+  SRCS
+    "contents.cc"
+  DEPS
+    ::catalog
+    ::error
+    ::options
+    iree::third_party::cxx_parser
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    frontend
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "frontend.h"
+  SRCS
+    "frontend.cc"
+  DEPS
+    ::contents
+    ::error
+    ::options
+    iree::third_party::cxx_parser
+    loom::error::error_defs
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    preamble
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "preamble.h"
+  SRCS
+    "preamble.cc"
+  DEPS
+    ::error
+    ::frontend
+    ::options
+    iree::base
+    iree::base::internal
+    iree::third_party::cxx_parser
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
     source
   CXX_STANDARD
     23
@@ -137,11 +218,8 @@ loom_cc_library(
   SRCS
     "source.cc"
   DEPS
-    ::catalog
-    ::error
-    ::options
-    iree::third_party::cxx_parser
-    loom::error::error_defs
+    ::frontend
+    ::preamble
   PUBLIC
 )
 endif()
@@ -171,28 +249,6 @@ endif()
 if(LOOM_IMPORT_CXX)
 loom_cc_test(
   NAME
-    constant_bits_test
-  SRCS
-    "constant_bits_test.cc"
-  CXX_STANDARD
-    23
-  CXX_FEATURES
-    "exceptions"
-    "rtti"
-  DEPS
-    ::options
-    ::source
-    iree::testing::gtest
-    iree::testing::gtest_main
-    iree::third_party::cxx_parser
-  LABELS
-    "iree-build-requirement=loom.import.cxx"
-)
-endif()
-
-if(LOOM_IMPORT_CXX)
-loom_cc_test(
-  NAME
     constexpr_test
   SRCS
     "constexpr_test.cc"
@@ -202,6 +258,7 @@ loom_cc_test(
     "exceptions"
     "rtti"
   DEPS
+    ::expressions
     ::options
     ::source
     iree::testing::gtest
@@ -298,6 +355,25 @@ loom_cc_library(
 endif()
 
 if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    expressions
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  HDRS
+    "expressions.h"
+  SRCS
+    "expressions.cc"
+  DEPS
+    iree::third_party::cxx_parser
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
 loom_cc_test(
   NAME
     constants_test
@@ -354,6 +430,30 @@ loom_cc_test(
   DEPS
     ::error
     ::options
+    ::preamble
+    ::source
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::third_party::cxx_parser
+  LABELS
+    "iree-build-requirement=loom.import.cxx"
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_test(
+  NAME
+    preamble_test
+  SRCS
+    "preamble_test.cc"
+  CXX_STANDARD
+    23
+  CXX_FEATURES
+    "exceptions"
+    "rtti"
+  DEPS
+    ::frontend
+    ::preamble
     ::source
     iree::testing::gtest
     iree::testing::gtest_main

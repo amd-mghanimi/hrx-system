@@ -494,16 +494,11 @@ static iree_status_t loom_vector_to_scalar_build_bitcast_piece(
   if (source_shift == 0 && bit_count == source_width) {
     source_bits = source_lane;
   } else {
-    loom_value_id_t shifted_source = LOOM_VALUE_ID_INVALID;
-    IREE_RETURN_IF_ERROR(loom_vector_to_scalar_build_scalar_shift(
-        state, LOOM_OP_SCALAR_SHRUI, source_lane, source_integer_type,
-        source_shift, &shifted_source));
-    loom_value_id_t source_mask = LOOM_VALUE_ID_INVALID;
-    IREE_RETURN_IF_ERROR(loom_vector_to_scalar_build_integer_mask(
-        state, source_integer_type, bit_count, &source_mask));
-    IREE_RETURN_IF_ERROR(loom_vector_to_scalar_build_scalar_binary(
-        state, LOOM_OP_SCALAR_ANDI, shifted_source, source_mask,
-        source_integer_type, &source_bits));
+    loom_op_t* extract_op = NULL;
+    IREE_RETURN_IF_ERROR(loom_scalar_bitfield_extractu_build(
+        &state->rewriter->builder, source_lane, source_shift, bit_count,
+        source_integer_type, state->location, &extract_op));
+    source_bits = loom_scalar_bitfield_extractu_result(extract_op);
   }
   loom_value_id_t result_bits = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(loom_vector_to_scalar_cast_integer_lane(

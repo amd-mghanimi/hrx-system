@@ -21,6 +21,11 @@
 extern "C" {
 #endif
 
+typedef struct loom_low_memory_access_map_t loom_low_memory_access_map_t;
+typedef struct loom_low_loop_execution_map_t loom_low_loop_execution_map_t;
+typedef struct loom_target_facts_t loom_target_facts_t;
+typedef struct loom_aie2p_array_leaf_t loom_aie2p_array_leaf_t;
+
 // Access permitted through one external array-program binding.
 typedef enum loom_aie2p_array_binding_access_e {
   LOOM_AIE2P_ARRAY_BINDING_ACCESS_READ = 1,
@@ -50,11 +55,21 @@ typedef enum loom_aie2p_array_channel_transport_e {
   LOOM_AIE2P_ARRAY_CHANNEL_TRANSPORT_ROUTED_DMA = 3,
 } loom_aie2p_array_channel_transport_t;
 
-// DMA transfer direction relative to local memory.
-typedef enum loom_aie2p_array_dma_direction_e {
-  LOOM_AIE2P_ARRAY_DMA_DIRECTION_MEMORY_TO_STREAM = 1,
-  LOOM_AIE2P_ARRAY_DMA_DIRECTION_STREAM_TO_MEMORY = 2,
-} loom_aie2p_array_dma_direction_t;
+typedef uint8_t loom_aie2p_array_channel_resource_flags_t;
+enum loom_aie2p_array_channel_resource_flag_bits_e {
+  // The channel owns one compute memory-to-stream DMA endpoint and ring.
+  LOOM_AIE2P_ARRAY_CHANNEL_RESOURCE_FLAG_OWNS_COMPUTE_MEMORY_TO_STREAM = 1u
+                                                                         << 0,
+  // The channel owns one compute stream-to-memory DMA endpoint and ring.
+  LOOM_AIE2P_ARRAY_CHANNEL_RESOURCE_FLAG_OWNS_COMPUTE_STREAM_TO_MEMORY = 1u
+                                                                         << 1,
+  // The channel owns one shim memory-to-stream DMA endpoint.
+  LOOM_AIE2P_ARRAY_CHANNEL_RESOURCE_FLAG_OWNS_SHIM_MEMORY_TO_STREAM = 1u << 2,
+  // The channel owns one shim stream-to-memory DMA endpoint.
+  LOOM_AIE2P_ARRAY_CHANNEL_RESOURCE_FLAG_OWNS_SHIM_STREAM_TO_MEMORY = 1u << 3,
+  // The channel owns one neighbor-visible ring and synchronization pair.
+  LOOM_AIE2P_ARRAY_CHANNEL_RESOURCE_FLAG_OWNS_NEIGHBOR_RING = 1u << 4,
+};
 
 typedef uint8_t loom_aie2p_array_dma_flags_t;
 enum loom_aie2p_array_dma_flag_bits_e {
@@ -98,6 +113,8 @@ typedef struct loom_aie2p_array_worker_t {
   uint32_t lane;
   // Core function executed by the worker.
   loom_symbol_ref_t entry;
+  // Source leaf selected for the worker entry during topology extraction.
+  const loom_aie2p_array_leaf_t* leaf;
   // Number of source records folded into one output, or zero when recordwise.
   uint32_t fold_record_count;
   // Callable output port carrying the folded result.
@@ -108,6 +125,8 @@ typedef struct loom_aie2p_array_worker_t {
   loom_combining_kind_t fold_kind;
   // Floating-point permissions applied by the temporal fold.
   uint8_t fold_fast_math_flags;
+  // Number of direct endpoints participating in at least one channel.
+  uint32_t active_endpoint_count;
   // Physical compute tile selected by the authored placement constraint.
   loom_xdna_tile_coordinate_t coordinate;
 } loom_aie2p_array_worker_t;
@@ -124,6 +143,10 @@ typedef struct loom_aie2p_array_endpoint_t {
   uint32_t owner_index;
   // Port ordinal in the owner ABI.
   uint32_t port;
+  // First logical channel using this endpoint, or UINT32_MAX when unused.
+  uint32_t first_channel_index;
+  // Number of logical channels using this endpoint.
+  uint32_t channel_use_count;
   // Matched leaf resource ordinal for a worker endpoint, or UINT32_MAX when
   // its pointer is unused by the leaf. Unused for bindings.
   uint32_t worker_resource_ordinal;
@@ -133,6 +156,9 @@ typedef struct loom_aie2p_array_endpoint_t {
   uint64_t binding_byte_offset;
   // Raw binding endpoint wrapped by this view, or UINT32_MAX when unwrapped.
   uint32_t binding_view_source_endpoint_index;
+  // Records selected from the source by an active binding view, or zero when
+  // this endpoint is direct or unused.
+  uint32_t binding_view_record_count;
   // Selected partition lane, or zero for an unpartitioned binding view.
   uint32_t partition_lane;
   // Number of source partitions, or one for an unpartitioned binding view.
@@ -154,6 +180,9 @@ typedef struct loom_aie2p_array_channel_t {
   // fanout shares producer storage, DMA, and locks. Binding fanout shares the
   // host-facing shim DMA and runtime binding patch.
   uint32_t source_channel_index;
+  // Admitted host-facing binding patch row, or UINT32_MAX for an internal
+  // channel. Ingress binding fanout shares its canonical source row.
+  uint32_t binding_plan_index;
   // First record in channel_slots for this channel's contiguous ring.
   uint32_t first_channel_slot;
   // DMA row serving the sending endpoint, or UINT32_MAX for memory transport.
@@ -162,19 +191,34 @@ typedef struct loom_aie2p_array_channel_t {
   uint32_t capacity;
   // Number of ordered records transferred per activation.
   uint32_t record_count;
-  // Byte length of one statically shaped tile record.
+  // Byte length of one topology-admitted tile record.
   uint32_t record_byte_length;
+  // Transfer-length field value admitted for DMA-backed transports. Neighbor
+  // memory transport does not consume this value.
+  uint32_t encoded_dma_record_length;
   // Physical transport selected by planning.
   loom_aie2p_array_channel_transport_t transport;
+  // Receiver-relative aperture retained for neighbor-memory transport, or NULL.
+  const loom_xdna_address_window_t* neighbor_receiver_window;
+  // Exact physical resources owned after transport and multicast selection.
+  loom_aie2p_array_channel_resource_flags_t resource_flags;
 } loom_aie2p_array_channel_t;
 
 // Declared requirements associated with a worker entry symbol.
-typedef struct loom_aie2p_array_leaf_t {
+struct loom_aie2p_array_leaf_t {
   // Module-local core entry symbol.
   loom_symbol_ref_t entry;
+  // Source core function selected by entry.
+  const loom_op_t* function_op;
+  // Immutable invocation target facts selected at the source boundary.
+  const loom_target_facts_t* function_target_facts;
+  // Optional source memory proofs translated with the resident clone.
+  const loom_low_memory_access_map_t* memory_accesses;
+  // Optional source loop execution facts translated with the resident clone.
+  const loom_low_loop_execution_map_t* loop_execution;
   // Source imports and storage retained before resident worker construction.
   loom_low_function_requirements_t requirements;
-} loom_aie2p_array_leaf_t;
+};
 
 // Contiguous equal-width transfers between an output and private fold state.
 typedef struct loom_aie2p_array_fold_span_t {
@@ -211,12 +255,16 @@ typedef struct loom_aie2p_array_worker_plan_t {
   uint32_t worker_index;
   // Physical compute tile executing the worker.
   loom_xdna_tile_coordinate_t coordinate;
-  // Immutable source requirements used to assign ports and storage.
-  const loom_low_function_requirements_t* requirements;
   // First worker_ports row and worker_resource_ports entry for this worker.
   uint32_t first_port;
+  // First function-local storage placement for this worker.
+  uint32_t first_storage;
+  // First read-only data placement for this worker.
+  uint32_t first_read_only_data;
   // Number of contiguous ports, ordered by their first channel binding.
   uint32_t port_count;
+  // Number of resident ring positions consumed by leaf or generated code.
+  uint32_t resident_state_count;
   // Private ordered-fold state reserved before channel rings are placed.
   loom_aie2p_array_fold_state_plan_t fold_state;
 } loom_aie2p_array_worker_plan_t;
@@ -235,18 +283,35 @@ typedef struct loom_aie2p_array_worker_storage_plan_t {
   uint32_t byte_length;
 } loom_aie2p_array_worker_storage_plan_t;
 
+// Final local-data placement for one worker read-only data requirement.
+typedef struct loom_aie2p_array_read_only_data_plan_t {
+  // Index of the logical worker referencing the data.
+  uint32_t worker_index;
+  // Ordinal in the worker leaf's retained read-only data requirements.
+  uint32_t requirement_ordinal;
+  // Byte offset in the worker tile's local data memory.
+  uint32_t owner_offset;
+  // Worker-visible load address used to relocate symbolic references.
+  uint32_t load_address;
+  // Number of initialized bytes occupying local data memory.
+  uint32_t byte_length;
+} loom_aie2p_array_read_only_data_plan_t;
+
 // Worker ABI port bound to one planned channel ring.
 typedef struct loom_aie2p_array_worker_port_plan_t {
   // Index of the logical worker owning the port.
   uint32_t worker_index;
-  // Leaf resource import index selected by the port.
+  // Worker ABI port index selected by the topology endpoint.
   uint32_t port;
   // Sender or receiver direction of the worker endpoint.
   loom_aie2p_array_endpoint_direction_t direction;
   // Index of the logical channel bound to the port.
   uint32_t channel_index;
-  // First row of the credit/ready lock pair used by the resident worker.
-  uint32_t credit_lock_index;
+  // Worker-visible credit and ready selectors in lock-plan order.
+  uint16_t lock_selectors[2];
+  // Worker-local resident state ordinal carrying the ring position, or
+  // UINT32_MAX when neither the leaf nor generated code consumes its address.
+  uint32_t resident_state_ordinal;
 } loom_aie2p_array_worker_port_plan_t;
 
 // One endpoint's physical view of a channel record.
@@ -297,7 +362,7 @@ typedef struct loom_aie2p_array_dma_plan_t {
   // Physical tile containing the DMA engine.
   loom_xdna_tile_coordinate_t coordinate;
   // Transfer direction relative to local memory.
-  loom_aie2p_array_dma_direction_t direction;
+  loom_xdna_dma_direction_t direction;
   // Direction-local DMA channel ordinal.
   uint8_t dma_channel;
   // Engine placement and lifecycle ownership flags.
@@ -350,11 +415,11 @@ typedef struct loom_aie2p_array_completion_route_t {
 } loom_aie2p_array_completion_route_t;
 
 enum {
-  // AIE2P shim DMA buffer descriptors expose three address dimensions.
-  LOOM_AIE2P_ARRAY_BINDING_DMA_DIMENSION_COUNT = 3,
+  // Memory-tile DMA exposes four dimensions; compute and shim DMA expose three.
+  LOOM_AIE2P_ARRAY_BINDING_DMA_DIMENSION_CAPACITY = 4,
 };
 
-// One innermost-first shim DMA address dimension.
+// One innermost-first DMA address dimension.
 typedef struct loom_aie2p_array_binding_dma_dimension_t {
   // Actual address-generation step in family-native address units.
   uint32_t step_size;
@@ -379,7 +444,8 @@ typedef struct loom_aie2p_array_binding_plan_t {
   uint32_t completion_route_index;
   // Byte offset added to the runtime binding base address.
   uint64_t binding_byte_offset;
-  // Physical byte span reachable from binding_byte_offset.
+  // Physical byte span reachable from binding_byte_offset. Transfer planning
+  // proves that the offset plus this span fits the shim DMA address space.
   uint64_t binding_span_byte_length;
   // Number of bytes transferred by each shim DMA task execution.
   uint32_t transfer_byte_length;
@@ -389,7 +455,7 @@ typedef struct loom_aie2p_array_binding_plan_t {
   uint8_t dma_dimension_count;
   // Innermost-first multidimensional address-generator rows.
   loom_aie2p_array_binding_dma_dimension_t
-      dma_dimensions[LOOM_AIE2P_ARRAY_BINDING_DMA_DIMENSION_COUNT];
+      dma_dimensions[LOOM_AIE2P_ARRAY_BINDING_DMA_DIMENSION_CAPACITY];
 } loom_aie2p_array_binding_plan_t;
 
 // Complete arena-owned logical topology and deterministic NPU2 physical plan.
@@ -408,8 +474,10 @@ typedef struct loom_aie2p_array_plan_t {
   iree_host_size_t group_count;
   // External bindings in source order.
   const loom_aie2p_array_binding_t* bindings;
-  // Number of external bindings.
+  // Number of active external bindings retained by the topology.
   iree_host_size_t binding_count;
+  // Dense external ABI cardinality, including unused binding slots.
+  uint32_t binding_slot_count;
   // Resident workers in source order.
   const loom_aie2p_array_worker_t* workers;
   // Number of resident workers.
@@ -430,6 +498,10 @@ typedef struct loom_aie2p_array_plan_t {
   const loom_aie2p_array_worker_storage_plan_t* worker_storage;
   // Number of function-local worker storage placements.
   iree_host_size_t worker_storage_count;
+  // Worker read-only data placements in worker and requirement order.
+  const loom_aie2p_array_read_only_data_plan_t* read_only_data;
+  // Number of worker read-only data placements.
+  iree_host_size_t read_only_data_count;
   // Worker ABI ports bound to planned channel rings.
   const loom_aie2p_array_worker_port_plan_t* worker_ports;
   // Number of worker ABI port bindings.
@@ -439,6 +511,9 @@ typedef struct loom_aie2p_array_plan_t {
   // from its requirements. It shares the worker_ports allocation; unused
   // topology ports require synchronization but have no resource-map entry.
   const uint32_t* worker_resource_ports;
+  // Worker-local resident state ordinals in folded-output order. Each worker
+  // range starts at first_port and contains fold_output_count entries.
+  const uint32_t* worker_fold_output_states;
   // Logical channel slots with endpoint-local storage views.
   const loom_aie2p_array_channel_slot_t* channel_slots;
   // Number of logical channel slots.

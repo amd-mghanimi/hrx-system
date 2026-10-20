@@ -72,7 +72,11 @@ def generate_contract_fragment_from_lower_rules(
     descriptor_rule_rows = {
         authored_case_index: CompiledDescriptorRule(rule_index=rule_index)
         for authored_case_index, rule_index in lower_rule_indices.items()
-        if table.cases[authored_case_index].system == ContractSystem.DESCRIPTOR_RULE
+        if table.cases[authored_case_index].system
+        in (
+            ContractSystem.DESCRIPTOR_RULE,
+            ContractSystem.DESCRIPTOR_RULE_LOWERING_ONLY,
+        )
     }
     compiled = compile_contract_fragment(
         table,
@@ -197,16 +201,29 @@ def _generate_source(
         descriptor_matrices_value = descriptor_matrices_name
     else:
         descriptor_matrices_value = "NULL"
-    flags_value = "LOOM_TARGET_CONTRACT_FRAGMENT_FLAG_TARGET_QUERY" if table.target_contract_query else "0"
+    source_graph_op_kinds_name = f"k{c_table_prefix}SourceGraphOpKinds"
+    if table.source_graph_op_kinds:
+        lines.append(f"static const loom_op_kind_t {source_graph_op_kinds_name}[] = {{")
+        lines.extend(f"    {op_kind}," for op_kind in table.source_graph_op_kinds)
+        lines.extend(["};", ""])
+        source_graph_op_kinds_value = source_graph_op_kinds_name
+    else:
+        source_graph_op_kinds_value = "NULL"
+    flag_names = []
+    if table.target_contract_query:
+        flag_names.append("LOOM_TARGET_CONTRACT_FRAGMENT_FLAG_TARGET_QUERY")
+    flags_value = " | ".join(flag_names) if flag_names else "0"
 
     lines.extend(
         [
             f"const loom_target_contract_fragment_t {symbol_name} = {{",
-            f"    {flags_value},",
-            f"    {len(table.descriptor_rules)},",
-            f"    {descriptor_rules_value},",
-            f"    {len(table.descriptor_matrices)},",
-            f"    {descriptor_matrices_value},",
+            f"    .flags = {flags_value},",
+            f"    .descriptor_rule_count = {len(table.descriptor_rules)},",
+            f"    .descriptor_matrix_count = {len(table.descriptor_matrices)},",
+            f"    .source_graph_op_kind_count = {len(table.source_graph_op_kinds)},",
+            f"    .descriptor_rules = {descriptor_rules_value},",
+            f"    .descriptor_matrices = {descriptor_matrices_value},",
+            f"    .source_graph_op_kinds = {source_graph_op_kinds_value},",
             "};",
             "",
         ]
@@ -223,6 +240,8 @@ def _validate_c_shard_shape(table: CompiledContractFragment) -> None:
         raise ValueError(f"contract fragment '{table.name}' descriptor-rule count exceeds uint16_t")
     if len(table.descriptor_matrices) > _UINT16_MAX:
         raise ValueError(f"contract fragment '{table.name}' descriptor-matrix count exceeds uint16_t")
+    if len(table.source_graph_op_kinds) > _UINT16_MAX:
+        raise ValueError(f"contract fragment '{table.name}' source-graph op-kind count exceeds uint16_t")
     for op_span in table.op_spans:
         if op_span.op_kind > _UINT16_MAX:
             raise ValueError(f"contract fragment '{table.name}' op '{op_span.op_name}' kind exceeds uint16_t")

@@ -10,6 +10,9 @@ load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
 load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//build_tools/bazel:cc_opts.bzl", "cc_opts")
+
+_CXX_OPTIONS = cc_opts.iree_cxx_standard_options()
 
 IreeWasmJsInfo = provider(
     doc = "JavaScript companion sources for a wasm import module.",
@@ -150,6 +153,8 @@ _WASM32_COMPATIBLE_WITH = ["@platforms//cpu:wasm32"]
 
 def _with_wasm_target_compatibility(kwargs):
     kwargs = dict(kwargs)
+    kwargs["cxxopts"] = _CXX_OPTIONS.cxxopts + kwargs.get("cxxopts", [])
+    kwargs["features"] = _CXX_OPTIONS.features + kwargs.get("features", [])
     kwargs["target_compatible_with"] = kwargs.get("target_compatible_with", []) + _WASM32_COMPATIBLE_WITH
     return kwargs
 
@@ -182,7 +187,8 @@ def collect_and_bundle_wasm(ctx, wasm_binary, main_js, cc_deps, bundler, main_sr
       main_srcs: Local JavaScript imports used by `main_js`.
 
     Returns:
-      The generated JavaScript bundle file.
+      A struct containing the generated JavaScript bundle and its adjacent
+      staged WebAssembly binary.
     """
     transitive_modules = []
     transitive_js_files = []
@@ -205,9 +211,14 @@ def collect_and_bundle_wasm(ctx, wasm_binary, main_js, cc_deps, bundler, main_sr
     )
 
     output_mjs = ctx.actions.declare_file(ctx.label.name + ".mjs")
+    output_wasm = ctx.actions.declare_file(ctx.label.name + ".wasm")
+    ctx.actions.symlink(
+        output = output_wasm,
+        target_file = wasm_binary,
+    )
     arguments = ctx.actions.args()
     arguments.add("--wasm", wasm_binary)
-    arguments.add("--wasm-filename", wasm_binary.basename)
+    arguments.add("--wasm-filename", output_wasm.basename)
     arguments.add("--main", main_js)
     arguments.add("--modules", modules_file)
     arguments.add("--output", output_mjs)
@@ -222,7 +233,10 @@ def collect_and_bundle_wasm(ctx, wasm_binary, main_js, cc_deps, bundler, main_sr
         outputs = [output_mjs],
         progress_message = "Bundling wasm JavaScript companions for %{label}",
     )
-    return output_mjs
+    return struct(
+        binary = output_wasm,
+        main = output_mjs,
+    )
 
 def _iree_wasm_bundle_impl(ctx):
     main_js = ctx.file.main
@@ -234,7 +248,7 @@ def _iree_wasm_bundle_impl(ctx):
         main_js = entry.main
         main_srcs = list(entry.srcs)
 
-    output_mjs = collect_and_bundle_wasm(
+    bundle = collect_and_bundle_wasm(
         ctx = ctx,
         wasm_binary = ctx.file.binary,
         main_js = main_js,
@@ -243,8 +257,8 @@ def _iree_wasm_bundle_impl(ctx):
         main_srcs = main_srcs,
     )
     return [DefaultInfo(
-        files = depset([output_mjs]),
-        runfiles = ctx.runfiles(files = [ctx.file.binary, output_mjs]),
+        files = depset([bundle.main]),
+        runfiles = ctx.runfiles(files = [bundle.binary, bundle.main]),
     )]
 
 _iree_wasm_bundle = rule(

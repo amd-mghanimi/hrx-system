@@ -7,6 +7,7 @@
 load(
     "//loom/build_tools/bazel:build_defs.bzl",
     "loom_cc_library",
+    "loom_cc_test",
     "loom_low_descriptor_cc_library",
 )
 
@@ -26,18 +27,7 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
-        "//loom/src/loom/codegen/low:descriptors",
-    ],
-)
-
-loom_low_descriptor_cc_library(
-    name = "simd128_descriptors",
-    header_only = True,
-    ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
-    visibility = _X86_NATIVE_VISIBILITY,
-    deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -48,7 +38,18 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
+        "//loom/src/loom/codegen/low:descriptors",
+    ],
+)
+
+loom_low_descriptor_cc_library(
+    name = "avx2_features_descriptors",
+    header_only = True,
+    ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
+    visibility = _X86_NATIVE_VISIBILITY,
+    deps = [
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -59,7 +60,7 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -70,7 +71,7 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -81,7 +82,7 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -92,7 +93,18 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
+        "//loom/src/loom/codegen/low:descriptors",
+    ],
+)
+
+loom_low_descriptor_cc_library(
+    name = "avx512_fp16_descriptors",
+    header_only = True,
+    ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
+    visibility = _X86_NATIVE_VISIBILITY,
+    deps = [
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -103,7 +115,7 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -114,7 +126,7 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -125,7 +137,7 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
@@ -136,22 +148,26 @@ loom_low_descriptor_cc_library(
     ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     visibility = _X86_NATIVE_VISIBILITY,
     deps = [
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
     ],
 )
 
 loom_low_descriptor_cc_library(
-    name = "avx512_packed_dot_descriptors",
-    args = ["--target=avx512_packed_dot"],
+    name = "avx512_features_descriptors",
+    args = [
+        "--target=avx512_features",
+        "--shared-strings=$(rootpath //loom/src/loom/target/arch/x86/contracts:instruction_strings.json)",
+    ],
     generated_hdr_flags = [
         "--view-header=scalar",
-        "--view-header=simd128",
         "--view-header=avx2",
+        "--view-header=avx2_features",
         "--view-header=avx512",
         "--view-header=packed_dot",
         "--view-header=avx512_vnni",
         "--view-header=avx512_bf16",
+        "--view-header=avx512_fp16",
         "--view-header=avx_vnni",
         "--view-header=avx_vnni_int8",
         "--view-header=avx_vnni_int16",
@@ -159,21 +175,70 @@ loom_low_descriptor_cc_library(
     ],
     generated_hdrs = [
         "scalar_descriptors.h",
-        "simd128_descriptors.h",
         "avx2_descriptors.h",
+        "avx2_features_descriptors.h",
         "avx512_descriptors.h",
         "packed_dot_descriptors.h",
         "avx512_vnni_descriptors.h",
         "avx512_bf16_descriptors.h",
+        "avx512_fp16_descriptors.h",
         "avx_vnni_descriptors.h",
         "avx_vnni_int8_descriptors.h",
         "avx_vnni_int16_descriptors.h",
         "avx10_2_descriptors.h",
     ],
     generator = "//loom/py/loom/gen/target/arch/x86:low_descriptor_shard",
+    ids_deps = ["//loom/src/loom/codegen/low:descriptors"],
     ids_visibility = _X86_ROOT_VISIBILITY + _X86_NATIVE_VISIBILITY,
+    inputs = ["//loom/src/loom/target/arch/x86/contracts:instruction_strings.json"],
     visibility = _X86_NATIVE_VISIBILITY,
-    deps = ["//loom/src/loom/codegen/low:descriptors"],
+    deps = [
+        "//loom/src/loom/codegen/low:descriptors",
+        "//loom/src/loom/target/arch/x86/contracts:instruction_strings",
+    ],
+)
+
+loom_cc_library(
+    name = "entry",
+    srcs = ["entry.c"],
+    hdrs = ["entry.h"],
+    visibility = _X86_ROOT_VISIBILITY,
+    deps = [
+        ":avx2_descriptors_ids",
+        ":avx2_features_descriptors_ids",
+        ":avx512_descriptors_ids",
+        ":avx512_features_descriptors_ids",
+        ":scalar_descriptors_ids",
+        "//loom/src/loom/codegen/low:descriptors",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "vector_construct",
+    srcs = ["vector_construct.c"],
+    hdrs = ["vector_construct.h"],
+    visibility = ["//loom/src/loom/target/arch/x86/lower:__pkg__"],
+    deps = [
+        ":avx2_descriptors_ids",
+        ":avx2_features_descriptors_ids",
+        ":avx512_descriptors_ids",
+        ":avx512_features_descriptors_ids",
+        "//loom/src/loom/codegen/low:descriptors",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_test(
+    name = "entry_test",
+    srcs = ["entry_test.cc"],
+    deps = [
+        ":entry",
+        ":shards_for_testing",
+        "//loom/src/loom/codegen/low:descriptors",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
 )
 
 loom_cc_library(
@@ -184,16 +249,17 @@ loom_cc_library(
     deps = [
         ":avx10_2_descriptors",
         ":avx2_descriptors",
+        ":avx2_features_descriptors",
         ":avx512_bf16_descriptors",
         ":avx512_descriptors",
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
+        ":avx512_fp16_descriptors",
         ":avx512_vnni_descriptors",
         ":avx_vnni_descriptors",
         ":avx_vnni_int16_descriptors",
         ":avx_vnni_int8_descriptors",
         ":packed_dot_descriptors",
         ":scalar_descriptors",
-        ":simd128_descriptors",
         "//loom/src/loom/codegen/low:descriptors",
         "//loom/src/loom/target:low_descriptor_registry",
         "//loom/src/loom/target:types",
@@ -208,30 +274,32 @@ loom_cc_library(
     hdrs = [
         ":avx10_2_descriptors.h",
         ":avx2_descriptors.h",
+        ":avx2_features_descriptors.h",
         ":avx512_bf16_descriptors.h",
         ":avx512_descriptors.h",
-        ":avx512_packed_dot_descriptors.h",
+        ":avx512_features_descriptors.h",
+        ":avx512_fp16_descriptors.h",
         ":avx512_vnni_descriptors.h",
         ":avx_vnni_descriptors.h",
         ":avx_vnni_int16_descriptors.h",
         ":avx_vnni_int8_descriptors.h",
         ":packed_dot_descriptors.h",
         ":scalar_descriptors.h",
-        ":simd128_descriptors.h",
     ],
     visibility = _X86_ROOT_VISIBILITY,
     deps = [
         ":avx10_2_descriptors",
         ":avx2_descriptors",
+        ":avx2_features_descriptors",
         ":avx512_bf16_descriptors",
         ":avx512_descriptors",
-        ":avx512_packed_dot_descriptors",
+        ":avx512_features_descriptors",
+        ":avx512_fp16_descriptors",
         ":avx512_vnni_descriptors",
         ":avx_vnni_descriptors",
         ":avx_vnni_int16_descriptors",
         ":avx_vnni_int8_descriptors",
         ":packed_dot_descriptors",
         ":scalar_descriptors",
-        ":simd128_descriptors",
     ],
 )

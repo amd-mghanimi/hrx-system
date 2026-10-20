@@ -9,13 +9,26 @@
 
 iree_add_all_subdirs()
 
+iree_cc_library(
+  NAME
+    backend
+  SRCS
+    "backend.cc"
+  DEPS
+    iree::net::carrier::loopback::factory
+    iree::net::cts::transport_backend
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+
 iree_cc_test(
   NAME
     transfer_trial_tests
   SRCS
-    "backend.cc"
     "transfer_trial_test.cc"
   DEPS
+    ::backend
     iree::async::cts::util::platform_backends
     iree::async::cts::util::registry
     iree::async::cts::util::test_main
@@ -29,9 +42,8 @@ iree_cc_test(
 iree_cc_test(
   NAME
     transport_tests
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::net::carrier::loopback::factory
     iree::net::cts::transport_backend
     iree::net::cts::transport_tests
@@ -41,16 +53,26 @@ iree_cc_test(
 iree_cc_binary_benchmark(
   NAME
     transfer_benchmarks
-  SRCS
-    "backend.cc"
   DEPS
+    ::backend
     iree::async::cts::util::benchmark_main
     iree::async::cts::util::platform_backends
     iree::net::carrier::loopback::factory
     iree::net::cts::transfer_benchmarks
     iree::net::cts::transport_backend
     iree::third_party::google_benchmark
+  ARGS
+    "--benchmark_filter=^CheckedTransfer/.*/peers:1/bytes:64/batch:32/window:128/sg:1/records:2048/"
   TESTONLY
+)
+
+iree_cc_test(
+  NAME
+    receive_tests
+  DEPS
+    ::backend
+    iree::net::cts::receive_tests
+    iree::testing::gtest_main
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

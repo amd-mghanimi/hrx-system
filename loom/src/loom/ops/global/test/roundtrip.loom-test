@@ -6,7 +6,7 @@ global.constant @pi : f32 = 3.14159265358979
 // ====
 
 // Typed constant with dynamic dims and predicates.
-global.constant @weights : tile<[%m]x[%k]xf32> where [mul(%m, 16)]
+global.constant @weights : tile<[%m]x[%k]xf32> where [multiple_of(%m, 16)]
 
 // ====
 
@@ -37,6 +37,13 @@ global.rodata.def @loom_sanitizer_sites = align(8) bytes("4c53495401000000")
 
 // Empty read-only artifact payload with natural alignment.
 global.rodata.def @empty_rodata = bytes("")
+
+// ====
+
+// Read-only payload bank conflicts are explicit and reciprocal.
+global.rodata.def @lookup_ab = align(32) conflicts([@lookup_cd]) bytes("00112233")
+
+global.rodata.def @lookup_cd = align(32) conflicts([@lookup_ab]) bytes("44556677")
 
 // ====
 

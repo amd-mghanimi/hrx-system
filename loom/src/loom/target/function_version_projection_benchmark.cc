@@ -91,13 +91,13 @@ static iree_status_t MaterializeTestTargetDefinition(
 }
 
 static const loom_target_profile_type_t kTestProfileType = {
-    /*.name=*/IREE_SVL("function-version-projection-benchmark"),
-    /*.fact_type=*/&loom_test_target_fact_type,
+    .name = IREE_SVL("function-version-projection-benchmark"),
+    .fact_type = &loom_test_target_fact_type,
 };
 
 static const loom_target_provider_t kTestProvider = {
-    /*.profile_type=*/&kTestProfileType,
-    /*.materialize_definition=*/MaterializeTestTargetDefinition,
+    .profile_type = &kTestProfileType,
+    .materialize_definition = MaterializeTestTargetDefinition,
 };
 
 static loom_symbol_ref_t AddSymbol(loom_module_t* module,
@@ -107,7 +107,7 @@ static loom_symbol_ref_t AddSymbol(loom_module_t* module,
       builder, iree_make_cstring_view(name), &name_id));
   loom_symbol_id_t symbol_id = LOOM_SYMBOL_ID_INVALID;
   IREE_CHECK_OK(loom_module_add_symbol(module, name_id, &symbol_id));
-  return {/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+  return {.module_id = 0, .symbol_id = symbol_id};
 }
 
 static loom_func_like_t AddFunction(loom_module_t* module,
@@ -123,8 +123,9 @@ static loom_func_like_t AddFunction(loom_module_t* module,
       loom_symbol_ref_is_valid(target_ref) ? LOOM_FUNC_DEF_BUILD_FLAG_HAS_TARGET
                                            : 0;
   IREE_CHECK_OK(loom_func_def_build(
-      module_builder, build_flags, /*visibility=*/0, /*retain=*/0,
-      /*cc=*/0, /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+      module_builder, build_flags, /*visibility=*/0, /*linkage=*/0,
+      /*retain=*/0,
+      /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
       target_ref, /*abi=*/0, loom_named_attr_slice_empty(),
       /*export_symbol=*/LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(),
       symbol, &value_type, /*arg_types_count=*/1, &value_type,
@@ -191,12 +192,8 @@ class FunctionVersionProjectionFixture {
     }
 
     loom_module_size_hints_t hints = {
-        /*.value_count=*/0,
-        /*.string_count=*/0,
-        /*.type_count=*/0,
-        /*.encoding_count=*/0,
-        /*.symbol_count=*/
-        static_cast<iree_host_size_t>(function_count + context_count),
+        .symbol_count =
+            static_cast<iree_host_size_t>(function_count + context_count),
     };
     IREE_CHECK_OK(loom_module_allocate(
         &context_, IREE_SV("function_version_projection_benchmark"),
@@ -218,8 +215,8 @@ class FunctionVersionProjectionFixture {
             AddSymbol(source_module_, &builder, name);
         authored_target_refs.push_back(symbol);
         const loom_resolved_target_t resolved_target = {
-            /*.provider=*/&kTestProvider,
-            /*.facts=*/&facts_[i],
+            .provider = &kTestProvider,
+            .facts = &facts_[i],
         };
         IREE_CHECK_OK(MaterializeTestTargetDefinition(
             &builder, &resolved_target, symbol, LOOM_LOCATION_UNKNOWN));
@@ -244,29 +241,29 @@ class FunctionVersionProjectionFixture {
         const bool authored_target_is_exact =
             shape == ProjectionShape::kExactAuthoredContexts;
         versions_[i] = loom_target_function_version_t{
-            /*.base=*/
-            {
-                /*.type=*/&loom_target_function_version_type,
-                /*.function=*/functions_[i],
-            },
-            /*.authored_target_name=*/{},
-            /*.target_requirement_facts=*/
-            authored_target_is_exact ? &facts_[context_ordinal] : nullptr,
-            /*.resolved_target=*/
-            {
-                /*.provider=*/&kTestProvider,
-                /*.facts=*/&facts_[context_ordinal],
-            },
-            /*.target_context_ordinal=*/
-            static_cast<loom_target_context_ordinal_t>(context_ordinal),
-            /*.authored_target_is_exact=*/authored_target_is_exact,
-            /*.function_target_facts=*/&facts_[context_ordinal],
+            .base =
+                {
+                    .type = &loom_target_function_version_type,
+                    .function = functions_[i],
+                },
+            .authored_target_name = {},
+            .target_requirement_facts =
+                authored_target_is_exact ? &facts_[context_ordinal] : nullptr,
+            .resolved_target =
+                {
+                    .provider = &kTestProvider,
+                    .facts = &facts_[context_ordinal],
+                },
+            .target_context_ordinal =
+                static_cast<loom_target_context_ordinal_t>(context_ordinal),
+            .authored_target_is_exact = authored_target_is_exact,
+            .function_target_facts = &facts_[context_ordinal],
         };
         version_handles_[i] = &versions_[i].base;
       }
       version_list_ = {
-          /*.values=*/version_handles_.data(),
-          /*.count=*/version_handles_.size(),
+          .values = version_handles_.data(),
+          .count = version_handles_.size(),
       };
     }
 
@@ -301,7 +298,7 @@ class FunctionVersionProjectionFixture {
     loom_module_t* projected_module = nullptr;
     IREE_CHECK_OK(loom_target_function_versions_project_module(
         source_module_, version_list_.count > 0 ? &version_list_ : nullptr,
-        &block_pool_, iree_allocator_system(), &projected_module));
+        &block_pool_, iree_allocator_system(), nullptr, &projected_module));
     if (projected_module == nullptr) {
       std::abort();
     }

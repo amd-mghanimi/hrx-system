@@ -6,6 +6,12 @@ spirv.target<vulkan1_3> @target
 low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @spirv_barriers() asm {
   OpControlBarrier.subgroup.workgroup.acq_rel
   OpControlBarrier.workgroup.workgroup.acq_rel
+  OpControlBarrier.subgroup.global.acquire
+  OpControlBarrier.workgroup.global.acquire
+  OpControlBarrier.subgroup.global.release
+  OpControlBarrier.workgroup.global.release
+  OpControlBarrier.subgroup.global.acq_rel
+  OpControlBarrier.workgroup.global.acq_rel
   return
 }
 
@@ -26,9 +32,18 @@ low.func.def target<spirv.logical.core>(@target) abi(shader_entry_point) @spirv_
      %uint_3 = OpConstant %uint 3
      %uint_2 = OpConstant %uint 2
    %uint_264 = OpConstant %uint 264
+    %uint_66 = OpConstant %uint 66
+    %uint_68 = OpConstant %uint 68
+    %uint_72 = OpConstant %uint 72
 %spirv_barriers = OpFunction %void None %3
           %4 = OpLabel
                OpControlBarrier %uint_3 %uint_2 %uint_264
                OpControlBarrier %uint_2 %uint_2 %uint_264
+               OpControlBarrier %uint_3 %uint_2 %uint_66
+               OpControlBarrier %uint_2 %uint_2 %uint_66
+               OpControlBarrier %uint_3 %uint_2 %uint_68
+               OpControlBarrier %uint_2 %uint_2 %uint_68
+               OpControlBarrier %uint_3 %uint_2 %uint_72
+               OpControlBarrier %uint_2 %uint_2 %uint_72
                OpReturn
                OpFunctionEnd

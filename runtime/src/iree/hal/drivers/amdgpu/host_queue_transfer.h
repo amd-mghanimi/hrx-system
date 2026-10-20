@@ -19,7 +19,8 @@ iree_status_t iree_hal_amdgpu_host_queue_enqueue_transfer(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_host_size_t operation_count,
-    const iree_hal_transfer_operation_t* operations);
+    const iree_hal_transfer_operation_t* operations,
+    const iree_hal_queue_barriers_t* barriers);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -14,7 +14,7 @@ kernel.def target(@fragment_result_dynamic_gfx1100_wave64) @fragment_result_dyna
   %base = index.constant 0 : offset
   %tile_origin = index.constant 0 : index
   %tile_extent = index.constant 16 : index
-  %column_stride = index.assume %column_stride0 [range(%column_stride0, 64, 128), mul(%column_stride0, 64)] : index
+  %column_stride = index.assume %column_stride0 [range(%column_stride0, 64, 128), multiple_of(%column_stride0, 64)] : index
   %m = index.constant 16 : index
   %n = index.constant 16 : index
   %k = index.constant 16 : index

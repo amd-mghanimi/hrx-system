@@ -94,14 +94,14 @@ func.def @dominating_attribute(%width: index, %value: f32) -> (f32) {
 func.def @restored_attribute_scope(%width: index, %condition: i1, %value: f32) {
   test.isolated_region {
     %local = index.constant 4 : index
-    %constrained = test.assume %local [mul(%local, 2)] : index
+    %constrained = test.assume %local [multiple_of(%local, 2)] : index
     test.yield
   }
   scf.if %condition {
     %annotated = test.attrs %value {shape = #test.options<mode = fast, element_type = vector<[%width]xf32>>} : f32
   } else {
   }
-  %constrained = test.assume %width [mul(%width, 2)] : index
+  %constrained = test.assume %width [multiple_of(%width, 2)] : index
   func.return
 }
 
@@ -124,16 +124,16 @@ func.def @join_argument_attribute(%condition: i1, %value: f32) -> (f32) {
 // ====
 
 // Both body-backed and operand-backed signatures define their local arguments.
-func.def @local_signature(%width: index) where [mul(%width, 16)] {
+func.def @local_signature(%width: index) where [multiple_of(%width, 16)] {
   func.return
 }
 
-func.decl @local_declaration(%width: index) where [mul(%width, 16)]
+func.decl @local_declaration(%width: index) where [multiple_of(%width, 16)]
 
 // ====
 
 // Signature predicates can constrain declaration-local result definitions.
-func.decl @result_constraint() -> (%width: index) where [mul(%width, 16)]
+func.decl @result_constraint() -> (%width: index) where [multiple_of(%width, 16)]
 
 // ====
 
@@ -143,7 +143,7 @@ config.decl @maximum_width : %width: index where [range(%width, 1, 131072)]
 // ====
 
 // Global shape placeholders are declaration-local, not undefined body values.
-global.constant @weights : tile<[%rows]x[%columns]xf32> where [mul(%rows, 16), mul(%columns, 8)]
+global.constant @weights : tile<[%rows]x[%columns]xf32> where [multiple_of(%rows, 16), multiple_of(%columns, 8)]
 
 // ====
 

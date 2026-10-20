@@ -92,10 +92,10 @@ static iree_status_t CapturingProfileSinkEndSession(
 }
 
 static const iree_hal_profile_sink_vtable_t kCapturingProfileSinkVTable = {
-    /*.destroy=*/CapturingProfileSinkDestroy,
-    /*.begin_session=*/CapturingProfileSinkBeginSession,
-    /*.write=*/CapturingProfileSinkWrite,
-    /*.end_session=*/CapturingProfileSinkEndSession,
+    .destroy = CapturingProfileSinkDestroy,
+    .begin_session = CapturingProfileSinkBeginSession,
+    .write = CapturingProfileSinkWrite,
+    .end_session = CapturingProfileSinkEndSession,
 };
 
 static void CapturingProfileSinkInitialize(CapturingProfileSink* sink) {
@@ -136,12 +136,8 @@ TEST_F(ProfileEventsTest, MemoryEventsPreserveRecordsAndReportDrops) {
       &streams_, /*event_capacity=*/2, iree_allocator_system()));
   iree_hal_amdgpu_profile_event_streams_clear_memory(&streams_);
 
-  uint64_t session_id = 0;
-  const uint64_t allocation_id =
-      iree_hal_amdgpu_profile_event_streams_allocate_memory_allocation_id(
-          &streams_, /*active_session_id=*/7, &session_id);
-  EXPECT_EQ(7u, session_id);
-  EXPECT_EQ(1u, allocation_id);
+  const uint64_t session_id = 7;
+  const uint64_t allocation_id = 42;
 
   iree_hal_profile_memory_event_t event =
       iree_hal_profile_memory_event_default();

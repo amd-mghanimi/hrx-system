@@ -30,10 +30,14 @@ iree_runtime_cc_library(
     srcs = ["asan_allocation_test.cc"],
     deps = [
         ":sanitizer_test_util",
+        "//runtime/src/iree/async",
         "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/cts/util:pool_test_util",
         "//runtime/src/iree/hal/cts/util:registry",
         "//runtime/src/iree/hal/cts/util:test_base",
+        "//runtime/src/iree/hal/memory:fixed_block_pool",
         "//runtime/src/iree/hal/memory:passthrough_pool",
+        "//runtime/src/iree/hal/memory:tlsf_pool",
     ],
     alwayslink = True,
 )

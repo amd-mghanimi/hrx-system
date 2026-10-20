@@ -33,10 +33,10 @@ class AmdgpuQueueExecutionResourceTest : public CtsTestBase<> {
     family_spec_ = iree_hal_queue_family_spec(queue_family_);
 
     const iree_hal_executable_target_selection_t exact_target_selection = {
-        /*.family=*/IREE_SV("amdgpu"),
-        /*.target_key=*/iree_string_view_empty(),
-        /*.kind_flags=*/IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_EXACT,
-        /*.physical_device_affinity=*/family_spec_->physical_device_affinity,
+        .family = IREE_SV("amdgpu"),
+        .target_key = iree_string_view_empty(),
+        .kind_flags = IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_EXACT,
+        .physical_device_affinity = family_spec_->physical_device_affinity,
     };
     const iree_hal_executable_target_selection_result_t exact_target_result =
         iree_hal_device_spec_select_executable_target(
@@ -89,8 +89,8 @@ iree_status_t AmdgpuQueueExecutionResourceTest::ObserveExecutionUnitIds(
   const iree_hal_buffer_ref_t binding = iree_hal_make_buffer_ref(
       output_buffer, /*offset=*/0, iree_hal_buffer_byte_length(output_buffer));
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/1,
-      /*.values=*/&binding,
+      .count = 1,
+      .values = &binding,
   };
   iree_hal_dispatch_config_t config =
       iree_hal_make_static_dispatch_config(workgroup_count, 1, 1);
@@ -102,7 +102,8 @@ iree_status_t AmdgpuQueueExecutionResourceTest::ObserveExecutionUnitIds(
   IREE_RETURN_IF_ERROR(iree_hal_queue_dispatch(
       queue, iree_hal_semaphore_list_empty(), signal, executable_,
       iree_hal_executable_function_from_index(0), config,
-      iree_const_byte_span_empty(), bindings, IREE_HAL_DISPATCH_FLAG_NONE));
+      iree_const_byte_span_empty(), bindings, /*barriers=*/NULL,
+      IREE_HAL_DISPATCH_FLAG_NONE));
   IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_wait(
       signal, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
 
@@ -182,8 +183,8 @@ TEST_P(AmdgpuQueueExecutionResourceTest,
           : kGfx942MaximumWorkgroupInvocations;
 
   const iree_hal_queue_dispatch_concurrency_params_t concurrency_params = {
-      /*.workgroup_size=*/{workgroup_size, 1, 1},
-      /*.dynamic_workgroup_local_memory=*/0,
+      .workgroup_size = {workgroup_size, 1, 1},
+      .dynamic_workgroup_local_memory = 0,
   };
   iree_hal_queue_dispatch_concurrency_t full_concurrency;
   iree_hal_queue_dispatch_concurrency_t first_concurrency;

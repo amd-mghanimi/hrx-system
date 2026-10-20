@@ -27,13 +27,13 @@ loom_cc_test(
     loom::error::source
     loom::format::location
     loom::import::cxx
-    loom::import::cxx::source::catalog
     loom::import::cxx::source::options
     loom::ir
     loom::ops::func
     loom::ops::func::location_capture
     loom::ops::op_defs
     loom::ops::op_registry
+    loom::target::provider
     loom::testing::test_file
     loom::tooling::input
     loom::tools::loom-check::execute
@@ -65,19 +65,60 @@ iree_c_embed_data(
 if(LOOM_IMPORT_CXX)
 loom_cc_library(
   NAME
+    options
+  HDRS
+    "options.h"
+  SRCS
+    "options.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    iree::base::internal::path
+    loom::binding::c::import::cxx
+    loom::binding::c::loomc
+    loom::tooling::input::format
+    loom::tooling::io::file
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
     input
   HDRS
     "input.h"
   SRCS
     "input.c"
   DEPS
+    ::options
     iree::base
     iree::base::internal::arena
     iree::base::internal::path
+    loom::binding::c::loomc
     loom::import::cxx
     loom::import::cxx::source::options
     loom::tooling::input
     loom::tooling::io::file
+  PUBLIC
+)
+endif()
+
+if(LOOM_IMPORT_CXX)
+loom_cc_library(
+  NAME
+    loomc_input
+  HDRS
+    "loomc_input.h"
+  SRCS
+    "loomc_input.c"
+  DEPS
+    ::options
+    iree::base
+    iree::base::internal::arena
+    loom::binding::c::import::cxx
+    loom::binding::c::loomc
+    loom::tooling::io::source_path
   PUBLIC
 )
 endif()
@@ -96,6 +137,7 @@ iree_execution_test_suite(
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/tooling/check_cases.cxx"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/tooling/check_cases.h"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/tooling/check_library.cxx"
+    "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/tooling/dependency_input.cxx"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/tooling/record_input.loom"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/tooling/record_library.cxx"
     "${PROJECT_SOURCE_DIR}/loom/src/loom/import/cxx/tooling/source_input.cxx"

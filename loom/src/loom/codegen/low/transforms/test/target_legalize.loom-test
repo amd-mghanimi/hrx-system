@@ -80,7 +80,7 @@ func.def target(@test_target) @scalarizes_dynamic_flat_mma_store(%m: index, %n: 
   %40 = index.cmp slt, %38, %mn : index
   cfg.cond_br %40, ^_bb2, ^_bb7
 ^_bb2:
-  %39 = index.assume %38 [lt(%38, %mn)] : index
+  %39 = index.assume %38 [range(%38, 0, 9223372036854775806), lt(%38, %mn)] : index
   %28 = index.constant 0 : index
   %29 = index.constant 1 : index
   cfg.br ^_bb3(%28: index, %init0: f32)
@@ -88,7 +88,7 @@ func.def target(@test_target) @scalarizes_dynamic_flat_mma_store(%m: index, %n: 
   %46 = index.cmp slt, %43, %k : index
   cfg.cond_br %46, ^_bb4, ^_bb5
 ^_bb4:
-  %45 = index.assume %43 [lt(%43, %k)] : index
+  %45 = index.assume %43 [range(%43, 0, 9223372036854775806), lt(%43, %k)] : index
   %37 = scalar.fmaf %lhs0, %rhs0, %44 : f32
   %47 = index.add %45, %29 : index
   cfg.br ^_bb3(%47: index, %37: f32)
@@ -468,6 +468,28 @@ func.def target(@test_target) @scalarizes_vector_shifts_to_structural_lanes(%lhs
 
 test.target<low_core> @test_target
 
+// Fallback linearization seeds from the dominant SSA value even when lane zero
+// differs, retaining a compact splat-and-patch construction.
+func.def target(@test_target) @linearizes_repeated_elements(%fill: i32, %left: i32, %right: i32) -> (vector<8xi32>) {
+  %result = vector.from_elements %left, %fill, %right, %fill, %fill, %fill, %fill, %fill : vector<8xi32>
+  func.return %result : vector<8xi32>
+}
+
+// ----
+test.target<low_core> @test_target
+
+func.def target(@test_target) @linearizes_repeated_elements(%fill: i32, %left: i32, %right: i32) -> (vector<8xi32>) {
+  %5 = vector.splat %fill : vector<8xi32>
+  %6 = vector.insert %left into %5[0] : i32, vector<8xi32>
+  %result = vector.insert %right into %6[2] : i32, vector<8xi32>
+  func.return %result : vector<8xi32>
+}
+
+// ====
+// RUN: pass target-legalize{mode=eager,policy=reference-only},dce
+
+test.target<low_core> @test_target
+
 func.def target(@test_target) @preserves_multidimensional_constructor(%e0: i32, %e1: i32, %e2: i32, %e3: i32) -> (vector<2x2xi32>) {
   %result = vector.from_elements %e0, %e1, %e2, %e3 : vector<2x2xi32>
   func.return %result : vector<2x2xi32>
@@ -547,17 +569,35 @@ func.def target(@test_target) @narrow_signed_operands(%left: i16, %right: i16, %
 test.target<low_core> @test_target
 
 func.def target(@test_target) @narrow_signed_operands(%left: i16, %right: i16, %shift: i16) -> (i16, i16, i16) {
-  %17 = scalar.extsi %left : i16 to i32
-  %18 = scalar.extsi %right : i16 to i32
-  %19 = scalar.divsi %17, %18 : i32
-  %quotient = scalar.trunci %19 : i32 to i16
-  %13 = scalar.extsi %left : i16 to i32
-  %14 = scalar.extsi %right : i16 to i32
-  %15 = scalar.remsi %13, %14 : i32
-  %remainder = scalar.trunci %15 : i32 to i16
-  %9 = scalar.extsi %left : i16 to i32
-  %10 = scalar.extsi %shift : i16 to i32
-  %11 = scalar.shrsi %9, %10 : i32
+  %41 = scalar.extui %left : i16 to i32
+  %42 = scalar.constant 16 : i32
+  %43 = scalar.shli %41, %42 : i32
+  %44 = scalar.shrsi %43, %42 : i32
+  %37 = scalar.extui %right : i16 to i32
+  %38 = scalar.constant 16 : i32
+  %39 = scalar.shli %37, %38 : i32
+  %40 = scalar.shrsi %39, %38 : i32
+  %35 = scalar.divsi %44, %40 : i32
+  %quotient = scalar.trunci %35 : i32 to i16
+  %29 = scalar.extui %left : i16 to i32
+  %30 = scalar.constant 16 : i32
+  %31 = scalar.shli %29, %30 : i32
+  %32 = scalar.shrsi %31, %30 : i32
+  %25 = scalar.extui %right : i16 to i32
+  %26 = scalar.constant 16 : i32
+  %27 = scalar.shli %25, %26 : i32
+  %28 = scalar.shrsi %27, %26 : i32
+  %23 = scalar.remsi %32, %28 : i32
+  %remainder = scalar.trunci %23 : i32 to i16
+  %17 = scalar.extui %left : i16 to i32
+  %18 = scalar.constant 16 : i32
+  %19 = scalar.shli %17, %18 : i32
+  %20 = scalar.shrsi %19, %18 : i32
+  %13 = scalar.extui %shift : i16 to i32
+  %14 = scalar.constant 16 : i32
+  %15 = scalar.shli %13, %14 : i32
+  %16 = scalar.shrsi %15, %14 : i32
+  %11 = scalar.shrsi %20, %16 : i32
   %shifted = scalar.trunci %11 : i32 to i16
   func.return %quotient, %remainder, %shifted : i16, i16, i16
 }
@@ -583,37 +623,43 @@ func.def target(@test_target) @narrow_unsigned_operands(%left: i8, %right: i8, %
 test.target<low_core> @test_target
 
 func.def target(@test_target) @narrow_unsigned_operands(%left: i8, %right: i8, %shift: i8) -> (i8, i8, i8, i8, i8, i8, i8, i8) {
+  %55 = scalar.extui %left : i8 to i32
+  %56 = scalar.extui %right : i8 to i32
+  %57 = scalar.subi %55, %56 : i32
+  %difference = scalar.trunci %57 : i32 to i8
+  %51 = scalar.extui %left : i8 to i32
+  %52 = scalar.extui %right : i8 to i32
+  %53 = scalar.muli %51, %52 : i32
+  %product = scalar.trunci %53 : i32 to i8
   %47 = scalar.extui %left : i8 to i32
   %48 = scalar.extui %right : i8 to i32
-  %49 = scalar.subi %47, %48 : i32
-  %difference = scalar.trunci %49 : i32 to i8
+  %49 = scalar.divui %47, %48 : i32
+  %quotient = scalar.trunci %49 : i32 to i8
   %43 = scalar.extui %left : i8 to i32
   %44 = scalar.extui %right : i8 to i32
-  %45 = scalar.muli %43, %44 : i32
-  %product = scalar.trunci %45 : i32 to i8
+  %45 = scalar.remui %43, %44 : i32
+  %remainder = scalar.trunci %45 : i32 to i8
   %39 = scalar.extui %left : i8 to i32
   %40 = scalar.extui %right : i8 to i32
-  %41 = scalar.divui %39, %40 : i32
-  %quotient = scalar.trunci %41 : i32 to i8
+  %41 = scalar.andi %39, %40 : i32
+  %intersection = scalar.trunci %41 : i32 to i8
   %35 = scalar.extui %left : i8 to i32
   %36 = scalar.extui %right : i8 to i32
-  %37 = scalar.remui %35, %36 : i32
-  %remainder = scalar.trunci %37 : i32 to i8
+  %37 = scalar.ori %35, %36 : i32
+  %union = scalar.trunci %37 : i32 to i8
   %31 = scalar.extui %left : i8 to i32
   %32 = scalar.extui %right : i8 to i32
-  %33 = scalar.andi %31, %32 : i32
-  %intersection = scalar.trunci %33 : i32 to i8
+  %33 = scalar.xori %31, %32 : i32
+  %exclusive = scalar.trunci %33 : i32 to i8
   %27 = scalar.extui %left : i8 to i32
-  %28 = scalar.extui %right : i8 to i32
-  %29 = scalar.ori %27, %28 : i32
-  %union = scalar.trunci %29 : i32 to i8
-  %23 = scalar.extui %left : i8 to i32
-  %24 = scalar.extui %right : i8 to i32
-  %25 = scalar.xori %23, %24 : i32
-  %exclusive = scalar.trunci %25 : i32 to i8
-  %19 = scalar.extsi %left : i8 to i32
-  %20 = scalar.extsi %shift : i8 to i32
-  %21 = scalar.shli %19, %20 : i32
+  %28 = scalar.constant 24 : i32
+  %29 = scalar.shli %27, %28 : i32
+  %30 = scalar.shrsi %29, %28 : i32
+  %23 = scalar.extui %shift : i8 to i32
+  %24 = scalar.constant 24 : i32
+  %25 = scalar.shli %23, %24 : i32
+  %26 = scalar.shrsi %25, %24 : i32
+  %21 = scalar.shli %30, %26 : i32
   %shifted = scalar.trunci %21 : i32 to i8
   func.return %difference, %product, %quotient, %remainder, %intersection, %union, %exclusive, %shifted : i8, i8, i8, i8, i8, i8, i8, i8
 }
@@ -670,7 +716,7 @@ func.def target(@test_target) @integer_vector_multiply_reference(%left: vector<4
 }
 
 // ====
-// RUN: pass target-legalize{mode=eager},canonicalize
+// RUN: pass target-legalize{mode=eager,policy=reference-only},canonicalize
 
 test.target<low_core> @test_target
 
@@ -689,6 +735,142 @@ func.def target(@test_target) @register_lookup_reference(%table: vector<4xi32>, 
   %7 = vector.extract %indices[1] : vector<2xi32> -> i32
   %8 = index.cast %7 : i32 to index
   %9 = vector.extract %table[%8] : vector<4xi32> -> i32
-  %result = vector.from_elements %6, %9 : vector<2xi32>
+  %11 = vector.splat %6 : vector<2xi32>
+  %result = vector.insert %9 into %11[1] : i32, vector<2xi32>
   func.return %result : vector<2xi32>
+}
+
+// ====
+// RUN: pass target-legalize{mode=final},dce,canonicalize
+
+test.target<low_core> @test_target
+
+// An empty reduced dimension contributes no terms, so the supplied vector
+// accumulator is the result.
+func.def target(@test_target) @empty_partial_reduction(%values: vector<0x3xi32>, %init: vector<3xi32>) -> (vector<3xi32>) {
+  %result = vector.reduce.axes<addi> %values, %init axes [0] : vector<0x3xi32>, vector<3xi32>
+  func.return %result : vector<3xi32>
+}
+
+// ----
+test.target<low_core> @test_target
+
+func.def target(@test_target) @empty_partial_reduction(%values: vector<0x3xi32>, %init: vector<3xi32>) -> (vector<3xi32>) {
+  func.return %init : vector<3xi32>
+}
+
+// ====
+// RUN: pass target-legalize{mode=complete},dce
+
+test.target<low_core> @test_target
+
+// Range coordinates retain their narrow modular arithmetic while the target
+// fallback materializes each mask lane and its signed upper-bound comparison.
+func.def target(@test_target) @narrow_range_mask_reference(%lower: i8, %upper: i8, %step: i8) {
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<2xi1>
+  test.use %mask : vector<2xi1>
+  func.return
+}
+
+// ----
+test.target<low_core> @test_target
+
+func.def target(@test_target) @narrow_range_mask_reference(%lower: i8, %upper: i8, %step: i8) {
+  %4 = scalar.constant 0 : i8
+  %33 = scalar.extui %4 : i8 to i32
+  %34 = scalar.extui %step : i8 to i32
+  %35 = scalar.muli %33, %34 : i32
+  %36 = scalar.trunci %35 : i32 to i8
+  %29 = scalar.extui %lower : i8 to i32
+  %30 = scalar.extui %36 : i8 to i32
+  %31 = scalar.addi %29, %30 : i32
+  %32 = scalar.trunci %31 : i32 to i8
+  %26 = scalar.extsi %32 : i8 to i32
+  %27 = scalar.extsi %upper : i8 to i32
+  %28 = scalar.cmpi slt, %26, %27 : i32
+  %8 = scalar.constant 1 : i8
+  %22 = scalar.extui %8 : i8 to i32
+  %23 = scalar.extui %step : i8 to i32
+  %24 = scalar.muli %22, %23 : i32
+  %25 = scalar.trunci %24 : i32 to i8
+  %18 = scalar.extui %lower : i8 to i32
+  %19 = scalar.extui %25 : i8 to i32
+  %20 = scalar.addi %18, %19 : i32
+  %21 = scalar.trunci %20 : i32 to i8
+  %15 = scalar.extsi %21 : i8 to i32
+  %16 = scalar.extsi %upper : i8 to i32
+  %17 = scalar.cmpi slt, %15, %16 : i32
+  %13 = vector.splat %28 : vector<2xi1>
+  %mask = vector.insert %17 into %13[1] : i1, vector<2xi1>
+  test.use %mask : vector<2xi1>
+  func.return
+}
+
+// ====
+// RUN: pass target-legalize{mode=eager,policy=reference-only},dce
+
+test.target<low_core> @test_target
+
+func.def target(@test_target) @index_extrema_reference(%lhs: index, %rhs: index) -> (index, index) {
+  %minimum = index.min %lhs, %rhs : index
+  %maximum = index.max %lhs, %rhs : index
+  func.return %minimum, %maximum : index, index
+}
+
+// ----
+test.target<low_core> @test_target
+
+func.def target(@test_target) @index_extrema_reference(%lhs: index, %rhs: index) -> (index, index) {
+  %8 = index.cmp slt, %lhs, %rhs : index
+  %minimum = scf.select %8, %lhs, %rhs : index
+  %6 = index.cmp sgt, %lhs, %rhs : index
+  %maximum = scf.select %6, %lhs, %rhs : index
+  func.return %minimum, %maximum : index, index
+}
+
+// ====
+// RUN: pass target-legalize{mode=eager},canonicalize,cse
+
+test.target<low_core> @target
+
+// Eager legalization leaves lane programs available for source-level sharing.
+func.def target(@target) @share_before_lane_expansion(%lhs: vector<2xi64>, %rhs: vector<2xi64>) -> (vector<2xi64>, vector<2xi64>) {
+  %first = vector.divsi %lhs, %rhs : vector<2xi64>
+  %second = vector.divsi %lhs, %rhs : vector<2xi64>
+  func.return %first, %second : vector<2xi64>, vector<2xi64>
+}
+
+// ----
+test.target<low_core> @target
+
+func.def target(@target) @share_before_lane_expansion(%lhs: vector<2xi64>, %rhs: vector<2xi64>) -> (vector<2xi64>, vector<2xi64>) {
+  %first = vector.divsi %lhs, %rhs : vector<2xi64>
+  func.return %first, %first : vector<2xi64>, vector<2xi64>
+}
+
+// ====
+// RUN: pass target-legalize{mode=eager},canonicalize,cse,target-legalize{mode=complete},canonicalize,cse
+
+test.target<low_core> @target
+
+// Complete legalization expands the shared program once, retaining both uses.
+func.def target(@target) @expand_shared_lanes(%lhs: vector<2xi64>, %rhs: vector<2xi64>) -> (vector<2xi64>, vector<2xi64>) {
+  %first = vector.divsi %lhs, %rhs : vector<2xi64>
+  %second = vector.divsi %lhs, %rhs : vector<2xi64>
+  func.return %first, %second : vector<2xi64>, vector<2xi64>
+}
+
+// ----
+test.target<low_core> @target
+
+func.def target(@target) @expand_shared_lanes(%lhs: vector<2xi64>, %rhs: vector<2xi64>) -> (vector<2xi64>, vector<2xi64>) {
+  %6 = vector.extract %lhs[0] : vector<2xi64> -> i64
+  %7 = vector.extract %rhs[0] : vector<2xi64> -> i64
+  %8 = scalar.divsi %6, %7 : i64
+  %9 = vector.extract %lhs[1] : vector<2xi64> -> i64
+  %10 = vector.extract %rhs[1] : vector<2xi64> -> i64
+  %11 = scalar.divsi %9, %10 : i64
+  %13 = vector.splat %8 : vector<2xi64>
+  %first = vector.insert %11 into %13[1] : i64, vector<2xi64>
+  func.return %first, %first : vector<2xi64>, vector<2xi64>
 }

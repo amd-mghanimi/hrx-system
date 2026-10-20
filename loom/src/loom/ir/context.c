@@ -51,6 +51,12 @@ void loom_context_deinitialize(loom_context_t* context) {
   memset(context, 0, sizeof(*context));
 }
 
+bool loom_context_is_dialect_registered(const loom_context_t* context,
+                                        uint8_t dialect_id) {
+  return dialect_id < LOOM_DIALECT_BUILTIN_COUNT_ &&
+         context->op_vtables.dialects[dialect_id].entries != NULL;
+}
+
 iree_status_t loom_context_register_dialect(
     loom_context_t* context, uint8_t dialect_id,
     const loom_op_vtable_t* const* vtables, uint16_t op_count) {

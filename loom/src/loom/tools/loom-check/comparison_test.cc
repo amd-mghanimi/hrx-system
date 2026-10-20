@@ -21,9 +21,10 @@ class ComparisonTest : public ::testing::Test {
   iree_status_t Compare(
       const char* checks, const char* actual,
       loom_test_output_flags_t flags = LOOM_TEST_OUTPUT_CHECKS) {
-    loom_test_case_t test_case = {};
-    test_case.output_flags = flags;
-    test_case.expected = iree_make_cstring_view(checks);
+    loom_test_case_t test_case = {
+        .output_flags = flags,
+        .expected = iree_make_cstring_view(checks),
+    };
     IREE_RETURN_IF_ERROR(
         iree_string_builder_append_cstring(&result_.actual_output, actual));
     return loom_check_compare_output(&test_case, iree_allocator_system(),
@@ -80,6 +81,55 @@ TEST_F(ComparisonTest, ForbiddenLineFails) {
 TEST_F(ComparisonTest, EmptyOutputFailsPositiveCheck) {
   IREE_ASSERT_OK(Compare("CHECK: *", ""));
   EXPECT_EQ(result_.raw_outcome, LOOM_CHECK_FAIL);
+}
+
+TEST_F(ComparisonTest, CountChecksMatchTheWholeOutputIndependently) {
+  IREE_ASSERT_OK(
+      Compare("// CHECK-COUNT-2: * = buffer.alloca*\n"
+              "CHECK-COUNT-1: * = other.op\n",
+              "%second = buffer.alloca<local>\n"
+              "%middle = other.op\n"
+              "  %first = buffer.alloca<local>  \n"));
+  EXPECT_EQ(result_.raw_outcome, LOOM_CHECK_PASS);
+}
+
+TEST_F(ComparisonTest, CountChecksRejectMissingMatches) {
+  IREE_ASSERT_OK(Compare("CHECK-COUNT-2: value=*", "value=one\n"));
+  EXPECT_EQ(result_.raw_outcome, LOOM_CHECK_FAIL);
+  EXPECT_THAT(iree_string_builder_buffer(&result_.detail),
+              ::testing::HasSubstr("expected 2 matching lines, found 1"));
+}
+
+TEST_F(ComparisonTest, CountChecksRejectExtraMatches) {
+  IREE_ASSERT_OK(Compare("CHECK-COUNT-1: value=*", "value=one\nvalue=two\n"));
+  EXPECT_EQ(result_.raw_outcome, LOOM_CHECK_FAIL);
+  EXPECT_THAT(iree_string_builder_buffer(&result_.detail),
+              ::testing::HasSubstr("expected 1 matching lines, found 2"));
+}
+
+TEST_F(ComparisonTest, CountChecksRejectEmptyOutput) {
+  IREE_ASSERT_OK(Compare("CHECK-COUNT-1: *", ""));
+  EXPECT_EQ(result_.raw_outcome, LOOM_CHECK_FAIL);
+}
+
+TEST_F(ComparisonTest, MalformedCountsAreErrors) {
+  const char* checks[] = {
+      "CHECK-COUNT-0: value=*",
+      "CHECK-COUNT--1: value=*",
+      "CHECK-COUNT-4294967296: value=*",
+      "CHECK-COUNT-x: value=*",
+      "CHECK-COUNT-+2: value=*",
+      "CHECK-COUNT- 2: value=*",
+      "CHECK-COUNT-2x: value=*",
+      "CHECK-COUNT-4294967297: value=*",
+      "CHECK-COUNT-2 value=*",
+      "// CHECK-COUNT-: value=*",
+      "CHECK-COUNT-1:",
+  };
+  for (const char* check : checks) {
+    SCOPED_TRACE(check);
+    IREE_EXPECT_STATUS_IS(IREE_STATUS_INVALID_ARGUMENT, Compare(check, ""));
+  }
 }
 
 TEST_F(ComparisonTest, MissingPositiveCheckIsAnError) {

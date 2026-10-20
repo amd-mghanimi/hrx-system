@@ -22,14 +22,73 @@
 extern "C" {
 #endif
 
-typedef struct loom_low_lower_u32_divisor_magic_info_t {
+typedef struct loom_low_lower_unsigned_divisor_magic_info_t {
   // Multiplication constant consumed by the unsigned quotient recipe.
-  uint32_t multiplier;
+  uint64_t multiplier;
   // Final logical right shift applied after the high-half multiply.
   uint8_t post_shift;
   // Whether the quotient recipe needs the unsigned add-adjustment step.
   bool is_add;
-} loom_low_lower_u32_divisor_magic_info_t;
+} loom_low_lower_unsigned_divisor_magic_info_t;
+
+// Exact signed constant-divisor recipe for a native-width high multiply.
+typedef struct loom_low_lower_signed_divisor_magic_info_t {
+  // Two's-complement multiplication constant at the selected integer width.
+  uint64_t multiplier;
+  // Final arithmetic right shift applied after the high-half multiply.
+  uint8_t post_shift;
+  // Numerator coefficient added to the high product: -1, 0, or 1.
+  int8_t numerator_factor;
+} loom_low_lower_signed_divisor_magic_info_t;
+
+// Arithmetic shape of an exact signed reciprocal recipe. Adjacent pairs
+// distinguish whether the high product needs an arithmetic post-shift.
+typedef enum loom_low_lower_signed_divisor_magic_kind_e {
+  LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY = 0,
+  LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_SHIFT = 1,
+  LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_ADD = 2,
+  LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_ADD_SHIFT = 3,
+  LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_SUBTRACT = 4,
+  LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_SUBTRACT_SHIFT = 5,
+} loom_low_lower_signed_divisor_magic_kind_t;
+
+// Derives an exact signed constant-divisor recipe using a |bit_width|-bit
+// signed high-half multiply. The width is in [3, 64], and |divisor| must fit
+// that signed width and must not be 0, 1, or -1. With q =
+// signed_high_bit_width(n * multiplier), the quotient is:
+//
+//   q = (q + numerator_factor * n) >> post_shift;
+//   q += logical_shift_right(q, bit_width - 1);
+//
+// All arithmetic before the shifts wraps at |bit_width| bits.
+loom_low_lower_signed_divisor_magic_info_t
+loom_low_lower_signed_divisor_magic_info(int64_t divisor, uint32_t bit_width);
+
+// Returns the arithmetic shape represented by |info|.
+loom_low_lower_signed_divisor_magic_kind_t
+loom_low_lower_signed_divisor_magic_kind(
+    loom_low_lower_signed_divisor_magic_info_t info);
+
+// Derives an exact unsigned constant-divisor recipe using a |bit_width|-bit
+// high-half multiply. The width is in [2, 64]. Divisor is in [2, 2^bit_width -
+// 1] and numerator_maximum is an inclusive bound in [0, 2^bit_width - 1]. The
+// bound restricts the input domain, not the width of the high-half
+// multiplication. With q = high_bit_width(n * multiplier), the quotient is q >>
+// post_shift, or (((n - q) >> 1) + q) >> post_shift when is_add is set. A zero
+// multiplier represents an always-zero quotient. Every input bit participates;
+// the range proof permits a smaller reciprocal without truncating the
+// numerator.
+loom_low_lower_unsigned_divisor_magic_info_t
+loom_low_lower_unsigned_divisor_magic_info(uint64_t divisor, uint32_t bit_width,
+                                           uint64_t numerator_maximum);
+
+// Arithmetic shape of an exact unsigned reciprocal recipe. The multiplier-only
+// form consumes the high product directly without an identity post-shift.
+typedef enum loom_low_lower_unsigned_divisor_magic_kind_e {
+  LOOM_LOW_LOWER_UNSIGNED_DIVISOR_MAGIC_MULTIPLY = 0,
+  LOOM_LOW_LOWER_UNSIGNED_DIVISOR_MAGIC_MULTIPLY_SHIFT = 1,
+  LOOM_LOW_LOWER_UNSIGNED_DIVISOR_MAGIC_MULTIPLY_ADD_SHIFT = 2,
+} loom_low_lower_unsigned_divisor_magic_kind_t;
 
 // Returns ceil(2^64 / divisor), for a divisor in [2, UINT32_MAX]. For a u32
 // numerator n, high64(n * reciprocal) is n / divisor and
@@ -58,6 +117,19 @@ loom_value_id_t loom_low_lower_rule_source_value_from_nodes(
     const loom_module_t* module, const loom_low_lower_rule_set_t* rule_set,
     const loom_op_t* source_op, const loom_op_t* const* source_nodes,
     uint8_t source_node_count, uint16_t value_ref_index);
+
+// Resolves a source-backed value-ref across a selected source graph. Direct
+// operand and result refs always resolve. Fact-derived refs return false when
+// their producer-owned relation is unavailable or does not describe the whole
+// referenced value. |vector_lane_projection| tests whole-value relations using
+// the candidate representation without mutating source IR; an empty projection
+// reads authored types.
+bool loom_low_lower_rule_resolve_source_value_from_nodes(
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_target_contract_vector_lane_projection_t vector_lane_projection,
+    const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
+    const loom_op_t* const* source_nodes, uint8_t source_node_count,
+    uint16_t value_ref_index, loom_value_id_t* out_source_value_id);
 
 // Resolves an operand or result value-ref row to its source SSA value.
 // Generated table indices and value-ref kinds are trusted.
@@ -88,13 +160,35 @@ bool loom_low_lower_rule_float_immediate_facts(
     const loom_module_t* module, const loom_value_fact_table_t* fact_table,
     loom_value_id_t value_id, loom_value_facts_t* out_facts);
 
-// Derives the unsigned 32-bit constant-divisor recipe for an exact source
-// value. Returns false when the value is unavailable or outside [2,
-// UINT32_MAX].
+// Projects the exact declared-width bit pattern of one scalar integer or
+// floating-point value. Address-like and predicate scalars are not payloads.
+// Returns false when the type, width, or retained fact is not exact.
+bool loom_low_lower_rule_value_exact_bits(
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t value_id, uint32_t expected_bit_width, uint64_t* out_bits);
+
+// Returns the inclusive unsigned maximum of a scalar numerator at its native
+// product width. Unknown or sign-crossing facts retain the full unsigned
+// domain.
+uint64_t loom_low_lower_unsigned_numerator_maximum(
+    const loom_value_fact_table_t* fact_table, loom_value_id_t numerator,
+    uint32_t bit_width);
+
+// Derives the unsigned 32-bit recipe from the numerator's retained range and an
+// exact divisor. Returns false when the divisor is unavailable or outside
+// [2, UINT32_MAX].
 bool loom_low_lower_rule_value_facts_u32_divisor_magic_info(
     const loom_module_t* module, const loom_value_fact_table_t* fact_table,
-    loom_value_id_t value_id,
-    loom_low_lower_u32_divisor_magic_info_t* out_info);
+    loom_value_id_t numerator, loom_value_id_t divisor,
+    loom_low_lower_unsigned_divisor_magic_info_t* out_info);
+
+// Derives the signed 32-bit recipe from an exact divisor. Returns false when
+// the divisor is unavailable, outside the signed i32 domain, or equal to
+// zero, one, or negative one.
+bool loom_low_lower_rule_value_facts_i32_divisor_magic_info(
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t divisor,
+    loom_low_lower_signed_divisor_magic_info_t* out_info);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -21,6 +21,15 @@ extern "C" {
 typedef struct loom_low_allocation_storage_lease_index_node_t
     loom_low_allocation_storage_lease_index_node_t;
 
+// Definite lease conflicts represented by an ordered spatial query.
+typedef enum loom_low_allocation_storage_lease_conflict_class_e {
+  // Every temporally overlapping lease blocks the queried unit.
+  LOOM_LOW_ALLOCATION_STORAGE_LEASE_CONFLICT_ALL = 0,
+  // Pressure-releasable leases require the full release predicate; only the
+  // remaining leases are definite conflicts.
+  LOOM_LOW_ALLOCATION_STORAGE_LEASE_CONFLICT_NON_PRESSURE = 1,
+} loom_low_allocation_storage_lease_conflict_class_t;
+
 // Physical-unit and temporal radix indexes over materialized register leases.
 // Construction and endpoint updates belong to allocation. After allocation,
 // the index and its borrowed instances are immutable and support independent
@@ -57,16 +66,10 @@ typedef struct loom_low_allocation_storage_lease_unit_query_t {
   const loom_low_allocation_storage_lease_unit_index_t* index;
   // Optional membership unioned with temporal matches, even outside time.
   const loom_low_allocation_storage_lease_selection_t* selection;
-  // Target-storage identity key shared by aliasing register classes.
-  uint32_t storage_key;
-  // Physical-register or target-ID unit-directory ordinal.
-  uint32_t unit_root_ordinal;
-  // First physical unit in the queried range.
-  uint32_t location_base;
-  // Number of physical units in the queried range.
-  uint32_t location_count;
-  // Next physical unit offset not yet visited.
-  uint32_t next_unit_offset;
+  // Inclusive maximum key in the selected storage/unit directory range.
+  uint64_t maximum_unit_key;
+  // Next materialized physical-unit directory leaf, or UINT32_MAX.
+  uint32_t next_unit_index;
   // Physical unit whose temporal tree is currently being visited.
   uint32_t active_location;
   // Inclusive lower bound on a matching lease's end point.
@@ -95,7 +98,15 @@ iree_status_t loom_low_allocation_storage_lease_unit_index_initialize(
 void loom_low_allocation_storage_lease_unit_index_insert(
     loom_low_allocation_storage_lease_unit_index_t* index,
     const loom_low_descriptor_set_t* descriptor_set,
-    uint32_t storage_lease_index);
+    uint32_t storage_lease_index, loom_low_storage_lease_flags_t lease_flags);
+
+// Reindexes completed instances after a bijective physical renumbering. The
+// set of units and their lease membership are unchanged, so the original
+// node capacity is sufficient. No selections or cursors may exist yet.
+void loom_low_allocation_storage_lease_unit_index_rebuild(
+    loom_low_allocation_storage_lease_unit_index_t* index,
+    const loom_low_descriptor_set_t* descriptor_set,
+    iree_host_size_t lease_count);
 
 // Retains a changed endpoint for a materialized lease. Cursors remain valid
 // while endpoints shorten. Construction is complete before any selection is
@@ -103,6 +114,47 @@ void loom_low_allocation_storage_lease_unit_index_insert(
 void loom_low_allocation_storage_lease_unit_index_update(
     loom_low_allocation_storage_lease_unit_index_t* index,
     uint32_t storage_lease_index);
+
+// Refreshes ordered spatial summaries for every physical unit owned by one
+// lease at |start_point|. The temporal index must already contain the lease.
+// Calls are monotone in |start_point| at the owning allocation boundary.
+// |all_leases_pressure_releasable| is a table-wide mode that remains fixed
+// across refreshes. In that mode the non-pressure directory word instead owns
+// the minimum pressure-lease start, so non-pressure ordered queries are not
+// available and the owning lease state handles them directly.
+void loom_low_allocation_storage_lease_unit_index_refresh_availability(
+    loom_low_allocation_storage_lease_unit_index_t* index,
+    const loom_low_descriptor_set_t* descriptor_set,
+    uint32_t storage_lease_index, uint32_t start_point,
+    bool all_leases_pressure_releasable);
+
+// Returns the earliest start among pressure-releasable leases active in the
+// ordered availability summary, or UINT32_MAX when none are active. Every
+// indexed lease must be pressure-releasable.
+uint32_t
+loom_low_allocation_storage_lease_unit_index_minimum_pressure_start_point(
+    const loom_low_allocation_storage_lease_unit_index_t* index);
+
+// Finds the first location in the inclusive range that is not a definite
+// conflict under |conflict_class| for a candidate ending at
+// |candidate_end_point|. These queries cover one scalar linear storage space;
+// the caller retains candidate-shape and policy eligibility.
+bool loom_low_allocation_storage_lease_unit_index_find_next_available_location(
+    const loom_low_allocation_storage_lease_unit_index_t* index,
+    const loom_low_descriptor_set_t* descriptor_set,
+    uint16_t descriptor_reg_class_id,
+    loom_low_allocation_location_kind_t location_kind,
+    uint32_t candidate_end_point,
+    loom_low_allocation_storage_lease_conflict_class_t conflict_class,
+    uint32_t minimum_base, uint32_t maximum_base, uint32_t* out_base);
+bool loom_low_allocation_storage_lease_unit_index_find_previous_available_location(
+    const loom_low_allocation_storage_lease_unit_index_t* index,
+    const loom_low_descriptor_set_t* descriptor_set,
+    uint16_t descriptor_reg_class_id,
+    loom_low_allocation_location_kind_t location_kind,
+    uint32_t candidate_end_point,
+    loom_low_allocation_storage_lease_conflict_class_t conflict_class,
+    uint32_t minimum_base, uint32_t maximum_base, uint32_t* out_base);
 
 // Returns true when storage exists for physical-unit queries.
 bool loom_low_allocation_storage_lease_unit_index_is_enabled(

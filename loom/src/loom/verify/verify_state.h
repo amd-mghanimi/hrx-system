@@ -8,12 +8,12 @@
 #define LOOM_VERIFY_VERIFY_STATE_H_
 
 #include "iree/base/internal/arena.h"
-#include "loom/analysis/consumption.h"
 #include "loom/error/source.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ops/special_values.h"
 #include "loom/verify/verify.h"
+#include "loom/verify/verify_consumption.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,16 +55,19 @@ typedef struct loom_verify_tied_table_t {
 
   // Number of allocated operand occurrence entries.
   iree_host_size_t operand_field_occurrence_capacity;
-
-  // Sorted scratch copy of valid operand value IDs for the current op.
-  loom_value_id_t* operand_value_ids;
-
-  // Number of entries in operand_value_ids.
-  iree_host_size_t operand_value_count;
-
-  // Number of allocated operand_value_ids entries.
-  iree_host_size_t operand_value_capacity;
 } loom_verify_tied_table_t;
+
+// Reusable sorted value IDs for bounded membership and duplicate queries.
+typedef struct loom_verify_sorted_values_t {
+  // Sorted valid value IDs, including duplicates from the source list.
+  loom_value_id_t* values;
+
+  // Number of active entries in values.
+  iree_host_size_t count;
+
+  // Number of allocated entries in values.
+  iree_host_size_t capacity;
+} loom_verify_sorted_values_t;
 
 // Module-wide canonical type facts gathered before the op walk.
 typedef struct loom_verify_type_summary_t {
@@ -80,8 +83,8 @@ typedef struct loom_verify_region_scope_t {
   // Region currently being verified.
   const loom_region_t* current;
 
-  // Reusable consumed-value query for current.
-  loom_consumption_region_query_t* consumption_query;
+  // Region index retained by the ownership verification analysis.
+  uint32_t index;
 
   // True when observable effects must be explicit command effects.
   bool command_effects_only;
@@ -141,17 +144,11 @@ typedef struct loom_verify_state_t {
     uint8_t scope_minimum_depths[LOOM_VERIFY_MAX_SCOPE_DEPTH];
   } visibility;
 
-  // Bitset indexed by value_id; a set bit means the value was consumed.
-  uint64_t* consumed_bits;
-
-  // Number of uint64_t words in consumed_bits.
-  iree_host_size_t consumed_word_count;
-
-  // First op that consumed each value_id through an ownership transfer.
-  const loom_op_t** consuming_ops;
-
   // Reusable per-op scratch for tied-result uniqueness checks.
   loom_verify_tied_table_t tied_table;
+
+  // Reusable sorted value IDs for per-op membership and duplicate queries.
+  loom_verify_sorted_values_t sorted_values;
 
   // Reusable scratch for operand dictionaries exceeding one bitset word.
   struct {
@@ -164,6 +161,9 @@ typedef struct loom_verify_state_t {
 
   // State inherited through the current nested region traversal.
   loom_verify_region_scope_t region_scope;
+
+  // Arena-owned canonical storage identities and grouped consumption state.
+  loom_verify_consumption_t* consumption;
 
   // Stack of value IDs defined during the current scoped walk.
   uint32_t* defined_stack;
@@ -214,6 +214,25 @@ void loom_verify_record_diagnostic_status(loom_verify_state_t* state,
 iree_status_t loom_verify_take_diagnostic_status(loom_verify_state_t* state);
 iree_status_t loom_verify_pending_diagnostic_status(loom_verify_state_t* state);
 
+// Replaces the reusable sorted values with valid IDs from |values|.
+iree_status_t loom_verify_sorted_values_assign(loom_verify_state_t* state,
+                                               const loom_value_id_t* values,
+                                               iree_host_size_t count);
+
+// Replaces the reusable sorted values with valid IDs from both slices.
+iree_status_t loom_verify_sorted_values_assign_pair(
+    loom_verify_state_t* state, const loom_value_id_t* first_values,
+    iree_host_size_t first_count, const loom_value_id_t* second_values,
+    iree_host_size_t second_count);
+
+// Returns true if the reusable sorted values contain |value_id|.
+bool loom_verify_sorted_values_contains(const loom_verify_state_t* state,
+                                        loom_value_id_t value_id);
+
+// Returns true if the reusable sorted values contain |value_id| twice.
+bool loom_verify_sorted_values_contain_duplicate(
+    const loom_verify_state_t* state, loom_value_id_t value_id);
+
 // Enters a scope, optionally hiding every enclosing definition in O(1).
 iree_status_t loom_verify_push_scope(loom_verify_state_t* state, bool isolated);
 void loom_verify_pop_scope(loom_verify_state_t* state);
@@ -229,10 +248,6 @@ void loom_verify_restore_definitions(loom_verify_state_t* state,
                                      iree_host_size_t watermark);
 iree_status_t loom_verify_define_value(loom_verify_state_t* state,
                                        loom_value_id_t value_id);
-void loom_verify_consume_value(loom_verify_state_t* state,
-                               loom_value_id_t value_id,
-                               const loom_op_t* consuming_op);
-
 bool loom_verify_at_error_limit(const loom_verify_state_t* state);
 const loom_op_vtable_t* loom_verify_lookup_vtable(
     const loom_verify_state_t* state, loom_op_kind_t kind);

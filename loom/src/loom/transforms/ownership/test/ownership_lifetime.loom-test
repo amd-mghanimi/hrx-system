@@ -1,68 +1,68 @@
 // RUN: pass ownership-lifetime
 
 func.def @releases_linear_owned_resource(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  test.resource.borrow %resource : pool<16>
-  test.resource.release %resource : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  test.resource.borrow %resource : pool
+  test.resource.release %resource : pool
   func.return
 }
 
 // ====
 
-func.def @retains_borrowed_argument(%resource: pool<16>) {
-  %retained = test.resource.retain %resource : pool<16> -> pool<16>
-  test.resource.release %retained : pool<16>
+func.def @retains_borrowed_argument(%resource: pool) {
+  %retained = test.resource.retain %resource : pool -> pool
+  test.resource.release %retained : pool
   func.return
 }
 
 // ====
 
 func.def @moves_owned_resource(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  %moved = test.resource.move %resource : pool<16> -> pool<16>
-  test.resource.release %moved : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  %moved = test.resource.move %resource : pool -> pool
+  test.resource.release %moved : pool
   func.return
 }
 
 // ====
 
-func.def @moves_borrowed_resource(%resource: pool<16>) {
-  %moved = test.resource.move %resource : pool<16> -> pool<16>
-  test.resource.borrow %moved : pool<16>
+func.def @moves_borrowed_resource(%resource: pool) {
+  %moved = test.resource.move %resource : pool -> pool
+  test.resource.borrow %moved : pool
   func.return
 }
 
 // ====
 
 func.def @rejects_use_after_move(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  %moved = test.resource.move %resource : pool<16> -> pool<16>
-  // ERROR@+1: DOMINANCE/012 {phase_name="ownership-lifetime", value_name="resource", op_name="test.resource.borrow"}
-  test.resource.borrow %resource : pool<16>
-  test.resource.release %moved : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  %moved = test.resource.move %resource : pool -> pool
+  // ERROR@+1: DOMINANCE/002 {value_name="resource"}
+  test.resource.borrow %resource : pool
+  test.resource.release %moved : pool
   func.return
 }
 
 // ====
 
 func.def @transfers_owned_resource_through_block_arg(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  cfg.br ^join(%resource: pool<16>)
-^join(%carried: pool<16>):
-  test.resource.release %carried : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  cfg.br ^join(%resource: pool)
+^join(%carried: pool):
+  test.resource.release %carried : pool
   func.return
 }
 
 // ====
 
 func.def @balances_release_on_both_branch_paths(%cond: i1, %size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
+  %resource = test.resource.alloc %size : index -> pool
   cfg.cond_br %cond, ^left, ^right
 ^left:
-  test.resource.release %resource : pool<16>
+  test.resource.release %resource : pool
   cfg.br ^join
 ^right:
-  test.resource.release %resource : pool<16>
+  test.resource.release %resource : pool
   cfg.br ^join
 ^join:
   func.return
@@ -71,7 +71,7 @@ func.def @balances_release_on_both_branch_paths(%cond: i1, %size: index) {
 // ====
 
 func.def @rejects_leaked_owned_resource(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
+  %resource = test.resource.alloc %size : index -> pool
   // ERROR@+1: DOMINANCE/014 {phase_name="ownership-lifetime", value_name="resource"}
   func.return
 }
@@ -79,42 +79,42 @@ func.def @rejects_leaked_owned_resource(%size: index) {
 // ====
 
 func.def @rejects_use_after_release(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  test.resource.release %resource : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  test.resource.release %resource : pool
   // ERROR@+1: DOMINANCE/012 {phase_name="ownership-lifetime", value_name="resource", op_name="test.resource.borrow"}
-  test.resource.borrow %resource : pool<16>
+  test.resource.borrow %resource : pool
   func.return
 }
 
 // ====
 
 func.def @rejects_branch_payload_after_release(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  test.resource.release %resource : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  test.resource.release %resource : pool
   // ERROR@+1: DOMINANCE/012 {phase_name="ownership-lifetime", value_name="resource", op_name="cfg.br"}
-  cfg.br ^join(%resource: pool<16>)
-^join(%carried: pool<16>):
+  cfg.br ^join(%resource: pool)
+^join(%carried: pool):
   func.return
 }
 
 // ====
 
-func.decl @external_resource(%resource: pool<16>) -> (pool<16>)
+func.decl @external_resource(%resource: pool) -> (pool)
 
-func.def @rejects_release_of_external_borrowed_result(%resource: pool<16>) {
-  %borrowed = func.call @external_resource(%resource) : (pool<16>) -> (pool<16>)
+func.def @rejects_release_of_external_borrowed_result(%resource: pool) {
+  %borrowed = func.call @external_resource(%resource) : (pool) -> (pool)
   // ERROR@+1: DOMINANCE/013 {phase_name="ownership-lifetime", op_name="test.resource.release", value_name="borrowed", effect_name="release", state_name="borrowed"}
-  test.resource.release %borrowed : pool<16>
+  test.resource.release %borrowed : pool
   func.return
 }
 
 // ====
 
 func.def @rejects_unbalanced_branch_ownership(%cond: i1, %size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
+  %resource = test.resource.alloc %size : index -> pool
   cfg.cond_br %cond, ^left, ^right
 ^left:
-  test.resource.release %resource : pool<16>
+  test.resource.release %resource : pool
   cfg.br ^join
 ^right:
   // ERROR@+1: DOMINANCE/015 {phase_name="ownership-lifetime", value_name="resource", current_state="not-owned", incoming_state="owned"}
@@ -125,68 +125,68 @@ func.def @rejects_unbalanced_branch_ownership(%cond: i1, %size: index) {
 
 // ====
 
-func.def @take_resource(%resource: pool<16>) {
-  test.resource.release %resource : pool<16>
+func.def @take_resource(%resource: pool) {
+  test.resource.release %resource : pool
   func.return
 }
 
 func.def @calls_owned_consumer(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  func.call @take_resource(%resource) : (pool<16>)
+  %resource = test.resource.alloc %size : index -> pool
+  func.call @take_resource(%resource) : (pool)
   func.return
 }
 
 // ====
 
-func.def @take_resource(%resource: pool<16>) {
-  test.resource.release %resource : pool<16>
+func.def @take_resource(%resource: pool) {
+  test.resource.release %resource : pool
   func.return
 }
 
 func.def @rejects_use_after_call_consumes(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  func.call @take_resource(%resource) : (pool<16>)
+  %resource = test.resource.alloc %size : index -> pool
+  func.call @take_resource(%resource) : (pool)
   // ERROR@+1: DOMINANCE/012 {phase_name="ownership-lifetime", value_name="resource", op_name="test.resource.borrow"}
-  test.resource.borrow %resource : pool<16>
+  test.resource.borrow %resource : pool
   func.return
 }
 
 // ====
 
-func.def @make_resource(%size: index) -> (pool<16>) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  func.return %resource : pool<16>
+func.def @make_resource(%size: index) -> (pool) {
+  %resource = test.resource.alloc %size : index -> pool
+  func.return %resource : pool
 }
 
 func.def @calls_owned_producer(%size: index) {
-  %resource = func.call @make_resource(%size) : (index) -> (pool<16>)
-  test.resource.release %resource : pool<16>
+  %resource = func.call @make_resource(%size) : (index) -> (pool)
+  test.resource.release %resource : pool
   func.return
 }
 
 // ====
 
-func.def @borrow_identity(%resource: pool<16>) -> (pool<16>) {
-  func.return %resource : pool<16>
+func.def @borrow_identity(%resource: pool) -> (pool) {
+  func.return %resource : pool
 }
 
 func.def @calls_borrowed_identity(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  %borrowed = func.call @borrow_identity(%resource) : (pool<16>) -> (pool<16>)
-  test.resource.borrow %borrowed : pool<16>
-  test.resource.release %resource : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  %borrowed = func.call @borrow_identity(%resource) : (pool) -> (pool)
+  test.resource.borrow %borrowed : pool
+  test.resource.release %resource : pool
   func.return
 }
 
 // ====
 
-func.decl @external_resource(%resource: pool<16>) -> (pool<16>)
+func.decl @external_resource(%resource: pool) -> (pool)
 
 func.def @external_calls_are_borrowed(%size: index) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  %borrowed = func.call @external_resource(%resource) : (pool<16>) -> (pool<16>)
-  test.resource.borrow %borrowed : pool<16>
-  test.resource.release %resource : pool<16>
+  %resource = test.resource.alloc %size : index -> pool
+  %borrowed = func.call @external_resource(%resource) : (pool) -> (pool)
+  test.resource.borrow %borrowed : pool
+  test.resource.release %resource : pool
   func.return
 }
 
@@ -194,13 +194,105 @@ func.def @external_calls_are_borrowed(%size: index) {
 
 // Ownership summaries consume the direct body exit declared by FuncLike, not
 // a concrete dialect's return operation.
-test.func @make_test_resource(%size: index) -> (pool<16>) {
-  %resource = test.resource.alloc %size : index -> pool<16>
-  test.yield %resource : pool<16>
+test.func @make_test_resource(%size: index) -> (pool) {
+  %resource = test.resource.alloc %size : index -> pool
+  test.yield %resource : pool
 }
 
 test.func @consume_test_resource(%size: index) {
-  %resource = test.invoke @make_test_resource(%size) : (index) -> (pool<16>)
-  test.resource.release %resource : pool<16>
+  %resource = test.invoke @make_test_resource(%size) : (index) -> (pool)
+  test.resource.release %resource : pool
   test.yield
+}
+
+// ====
+
+// Both backedge operands must be read before either destination is rebound.
+func.def @rotates_owned_block_arguments(%size: index, %more: i1) {
+  %first = test.resource.alloc %size : index -> pool
+  %second = test.resource.alloc %size : index -> pool
+  cfg.br ^loop(%first: pool, %second: pool)
+^loop(%left: pool, %right: pool):
+  cfg.cond_br %more, ^rotate, ^done
+^rotate:
+  cfg.br ^loop(%right: pool, %left: pool)
+^done:
+  test.resource.release %left : pool
+  test.resource.release %right : pool
+  func.return
+}
+
+// ====
+
+func.def @retains_owned_block_argument(%size: index, %more: i1) {
+  %initial = test.resource.alloc %size : index -> pool
+  cfg.br ^loop(%initial: pool)
+^loop(%current: pool):
+  cfg.cond_br %more, ^repeat, ^done
+^repeat:
+  cfg.br ^loop(%current: pool)
+^done:
+  test.resource.release %current : pool
+  func.return
+}
+
+// ====
+
+func.def @duplicates_borrowed_block_arguments(%resource: pool) {
+  cfg.br ^join(%resource: pool, %resource: pool)
+^join(%left: pool, %right: pool):
+  test.resource.borrow %resource : pool
+  test.resource.borrow %left : pool
+  test.resource.borrow %right : pool
+  func.return
+}
+
+// ====
+
+func.decl @update_accumulator(%value: f32) -> (f32)
+
+// A constant and a borrowed call result are both available scalar values at
+// the loop header, including the exit before the first body execution.
+func.def @carries_scalar_with_owned_resource(%size: index, %more: i1) -> (f32) {
+  %resource = test.resource.alloc %size : index -> pool
+  %initial = scalar.constant 0.0 : f32
+  cfg.br ^loop(%resource: pool, %initial: f32)
+^loop(%current: pool, %partial: f32):
+  cfg.cond_br %more, ^step, ^done
+^step:
+  %next = func.call @update_accumulator(%partial) : (f32) -> (f32)
+  cfg.br ^loop(%current: pool, %next: f32)
+^done:
+  cfg.br ^exit(%current: pool, %partial: f32)
+^exit(%last: pool, %result: f32):
+  test.resource.release %last : pool
+  func.return %result : f32
+}
+
+// ====
+
+func.def @rejects_duplicate_owned_block_arguments(%size: index) {
+  %resource = test.resource.alloc %size : index -> pool
+  // ERROR@+1: DOMINANCE/012 {phase_name="ownership-lifetime", value_name="resource", op_name="cfg.br"}
+  cfg.br ^join(%resource: pool, %resource: pool)
+^join(%left: pool, %right: pool):
+  test.resource.release %left : pool
+  test.resource.release %right : pool
+  func.return
+}
+
+// ====
+
+func.def @rejects_overwritten_loop_ownership(%size: index, %more: i1) {
+  %initial = test.resource.alloc %size : index -> pool
+  cfg.br ^loop(%initial: pool)
+^loop(%current: pool):
+  cfg.cond_br %more, ^replace, ^done
+^replace:
+  %replacement = test.resource.alloc %size : index -> pool
+  // ERROR@+1: DOMINANCE/014 {phase_name="ownership-lifetime", value_name="current"}
+  cfg.br ^loop(%replacement: pool)
+^done:
+  test.resource.release %current : pool
+  func.return
 }

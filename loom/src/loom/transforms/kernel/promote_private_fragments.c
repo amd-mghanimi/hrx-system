@@ -944,6 +944,7 @@ static iree_status_t loom_private_storage_extend_op(
   loom_op_t* op = *out_op;
   op->instance_flags = source->instance_flags;
   op->traits = source->traits;
+  op->intrinsic_write_spaces = source->intrinsic_write_spaces;
   op->flags |= source->flags & LOOM_OP_SOURCE_PRESENTATION_FLAG_MASK;
   memcpy(loom_op_attrs(op), loom_op_const_attrs(source),
          source->attribute_count * sizeof(loom_attribute_t));
@@ -1266,7 +1267,7 @@ iree_status_t loom_promote_private_fragments_run(loom_pass_t* pass,
               .fn = loom_promote_private_fragments_collect_view,
               .user_data = &collect_context,
           },
-          pass->arena, &walk_result);
+          &walk_result);
     }
 
     loom_promote_private_fragments_context_t context = {

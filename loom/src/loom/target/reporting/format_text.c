@@ -297,6 +297,11 @@ static iree_status_t loom_target_compile_report_append_target_resources_fields(
       limiting_resource.data));
   const loom_target_residency_summary_t* summary =
       &resources->residency_summary;
+  if (iree_any_bit_set(summary->flags,
+                       LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_HAS_REQUIRED_TIER)) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, " residency_required_tier=%" PRIu32, summary->required_tier));
+  }
   if (!loom_target_residency_summary_is_valid(summary)) {
     if (iree_any_bit_set(
             summary->flags,
@@ -317,6 +322,16 @@ static iree_status_t loom_target_compile_report_append_target_resources_fields(
       " residency_best_tier=%" PRIu32 " residency_current_tier=%" PRIu32
       " residency_limiting_resource_count=%" PRIu32,
       summary->best_tier, summary->tier, summary->limiting_resource_count));
+  if (iree_any_bit_set(summary->flags,
+                       LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_HAS_REQUIRED_TIER)) {
+    IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+        builder, " residency_launchable=%s",
+        iree_any_bit_set(
+            summary->flags,
+            LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_REQUIRED_TIER_UNSATISFIED)
+            ? "false"
+            : "true"));
+  }
   if (iree_any_bit_set(
           summary->flags,
           LOOM_TARGET_RESIDENCY_SUMMARY_FLAG_HAS_NEXT_BETTER_TIER)) {
@@ -584,12 +599,14 @@ static iree_status_t loom_target_compile_report_format_summary(
         builder,
         "COMPILE-REPORT: math_legalization rewritten=%" PRIu64
         " rejected=%" PRIu64 " missing_policy=%" PRIu64
-        " missing_recipe=%" PRIu64 " rows=%" PRIhsz "\n",
+        " missing_recipe=%" PRIu64 " rows=%" PRIhsz
+        " maximum_created_ops=%" PRIu64 "\n",
         report->math_legalization_rewritten_op_count,
         report->math_legalization_rejected_op_count,
         report->math_legalization_missing_policy_op_count,
         report->math_legalization_missing_recipe_op_count,
-        report->math_legalization_rows.count));
+        report->math_legalization_rows.count,
+        report->math_legalization_maximum_created_op_count));
   }
 
   if (iree_any_bit_set(report->detail_flags,
@@ -597,9 +614,11 @@ static iree_status_t loom_target_compile_report_format_summary(
     IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
         builder,
         "COMPILE-REPORT: source_low selected_ops=%" PRIu64
-        " emitted_ops=%" PRIu64 " rows=%" PRIhsz "\n",
+        " emitted_ops=%" PRIu64 " rows=%" PRIhsz
+        " unkeyed_maximum_emitted_ops=%u\n",
         report->source_low_selected_op_count,
-        report->source_low_emitted_op_count, report->source_low_rows.count));
+        report->source_low_emitted_op_count, report->source_low_rows.count,
+        report->source_low_unkeyed_maximum_emitted_op_count));
     if (report->source_low_memory_summary.packet_count != 0) {
       const loom_target_compile_report_source_low_memory_summary_t* summary =
           &report->source_low_memory_summary;
@@ -616,7 +635,8 @@ static iree_status_t loom_target_compile_report_format_summary(
           loom_target_compile_report_format_text_source_low_memory_summary(
               summary, &report->workload, builder));
       IREE_RETURN_IF_ERROR(iree_string_builder_append_cstring(builder, "\n"));
-      if (report->bank_service_summary.modeled_packet_count != 0) {
+      if (report->bank_service_summary.modeled_packet_count != 0 ||
+          report->bank_service_summary.unmodeled_packet_count != 0) {
         IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
             builder,
             "COMPILE-REPORT: source_low_bank_service_summary groups=%" PRIhsz,
@@ -646,19 +666,22 @@ static iree_status_t loom_target_compile_report_format_summary(
     IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
         builder,
         "COMPILE-REPORT: target_legalization legal=%" PRIu64
-        " rewritten=%" PRIu64 " target_rewritten=%" PRIu64
-        " reference_rewritten=%" PRIu64 " deferred=%" PRIu64
-        " invalid_ir=%" PRIu64 " unsupported=%" PRIu64 " unhandled=%" PRIu64
-        " rows=%" PRIhsz "\n",
+        " rewritten=%" PRIu64 " scalarized=%" PRIu64
+        " target_rewritten=%" PRIu64 " reference_rewritten=%" PRIu64
+        " deferred=%" PRIu64 " invalid_ir=%" PRIu64 " unsupported=%" PRIu64
+        " unhandled=%" PRIu64 " rows=%" PRIhsz " maximum_created_ops=%" PRIu64
+        "\n",
         report->target_legalization_legal_op_count,
         report->target_legalization_rewritten_op_count,
+        report->target_legalization_scalarized_op_count,
         report->target_legalization_target_rewritten_op_count,
         report->target_legalization_reference_rewritten_op_count,
         report->target_legalization_deferred_op_count,
         report->target_legalization_invalid_ir_op_count,
         report->target_legalization_unsupported_op_count,
         report->target_legalization_unhandled_op_count,
-        report->target_legalization_rows.count));
+        report->target_legalization_rows.count,
+        report->target_legalization_maximum_created_op_count));
   }
 
   if (iree_any_bit_set(report->detail_flags,
@@ -872,7 +895,8 @@ static iree_status_t loom_target_compile_report_format_entry_rows(
           row->wait_counter_row_count, row->wait_reason_summary_row_count,
           row->wait_action_row_count, row->target_capability_row_count,
           row->target_insertion_row_count));
-      if (row->bank_service_summary.modeled_packet_count != 0) {
+      if (row->bank_service_summary.modeled_packet_count != 0 ||
+          row->bank_service_summary.unmodeled_packet_count != 0) {
         IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
             builder,
             "COMPILE-REPORT: entry_bank_service[%" PRIhsz "] function=%.*s",

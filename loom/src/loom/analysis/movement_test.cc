@@ -74,8 +74,8 @@ class MovementTest : public ::testing::Test {
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
     const loom_symbol_ref_t symbol = {
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
     loom_op_t* func_op = nullptr;
     IREE_ASSERT_OK(loom_test_func_build(
@@ -103,8 +103,9 @@ class MovementTest : public ::testing::Test {
         loom_index_constant_result(BuildOffsetConstant(byte_length));
     loom_op_t* op = nullptr;
     IREE_CHECK_OK(loom_buffer_alloca_build(
-        &builder_, LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP, base_alignment,
-        byte_length_value, loom_type_buffer(), LOOM_LOCATION_UNKNOWN, &op));
+        &builder_, /*build_flags=*/0, LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP,
+        LOOM_VALUE_ID_INVALID, base_alignment, byte_length_value,
+        loom_type_buffer(), LOOM_LOCATION_UNKNOWN, &op));
     return loom_buffer_alloca_result(op);
   }
 
@@ -410,7 +411,7 @@ TEST_F(MovementTest, ClassifiesMaskedLoadPolicyAndMask) {
   IREE_ASSERT_OK(loom_vector_load_mask_build(
       &builder_, LOOM_VECTOR_LOAD_MASK_BUILD_FLAG_HAS_CACHE_SCOPE, view,
       nullptr, 0, static_indices, IREE_ARRAYSIZE(static_indices), mask,
-      passthrough, LOOM_CACHE_SCOPE_CU, 0,
+      passthrough, LOOM_CACHE_SCOPE_WORKGROUP, 0,
       VectorType1D(LOOM_SCALAR_TYPE_F32, 4), LOOM_LOCATION_UNKNOWN, &op));
 
   loom_movement_analysis_t analysis = {};
@@ -424,7 +425,7 @@ TEST_F(MovementTest, ClassifiesMaskedLoadPolicyAndMask) {
   EXPECT_EQ(request.mask_value_id, mask);
   EXPECT_EQ(request.cache_policy.build_flags,
             LOOM_VECTOR_MEMORY_CACHE_POLICY_BUILD_FLAG_SCOPE);
-  EXPECT_EQ(request.cache_policy.cache_scope, LOOM_CACHE_SCOPE_CU);
+  EXPECT_EQ(request.cache_policy.cache_scope, LOOM_CACHE_SCOPE_WORKGROUP);
 }
 
 TEST_F(MovementTest, ClassifiesVectorGatherOffsets) {
@@ -496,9 +497,9 @@ TEST_F(MovementTest, ClassifiesAsyncCopyAsBytePreserving) {
       dest_buffer, 64, ViewType1D(LOOM_SCALAR_TYPE_I8, 16, layout));
   loom_op_t* op = nullptr;
   IREE_ASSERT_OK(loom_kernel_async_copy_build(
-      &builder_, source, dest, LOOM_CACHE_SCOPE_CU, LOOM_CACHE_TEMPORAL_REGULAR,
-      LOOM_KERNEL_DIRECTION_GLOBAL_TO_WORKGROUP, KernelAsyncTokenType(),
-      LOOM_LOCATION_UNKNOWN, &op));
+      &builder_, source, dest, LOOM_CACHE_SCOPE_WORKGROUP,
+      LOOM_CACHE_TEMPORAL_REGULAR, LOOM_KERNEL_DIRECTION_GLOBAL_TO_WORKGROUP,
+      KernelAsyncTokenType(), LOOM_LOCATION_UNKNOWN, &op));
 
   loom_movement_analysis_t analysis = {};
   InitializeAnalysis(&analysis);
@@ -506,7 +507,7 @@ TEST_F(MovementTest, ClassifiesAsyncCopyAsBytePreserving) {
   loom_movement_diagnostic_t diagnostic = {};
   ASSERT_TRUE(Describe(&analysis, op, &request, &diagnostic));
   EXPECT_EQ(request.kind, LOOM_MOVEMENT_KIND_KERNEL_ASYNC_COPY);
-  EXPECT_EQ(request.cache_policy.cache_scope, LOOM_CACHE_SCOPE_CU);
+  EXPECT_EQ(request.cache_policy.cache_scope, LOOM_CACHE_SCOPE_WORKGROUP);
   EXPECT_EQ(request.cache_policy.cache_temporal, LOOM_CACHE_TEMPORAL_REGULAR);
   EXPECT_EQ(request.cache_policy.build_flags,
             LOOM_VECTOR_MEMORY_CACHE_POLICY_BUILD_FLAG_SCOPE |
@@ -529,12 +530,13 @@ TEST_F(MovementTest, ClassifiesAsyncGatherAsSubgroupGather) {
   loom_value_id_t predicate = DefinePredicateArg();
   loom_value_id_t layout = BuildDenseLayout();
   loom_value_id_t source = BuildBufferView(
-      source_buffer, 0, ViewType1D(LOOM_SCALAR_TYPE_I8, 4, layout));
+      source_buffer, 0,
+      ViewType2D(LOOM_SCALAR_TYPE_I8, 2, 2, BuildStaticStridedLayout(3, 1)));
   loom_value_id_t dest = BuildBufferView(
       dest_buffer, 128, ViewType2D(LOOM_SCALAR_TYPE_I8, 64, 4, layout));
   loom_op_t* op = nullptr;
   IREE_ASSERT_OK(loom_kernel_async_gather_mask_build(
-      &builder_, source, dest, predicate, LOOM_CACHE_SCOPE_CU,
+      &builder_, source, dest, predicate, LOOM_CACHE_SCOPE_WORKGROUP,
       LOOM_CACHE_TEMPORAL_REGULAR, KernelAsyncTokenType(),
       LOOM_LOCATION_UNKNOWN, &op));
 
@@ -549,7 +551,7 @@ TEST_F(MovementTest, ClassifiesAsyncGatherAsSubgroupGather) {
   EXPECT_TRUE(iree_any_bit_set(request.flags, LOOM_MOVEMENT_REQUEST_ASYNC));
   EXPECT_TRUE(iree_any_bit_set(request.flags, LOOM_MOVEMENT_REQUEST_MASKED));
   EXPECT_EQ(request.mask_value_id, predicate);
-  EXPECT_EQ(request.source.static_byte_length, 4);
+  EXPECT_EQ(request.source.static_byte_length, 5);
   EXPECT_EQ(request.dest.static_begin_byte_offset, 128);
   EXPECT_EQ(request.transferred_byte_count, 4);
 }
@@ -561,14 +563,15 @@ TEST_F(MovementTest, ClassifiesAsyncClusterGatherControlOperands) {
   loom_value_id_t predicate = DefinePredicateArg();
   loom_value_id_t layout = BuildDenseLayout();
   loom_value_id_t source = BuildBufferView(
-      source_buffer, 0, ViewType1D(LOOM_SCALAR_TYPE_I8, 16, layout));
+      source_buffer, 0,
+      ViewType2D(LOOM_SCALAR_TYPE_I32, 2, 2, BuildStaticStridedLayout(3, 1)));
   loom_value_id_t dest = BuildBufferView(
       dest_buffer, 256, ViewType1D(LOOM_SCALAR_TYPE_I8, 16, layout));
   loom_op_t* op = nullptr;
   IREE_ASSERT_OK(loom_kernel_async_cluster_gather_mask_build(
-      &builder_, source, dest, cluster_mask, predicate, LOOM_CACHE_SCOPE_SE,
-      LOOM_CACHE_TEMPORAL_HIGH_TEMPORAL, KernelAsyncTokenType(),
-      LOOM_LOCATION_UNKNOWN, &op));
+      &builder_, source, dest, cluster_mask, predicate,
+      LOOM_CACHE_SCOPE_CLUSTER, LOOM_CACHE_TEMPORAL_HIGH_TEMPORAL,
+      KernelAsyncTokenType(), LOOM_LOCATION_UNKNOWN, &op));
 
   loom_movement_analysis_t analysis = {};
   InitializeAnalysis(&analysis);
@@ -576,7 +579,7 @@ TEST_F(MovementTest, ClassifiesAsyncClusterGatherControlOperands) {
   loom_movement_diagnostic_t diagnostic = {};
   ASSERT_TRUE(Describe(&analysis, op, &request, &diagnostic));
   EXPECT_EQ(request.kind, LOOM_MOVEMENT_KIND_KERNEL_ASYNC_CLUSTER_GATHER_MASK);
-  EXPECT_EQ(request.cache_policy.cache_scope, LOOM_CACHE_SCOPE_SE);
+  EXPECT_EQ(request.cache_policy.cache_scope, LOOM_CACHE_SCOPE_CLUSTER);
   EXPECT_EQ(request.cache_policy.cache_temporal,
             LOOM_CACHE_TEMPORAL_HIGH_TEMPORAL);
   EXPECT_EQ(request.layout_kind, LOOM_MOVEMENT_LAYOUT_CLUSTER_GATHER);
@@ -588,6 +591,8 @@ TEST_F(MovementTest, ClassifiesAsyncClusterGatherControlOperands) {
   EXPECT_EQ(request.cluster_mask_value_id, cluster_mask);
   EXPECT_EQ(request.mask_value_id, predicate);
   EXPECT_EQ(request.transferred_byte_count, 16);
+  EXPECT_EQ(request.source.static_byte_length, 20);
+  EXPECT_EQ(request.dest.static_byte_length, 16);
   EXPECT_EQ(request.dest.static_begin_byte_offset, 256);
 }
 
@@ -598,14 +603,16 @@ TEST_F(MovementTest, ClassifiesAsyncTensorDescriptorsAndDirections) {
   loom_value_id_t descriptor = DefineArg(KernelTensorLdsDescriptorType());
   loom_value_id_t layout = BuildDenseLayout();
   loom_value_id_t source = BuildBufferView(
-      source_buffer, 0, ViewType2D(LOOM_SCALAR_TYPE_F32, 2, 2, layout));
+      source_buffer, 0,
+      ViewType2D(LOOM_SCALAR_TYPE_F32, 2, 2, BuildStaticStridedLayout(4, 1)));
   loom_value_id_t lds = BuildBufferView(
       lds_buffer, 64, ViewType2D(LOOM_SCALAR_TYPE_F32, 2, 2, layout));
   loom_value_id_t dest = BuildBufferView(
-      dest_buffer, 128, ViewType2D(LOOM_SCALAR_TYPE_F32, 2, 2, layout));
+      dest_buffer, 128,
+      ViewType2D(LOOM_SCALAR_TYPE_F32, 2, 2, BuildStaticStridedLayout(5, 1)));
   loom_op_t* load_op = nullptr;
   IREE_ASSERT_OK(loom_kernel_async_tensor_load_to_lds_build(
-      &builder_, source, lds, descriptor, LOOM_CACHE_SCOPE_CU,
+      &builder_, source, lds, descriptor, LOOM_CACHE_SCOPE_WORKGROUP,
       LOOM_CACHE_TEMPORAL_REGULAR, KernelAsyncTokenType(),
       LOOM_LOCATION_UNKNOWN, &load_op));
   loom_op_t* store_op = nullptr;
@@ -626,6 +633,8 @@ TEST_F(MovementTest, ClassifiesAsyncTensorDescriptorsAndDirections) {
       iree_any_bit_set(request.flags, LOOM_MOVEMENT_REQUEST_HAS_DIRECTION));
   EXPECT_EQ(request.direction, LOOM_KERNEL_DIRECTION_GLOBAL_TO_WORKGROUP);
   EXPECT_EQ(request.transferred_byte_count, 16);
+  EXPECT_EQ(request.source.static_byte_length, 24);
+  EXPECT_EQ(request.dest.static_byte_length, 16);
 
   ASSERT_TRUE(Describe(&analysis, store_op, &request, &diagnostic));
   EXPECT_EQ(request.kind,
@@ -636,6 +645,45 @@ TEST_F(MovementTest, ClassifiesAsyncTensorDescriptorsAndDirections) {
       iree_any_bit_set(request.flags, LOOM_MOVEMENT_REQUEST_HAS_DIRECTION));
   EXPECT_EQ(request.direction, LOOM_KERNEL_DIRECTION_WORKGROUP_TO_GLOBAL);
   EXPECT_EQ(request.transferred_byte_count, 16);
+  EXPECT_EQ(request.source.static_byte_length, 16);
+  EXPECT_EQ(request.dest.static_byte_length, 28);
+}
+
+TEST_F(MovementTest, AsyncCopyPayloadExcludesBothEndpointPaddings) {
+  loom_value_id_t source_buffer = DefineBufferArg();
+  loom_value_id_t dest_buffer = DefineBufferArg();
+  loom_value_id_t predicate = DefinePredicateArg();
+  loom_value_id_t source = BuildBufferView(
+      source_buffer, 0,
+      ViewType2D(LOOM_SCALAR_TYPE_I32, 2, 4, BuildStaticStridedLayout(8, 1)));
+  loom_value_id_t dest = BuildBufferView(
+      dest_buffer, 64,
+      ViewType2D(LOOM_SCALAR_TYPE_F32, 2, 4, BuildStaticStridedLayout(6, 1)));
+  loom_op_t* copy = nullptr;
+  IREE_ASSERT_OK(loom_kernel_async_copy_build(
+      &builder_, source, dest, LOOM_CACHE_SCOPE_WORKGROUP,
+      LOOM_CACHE_TEMPORAL_REGULAR, LOOM_KERNEL_DIRECTION_GLOBAL_TO_WORKGROUP,
+      KernelAsyncTokenType(), LOOM_LOCATION_UNKNOWN, &copy));
+  loom_op_t* masked_copy = nullptr;
+  IREE_ASSERT_OK(loom_kernel_async_copy_mask_build(
+      &builder_, dest, source, predicate, LOOM_CACHE_SCOPE_WORKGROUP,
+      LOOM_CACHE_TEMPORAL_REGULAR, LOOM_KERNEL_DIRECTION_WORKGROUP_TO_GLOBAL,
+      KernelAsyncTokenType(), LOOM_LOCATION_UNKNOWN, &masked_copy));
+
+  loom_movement_analysis_t analysis = {};
+  InitializeAnalysis(&analysis);
+  loom_movement_request_t request = {};
+  loom_movement_diagnostic_t diagnostic = {};
+  ASSERT_TRUE(Describe(&analysis, copy, &request, &diagnostic));
+  EXPECT_EQ(request.transferred_byte_count, 32);
+  EXPECT_EQ(request.source.static_byte_length, 48);
+  EXPECT_EQ(request.dest.static_byte_length, 40);
+  EXPECT_EQ(request.dest.static_begin_byte_offset, 64);
+  ASSERT_TRUE(Describe(&analysis, masked_copy, &request, &diagnostic));
+  EXPECT_EQ(request.transferred_byte_count, 32);
+  EXPECT_EQ(request.source.static_byte_length, 40);
+  EXPECT_EQ(request.dest.static_byte_length, 48);
+  EXPECT_EQ(request.mask_value_id, predicate);
 }
 
 TEST_F(MovementTest, ReportsUnsupportedOpsWithoutFailingAnalysis) {

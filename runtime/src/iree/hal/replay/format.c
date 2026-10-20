@@ -6,6 +6,24 @@
 
 #include "iree/hal/replay/format.h"
 
+IREE_API_EXPORT bool iree_hal_replay_operation_has_queue_barriers(
+    iree_hal_replay_operation_code_t operation_code) {
+  switch (operation_code) {
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_BARRIER:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_DISPATCH:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_TRANSFER:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_READ:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_WRITE:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_ATOMIC_WAIT:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_ATOMIC_STORE:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_ATOMIC_RMW:
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_TIMESTAMP:
+      return true;
+    default:
+      return false;
+  }
+}
+
 IREE_API_EXPORT const char* iree_hal_replay_file_record_type_string(
     iree_hal_replay_file_record_type_t record_type) {
   switch (record_type) {
@@ -55,6 +73,8 @@ IREE_API_EXPORT const char* iree_hal_replay_object_type_string(
       return "host_call";
     case IREE_HAL_REPLAY_OBJECT_TYPE_QUEUE:
       return "queue";
+    case IREE_HAL_REPLAY_OBJECT_TYPE_BUFFER_MAPPING:
+      return "buffer_mapping";
     default:
       return "unknown";
   }
@@ -85,8 +105,6 @@ IREE_API_EXPORT const char* iree_hal_replay_operation_code_string(
       return "device.import_file";
     case IREE_HAL_REPLAY_OPERATION_CODE_DEVICE_CREATE_SEMAPHORE:
       return "device.create_semaphore";
-    case IREE_HAL_REPLAY_OPERATION_CODE_DEVICE_QUERY_QUEUE_POOL_BACKEND:
-      return "device.query_queue_pool_backend";
     case IREE_HAL_REPLAY_OPERATION_CODE_DEVICE_ACQUIRE_QUEUE:
       return "device.acquire_queue";
     case IREE_HAL_REPLAY_OPERATION_CODE_DEVICE_PROFILING_BEGIN:
@@ -95,14 +113,8 @@ IREE_API_EXPORT const char* iree_hal_replay_operation_code_string(
       return "device.profiling_flush";
     case IREE_HAL_REPLAY_OPERATION_CODE_DEVICE_PROFILING_END:
       return "device.profiling_end";
-    case IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_TRIM:
-      return "allocator.trim";
     case IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_QUERY_MEMORY_HEAPS:
       return "allocator.query_memory_heaps";
-    case IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_ALLOCATE_BUFFER:
-      return "allocator.allocate_buffer";
-    case IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_IMPORT_BUFFER:
-      return "allocator.import_buffer";
     case IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_VIRTUAL_MEMORY_QUERY_GRANULARITY:
       return "allocator.virtual_memory_query_granularity";
     case IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_VIRTUAL_MEMORY_RESERVE:
@@ -121,6 +133,18 @@ IREE_API_EXPORT const char* iree_hal_replay_operation_code_string(
       return "allocator.virtual_memory_protect";
     case IREE_HAL_REPLAY_OPERATION_CODE_ALLOCATOR_VIRTUAL_MEMORY_ADVISE:
       return "allocator.virtual_memory_advise";
+    case IREE_HAL_REPLAY_OPERATION_CODE_VIRTUAL_BUFFER_CREATE:
+      return "virtual_buffer.create";
+    case IREE_HAL_REPLAY_OPERATION_CODE_VIRTUAL_BUFFER_DETACH:
+      return "virtual_buffer.detach";
+    case IREE_HAL_REPLAY_OPERATION_CODE_POOL_CREATE_SLAB:
+      return "pool.create_slab";
+    case IREE_HAL_REPLAY_OPERATION_CODE_POOL_TRIM:
+      return "pool.trim";
+    case IREE_HAL_REPLAY_OPERATION_CODE_POOL_ALLOCATE_BUFFER:
+      return "pool.allocate_buffer";
+    case IREE_HAL_REPLAY_OPERATION_CODE_POOL_IMPORT_BUFFER:
+      return "pool.import_buffer";
     case IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_MAP_RANGE:
       return "buffer.map_range";
     case IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_UNMAP_RANGE:
@@ -171,6 +195,8 @@ IREE_API_EXPORT const char* iree_hal_replay_operation_code_string(
       return "queue.read";
     case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_WRITE:
       return "queue.write";
+    case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_MAP:
+      return "queue.map";
     case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_ALLOCA:
       return "queue.alloca";
     case IREE_HAL_REPLAY_OPERATION_CODE_QUEUE_DEALLOCA:
@@ -205,10 +231,6 @@ IREE_API_EXPORT const char* iree_hal_replay_payload_type_string(
       return "none";
     case IREE_HAL_REPLAY_PAYLOAD_TYPE_BUFFER_OBJECT:
       return "buffer_object";
-    case IREE_HAL_REPLAY_PAYLOAD_TYPE_ALLOCATOR_ALLOCATE_BUFFER:
-      return "allocator_allocate_buffer";
-    case IREE_HAL_REPLAY_PAYLOAD_TYPE_ALLOCATOR_IMPORT_BUFFER:
-      return "allocator_import_buffer";
     case IREE_HAL_REPLAY_PAYLOAD_TYPE_REPLAY_SCOPE:
       return "replay_scope";
     case IREE_HAL_REPLAY_PAYLOAD_TYPE_BUFFER_RANGE:
@@ -241,6 +263,20 @@ IREE_API_EXPORT const char* iree_hal_replay_payload_type_string(
       return "provisioned_queue_object";
     case IREE_HAL_REPLAY_PAYLOAD_TYPE_DYNAMIC_QUEUE_OBJECT:
       return "dynamic_queue_object";
+    case IREE_HAL_REPLAY_PAYLOAD_TYPE_VIRTUAL_BUFFER_DETACH:
+      return "virtual_buffer_detach";
+    case IREE_HAL_REPLAY_PAYLOAD_TYPE_VIRTUAL_BUFFER_CREATE:
+      return "virtual_buffer_create";
+    case IREE_HAL_REPLAY_PAYLOAD_TYPE_QUEUE_MAP:
+      return "queue_map";
+    case IREE_HAL_REPLAY_PAYLOAD_TYPE_POOL_CREATE_SLAB:
+      return "pool_create_slab";
+    case IREE_HAL_REPLAY_PAYLOAD_TYPE_POOL_TRIM:
+      return "pool_trim";
+    case IREE_HAL_REPLAY_PAYLOAD_TYPE_POOL_ALLOCATE_BUFFER:
+      return "pool_allocate_buffer";
+    case IREE_HAL_REPLAY_PAYLOAD_TYPE_POOL_IMPORT_BUFFER:
+      return "pool_import_buffer";
     case IREE_HAL_REPLAY_PAYLOAD_TYPE_QUEUE_TRANSFER:
       return "queue_transfer";
     case IREE_HAL_REPLAY_PAYLOAD_TYPE_QUEUE_READ:

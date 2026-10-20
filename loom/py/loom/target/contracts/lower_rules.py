@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from loom.dsl import ATTR_TYPE_ENUM, Op
+from loom.target.contracts.descriptors import _require_immediate
 from loom.target.contracts.diagnostics import (
     DiagnosticParam,
     DiagnosticParamKind,
@@ -25,14 +26,18 @@ from loom.target.contracts.emits import (
     EmitDescriptorOp,
     EmitRegisterConcat,
     EmitRegisterCopy,
+    EmitRegisterMove,
     EmitRegisterSlice,
     ResultTypeBinding,
 )
 from loom.target.contracts.fragments import ContractFragment
-from loom.target.contracts.guards import Guard, GuardKind
+from loom.target.contracts.guards import Guard, GuardKind, is_source_attr_guard_kind
 from loom.target.contracts.immediates import (
     AttrProject,
     AttrProjectKind,
+    OperandSegmentProject,
+    OperandSegmentProjectKind,
+    ReadOnlyDataLiteral,
     SourceMemoryProject,
     SourceOpProject,
     ValueProject,
@@ -64,32 +69,38 @@ from loom.target.contracts.lower_rule_diagnostics import (
     _bounded_integer_diagnostic,
     _descriptor_available_diagnostic,
     _enum_attr_diagnostic,
+    _enum_attr_set_diagnostic,
     _exact_float_diagnostic,
+    _exact_float_type_diagnostic,
     _exact_integer_diagnostic,
+    _exact_power_of_two_float_diagnostic,
     _exact_power_of_two_integer_diagnostic,
     _float_equals_diagnostic,
     _guard_diagnostic,
+    _i32_divisor_magic_kind_diagnostic,
     _i64_array_count_diagnostic,
     _i64_array_element_range_diagnostic,
     _i64_array_elements_range_diagnostic,
     _i64_attr_range_diagnostic,
+    _i64_attrs_sum_diagnostic,
     _instance_flags_diagnostic,
     _integer_range_diagnostic,
     _integer_range_relation_diagnostic,
     _materializer_diagnostic,
     _named_constraint_diagnostic,
+    _not_nan_diagnostic,
+    _not_subnormal_or_flag_diagnostic,
     _operand_segment_count_diagnostic,
     _register_class_diagnostic,
     _register_unit_count_diagnostic,
     _register_unit_count_exact_diagnostic,
-    _source_memory_address_diagnostic,
-    _source_memory_address_layout_diagnostic,
-    _source_memory_diagnostic,
-    _source_memory_dynamic_offset_diagnostic,
+    _source_memory_diagnostics,
     _static_dim0_multiple_diagnostic,
     _static_element_count_relation_diagnostic,
     _storage_element_format_diagnostic,
-    _u32_divisor_magic_is_add_diagnostic,
+    _storage_operand_schema_diagnostic,
+    _u32_divisor_magic_kind_diagnostic,
+    _value_no_uses_after_diagnostic,
     _value_no_uses_diagnostic,
     _value_type_diagnostic,
 )
@@ -104,8 +115,10 @@ from loom.target.contracts.lower_rule_tables import (
     LOWER_EMIT_FLAG_RESULT_TYPE_PATTERN,
     LOWER_EMIT_FLAG_SWAP_OPERANDS_0_1,
     LOWER_RULE_FLAG_CONTRACT_ONLY,
+    LOWER_RULE_FLAG_NONLOCAL_SOURCE_GRAPH,
     LOWER_RULE_FLAG_ORDINAL_VALUE_ALIAS,
     LOWER_RULE_PRIMARY_EMIT_NONE,
+    LOWER_RULE_PRIORITY_SHIFT,
     LOWER_SOURCE_MEMORY_NONE,
     CompiledLowerRuleSet,
     LowerAttrCopy,
@@ -126,24 +139,156 @@ from loom.target.contracts.lower_rule_tables import (
     _build_spans,
     _intern_program_rows,
     _op_kind_key,
+    _op_kind_value,
 )
 from loom.target.contracts.patterns import TypePattern
 from loom.target.contracts.rules import (
     DescriptorRule,
     OrdinalValueAliasRule,
     RecipeRule,
+    SourceNodeRelation,
+    UnsupportedRule,
     ValueAliasRule,
     ValueElideRule,
     contract_case_priority,
 )
 from loom.target.contracts.source import ValueRef
 from loom.target.contracts.source_memory import (
-    SourceMemoryAddressLayout,
     SourceMemoryAddressMaterializer,
     SourceMemoryByteOffsetMaterializer,
     SourceMemoryConstraint,
 )
-from loom.target.low_descriptors import EffectKind
+from loom.target.contracts.temporary_allocation import allocate_temporary_slots
+from loom.target.low_descriptors import ConstraintKind, Descriptor, ImmediateKind
+
+
+def _lower_literal_immediate(
+    descriptor: Descriptor, target_name: str, value: int
+) -> int:
+    """Converts a validated immediate literal to generated int64_t storage."""
+
+    immediate = _require_immediate(descriptor, target_name, "literal immediate")
+    if immediate.kind is ImmediateKind.UNSIGNED and value > (1 << 63) - 1:
+        # Low attributes and generated rule rows store immediate payloads in
+        # int64_t. Full-width unsigned immediates preserve the same bits using
+        # the signed two's-complement representation consumed by C verification.
+        return value - (1 << 64)
+    return value
+
+
+def _emit_operand_value_refs(emit: ContractEmit) -> tuple[ValueRef, ...]:
+    if isinstance(emit, EmitDescriptorOp):
+        return tuple(emit.operands.values())
+    if isinstance(emit, EmitRegisterConcat):
+        return emit.sources
+    return (emit.source,)
+
+
+def _rule_value_aliases(rule: DescriptorRule) -> dict[ValueRef, ValueRef]:
+    aliases: dict[ValueRef, ValueRef] = {}
+    for source_node in rule.source_nodes:
+        parent_value = replace(
+            source_node.parent_value,
+            source_node=source_node.parent,
+            materializer=None,
+        )
+        node_value = replace(
+            source_node.node_value,
+            source_node=source_node.name,
+            materializer=None,
+        )
+        identity = aliases.get(parent_value, parent_value)
+        aliases[parent_value] = identity
+        aliases[node_value] = identity
+    return aliases
+
+
+def _rule_value_identity(
+    value_ref: ValueRef,
+    aliases: Mapping[ValueRef, ValueRef],
+) -> ValueRef:
+    """Returns the conservative register identity behind a rule value ref.
+
+    A materializer may return its source register instead of creating a fresh
+    value, so its result cannot establish a distinct identity. Source-node
+    joins name the same SSA value from two operations and canonicalize through
+    the alias map.
+    """
+
+    direct_value = replace(value_ref, materializer=None)
+    return aliases.get(direct_value, direct_value)
+
+
+def _last_use_guarded_value_identities(
+    rule: DescriptorRule,
+    aliases: Mapping[ValueRef, ValueRef],
+) -> set[ValueRef]:
+    guarded_values = set[ValueRef]()
+    guard_groups = (
+        ("", rule.source_op, rule.guards),
+        *(
+            (source_node.name, source_node.source_op, source_node.guards)
+            for source_node in rule.source_nodes
+        ),
+    )
+    for source_node, source_op, guards in guard_groups:
+        for guard in guards:
+            if guard.kind is not GuardKind.VALUE_NO_USES_AFTER:
+                continue
+            value_ref = replace(
+                _value_ref_for_source_field(source_op, guard.field),
+                source_node=source_node,
+            )
+            guarded_values.add(_rule_value_identity(value_ref, aliases))
+    return guarded_values
+
+
+def _transferred_descriptor_fields_by_emit(
+    rule: DescriptorRule,
+) -> tuple[frozenset[str], ...]:
+    """Finds destructive operands whose identities die at their emit.
+
+    Reverse liveness proves a temporary's final operand use directly. A source
+    identity additionally needs a value-no-uses-after guard, which extends that
+    proof beyond the replacement program. Multiple same-emit uses remain live
+    through the destructive operation and therefore keep their protective copy.
+    """
+
+    aliases = _rule_value_aliases(rule)
+    guarded_values = _last_use_guarded_value_identities(rule, aliases)
+    later_operand_uses = set[ValueRef]()
+    transferred_fields = [frozenset[str]() for _ in rule.emit]
+    for emit_index in range(len(rule.emit) - 1, -1, -1):
+        emit = rule.emit[emit_index]
+        operand_values = _emit_operand_value_refs(emit)
+        operand_identities = tuple(
+            _rule_value_identity(value_ref, aliases) for value_ref in operand_values
+        )
+        if isinstance(emit, EmitDescriptorOp):
+            destructive_fields = {
+                emit.descriptor.operands[constraint.rhs_operand_index].field_name
+                for constraint in emit.descriptor.constraints
+                if constraint.kind is ConstraintKind.DESTRUCTIVE
+                and constraint.rhs_operand_index is not None
+            }
+            identity_counts: dict[ValueRef, int] = {}
+            for identity in operand_identities:
+                identity_counts[identity] = identity_counts.get(identity, 0) + 1
+            direct_fields = set[str]()
+            for descriptor_field, value_ref in emit.operands.items():
+                if descriptor_field not in destructive_fields:
+                    continue
+                identity = _rule_value_identity(value_ref, aliases)
+                if identity in later_operand_uses or identity_counts[identity] != 1:
+                    continue
+                if value_ref.kind is SourceValueKind.TEMPORARY or (
+                    value_ref.kind in (SourceValueKind.OPERAND, SourceValueKind.RESULT)
+                    and identity in guarded_values
+                ):
+                    direct_fields.add(descriptor_field)
+            transferred_fields[emit_index] = frozenset(direct_fields)
+        later_operand_uses.update(operand_identities)
+    return tuple(transferred_fields)
 
 
 def compile_lower_rule_set(
@@ -175,9 +320,16 @@ class _LowerRuleSetCompiler:
         self._tied_results: list[LowerTiedResult] = []
         self._emits: list[LowerEmit] = []
         self._diagnostics: list[LowerDiagnostic] = []
+        self._literal_data = bytearray()
+        self._literal_data_offsets: dict[bytes, int] = {}
         self._authored_case_indices: list[int] = []
         self._type_pattern_ordinals: dict[TypePattern, int] = {}
         self._diagnostic_ordinals: dict[LowerDiagnostic, int] = {}
+        self._value_ref_sequence_starts: dict[tuple[LowerValueRef, ...], int] = {(): 0}
+        self._attr_copy_sequence_starts: dict[tuple[LowerAttrCopy, ...], int] = {(): 0}
+        self._tied_result_sequence_starts: dict[tuple[LowerTiedResult, ...], int] = {
+            (): 0
+        }
         self._register_class_ordinals = {
             reg_class.name: index
             for index, reg_class in enumerate(table.descriptor_set.reg_classes)
@@ -223,6 +375,8 @@ class _LowerRuleSetCompiler:
                 self._append_elide_rule(authored_case_index, contract_case)
             elif isinstance(contract_case, RecipeRule):
                 self._append_recipe_rule(authored_case_index, contract_case)
+            elif isinstance(contract_case, UnsupportedRule):
+                continue
 
         guard_ranges = [(rule.guard_start, rule.guard_count) for rule in self._rules]
         guard_ranges.extend(
@@ -252,7 +406,29 @@ class _LowerRuleSetCompiler:
             )
             for index, source_node in enumerate(self._source_nodes)
         )
+        source_nodes, source_node_starts = _intern_program_rows(
+            source_nodes,
+            ((rule.source_node_start, rule.source_node_count) for rule in self._rules),
+        )
+        rules = tuple(
+            replace(
+                rule,
+                source_node_start=(
+                    source_node_starts[index] if rule.source_node_count else 0
+                ),
+            )
+            for index, rule in enumerate(rules)
+        )
         spans = _build_spans(rules, self._op_ordinals)
+        source_graph_root_op_kinds = tuple(
+            sorted(
+                {
+                    _op_kind_value(rule.source_op, self._op_ordinals)
+                    for rule in rules
+                    if rule.source_node_count != 0
+                }
+            )
+        )
         return CompiledLowerRuleSet(
             name=self._table.name,
             authored_case_indices=tuple(self._authored_case_indices),
@@ -261,12 +437,14 @@ class _LowerRuleSetCompiler:
             type_patterns=tuple(self._type_patterns),
             value_refs=tuple(self._value_refs),
             source_nodes=source_nodes,
+            source_graph_root_op_kinds=source_graph_root_op_kinds,
             source_memories=tuple(self._source_memories),
             guards=guards,
             attr_copies=tuple(self._attr_copies),
             tied_results=tuple(self._tied_results),
             emits=emits,
             diagnostics=tuple(self._diagnostics),
+            literal_data=bytes(self._literal_data),
         )
 
     def _append_descriptor_rule(
@@ -296,6 +474,12 @@ class _LowerRuleSetCompiler:
             int,
             dict[tuple[str, int], TypePattern],
         ] = {}
+        # Source-node relationships may reference variadic root operands before
+        # the root guards are emitted below. Make the root arity available when
+        # those relationship value references are lowered.
+        self._operand_segment_counts[0] = _operand_segment_counts(
+            rule.source_op, rule.guards
+        )
         source_node_start = len(self._source_nodes)
         for source_node_index, source_node in enumerate(rule.source_nodes, start=1):
             source_node_guard_start = len(self._guards)
@@ -336,9 +520,16 @@ class _LowerRuleSetCompiler:
         self._append_guards(rule.source_op, rule.guards, type_patterns_by_field)
 
         emit_start = len(self._emits)
+        transferred_fields_by_emit = _transferred_descriptor_fields_by_emit(rule)
+        temporary_slot_plan = allocate_temporary_slots(rule.emit)
         temporary_ordinals: dict[str, int] = {}
         primary_emit_ordinal = LOWER_RULE_PRIMARY_EMIT_NONE
-        for emit in rule.emit:
+        for emit, transferred_descriptor_fields, temporary_definition_slots in zip(
+            rule.emit,
+            transferred_fields_by_emit,
+            temporary_slot_plan.definition_slots,
+            strict=True,
+        ):
             if (
                 primary_emit_ordinal == LOWER_RULE_PRIMARY_EMIT_NONE
                 and isinstance(emit, EmitDescriptorOp)
@@ -350,11 +541,13 @@ class _LowerRuleSetCompiler:
                 emit,
                 type_patterns_by_source_node,
                 temporary_ordinals,
+                temporary_definition_slots,
+                transferred_descriptor_fields,
             )
         self._rules.append(
             LowerRule(
                 source_op=rule.source_op,
-                temporary_count=len(temporary_ordinals),
+                temporary_count=temporary_slot_plan.temporary_count,
                 guard_start=guard_start,
                 guard_count=len(self._guards) - guard_start,
                 emit_start=emit_start,
@@ -362,6 +555,19 @@ class _LowerRuleSetCompiler:
                 primary_emit_ordinal=primary_emit_ordinal,
                 source_node_start=(source_node_start if rule.source_nodes else 0),
                 source_node_count=len(rule.source_nodes),
+                flags=(
+                    LOWER_RULE_FLAG_NONLOCAL_SOURCE_GRAPH
+                    if any(
+                        source_node.relation
+                        in (
+                            SourceNodeRelation.EXCLUSIVE_USER,
+                            SourceNodeRelation.EXCLUSIVE_DEFINITION,
+                        )
+                        for source_node in rule.source_nodes
+                    )
+                    else 0
+                )
+                | (rule.priority << LOWER_RULE_PRIORITY_SHIFT),
                 report_key=rule.report_key,
             )
         )
@@ -475,52 +681,23 @@ class _LowerRuleSetCompiler:
         *,
         source_node_index: int = 0,
     ) -> None:
-        self._operand_segment_counts[source_node_index] = _operand_segment_counts(
-            source_op, guards
-        )
-        for guard in _order_operand_segment_guards(source_op, guards):
-            self._append_guard(source_op, guard, type_patterns_by_field)
+        operand_segment_counts = _operand_segment_counts(source_op, guards)
+        self._operand_segment_counts[source_node_index] = operand_segment_counts
+        root_operand_segment_counts = self._operand_segment_counts.get(0)
+        self._operand_segment_counts[0] = operand_segment_counts
+        try:
+            for guard in _order_operand_segment_guards(source_op, guards):
+                self._append_guard(source_op, guard, type_patterns_by_field)
+        finally:
+            if source_node_index != 0:
+                if root_operand_segment_counts is None:
+                    del self._operand_segment_counts[0]
+                else:
+                    self._operand_segment_counts[0] = root_operand_segment_counts
 
-    def _append_guard(
-        self,
-        source_op: Op,
-        guard: Guard,
-        type_patterns_by_field: dict[tuple[str, int], TypePattern],
-    ) -> None:
-        if guard.kind == GuardKind.VALUE_TYPE:
-            if guard.type_pattern is None:
-                raise ValueError(f"{source_op.name}: value_type guard needs a type")
-            element = guard.element or 0
-            type_patterns_by_field[(guard.field, element)] = guard.type_pattern
-            self._guards.append(
-                LowerGuard(
-                    kind=guard.kind,
-                    value_ref_index=self._append_value_ref(
-                        source_op,
-                        _value_ref_for_source_field(
-                            source_op,
-                            guard.field,
-                            element=element,
-                        ),
-                    ),
-                    type_pattern_index=self._append_type_pattern(guard.type_pattern),
-                    diagnostic_index=self._append_diagnostic_ref(
-                        source_op,
-                        _guard_diagnostic(
-                            guard,
-                            _value_type_diagnostic(
-                                guard.field,
-                                guard.type_pattern,
-                                element=element,
-                            ),
-                        ),
-                    ),
-                )
-            )
-            return
-
+    def _append_source_attr_guard(self, source_op: Op, guard: Guard) -> None:
+        attr_index = _source_attr_index(source_op, guard.field)
         if guard.kind == GuardKind.ENUM_ATTR_EQUALS:
-            attr_index = _source_attr_index(source_op, guard.field)
             attr = source_op.attr(guard.field)
             if (
                 attr is None
@@ -554,14 +731,47 @@ class _LowerRuleSetCompiler:
                 )
             )
             return
-
-        if guard.kind == GuardKind.ATTR_KIND:
-            if guard.attr_type is None:
-                raise ValueError(f"{source_op.name}: attr_kind guard needs a kind")
+        if guard.kind == GuardKind.ENUM_ATTR_IN:
+            attr = source_op.attrs[attr_index]
+            assert attr.attr_type == ATTR_TYPE_ENUM
+            assert attr.enum_def is not None
+            enum_cases = {
+                enum_case.keyword: enum_case for enum_case in attr.enum_def.cases
+            }
+            enum_mask = 0
+            for enum_keyword in guard.enum_keywords:
+                enum_value = enum_cases[enum_keyword].value
+                if not 0 <= enum_value < 64:
+                    raise ValueError(
+                        f"{source_op.name}: enum guard field '{guard.field}' "
+                        f"case '{enum_keyword}' value {enum_value} does not fit "
+                        "the generated u64 set"
+                    )
+                enum_mask |= 1 << enum_value
             self._guards.append(
                 LowerGuard(
                     kind=guard.kind,
-                    attr_index=_source_attr_index(source_op, guard.field),
+                    attr_index=attr_index,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _enum_attr_set_diagnostic(
+                                guard.field,
+                                guard.enum_keywords,
+                            ),
+                        ),
+                    ),
+                    u64=enum_mask,
+                )
+            )
+            return
+        if guard.kind == GuardKind.ATTR_KIND:
+            assert guard.attr_type is not None
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    attr_index=attr_index,
                     diagnostic_index=self._append_diagnostic_ref(
                         source_op,
                         _guard_diagnostic(
@@ -573,14 +783,12 @@ class _LowerRuleSetCompiler:
                 )
             )
             return
-
         if guard.kind == GuardKind.I64_RANGE:
-            if guard.minimum is None or guard.maximum is None:
-                raise ValueError(f"{source_op.name}: i64_range guard needs bounds")
+            assert guard.minimum is not None and guard.maximum is not None
             self._guards.append(
                 LowerGuard(
                     kind=guard.kind,
-                    attr_index=_source_attr_index(source_op, guard.field),
+                    attr_index=attr_index,
                     diagnostic_index=self._append_diagnostic_ref(
                         source_op,
                         _guard_diagnostic(
@@ -589,6 +797,117 @@ class _LowerRuleSetCompiler:
                                 guard.field,
                                 guard.minimum,
                                 guard.maximum,
+                            ),
+                        ),
+                    ),
+                    minimum_i64=guard.minimum,
+                    maximum_i64=guard.maximum,
+                )
+            )
+            return
+        if guard.kind in (
+            GuardKind.TARGET_WHOLE_SUBGROUP,
+            GuardKind.TARGET_CONTIGUOUS_SUBGROUP_CLUSTER,
+        ):
+            assert guard.other_field is not None
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    attr_index=attr_index,
+                    other_attr_index=_source_attr_index(source_op, guard.other_field),
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _named_constraint_diagnostic(
+                                "field", guard.field, guard.kind.value
+                            ),
+                        ),
+                    ),
+                )
+            )
+            return
+        assert guard.kind == GuardKind.I64_ATTRS_SUM_EQUALS
+        assert guard.other_field is not None and guard.i64_value is not None
+        self._guards.append(
+            LowerGuard(
+                kind=guard.kind,
+                attr_index=attr_index,
+                other_attr_index=_source_attr_index(source_op, guard.other_field),
+                diagnostic_index=self._append_diagnostic_ref(
+                    source_op,
+                    _guard_diagnostic(
+                        guard,
+                        _i64_attrs_sum_diagnostic(
+                            guard.field,
+                            guard.other_field,
+                            guard.i64_value,
+                        ),
+                    ),
+                ),
+                literal_i64=guard.i64_value,
+            )
+        )
+
+    def _append_guard(
+        self,
+        source_op: Op,
+        guard: Guard,
+        type_patterns_by_field: dict[tuple[str, int], TypePattern],
+    ) -> None:
+        if guard.kind == GuardKind.VALUE_TYPE:
+            if guard.type_pattern is None:
+                raise ValueError(f"{source_op.name}: value_type guard needs a type")
+            element = guard.element or 0
+            type_patterns_by_field[(guard.field, element)] = guard.type_pattern
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=self._append_value_ref(
+                        source_op,
+                        guard.value_ref
+                        or _value_ref_for_source_field(
+                            source_op,
+                            guard.field,
+                            element=element,
+                        ),
+                    ),
+                    type_pattern_index=self._append_type_pattern(guard.type_pattern),
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _value_type_diagnostic(
+                                guard.field,
+                                guard.type_pattern,
+                                element=element,
+                            ),
+                        ),
+                    ),
+                )
+            )
+            return
+
+        if is_source_attr_guard_kind(guard.kind):
+            self._append_source_attr_guard(source_op, guard)
+            return
+
+        if guard.kind == GuardKind.TARGET_SUBGROUP_SIZE_RANGE:
+            if guard.minimum is None or guard.maximum is None:
+                raise ValueError(
+                    f"{source_op.name}: target subgroup-size guard needs bounds"
+                )
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _named_constraint_diagnostic(
+                                "target",
+                                "subgroup_size",
+                                "range",
                             ),
                         ),
                     ),
@@ -670,6 +989,32 @@ class _LowerRuleSetCompiler:
             )
             return
 
+        if guard.kind == GuardKind.OPERAND_SEGMENT_EXACT_BITS:
+            if guard.bit_width is None:
+                raise ValueError(
+                    f"{source_op.name}: exact-bits operand-segment guard needs "
+                    "a bit width"
+                )
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    attr_index=_source_operand_index(source_op, guard.field),
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _named_constraint_diagnostic(
+                                "operand segment",
+                                guard.field,
+                                f"exact_{guard.bit_width}_bit_elements",
+                            ),
+                        ),
+                    ),
+                    u64=guard.bit_width,
+                )
+            )
+            return
+
         if guard.kind == GuardKind.I64_ARRAY_COUNT:
             if guard.count is None:
                 raise ValueError(f"{source_op.name}: array-count guard needs a count")
@@ -747,14 +1092,22 @@ class _LowerRuleSetCompiler:
             GuardKind.VALUE_SIGNED_BIT_COUNT,
             GuardKind.VALUE_UNSIGNED_BIT_COUNT,
             GuardKind.VALUE_EXACT_I64,
+            GuardKind.VALUE_NOT_EXACT_I64,
             GuardKind.VALUE_EXACT_POWER_OF_TWO_I64,
-            GuardKind.VALUE_U32_DIVISOR_MAGIC_IS_ADD,
+            GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND,
+            GuardKind.VALUE_I32_DIVISOR_MAGIC_KIND,
             GuardKind.VALUE_EXACT_FLOAT,
+            GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS,
+            GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT,
+            GuardKind.VALUE_NOT_NAN,
+            GuardKind.VALUE_NOT_SUBNORMAL_OR_INSTANCE_FLAGS_HAS_ALL,
             GuardKind.VALUE_I64_RANGE,
             GuardKind.VALUE_I64_RANGE_LE,
             GuardKind.VALUE_I64_RANGE_GE,
+            GuardKind.VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE,
             GuardKind.VALUE_FLOAT_EQUALS,
             GuardKind.VALUE_STORAGE_ELEMENT_FORMAT,
+            GuardKind.VALUE_STORAGE_OPERAND_SCHEMA,
             GuardKind.VALUE_MEMORY_SPACE,
             GuardKind.VALUE_PACKED_INTEGER_PAYLOAD_FROM_LANES,
             GuardKind.VALUE_PACKED_INTEGER_LANES_FROM_PAYLOAD,
@@ -776,6 +1129,25 @@ class _LowerRuleSetCompiler:
                         _guard_diagnostic(
                             guard,
                             _value_no_uses_diagnostic(guard.field),
+                        ),
+                    ),
+                )
+            )
+            return
+
+        if guard.kind == GuardKind.VALUE_NO_USES_AFTER:
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=self._append_value_ref(
+                        source_op,
+                        _value_ref_for_source_field(source_op, guard.field),
+                    ),
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _value_no_uses_after_diagnostic(guard.field),
                         ),
                     ),
                 )
@@ -889,6 +1261,31 @@ class _LowerRuleSetCompiler:
             )
             return
 
+        if guard.kind == GuardKind.LOW_VALUE_REPRESENTATION:
+            if guard.count is None or guard.count < 0 or guard.count >= 0xFFFF:
+                raise ValueError(
+                    f"{source_op.name}: representation guard needs an ID in [0, 65534]"
+                )
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=value_ref_index,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _named_constraint_diagnostic(
+                                "field",
+                                guard.field,
+                                f"low_representation.{guard.count}",
+                            ),
+                        ),
+                    ),
+                    u64=guard.count,
+                )
+            )
+            return
+
         if guard.kind == GuardKind.LOW_VALUE_REGISTER_UNIT_COUNT:
             if guard.count is None or guard.count <= 0:
                 raise ValueError(
@@ -966,6 +1363,36 @@ class _LowerRuleSetCompiler:
             source_op,
             _value_ref_for_source_field(source_op, guard.field),
         )
+        if guard.kind == GuardKind.VALUE_NOT_EXACT_I64:
+            self._guards.append(
+                LowerGuard(kind=guard.kind, value_ref_index=value_ref_index)
+            )
+            return
+        if guard.kind == GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS:
+            if guard.other_field is None:
+                raise ValueError(
+                    f"{source_op.name}: exact float-type guard needs a type value"
+                )
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=value_ref_index,
+                    other_value_ref_index=self._append_value_ref(
+                        source_op,
+                        _value_ref_for_source_field(source_op, guard.other_field),
+                    ),
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _exact_float_type_diagnostic(
+                                guard.field, guard.other_field
+                            ),
+                        ),
+                    ),
+                )
+            )
+            return
         if guard.kind in (
             GuardKind.VALUE_SIGNED_BIT_COUNT,
             GuardKind.VALUE_UNSIGNED_BIT_COUNT,
@@ -1020,22 +1447,22 @@ class _LowerRuleSetCompiler:
                 )
             )
             return
-        if guard.kind == GuardKind.VALUE_U32_DIVISOR_MAGIC_IS_ADD:
-            if guard.count not in (0, 1):
-                raise ValueError(
-                    f"{source_op.name}: divisor-magic add guard needs 0 or 1"
-                )
+        if guard.kind == GuardKind.VALUE_U32_DIVISOR_MAGIC_KIND:
             self._guards.append(
                 LowerGuard(
                     kind=guard.kind,
                     value_ref_index=value_ref_index,
+                    other_value_ref_index=self._append_value_ref(
+                        source_op,
+                        _value_ref_for_source_field(source_op, guard.other_field),
+                    ),
                     diagnostic_index=self._append_diagnostic_ref(
                         source_op,
                         _guard_diagnostic(
                             guard,
-                            _u32_divisor_magic_is_add_diagnostic(
+                            _u32_divisor_magic_kind_diagnostic(
                                 guard.field,
-                                is_add=bool(guard.count),
+                                guard.count,
                             ),
                         ),
                     ),
@@ -1043,7 +1470,7 @@ class _LowerRuleSetCompiler:
                 )
             )
             return
-        if guard.kind == GuardKind.VALUE_EXACT_FLOAT:
+        if guard.kind == GuardKind.VALUE_I32_DIVISOR_MAGIC_KIND:
             self._guards.append(
                 LowerGuard(
                     kind=guard.kind,
@@ -1052,9 +1479,95 @@ class _LowerRuleSetCompiler:
                         source_op,
                         _guard_diagnostic(
                             guard,
-                            _exact_float_diagnostic(guard.field),
+                            _i32_divisor_magic_kind_diagnostic(
+                                guard.field,
+                                guard.count,
+                            ),
                         ),
                     ),
+                    u64=guard.count,
+                )
+            )
+            return
+        if guard.kind in (
+            GuardKind.VALUE_EXACT_FLOAT,
+            GuardKind.VALUE_NOT_NAN,
+        ):
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=value_ref_index,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _exact_float_diagnostic(guard.field)
+                            if guard.kind == GuardKind.VALUE_EXACT_FLOAT
+                            else _not_nan_diagnostic(guard.field),
+                        ),
+                    ),
+                )
+            )
+            return
+        if guard.kind == GuardKind.VALUE_NOT_SUBNORMAL_OR_INSTANCE_FLAGS_HAS_ALL:
+            attr_field = guard.attr_field
+            enum_keyword = guard.enum_keyword
+            if attr_field is None or enum_keyword is None:
+                raise ValueError(
+                    f"{source_op.name}: subnormal-permission guard needs a "
+                    "flags attribute and enum keyword"
+                )
+            attr = source_op.attr(attr_field)
+            if attr is None or attr.enum_def is None:
+                raise ValueError(
+                    f"{source_op.name}: subnormal-permission guard needs a "
+                    "flags enum definition"
+                )
+            enum_value = next(
+                enum_case.value
+                for enum_case in attr.enum_def.cases
+                if enum_case.keyword == enum_keyword
+            )
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=value_ref_index,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _not_subnormal_or_flag_diagnostic(
+                                guard.field, attr_field, enum_keyword
+                            ),
+                        ),
+                    ),
+                    u64=enum_value,
+                )
+            )
+            return
+        if guard.kind == GuardKind.VALUE_EXACT_POWER_OF_TWO_FLOAT:
+            if guard.minimum is None or guard.maximum is None:
+                raise ValueError(
+                    f"{source_op.name}: floating power-of-two guard needs "
+                    "exponent bounds"
+                )
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=value_ref_index,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _exact_power_of_two_float_diagnostic(
+                                guard.field,
+                                guard.minimum,
+                                guard.maximum,
+                            ),
+                        ),
+                    ),
+                    minimum_i64=guard.minimum,
+                    maximum_i64=guard.maximum,
                 )
             )
             return
@@ -1078,6 +1591,25 @@ class _LowerRuleSetCompiler:
                     ),
                     minimum_i64=guard.minimum,
                     maximum_i64=guard.maximum,
+                )
+            )
+            return
+        if guard.kind == GuardKind.VALUE_I64_EQUALS_TARGET_SUBGROUP_SIZE:
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=value_ref_index,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _named_constraint_diagnostic(
+                                "value_fact",
+                                guard.field,
+                                "equals_target_subgroup_size",
+                            ),
+                        ),
+                    ),
                 )
             )
             return
@@ -1162,6 +1694,26 @@ class _LowerRuleSetCompiler:
                         ),
                     ),
                     u64_c_expression=guard.numeric_format_c_expression,
+                )
+            )
+            return
+        if guard.kind == GuardKind.VALUE_STORAGE_OPERAND_SCHEMA:
+            if guard.storage_operand_schema is None:
+                raise ValueError(
+                    f"{source_op.name}: storage operand-schema guard needs a schema"
+                )
+            self._guards.append(
+                LowerGuard(
+                    kind=guard.kind,
+                    value_ref_index=value_ref_index,
+                    diagnostic_index=self._append_diagnostic_ref(
+                        source_op,
+                        _guard_diagnostic(
+                            guard,
+                            _storage_operand_schema_diagnostic(guard.field),
+                        ),
+                    ),
+                    storage_operand_schema=guard.storage_operand_schema,
                 )
             )
             return
@@ -1251,6 +1803,8 @@ class _LowerRuleSetCompiler:
             dict[tuple[str, int], TypePattern],
         ],
         temporary_ordinals: dict[str, int],
+        temporary_definition_slots: Mapping[str, int],
+        transferred_descriptor_fields: frozenset[str],
     ) -> None:
         if isinstance(emit, EmitDescriptorOp):
             self._append_descriptor_emit(
@@ -1258,6 +1812,8 @@ class _LowerRuleSetCompiler:
                 emit,
                 type_patterns_by_source_node,
                 temporary_ordinals,
+                temporary_definition_slots,
+                transferred_descriptor_fields,
             )
             return
         if isinstance(emit, EmitRegisterSlice):
@@ -1268,6 +1824,7 @@ class _LowerRuleSetCompiler:
                 emit.result,
                 emit.result_type,
                 temporary_ordinals,
+                temporary_definition_slots,
                 structural_offset=emit.unit_offset,
                 structural_unit_count=emit.unit_count or 0,
             )
@@ -1280,6 +1837,7 @@ class _LowerRuleSetCompiler:
                 emit.result,
                 emit.result_type,
                 temporary_ordinals,
+                temporary_definition_slots,
             )
             return
         if isinstance(emit, EmitRegisterCopy):
@@ -1290,6 +1848,18 @@ class _LowerRuleSetCompiler:
                 emit.result,
                 emit.result_type,
                 temporary_ordinals,
+                temporary_definition_slots,
+            )
+            return
+        if isinstance(emit, EmitRegisterMove):
+            self._append_structural_emit(
+                source_op,
+                LowerEmitKind.REGISTER_MOVE,
+                (emit.source,),
+                emit.result,
+                emit.result_type,
+                temporary_ordinals,
+                temporary_definition_slots,
             )
             return
         raise TypeError(f"unsupported contract emit type: {type(emit).__name__}")
@@ -1303,6 +1873,8 @@ class _LowerRuleSetCompiler:
             dict[tuple[str, int], TypePattern],
         ],
         temporary_ordinals: dict[str, int],
+        temporary_definition_slots: Mapping[str, int],
+        transferred_descriptor_fields: frozenset[str],
     ) -> None:
         emit_kind = _lower_emit_kind(
             source_op,
@@ -1342,10 +1914,9 @@ class _LowerRuleSetCompiler:
             value_ref = result_bindings.get(descriptor_operand.field_name)
             if value_ref is not None:
                 if value_ref.kind == SourceValueKind.TEMPORARY:
-                    temporary_ordinals.setdefault(
-                        value_ref.field,
-                        len(temporary_ordinals),
-                    )
+                    temporary_ordinals[value_ref.field] = temporary_definition_slots[
+                        value_ref.field
+                    ]
                 result_bind_refs.append(
                     self._lower_value_ref(source_op, value_ref, temporary_ordinals)
                 )
@@ -1440,6 +2011,7 @@ class _LowerRuleSetCompiler:
         tied_results, copy_operand_mask = _lower_descriptor_ties(
             emit.descriptor,
             operand_ordinals_by_descriptor_field,
+            transferred_descriptor_fields,
         )
         copy_operand_mask |= _lower_explicit_copy_operand_mask(
             source_op,
@@ -1475,16 +2047,14 @@ class _LowerRuleSetCompiler:
                 emit.source_memory_byte_offset_materializer,
                 emit.source_memory_address_materializer,
             )
-            if any(
-                effect.kind in (EffectKind.READ, EffectKind.WRITE)
-                for effect in emit.descriptor.effects
-            ):
+            if any(effect.is_memory_access for effect in emit.descriptor.effects):
                 flags |= LOWER_EMIT_FLAG_RECORD_SOURCE_MEMORY
 
         self._emits.append(
             LowerEmit(
                 kind=emit_kind,
                 descriptor=emit.descriptor,
+                operand_materialization=emit.operand_materialization,
                 flags=flags,
                 operand_ref_start=operand_ref_start,
                 operand_ref_count=operand_ref_count,
@@ -1496,6 +2066,9 @@ class _LowerRuleSetCompiler:
                 result_bind_ref_start=result_bind_ref_start,
                 attr_copy_start=attr_copy_start,
                 attr_copy_count=len(attr_copies),
+                has_read_only_data_attributes=any(
+                    attr_copy.kind.is_read_only_data for attr_copy in attr_copies
+                ),
                 tied_result_start=tied_result_start,
                 tied_result_count=len(tied_results),
                 source_memory_ordinal=source_memory_ordinal,
@@ -1510,6 +2083,7 @@ class _LowerRuleSetCompiler:
         result: ValueRef,
         result_type: ResultTypeBinding | None,
         temporary_ordinals: dict[str, int],
+        temporary_definition_slots: Mapping[str, int],
         *,
         structural_offset: int = 0,
         structural_unit_count: int = 0,
@@ -1521,7 +2095,7 @@ class _LowerRuleSetCompiler:
         operand_ref_start = self._append_value_ref_sequence(operand_refs)
 
         if result.kind == SourceValueKind.TEMPORARY:
-            temporary_ordinals.setdefault(result.field, len(temporary_ordinals))
+            temporary_ordinals[result.field] = temporary_definition_slots[result.field]
         result_bind_ref = self._lower_value_ref(
             source_op,
             result,
@@ -1585,28 +2159,12 @@ class _LowerRuleSetCompiler:
     ) -> int:
         row = LowerSourceMemory(
             constraint,
-            diagnostic_index=self._append_diagnostic_ref(
-                source_op,
-                _source_memory_diagnostic(constraint),
-            ),
-            dynamic_offset_diagnostic_index=self._append_diagnostic_ref(
-                source_op,
-                _source_memory_dynamic_offset_diagnostic(constraint),
-            ),
-            address_layout_diagnostic_index=(
-                0xFFFF
-                if constraint.address_layout == SourceMemoryAddressLayout.ANY
-                else self._append_diagnostic_ref(
-                    source_op,
-                    _source_memory_address_layout_diagnostic(constraint),
-                )
-            ),
-            address_diagnostic_index=self._append_diagnostic_ref(
-                source_op,
-                _source_memory_address_diagnostic(
+            rejection_diagnostic_indices=tuple(
+                self._append_diagnostic_ref(source_op, diagnostic)
+                for diagnostic in _source_memory_diagnostics(
                     constraint,
                     address_materializer,
-                ),
+                )
             ),
             byte_offset_materializer=byte_offset_materializer,
             address_materializer=address_materializer,
@@ -1668,7 +2226,16 @@ class _LowerRuleSetCompiler:
                     f"{source_op.name}: source value field '{value_ref.field}' "
                     f"references unknown source node '{value_ref.source_node}'"
                 )
-        if value_ref.kind == SourceValueKind.OPERAND and not allow_variadic_span:
+        if (
+            value_ref.kind
+            in (
+                SourceValueKind.OPERAND,
+                SourceValueKind.EXACT_LANE_ORIGIN_OPERAND,
+                SourceValueKind.EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND,
+                SourceValueKind.UNIFORM_ELEMENT_ORIGIN_OPERAND,
+            )
+            and not allow_variadic_span
+        ):
             operand = referenced_op.operand(value_ref.field)
             if operand is not None and operand.variadic:
                 expected_count = self._operand_segment_counts.get(
@@ -1695,7 +2262,11 @@ class _LowerRuleSetCompiler:
         )
 
     def _append_value_ref_sequence(self, sequence: tuple[LowerValueRef, ...]) -> int:
-        return _append_interned_row_sequence(self._value_refs, sequence)
+        return _append_interned_row_sequence(
+            self._value_refs,
+            sequence,
+            self._value_ref_sequence_starts,
+        )
 
     def _lower_attr_copies(
         self,
@@ -1719,13 +2290,40 @@ class _LowerRuleSetCompiler:
                     LowerAttrCopy(
                         kind=LowerAttrCopyKind.I64_LITERAL,
                         target_name=target_name,
-                        literal_i64=binding,
+                        literal_i64=_lower_literal_immediate(
+                            emit.descriptor, target_name, binding
+                        ),
                     )
                 )
                 continue
             if isinstance(binding, AttrProject):
                 attr_copies.append(
-                    self._lower_attr_project(source_op, target_name, binding)
+                    self._lower_attr_project(
+                        source_op,
+                        emit.descriptor,
+                        target_name,
+                        binding,
+                    )
+                )
+                continue
+            if isinstance(binding, OperandSegmentProject):
+                attr_copies.append(
+                    self._lower_operand_segment_project(
+                        source_op,
+                        target_name,
+                        binding,
+                    )
+                )
+                continue
+            if isinstance(binding, ReadOnlyDataLiteral):
+                literal_data_offset = self._append_literal_data(binding.data)
+                attr_copies.append(
+                    LowerAttrCopy(
+                        kind=LowerAttrCopyKind.READ_ONLY_DATA_LITERAL,
+                        target_name=target_name,
+                        literal_data_offset=literal_data_offset,
+                        literal_data_length=len(binding.data),
+                    )
                 )
                 continue
             if isinstance(binding, SourceOpProject):
@@ -1754,9 +2352,54 @@ class _LowerRuleSetCompiler:
             raise TypeError(f"unsupported immediate binding: {type(binding).__name__}")
         return tuple(attr_copies)
 
+    def _lower_operand_segment_project(
+        self,
+        source_op: Op,
+        target_name: str,
+        project: OperandSegmentProject,
+    ) -> LowerAttrCopy:
+        if project.kind != OperandSegmentProjectKind.EXACT_BITS_READ_ONLY:
+            raise ValueError(
+                f"{source_op.name}: unsupported operand-segment projection "
+                f"{project.kind.value}"
+            )
+        return LowerAttrCopy(
+            kind=LowerAttrCopyKind.OPERAND_SEGMENT_EXACT_BITS_READ_ONLY,
+            target_name=target_name,
+            source_operand_field_index=_source_operand_index(
+                source_op, project.source_operand
+            ),
+            source_element_bit_width=project.bit_width,
+        )
+
     def _lower_attr_project(
         self,
         source_op: Op,
+        descriptor: Descriptor,
+        target_name: str,
+        project: AttrProject,
+    ) -> LowerAttrCopy:
+        source_node_index = self._source_node_ordinals.get(project.source_node, -1)
+        referenced_op = self._source_ops.get(project.source_node)
+        if referenced_op is None or source_node_index < 0:
+            raise ValueError(
+                f"{source_op.name}: immediate projection references unknown "
+                f"source node '{project.source_node}'"
+            )
+        return replace(
+            self._lower_attr_project_for_op(
+                referenced_op,
+                descriptor,
+                target_name,
+                project,
+            ),
+            source_node_index=source_node_index,
+        )
+
+    def _lower_attr_project_for_op(
+        self,
+        source_op: Op,
+        descriptor: Descriptor,
         target_name: str,
         project: AttrProject,
     ) -> LowerAttrCopy:
@@ -1772,6 +2415,34 @@ class _LowerRuleSetCompiler:
                 kind=LowerAttrCopyKind.ENUM_ORDINAL,
                 target_name=target_name,
                 source_attr_index=source_attr_index,
+            )
+        if project.kind == AttrProjectKind.ENUM_REMAP:
+            source_attr = source_op.attrs[source_attr_index]
+            assert source_attr.enum_def is not None
+            immediate = _require_immediate(
+                descriptor,
+                target_name,
+                "enum_remap projection",
+            )
+            enum_values = dict(project.enum_values)
+            case_span = max(case.value for case in source_attr.enum_def.cases) + 1
+            bit_width = max(1, max(enum_values.values()).bit_length())
+            packed_values = 0
+            for case in source_attr.enum_def.cases:
+                packed_values |= enum_values[case.keyword] << (case.value * bit_width)
+            lower_bits = packed_values & ((1 << 63) - 1)
+            upper_bits = packed_values >> 63
+            assert upper_bits <= (2**32) - 1
+            assert max(enum_values.values()) <= immediate.unsigned_max
+            return LowerAttrCopy(
+                kind=LowerAttrCopyKind.ENUM_REMAP,
+                target_name=target_name,
+                source_attr_index=source_attr_index,
+                other_source_attr_index=upper_bits & 0xFFFF,
+                source_element_index=upper_bits >> 16,
+                source_element_count=case_span,
+                source_element_bit_width=bit_width,
+                literal_i64=lower_bits,
             )
         if project.kind == AttrProjectKind.I64_LOG2:
             return LowerAttrCopy(
@@ -1804,6 +2475,40 @@ class _LowerRuleSetCompiler:
                 source_element_index=project.element,
                 literal_i64=project.literal_i64,
             )
+        if project.kind == AttrProjectKind.I64_ARRAY_LITERAL_MINUS_ELEMENT:
+            if project.element is None:
+                raise ValueError(
+                    f"{source_op.name}: i64-array literal-minus-element "
+                    "projection needs an element"
+                )
+            return LowerAttrCopy(
+                kind=LowerAttrCopyKind.I64_ARRAY_LITERAL_MINUS_ELEMENT,
+                target_name=target_name,
+                source_attr_index=source_attr_index,
+                source_element_index=project.element,
+                literal_i64=project.literal_i64,
+            )
+        if project.kind in (
+            AttrProjectKind.I64_ARRAY_ELEMENT_QUOTIENT,
+            AttrProjectKind.I64_ARRAY_ELEMENT_REMAINDER,
+        ):
+            if project.element is None or project.literal_i64 <= 0:
+                raise ValueError(
+                    f"{source_op.name}: i64-array element division projection "
+                    "needs an element and positive divisor"
+                )
+            return LowerAttrCopy(
+                kind=(
+                    LowerAttrCopyKind.I64_ARRAY_ELEMENT_QUOTIENT
+                    if project.kind == AttrProjectKind.I64_ARRAY_ELEMENT_QUOTIENT
+                    else LowerAttrCopyKind.I64_ARRAY_ELEMENT_REMAINDER
+                ),
+                target_name=target_name,
+                source_attr_index=source_attr_index,
+                source_element_index=project.element,
+                literal_i64=project.literal_i64,
+                target_bit_offset=project.target_bit_offset,
+            )
         if project.kind == AttrProjectKind.I64_ARRAY_LANE_BYTE_OFFSET:
             if project.element is None or project.bytes_per_lane is None:
                 raise ValueError(
@@ -1817,6 +2522,61 @@ class _LowerRuleSetCompiler:
                 source_element_index=project.element,
                 source_element_count=project.bytes_per_lane,
                 literal_i64=project.literal_i64,
+            )
+        if project.kind == AttrProjectKind.I64_ARRAY_SHUFFLE_MASK_CHUNK:
+            if (
+                project.element is None
+                or project.bytes_per_lane is None
+                or project.count is None
+            ):
+                raise ValueError(
+                    f"{source_op.name}: shuffle-mask projection needs an "
+                    "output byte offset, bytes_per_lane, and source byte count"
+                )
+            return LowerAttrCopy(
+                kind=LowerAttrCopyKind.I64_ARRAY_SHUFFLE_MASK_CHUNK,
+                target_name=target_name,
+                source_attr_index=source_attr_index,
+                source_element_index=project.element,
+                source_element_count=project.bytes_per_lane,
+                source_element_bit_width=project.count,
+                literal_i64=project.literal_i64,
+            )
+        if project.kind == AttrProjectKind.I64_ARRAY_READ_ONLY_ELEMENTS:
+            if project.bit_width is None:
+                raise ValueError(
+                    f"{source_op.name}: read-only element projection needs a bit width"
+                )
+            return LowerAttrCopy(
+                kind=LowerAttrCopyKind.I64_ARRAY_READ_ONLY_ELEMENTS,
+                target_name=target_name,
+                source_attr_index=source_attr_index,
+                source_element_bit_width=project.bit_width,
+            )
+        if project.kind == AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT:
+            if project.bytes_per_lane is None or project.count is None:
+                raise ValueError(
+                    f"{source_op.name}: read-only byte-segment projection needs "
+                    "bytes_per_lane/count"
+                )
+            return LowerAttrCopy(
+                kind=LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_SEGMENT,
+                target_name=target_name,
+                source_attr_index=source_attr_index,
+                source_element_count=project.bytes_per_lane,
+                source_element_bit_width=project.count,
+                literal_i64=project.literal_i64,
+            )
+        if project.kind == AttrProjectKind.I64_ARRAY_READ_ONLY_BYTE_WORDS:
+            if project.element is None:
+                raise ValueError(
+                    f"{source_op.name}: read-only byte-word projection needs parity"
+                )
+            return LowerAttrCopy(
+                kind=LowerAttrCopyKind.I64_ARRAY_READ_ONLY_BYTE_WORDS,
+                target_name=target_name,
+                source_attr_index=source_attr_index,
+                source_element_index=project.element,
             )
         if project.kind == AttrProjectKind.I64_ARRAY_PACK_ELEMENTS:
             if (
@@ -1910,6 +2670,13 @@ class _LowerRuleSetCompiler:
         source_op: Op,
         project: AttrProject,
     ) -> tuple[LowerAttrCopy, ...]:
+        source_node_index = self._source_node_ordinals.get(project.source_node, -1)
+        referenced_op = self._source_ops.get(project.source_node)
+        if referenced_op is None or source_node_index < 0:
+            raise ValueError(
+                f"{source_op.name}: immediate projection references unknown "
+                f"source node '{project.source_node}'"
+            )
         if project.kind != AttrProjectKind.EXPAND_LANE_I64_ARRAY_TO_BYTE_LANES:
             raise ValueError(
                 f"{source_op.name}: immediate projection '{project.kind.value}' is "
@@ -1920,11 +2687,12 @@ class _LowerRuleSetCompiler:
                 f"{source_op.name}: lane-byte projection needs source lane count "
                 "and bytes per lane"
             )
-        source_attr_index = _source_attr_index(source_op, project.source_attr)
+        source_attr_index = _source_attr_index(referenced_op, project.source_attr)
         return tuple(
             LowerAttrCopy(
                 kind=LowerAttrCopyKind.I64_ARRAY_LANE_BYTE,
                 target_name=target_name,
+                source_node_index=source_node_index,
                 source_attr_index=source_attr_index,
                 source_element_index=index // project.bytes_per_lane,
                 source_element_count=project.bytes_per_lane,
@@ -1955,14 +2723,24 @@ class _LowerRuleSetCompiler:
             kind = LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_MULTIPLIER_AS_I32
         elif project.kind == ValueProjectKind.U32_DIVISOR_MAGIC_SHIFT:
             kind = LowerAttrCopyKind.VALUE_U32_DIVISOR_MAGIC_SHIFT
+        elif project.kind == ValueProjectKind.I32_DIVISOR_MAGIC_MULTIPLIER:
+            kind = LowerAttrCopyKind.VALUE_I32_DIVISOR_MAGIC_MULTIPLIER
+        elif project.kind == ValueProjectKind.I32_DIVISOR_MAGIC_SHIFT:
+            kind = LowerAttrCopyKind.VALUE_I32_DIVISOR_MAGIC_SHIFT
         elif project.kind == ValueProjectKind.I32_AS_U32_BITS:
             kind = LowerAttrCopyKind.VALUE_I32_AS_U32_BITS
         elif project.kind == ValueProjectKind.FLOAT_BITS:
             kind = LowerAttrCopyKind.VALUE_FLOAT_BITS
         elif project.kind == ValueProjectKind.FLOAT_AS_F32_I32:
             kind = LowerAttrCopyKind.VALUE_FLOAT_AS_F32_I32
+        elif project.kind == ValueProjectKind.FLOAT_AS_F64_I64:
+            kind = LowerAttrCopyKind.VALUE_FLOAT_AS_F64_I64
         elif project.kind == ValueProjectKind.FLOAT_AS_F64_I32_WORD:
             kind = LowerAttrCopyKind.VALUE_FLOAT_AS_F64_I32_WORD
+        elif project.kind == ValueProjectKind.FLOAT_POWER_OF_TWO_EXPONENT:
+            kind = LowerAttrCopyKind.VALUE_FLOAT_POWER_OF_TWO_EXPONENT
+        elif project.kind == ValueProjectKind.FLOAT_POWER_OF_TWO_NEGATED_EXPONENT:
+            kind = LowerAttrCopyKind.VALUE_FLOAT_POWER_OF_TWO_NEGATED_EXPONENT
         else:
             raise ValueError(
                 f"{source_op.name}: immediate projection '{project.kind.value}' is "
@@ -1982,6 +2760,16 @@ class _LowerRuleSetCompiler:
         )
         if project.source_node:
             value_ref = replace(value_ref, source_node=project.source_node)
+        other_value_ref_index = 0
+        if project.other_source_value:
+            other_value_ref = _value_ref_for_source_field(
+                referenced_op, project.other_source_value
+            )
+            if project.source_node:
+                other_value_ref = replace(
+                    other_value_ref, source_node=project.source_node
+                )
+            other_value_ref_index = self._append_value_ref(source_op, other_value_ref)
         return LowerAttrCopy(
             kind=kind,
             target_name=target_name,
@@ -1989,6 +2777,7 @@ class _LowerRuleSetCompiler:
                 source_op,
                 value_ref,
             ),
+            other_value_ref_index=other_value_ref_index,
             target_bit_offset=project.target_bit_offset,
             source_element_index=project.word_index,
             literal_i64=(
@@ -2043,6 +2832,8 @@ class _LowerRuleSetCompiler:
             kind = LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_SCALED
         elif project.kind == ValueTypeProjectKind.LITERAL_MINUS_STATIC_DIM_SCALED:
             kind = LowerAttrCopyKind.VALUE_TYPE_LITERAL_MINUS_STATIC_DIM_SCALED
+        elif project.kind == ValueTypeProjectKind.STATIC_DIM_LOW_BITS_MASK:
+            kind = LowerAttrCopyKind.VALUE_TYPE_STATIC_DIM_LOW_BITS_MASK
         else:
             raise ValueError(
                 f"{source_op.name}: immediate projection '{project.kind.value}' is "
@@ -2058,13 +2849,35 @@ class _LowerRuleSetCompiler:
         )
 
     def _append_attr_copy_sequence(self, sequence: tuple[LowerAttrCopy, ...]) -> int:
-        return _append_interned_row_sequence(self._attr_copies, sequence)
+        return _append_interned_row_sequence(
+            self._attr_copies,
+            sequence,
+            self._attr_copy_sequence_starts,
+        )
+
+    def _append_literal_data(self, data: bytes) -> int:
+        offset = self._literal_data_offsets.get(data)
+        if offset is not None:
+            return offset
+        offset = len(self._literal_data)
+        if offset + len(data) > 0xFFFF:
+            raise ValueError(
+                f"contract fragment '{self._table.name}' read-only literal data "
+                "exceeds 65535 bytes"
+            )
+        self._literal_data.extend(data)
+        self._literal_data_offsets[data] = offset
+        return offset
 
     def _append_tied_result_sequence(
         self,
         sequence: tuple[LowerTiedResult, ...],
     ) -> int:
-        return _append_interned_row_sequence(self._tied_results, sequence)
+        return _append_interned_row_sequence(
+            self._tied_results,
+            sequence,
+            self._tied_result_sequence_starts,
+        )
 
     def _append_diagnostic(self, diagnostic: LowerDiagnostic) -> int:
         ordinal = self._diagnostic_ordinals.get(diagnostic)

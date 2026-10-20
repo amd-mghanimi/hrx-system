@@ -1,0 +1,185 @@
+// RUN: emit source-low output=low
+
+// ZMM integer reductions collapse 256-bit halves and 128-bit quarters before
+// applying lane-local byte shifts. The family shares that tree across every
+// associative integer combine, including AVX-512's native i64 multiply.
+x86.target<avx512> @target
+
+func.def target(@target) @integer_reduction_families(%i8_values: vector<64xi8>, %i8_init: i8, %i16_values: vector<32xi16>, %i16_init: i16, %i32_values: vector<16xi32>, %i32_init: i32, %i64_values: vector<8xi64>, %i64_init: i64) -> (i8, i16, i32, i64) {
+  %i8 = vector.reduce<xori> %i8_values, %i8_init : vector<64xi8>, i8
+  %i16 = vector.reduce<addi> %i16_values, %i16_init : vector<32xi16>, i16
+  %i32 = vector.reduce<minui> %i32_values, %i32_init : vector<16xi32>, i32
+  %i64 = vector.reduce<muli> %i64_values, %i64_init : vector<8xi64>, i64
+  func.return %i8, %i16, %i32, %i64 : i8, i16, i32, i64
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<64xi8>, i8, vector<32xi16>, i16, vector<16xi32>, i32, vector<8xi64>, i64) -> (i8, i16, i32, i64)}) @integer_reduction_families(%i8_values: reg<x86.zmm>, %i8_init: reg<x86.gpr32>, %i16_values: reg<x86.zmm>, %i16_init: reg<x86.gpr32>, %i32_values: reg<x86.zmm>, %i32_init: reg<x86.gpr32>, %i64_values: reg<x86.zmm>, %i64_init: reg<x86.gpr64>) -> (reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr64>) asm {
+  %28 = vshufi64x2 %i8_values, %i8_values, 78
+  %29 = vpxord %i8_values, %28
+  %30 = vshufi64x2 %29, %29, 177
+  %31 = vpxord %29, %30
+  %32 = vpsrldq.zmm %31, 8
+  %33 = vpxord %31, %32
+  %34 = vpsrldq.zmm %33, 4
+  %35 = vpxord %33, %34
+  %36 = vpsrldq.zmm %35, 2
+  %37 = vpxord %35, %36
+  %38 = vpsrldq.zmm %37, 1
+  %39 = vpxord %37, %38
+  %40 = vpbroadcastb %i8_init
+  %41 = vpxord %39, %40
+  %42 = vextractf32x4.xmm %41, 0
+  %i8 = vpextrb.xmm %42, 0
+  %44 = vshufi64x2 %i16_values, %i16_values, 78
+  %45 = vpaddw %i16_values, %44
+  %46 = vshufi64x2 %45, %45, 177
+  %47 = vpaddw %45, %46
+  %48 = vpsrldq.zmm %47, 8
+  %49 = vpaddw %47, %48
+  %50 = vpsrldq.zmm %49, 4
+  %51 = vpaddw %49, %50
+  %52 = vpsrldq.zmm %51, 2
+  %53 = vpaddw %51, %52
+  %54 = vpbroadcastw %i16_init
+  %55 = vpaddw %53, %54
+  %56 = vextractf32x4.xmm %55, 0
+  %i16 = vpextrw.xmm %56, 0
+  %58 = vshufi64x2 %i32_values, %i32_values, 78
+  %59 = vpminud %i32_values, %58
+  %60 = vshufi64x2 %59, %59, 177
+  %61 = vpminud %59, %60
+  %62 = vpsrldq.zmm %61, 8
+  %63 = vpminud %61, %62
+  %64 = vpsrldq.zmm %63, 4
+  %65 = vpminud %63, %64
+  %66 = vpbroadcastd %i32_init
+  %67 = vpminud %65, %66
+  %68 = vextractf32x4.xmm %67, 0
+  %i32 = vpextrd.xmm %68, 0
+  %70 = vshufi64x2 %i64_values, %i64_values, 78
+  %71 = vpmullq %i64_values, %70
+  %72 = vshufi64x2 %71, %71, 177
+  %73 = vpmullq %71, %72
+  %74 = vpsrldq.zmm %73, 8
+  %75 = vpmullq %73, %74
+  %76 = vpbroadcastq %i64_init
+  %77 = vpmullq %75, %76
+  %78 = vextractf32x4.xmm %77, 0
+  %i64 = vpextrq.xmm %78, 0
+  return %i8, %i16, %i32, %i64
+}
+
+// ====
+
+// Ordered reductions preserve lane order through XMM chunks. Reassociated
+// reductions use the shared ZMM tree; native extrema additionally require the
+// NaN and signed-zero semantic differences to be disabled.
+x86.target<avx512> @target
+
+func.def target(@target) @float_reduction_families(%f32_values: vector<16xf32>, %f32_init: f32, %f64_values: vector<8xf64>, %f64_init: f64) -> (f64, f64, f32) {
+  %f64_ordered = vector.reduce<addf> %f64_values, %f64_init : vector<8xf64>, f64
+  %f64_reassociated = vector.reduce<mulf, reassoc> %f64_values, %f64_init : vector<8xf64>, f64
+  %f32_fast_extrema = vector.reduce<maxnumf, reassoc|nnan|nsz> %f32_values, %f32_init : vector<16xf32>, f32
+  func.return %f64_ordered, %f64_reassociated, %f32_fast_extrema : f64, f64, f32
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<16xf32>, f32, vector<8xf64>, f64) -> (f64, f64, f32)}) @float_reduction_families(%f32_values: reg<x86.zmm>, %f32_init: reg<x86.xmm>, %f64_values: reg<x86.zmm>, %f64_init: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %17 = vextractf32x4.xmm %f64_values, 0
+  %18 = vextractf32x4.xmm %f64_values, 1
+  %19 = vextractf32x4.xmm %f64_values, 2
+  %20 = vextractf32x4.xmm %f64_values, 3
+  %21 = vaddsd.xmm %f64_init, %17
+  %22 = vpermilpd.xmm %17, 1
+  %23 = vaddsd.xmm %21, %22
+  %24 = vaddsd.xmm %23, %18
+  %25 = vpermilpd.xmm %18, 1
+  %26 = vaddsd.xmm %24, %25
+  %27 = vaddsd.xmm %26, %19
+  %28 = vpermilpd.xmm %19, 1
+  %29 = vaddsd.xmm %27, %28
+  %30 = vaddsd.xmm %29, %20
+  %31 = vpermilpd.xmm %20, 1
+  %f64_ordered = vaddsd.xmm %30, %31
+  %33 = vshufi64x2 %f64_values, %f64_values, 78
+  %34 = vmulpd %f64_values, %33
+  %35 = vshufi64x2 %34, %34, 177
+  %36 = vmulpd %34, %35
+  %37 = vpsrldq.zmm %36, 8
+  %38 = vmulpd %36, %37
+  %39 = vextractf32x4.xmm %38, 0
+  %f64_reassociated = vmulsd.xmm %f64_init, %39
+  %41 = vshufi64x2 %f32_values, %f32_values, 78
+  %42 = vmaxps %f32_values, %41
+  %43 = vshufi64x2 %42, %42, 177
+  %44 = vmaxps %42, %43
+  %45 = vpsrldq.zmm %44, 8
+  %46 = vmaxps %44, %45
+  %47 = vpsrldq.zmm %46, 4
+  %48 = vmaxps %46, %47
+  %49 = vextractf32x4.xmm %48, 0
+  %f32_fast_extrema = vmaxss.xmm %f32_init, %49
+  return %f64_ordered, %f64_reassociated, %f32_fast_extrema
+}
+
+// ====
+
+// Exact dots retain the source operation's ordered scalar-FMA semantics while
+// projecting each logical ZMM quarter only once.
+x86.target<avx512> @target
+
+func.def target(@target) @float_dot_family(%f64_lhs: vector<8xf64>, %f64_rhs: vector<8xf64>, %f64_init: f64) -> (f64) {
+  %f64 = vector.dotf %f64_lhs, %f64_rhs, %f64_init : vector<8xf64>, vector<8xf64>, f64
+  func.return %f64 : f64
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<8xf64>, vector<8xf64>, f64) -> (f64)}) @float_dot_family(%f64_lhs: reg<x86.zmm>, %f64_rhs: reg<x86.zmm>, %f64_init: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %9 = vextractf32x4.xmm %f64_lhs, 0
+  %10 = vextractf32x4.xmm %f64_lhs, 1
+  %11 = vextractf32x4.xmm %f64_lhs, 2
+  %12 = vextractf32x4.xmm %f64_lhs, 3
+  %13 = vextractf32x4.xmm %f64_rhs, 0
+  %14 = vextractf32x4.xmm %f64_rhs, 1
+  %15 = vextractf32x4.xmm %f64_rhs, 2
+  %16 = vextractf32x4.xmm %f64_rhs, 3
+  %17 = copy %f64_init : reg<x86.xmm> -> reg<x86.xmm>
+  %18 = vfmadd231sd.xmm %17, %9, %13
+  %19 = vpermilpd.xmm %9, 1
+  %20 = vpermilpd.xmm %13, 1
+  %21 = vfmadd231sd.xmm %18, %19, %20
+  %22 = vfmadd231sd.xmm %21, %10, %14
+  %23 = vpermilpd.xmm %10, 1
+  %24 = vpermilpd.xmm %14, 1
+  %25 = vfmadd231sd.xmm %22, %23, %24
+  %26 = vfmadd231sd.xmm %25, %11, %15
+  %27 = vpermilpd.xmm %11, 1
+  %28 = vpermilpd.xmm %15, 1
+  %29 = vfmadd231sd.xmm %26, %27, %28
+  %30 = vfmadd231sd.xmm %29, %12, %16
+  %31 = vpermilpd.xmm %12, 1
+  %32 = vpermilpd.xmm %16, 1
+  %f64 = vfmadd231sd.xmm %30, %31, %32
+  return %f64
+}
+
+// ====
+
+// RUN: with-checks emit source-low output=low
+
+// Exact extrema retain the shared scalar IEEE recipe when the source does not
+// permit the smaller native MIN/MAX tree.
+x86.target<avx512> @target
+
+func.def target(@target) @exact_float_extrema_reduction(%values: vector<8xf64>, %init: f64) -> (f64) {
+  %result = vector.reduce<minnumf> %values, %init : vector<8xf64>, f64
+  func.return %result : f64
+}
+
+// ----
+CHECK: low.func.def target<x86.avx512.core>*@exact_float_extrema_reduction*
+CHECK: * = vextractf32x4.xmm %values, 3
+CHECK: %result = vpblendvb.xmm *
+CHECK-NOT: *vector.reduce*
+CHECK-NOT: *vminpd*

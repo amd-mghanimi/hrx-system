@@ -14,11 +14,14 @@ loom_check_test_suite(
     test
   SRCS
     "canonicalize.loom-test"
+    "collective_facts.loom-test"
+    "collective_float_facts.loom-test"
     "dce.loom-test"
     "facts.loom-test"
     "roundtrip.loom-test"
     "subgroup_facts.loom-test"
     "verify.loom-test"
+    "workgroup_payloads.loom-test"
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

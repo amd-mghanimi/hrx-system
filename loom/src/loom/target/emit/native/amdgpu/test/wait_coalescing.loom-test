@@ -15,10 +15,10 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @tuple_slice_waits(%address: r
 }
 
 // ----
-  ds_read_b128 v[8:11], v0 offset:0
-  ds_read_b128 v[12:15], v0 offset:16
+  ds_read_b128 v[4:7], v0 offset:0
+  ds_read_b128 v[8:11], v0 offset:16
   s_waitcnt vmcnt(63) lgkmcnt(0)
-  v_add_u32 v1, v8, v12
+  v_add_u32 v1, v4, v8
   ds_write_b32 v0, v1 offset:32
   s_endpgm
 
@@ -84,7 +84,7 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @materialized_slice_separates_
 
 // Even a fallthrough edge separates insertion points: its successor has its
 // own entry frontier, so a successor wait cannot join the predecessor's group.
-// RUN: emit amdgpu-assembly @block_entry_separates_waits strategy=source
+// RUN: emit amdgpu-assembly @block_entry_separates_waits strategy=source fixed=%left:physical_register:20:1
 amdgpu.target<gfx1151> @target
 
 low.func.def target<amdgpu.rdna3_5.core>(@target) @block_entry_separates_waits(%address: reg<amdgpu.vgpr>) asm {
@@ -101,12 +101,13 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @block_entry_separates_waits(%
 }
 
 // ----
-  ds_read_b128 v[8:11], v0 offset:0
-  ds_read_b128 v[12:15], v0 offset:16
+  ds_read_b128 v[4:7], v0 offset:0
+  ds_read_b128 v[8:11], v0 offset:16
   s_waitcnt vmcnt(63) lgkmcnt(1)
+  v_mov_b32 v20, v4
 .Lbb1:
   s_waitcnt vmcnt(63) lgkmcnt(0)
-  v_add_u32 v1, v8, v12
+  v_add_u32 v1, v20, v8
   ds_write_b32 v0, v1 offset:32
   s_endpgm
 
@@ -114,7 +115,7 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @block_entry_separates_waits(%
 
 // Authored waits keep their own insertion points and spelling. This loose
 // bound cannot retire the remaining load or be folded into a planned wait.
-// RUN: emit amdgpu-assembly @authored_wait_separates_groups strategy=source
+// RUN: emit amdgpu-assembly @authored_wait_separates_groups strategy=source fixed=%left:physical_register:20:1
 amdgpu.target<gfx1151> @target
 
 low.func.def target<amdgpu.rdna3_5.core>(@target) @authored_wait_separates_groups(%address: reg<amdgpu.vgpr>) asm {
@@ -130,12 +131,14 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @authored_wait_separates_group
 }
 
 // ----
-  ds_read_b128 v[8:11], v0 offset:0
-  ds_read_b128 v[12:15], v0 offset:16
+  ds_read_b128 v[4:7], v0 offset:0
+  ds_read_b128 v[8:11], v0 offset:16
   s_waitcnt vmcnt(63) lgkmcnt(1)
+  v_mov_b32 v20, v4
   s_waitcnt vmcnt(63) lgkmcnt(2)
   s_waitcnt vmcnt(63) lgkmcnt(0)
-  v_add_u32 v1, v8, v12
+  s_delay_alu instid0(VALU_DEP_1)
+  v_add_u32 v1, v20, v8
   ds_write_b32 v0, v1 offset:32
   s_endpgm
 
@@ -158,18 +161,19 @@ low.func.def target<amdgpu.rdna3_5.core>(@target) @mixed_counter_slices(%address
 }
 
 // ----
-  ds_read_b128 v[8:11], v0 offset:0
-  global_load_b128 v[12:15], v0, s[0:1] offset:0
+  ds_read_b128 v[4:7], v0 offset:0
+  global_load_b128 v[8:11], v0, s[0:1] offset:0
   s_waitcnt vmcnt(0) lgkmcnt(0)
-  v_add_u32 v1, v8, v12
+  v_add_u32 v1, v4, v8
   ds_write_b32 v0, v1 offset:32
   s_endpgm
 
 // ====
 
-// Address-state overlays are emitted before a packet's waits. A later wait
-// therefore stays after its overlay even when the preceding slice is free.
-// RUN: emit amdgpu-assembly @address_state_separates_waits strategy=source fixed=%high_address:physical_register:268:1
+// Address-state overlays are emitted before a packet's waits. A materialized
+// first slice creates an earlier completion group; the second load's wait stays
+// after its overlay.
+// RUN: emit amdgpu-assembly @address_state_separates_waits strategy=source fixed=%high_address:physical_register:268:1 fixed=%left:physical_register:20:1
 amdgpu.target<gfx1250> @target
 
 low.func.def target<amdgpu.rdna4.gfx125x.core>(@target) @address_state_separates_waits(%address: reg<amdgpu.vgpr>, %high_address: reg<amdgpu.vgpr>) asm {
@@ -186,11 +190,12 @@ low.func.def target<amdgpu.rdna4.gfx125x.core>(@target) @address_state_separates
   ds_read_b128 v[8:11], v0 offset:0
   ds_read_b128 v[12:15], v0 offset:16
   s_wait_dscnt dscnt(1)
+  v_mov_b32 v20, v8
   s_set_vgpr_msb 1
   s_wait_dscnt dscnt(0)
   ds_write_b128 v12, v[12:15] offset:32
   s_set_vgpr_msb 256
-  ds_write_b32 v0, v8 offset:48
+  ds_write_b32 v0, v20 offset:48
   s_endpgm
 
 // ====

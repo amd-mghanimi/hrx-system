@@ -21,11 +21,19 @@ load(
 )
 load(
     "//libamdf/requirements:defs.bzl",
+    "AMDGPU_PEERS_RESOURCE",
     "AMDGPU_RESOURCE",
     "LIBAMDF",
     "LIBAMDF_GPU",
     "LIBAMDF_XDNA",
     "XDNA_RESOURCE",
+)
+load(
+    "//loom/requirements:defs.bzl",
+    "EMIT_AMDGPU",
+    "EMIT_XDNA",
+    "TARGET_ARCH_AMDGPU",
+    "TARGET_ARCH_XDNA",
 )
 
 PACKAGE_POLICIES = [
@@ -60,11 +68,33 @@ PACKAGE_POLICIES = [
     ),
     package_policy(
         packages = [
+            "libamdf/cts/gpu/aql",
+            "libamdf/cts/gpu/kernels",
+            "libamdf/cts/gpu/linux/io_uring",
+            "libamdf/cts/gpu/peer/aql",
+            "libamdf/cts/gpu/pm4",
+            "libamdf/cts/gpu/recipes",
+            "libamdf/cts/interop/gpu/xdna/recipes",
+        ],
+        build_requirements = [TARGET_ARCH_AMDGPU, EMIT_AMDGPU],
+    ),
+    package_policy(
+        packages = [
             "libamdf/benchmarks/gpu/...",
             "libamdf/cts/gpu/...",
         ],
+        excluded_packages = [
+            "libamdf/cts/gpu/aql/encoding",
+            "libamdf/cts/gpu/kernels",
+            "libamdf/cts/gpu/pm4/encoding",
+            "libamdf/cts/gpu/sdma/encoding",
+        ],
         run_requirements = [AMDGPU_RESOURCE],
         resource_group = GPU_DEVICE_RESOURCE_GROUP,
+    ),
+    package_policy(
+        packages = ["libamdf/cts/gpu/peer/..."],
+        run_requirements = [AMDGPU_PEERS_RESOURCE],
     ),
     package_policy(
         packages = [
@@ -90,6 +120,14 @@ PACKAGE_POLICIES = [
         packages = ["libamdf/cts/interop/gpu/xdna/..."],
         build_requirements = [LIBAMDF_XDNA],
         run_requirements = [XDNA_RESOURCE],
+    ),
+    package_policy(
+        packages = [
+            "libamdf/cts/interop/gpu/xdna/recipes",
+            "libamdf/cts/xdna/programs",
+            "libamdf/cts/xdna/recipes",
+        ],
+        build_requirements = [TARGET_ARCH_XDNA, EMIT_XDNA],
     ),
     package_policy(
         packages = [

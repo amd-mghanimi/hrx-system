@@ -591,9 +591,9 @@ static iree_status_t loom_vector_to_scalar_mma_cast_float(
     return iree_ok_status();
   }
   loom_op_t* cast_op = NULL;
-  IREE_RETURN_IF_ERROR(loom_scalar_extf_build(&state->rewriter->builder, input,
-                                              input_type, result_type,
-                                              state->location, &cast_op));
+  IREE_RETURN_IF_ERROR(loom_scalar_extf_build(
+      &state->rewriter->builder, /*instance_flags=*/0, input, input_type,
+      result_type, state->location, &cast_op));
   *out_result = loom_scalar_extf_result(cast_op);
   return iree_ok_status();
 }

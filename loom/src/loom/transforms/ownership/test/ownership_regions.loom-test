@@ -1,0 +1,136 @@
+// RUN: pass ownership-lifetime
+
+// A nested allocation must not disappear from the lifetime proof.
+func.def @nested_resource_requires_cfg(%condition: i1, %size: index) {
+  // ERROR@+1: DOMINANCE/018 {phase_name="ownership-lifetime", op_name="scf.if"}
+  scf.if %condition {
+    %resource = test.resource.alloc %size : index -> pool
+    test.resource.borrow %resource : pool
+  }
+  func.return
+}
+
+// ====
+
+func.def noinline @make_resource(%size: index) -> (pool) {
+  %resource = test.resource.alloc %size : index -> pool
+  func.return %resource : pool
+}
+
+// The result's ownership comes from the callee body, not a type policy.
+func.def @nested_producer_requires_cfg(%condition: i1, %size: index) {
+  // ERROR@+1: DOMINANCE/018 {phase_name="ownership-lifetime", op_name="scf.if"}
+  scf.if %condition {
+    %resource = func.call @make_resource(%size) : (index) -> (pool)
+  }
+  func.return
+}
+
+// ====
+
+func.def noinline @release_resource(%resource: pool) {
+  test.resource.release %resource : pool
+  func.return
+}
+
+func.def noinline @forward_resource(%resource: pool) {
+  func.call @release_resource(%resource) : (pool)
+  func.return
+}
+
+// Consumption propagates through another ordinary non-inlined call.
+func.def @nested_consumer_requires_cfg(%condition: i1, %resource: pool) {
+  // ERROR@+1: DOMINANCE/018 {phase_name="ownership-lifetime", op_name="scf.if"}
+  scf.if %condition {
+    func.call @forward_resource(%resource) : (pool)
+  }
+  func.return
+}
+
+// ====
+
+// Even ownership created outside the region can be affected by its execution.
+func.def @outer_ownership_requires_cfg(%condition: i1, %size: index) {
+  %resource = test.resource.alloc %size : index -> pool
+  // ERROR@+1: DOMINANCE/018 {phase_name="ownership-lifetime", op_name="scf.if"}
+  scf.if %condition {
+    test.resource.borrow %resource : pool
+  }
+  test.resource.release %resource : pool
+  func.return
+}
+
+// ====
+
+// An arithmetic helper has no ownership to interpret inside its regions.
+func.def noinline @choose(%condition: i1, %left: i32, %right: i32) -> (i32) {
+  %selected = scf.if %condition -> (i32) {
+    scf.yield %left : i32
+  } else {
+    scf.yield %right : i32
+  }
+  func.return %selected : i32
+}
+
+func.def @flat_owner_calls_structured_arithmetic(%condition: i1, %size: index, %left: i32, %right: i32) -> (i32) {
+  %resource = test.resource.alloc %size : index -> pool
+  %selected = func.call @choose(%condition, %left, %right) : (i1, i32, i32) -> (i32)
+  test.resource.release %resource : pool
+  func.return %selected : i32
+}
+
+// ====
+
+func.def noinline @borrow_resource(%resource: pool) {
+  test.resource.borrow %resource : pool
+  func.return
+}
+
+func.def @structured_borrow_has_no_owned_obligation(%condition: i1, %resource: pool) {
+  scf.if %condition {
+    func.call @borrow_resource(%resource) : (pool)
+  }
+  func.return
+}
+
+// ====
+
+func.def noinline @manage_local_resource(%size: index) {
+  %resource = test.resource.alloc %size : index -> pool
+  test.resource.release %resource : pool
+  func.return
+}
+
+// Internal callee lifetimes do not escape through its borrowed-only ABI.
+func.def @structured_caller_of_self_contained_owner(%condition: i1, %size: index) {
+  scf.if %condition {
+    func.call @manage_local_resource(%size) : (index)
+  }
+  func.return
+}
+
+// ====
+
+func.def noinline @recursive_forward(%resource: pool, %repeat: i1) {
+  func.call @recursive_consume(%resource, %repeat) : (pool, i1)
+  func.return
+}
+
+func.def noinline @recursive_consume(%resource: pool, %repeat: i1) {
+  cfg.cond_br %repeat, ^recur, ^finish
+^recur:
+  func.call @recursive_forward(%resource, %repeat) : (pool, i1)
+  func.return
+^finish:
+  test.resource.release %resource : pool
+  func.return
+}
+
+// Ownership inferred through a recursive component still reaches its caller.
+func.def @recursive_consumer_requires_cfg(%condition: i1, %resource: pool, %repeat: i1) {
+  // ERROR@+1: DOMINANCE/018 {phase_name="ownership-lifetime", op_name="scf.if"}
+  scf.if %condition {
+    func.call @recursive_forward(%resource, %repeat) : (pool, i1)
+  }
+  func.return
+}

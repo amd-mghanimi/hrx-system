@@ -1,0 +1,191 @@
+// RUN: emit source-low output=low
+
+aie2p.target<core> @target
+
+func.def target(@target) @transpose_unit_axis(%source: vector<1x2x4xbf16>) -> (vector<2x1x4xbf16>) {
+  %result = vector.transpose<[1, 0, 2]> %source : vector<1x2x4xbf16> -> vector<2x1x4xbf16>
+  func.return %result : vector<2x1x4xbf16>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @transpose_unit_axis(%result: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>) asm {
+  return %result
+}
+
+// ====
+
+aie2p.target<core> @target
+
+func.def target(@target) @transpose_f32_4x4(%source: vector<4x4xf32>) -> (vector<4x4xf32>) {
+  %result = vector.transpose<[1, 0]> %source : vector<4x4xf32> -> vector<4x4xf32>
+  func.return %result : vector<4x4xf32>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @transpose_f32_4x4(%source: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>) asm {
+  %5 = mova.i32 34
+  %result = vshuffle %source, %source, %5
+  return %result
+}
+
+// ====
+
+aie2p.target<core> @target
+
+func.def target(@target) @transpose_bf16_8x8(%source: vector<8x8xbf16>) -> (vector<8x8xbf16>) {
+  %result = vector.transpose<[1, 0]> %source : vector<8x8xbf16> -> vector<8x8xbf16>
+  func.return %result : vector<8x8xbf16>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @transpose_bf16_8x8(%source: reg<aie2p.vec256 x4>) -> (reg<aie2p.vec256 x4>) asm {
+  %5 = slice %source[0] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %6 = slice %source[2] : reg<aie2p.vec256 x4> -> reg<aie2p.vec256 x2>
+  %7 = mova.i32 52
+  %8 = vshuffle %5, %6, %7
+  %9 = mova.i32 53
+  %10 = vshuffle %5, %6, %9
+  %result = concat(%8, %10) : (reg<aie2p.vec256 x2>, reg<aie2p.vec256 x2>) -> reg<aie2p.vec256 x4>
+  return %result
+}
+
+// ====
+
+aie2p.target<core> @target
+
+func.def target(@target) @transpose_i8_4x4(%source: vector<4x4xi8>) -> (vector<4x4xi8>) {
+  %result = vector.transpose<[1, 0]> %source : vector<4x4xi8> -> vector<4x4xi8>
+  func.return %result : vector<4x4xi8>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @transpose_i8_4x4(%source: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>) asm {
+  %5 = mova.i32 0
+  %6 = mova.i32 1
+  %7 = vshuffle %source, %source, %5
+  %8 = vshuffle %source, %source, %6
+  %9 = vshuffle %7, %7, %5
+  %10 = vshuffle %7, %7, %6
+  %11 = vshuffle %8, %8, %5
+  %12 = vshuffle %8, %8, %6
+  %13 = mova.i32 4
+  %14 = vshift %9, %9, %13
+  %15 = mova.i32 60
+  %16 = vshift %14, %11, %15
+  %17 = vshift %10, %10, %13
+  %18 = vshift %17, %12, %15
+  %19 = mova.i32 8
+  %20 = vshift %16, %16, %19
+  %21 = mova.i32 56
+  %result = vshift %20, %18, %21
+  return %result
+}
+
+// ====
+
+aie2p.target<core> @target
+
+func.def target(@target) @transpose_i32_2x3(%source: vector<2x3xi32>) -> (vector<3x2xi32>) {
+  %result = vector.transpose<[1, 0]> %source : vector<2x3xi32> -> vector<3x2xi32>
+  func.return %result : vector<3x2xi32>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @transpose_i32_2x3(%source: reg<aie2p.vec256 x2>) -> (reg<aie2p.vec256 x2>) asm {
+  %5 = mova.i32 8
+  %6 = vshift %source, %source, %5
+  %7 = mova.i32 56
+  %8 = vshift %source, %source, %7
+  %9 = predicate.constant.low32 983280
+  %10 = predicate.complete.zero.high32 %9, 0
+  %11 = vsel.8 %source, %6, %10
+  %12 = predicate.constant.low32 251719680
+  %13 = predicate.complete.zero.high32 %12, 0
+  %14 = vsel.8 %11, %8, %13
+  %15 = mova.i32 16
+  %16 = vshift %14, %14, %15
+  %17 = mova.i32 48
+  %18 = vshift %14, %14, %17
+  %19 = predicate.constant.low32 3840
+  %20 = predicate.complete.zero.high32 %19, 0
+  %21 = vsel.8 %14, %16, %20
+  %22 = predicate.constant.low32 251658240
+  %23 = predicate.complete.zero.high32 %22, 0
+  %24 = vsel.8 %21, %18, %23
+  %25 = vshift %24, %24, %5
+  %26 = vshift %24, %24, %7
+  %27 = predicate.constant.low32 983040
+  %28 = predicate.complete.zero.high32 %27, 0
+  %29 = vsel.8 %24, %25, %28
+  %30 = predicate.constant.low32 251658240
+  %31 = predicate.complete.zero.high32 %30, 0
+  %32 = vsel.8 %29, %26, %31
+  %33 = mova.i32 4
+  %34 = vshift %32, %32, %33
+  %35 = mova.i32 60
+  %36 = vshift %32, %32, %35
+  %37 = predicate.constant.low32 3840
+  %38 = predicate.complete.zero.high32 %37, 0
+  %39 = vsel.8 %32, %34, %38
+  %40 = predicate.constant.low32 61440
+  %41 = predicate.complete.zero.high32 %40, 0
+  %result = vsel.8 %39, %36, %41
+  return %result
+}
+
+// ====
+
+aie2p.target<core> @target
+
+func.def target(@target) @transpose_i1_2x3(%source: vector<2x3xi1>) -> (vector<3x2xi1>) {
+  %result = vector.transpose<[1, 0]> %source : vector<2x3xi1> -> vector<3x2xi1>
+  func.return %result : vector<3x2xi1>
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core>(@target) abi(object_function) @transpose_i1_2x3(%source: reg<aie2p.elpredicate>) -> (reg<aie2p.elpredicate>) asm {
+  %5 = mov.short 1
+  %6 = vbcst.8 %5
+  %7 = vsub.8 %6, %6
+  %8 = vsel.8 %7, %6, %source
+  %9 = mova.i32 2
+  %10 = vshift %8, %8, %9
+  %11 = mova.i32 62
+  %12 = vshift %8, %8, %11
+  %13 = predicate.constant.low32 18
+  %14 = predicate.complete.zero.high32 %13, 0
+  %15 = vsel.8 %8, %10, %14
+  %16 = predicate.constant.low32 72
+  %17 = predicate.complete.zero.high32 %16, 0
+  %18 = vsel.8 %15, %12, %17
+  %19 = mova.i32 4
+  %20 = vshift %18, %18, %19
+  %21 = mova.i32 60
+  %22 = vshift %18, %18, %21
+  %23 = predicate.constant.low32 4
+  %24 = predicate.complete.zero.high32 %23, 0
+  %25 = vsel.8 %18, %20, %24
+  %26 = predicate.constant.low32 64
+  %27 = predicate.complete.zero.high32 %26, 0
+  %28 = vsel.8 %25, %22, %27
+  %29 = vshift %28, %28, %9
+  %30 = vshift %28, %28, %11
+  %31 = predicate.constant.low32 16
+  %32 = predicate.complete.zero.high32 %31, 0
+  %33 = vsel.8 %28, %29, %32
+  %34 = predicate.constant.low32 64
+  %35 = predicate.complete.zero.high32 %34, 0
+  %36 = vsel.8 %33, %30, %35
+  %37 = mova.i32 1
+  %38 = vshift %36, %36, %37
+  %39 = mova.i32 63
+  %40 = vshift %36, %36, %39
+  %41 = predicate.constant.low32 4
+  %42 = predicate.complete.zero.high32 %41, 0
+  %43 = vsel.8 %36, %38, %42
+  %44 = predicate.constant.low32 8
+  %45 = predicate.complete.zero.high32 %44, 0
+  %46 = vsel.8 %43, %40, %45
+  %result = vlt.u8x64 %7, %46
+  return %result
+}

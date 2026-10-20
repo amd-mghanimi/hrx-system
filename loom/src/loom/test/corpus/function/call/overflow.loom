@@ -1,0 +1,125 @@
+// Values cross both sides of the direct-register window without changing bits.
+func.def noinline @wide_reverse(%a0: i64, %a1: i64, %a2: i64, %a3: i64, %a4: i64, %a5: i64, %a6: i64, %a7: i64, %a8: i64, %a9: i64, %a10: i64, %a11: i64, %a12: i64, %a13: i64, %a14: i64, %a15: i64, %a16: i64) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) {
+  func.return %a16, %a15, %a14, %a13, %a12, %a11, %a10, %a9, %a8, %a7, %a6, %a5, %a4, %a3, %a2, %a1, %a0 : i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+}
+
+// The retained call must preserve the original inputs and a computed live value.
+func.def @wide_call_preserves_values(%first: i64, %last: i64) -> (i64, i64, i64) {
+  %held = scalar.addi %first, %last : i64
+  %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15, %r16 = func.call @wide_reverse(%last, %first, %last, %first, %last, %first, %last, %first, %last, %first, %last, %first, %last, %first, %last, %first, %last) : (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)
+  %sum1 = scalar.addi %r0, %r1 : i64
+  %sum2 = scalar.addi %sum1, %r2 : i64
+  %sum3 = scalar.addi %sum2, %r3 : i64
+  %sum4 = scalar.addi %sum3, %r4 : i64
+  %sum5 = scalar.addi %sum4, %r5 : i64
+  %sum6 = scalar.addi %sum5, %r6 : i64
+  %sum7 = scalar.addi %sum6, %r7 : i64
+  %sum8 = scalar.addi %sum7, %r8 : i64
+  %sum9 = scalar.addi %sum8, %r9 : i64
+  %sum10 = scalar.addi %sum9, %r10 : i64
+  %sum11 = scalar.addi %sum10, %r11 : i64
+  %sum12 = scalar.addi %sum11, %r12 : i64
+  %sum13 = scalar.addi %sum12, %r13 : i64
+  %sum14 = scalar.addi %sum13, %r14 : i64
+  %sum15 = scalar.addi %sum14, %r15 : i64
+  %sum16 = scalar.addi %sum15, %r16 : i64
+  func.return %sum16, %held, %first : i64, i64, i64
+}
+
+// Reference fields do not advance the value-bank ordinal. Narrow and wide
+// floating bits cross the boundary without conversion or byte packing.
+func.def noinline @mixed_overflow(%a0: i64, %storage: buffer, %a1: i64, %a2: i64, %a3: i64, %a4: i64, %a5: i64, %a6: i64, %a7: i64, %a8: i64, %a9: i64, %a10: i64, %a11: i64, %a12: i64, %a13: i64, %a14: i64, %a15: i64, %small: f32, %wide: f64, %tag: i32) -> (f32, f64, i32, buffer, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) {
+  func.return %small, %wide, %tag, %storage, %a0, %a1, %a2, %a3, %a4, %a5, %a6, %a7, %a8, %a9, %a10, %a11, %a12, %a13, %a14, %a15 : f32, f64, i32, buffer, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+}
+
+func.def @mixed_overflow_call(%seed: i64, %small_bits: i32, %wide_bits: i64, %tag: i32) -> (i64, i32, i64, i32, i64) {
+  %length = index.constant 8 : offset
+  %storage = buffer.alloca<private> align(8) %length : buffer
+  %small = scalar.bitcast %small_bits : i32 to f32
+  %wide = scalar.bitcast %wide_bits : i64 to f64
+  %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15, %r16, %r17, %r18, %r19 = func.call @mixed_overflow(%seed, %storage, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %seed, %small, %wide, %tag) : (i64, buffer, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, f32, f64, i32) -> (f32, f64, i32, buffer, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)
+  %returned_small = scalar.bitcast %r0 : f32 to i32
+  %returned_wide = scalar.bitcast %r1 : f64 to i64
+  %returned_length = buffer.length %r3
+  %length_value = index.cast %returned_length : offset to i64
+  func.return %r19, %returned_small, %returned_wide, %r2, %length_value : i64, i32, i64, i32, i64
+}
+
+// Result-only overflow and a branch join use the same source-order tuple.
+func.def noinline @wide_branches(%a: i64, %b: i64) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) {
+  %c0 = scalar.constant 0 : i64
+  %negative = scalar.cmpi slt, %a, %c0 : i64
+  %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15, %r16 = scf.if %negative -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) {
+    scf.yield %a, %a, %a, %a, %a, %a, %a, %a, %a, %a, %a, %a, %a, %a, %a, %a, %b : i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+  } else {
+    scf.yield %b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %b, %a : i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+  }
+  func.return %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15, %r16 : i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64
+}
+
+func.def @wide_branch_call(%a: i64, %b: i64) -> (i64, i64, i64) {
+  %r0, %r1, %r2, %r3, %r4, %r5, %r6, %r7, %r8, %r9, %r10, %r11, %r12, %r13, %r14, %r15, %r16 = func.call @wide_branches(%a, %b) : (i64, i64) -> (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64)
+  func.return %r0, %r16, %a : i64, i64, i64
+}
+
+// Unused direct and overflow fields retain their positions in the signature.
+func.def noinline @sparse_arguments(%input0: i64, %input1: i64, %input2: i64, %input3: i64, %input4: i64, %input5: i64, %input6: i64, %input7: i64, %input8: i64, %input9: i64, %input10: i64, %input11: i64, %input12: i64, %input13: i64, %input14: i64, %input15: i64, %input16: i64, %input17: i64) -> (i64, i64) {
+  func.return %input0, %input17 : i64, i64
+}
+
+// Observes argument and result overflow across wide integer, branch, and sparse
+// signatures.
+func.def @overflow_call_observations(%a: i64, %b: i64, %output: buffer) {
+  %preserved0, %preserved1, %preserved2 = func.call @wide_call_preserves_values(%a, %b) : (i64, i64) -> (i64, i64, i64)
+  %branch0, %branch1, %branch2 = func.call @wide_branch_call(%a, %b) : (i64, i64) -> (i64, i64, i64)
+  %sparse0, %sparse1 = func.call @sparse_arguments(%a, %b, %a, %b, %a, %b, %a, %b, %a, %b, %a, %b, %a, %b, %a, %b, %a, %b) : (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> (i64, i64)
+  %values = vector.from_elements %preserved0, %preserved1, %preserved2, %branch0, %branch1, %branch2, %sparse0, %sparse1 : vector<8xi64>
+  %origin = index.constant 0 : offset
+  %results = buffer.view %output[%origin] : buffer -> view<8xi64>
+  vector.store %values, %results[0] : vector<8xi64>, view<8xi64>
+  func.return
+}
+
+func.def @mixed_overflow_call_observations(%a: i64, %b: i64, %word_output: buffer, %wide_output: buffer) {
+  %small_bits = scalar.trunci %a : i64 to i32
+  %tag = scalar.trunci %b : i64 to i32
+  %mixed0, %mixed1, %mixed2, %mixed3, %mixed4 = func.call @mixed_overflow_call(%a, %small_bits, %b, %tag) : (i64, i32, i64, i32) -> (i64, i32, i64, i32, i64)
+  %word_values = vector.from_elements %mixed1, %mixed3 : vector<2xi32>
+  %wide_values = vector.from_elements %mixed0, %mixed2, %mixed4 : vector<3xi64>
+  %origin = index.constant 0 : offset
+  %word_results = buffer.view %word_output[%origin] : buffer -> view<2xi32>
+  %wide_results = buffer.view %wide_output[%origin] : buffer -> view<3xi64>
+  vector.store %word_values, %word_results[0] : vector<2xi32>, view<2xi32>
+  vector.store %wide_values, %wide_results[0] : vector<3xi64>, view<3xi64>
+  func.return
+}
+
+check.scenario @overflow_call_values {
+  check.trial[128](%trial: index, %entropy: check.entropy) {
+    %a_source = check.entropy.fork %entropy name("a") : check.entropy
+    %b_source = check.entropy.fork %entropy name("b") : check.entropy
+    %a = check.entropy.read %a_source[%trial] : check.entropy -> i64
+    %b = check.entropy.read %b_source[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<8xi64>
+    check.compare<@overflow_call_observations>(%a, %b, %output) : (i64, i64, tensor<8xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<8xi64>
+    }
+  }
+  check.return
+}
+
+check.scenario @mixed_overflow_call_values {
+  check.trial[128](%trial: index, %entropy: check.entropy) {
+    %a_source = check.entropy.fork %entropy name("a") : check.entropy
+    %b_source = check.entropy.fork %entropy name("b") : check.entropy
+    %a = check.entropy.read %a_source[%trial] : check.entropy -> i64
+    %b = check.entropy.read %b_source[%trial] : check.entropy -> i64
+    %word_output = check.generate.fill value(0) : tensor<2xi32>
+    %wide_output = check.generate.fill value(0) : tensor<3xi64>
+    check.compare<@mixed_overflow_call_observations>(%a, %b, %word_output, %wide_output) : (i64, i64, tensor<2xi32>, tensor<3xi64>) -> () {
+      check.expect.bitwise actual(%word_output) expected(%word_output) : tensor<2xi32>
+      check.expect.bitwise actual(%wide_output) expected(%wide_output) : tensor<3xi64>
+    }
+  }
+  check.return
+}

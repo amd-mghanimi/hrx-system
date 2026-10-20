@@ -81,6 +81,19 @@ iree_runtime_cc_test(
 )
 
 iree_runtime_cc_test(
+    name = "bpe_encode_test",
+    srcs = ["bpe_encode_test.cc"],
+    deps = [
+        ":bpe",
+        ":model_test_util",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//runtime/src/iree/tokenizer:model",
+    ],
+)
+
+iree_runtime_cc_test(
     name = "bpe_backtrack_test",
     srcs = ["bpe_backtrack_test.cc"],
     deps = [
@@ -152,6 +165,7 @@ iree_runtime_cc_library(
     hdrs = ["unigram.h"],
     deps = [
         "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:unicode",
         "//runtime/src/iree/tokenizer:model",
         "//runtime/src/iree/tokenizer:types",
         "//runtime/src/iree/tokenizer/vocab",
@@ -162,6 +176,18 @@ iree_runtime_cc_library(
 iree_runtime_cc_test(
     name = "unigram_test",
     srcs = ["unigram_test.cc"],
+    deps = [
+        ":model_test_util",
+        ":unigram",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "unigram_streaming_test",
+    srcs = ["unigram_streaming_test.cc"],
     deps = [
         ":model_test_util",
         ":unigram",

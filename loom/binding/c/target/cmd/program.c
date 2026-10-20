@@ -28,7 +28,6 @@
 #include "loom/target/arch/cmd/artifact_set.h"
 #include "loom/transforms/cleanup/configured.h"
 #include "loom/transforms/kernel/kernel_class_materializer.h"
-#include "loom/transforms/kernel/kernel_request_producer.h"
 #include "loomc/compile.h"
 #include "loomc/iree.h"
 
@@ -82,7 +81,7 @@ typedef struct loomc_cmd_program_product_invocation_t {
     loomc_allocator_t allocator;
   } request;
 
-  // Operation result receiving command preparation diagnostics.
+  // Operation result receiving command planning diagnostics.
   loomc_result_t* result;
 
   // Optional embedding sink accepting source-backed kernel requests.
@@ -148,11 +147,10 @@ static loomc_status_t loomc_cmd_program_product_validate_options(
         LOOMC_STATUS_INVALID_ARGUMENT,
         "command product construction requires an explicit or INPUT root");
   }
-  LOOMC_RETURN_IF_ERROR(
-      loomc_target_specialization_options_validate_environment(
-          *out_target_specialization,
-          loomc_context_target_environment(
-              loomc_link_index_context(options->link_index))));
+  LOOMC_RETURN_IF_ERROR(loomc_link_materialization_validate_targets(
+      options->kernel_target_profile, *out_target_specialization,
+      loomc_context_target_environment(
+          loomc_link_index_context(options->link_index))));
   return loomc_config_validate_text_options(&options->config);
 }
 
@@ -217,10 +215,9 @@ static loomc_status_t loomc_cmd_program_product_validate_request_options(
           "command request library index contains INPUT providers");
     }
   }
-  LOOMC_RETURN_IF_ERROR(
-      loomc_target_specialization_options_validate_environment(
-          *out_target_specialization,
-          loomc_context_target_environment(context)));
+  LOOMC_RETURN_IF_ERROR(loomc_link_materialization_validate_targets(
+      options->kernel_target_profile, *out_target_specialization,
+      loomc_context_target_environment(context)));
   return loomc_config_validate_text_options(&options->config);
 }
 
@@ -342,8 +339,8 @@ static iree_status_t loomc_cmd_program_product_publish_kernel_request(
       (loomc_cmd_program_product_invocation_t*)user_data;
   loom_kernel_class_product_t kernel_product = {0};
   loomc_status_t status =
-      loomc_status_from_iree(loom_kernel_request_materialize(
-          request->kernel_request, invocation->request.block_pool,
+      loomc_status_from_iree(loom_cmd_program_kernel_request_materialize(
+          request, invocation->request.block_pool,
           iree_allocator_from_loomc(invocation->request.allocator),
           &kernel_product));
   loomc_source_t* source = NULL;
@@ -395,8 +392,25 @@ static iree_status_t loomc_cmd_program_product_capture_diagnostic(
     void* user_data, const loom_diagnostic_emission_t* emission) {
   loomc_cmd_program_product_invocation_t* invocation =
       (loomc_cmd_program_product_invocation_t*)user_data;
+  const loomc_target_pass_environment_t* pass_environment =
+      loomc_context_target_pass_environment(invocation->request.context);
   return iree_status_from_loomc(loomc_result_add_loom_diagnostic_emission(
-      invocation->result, /*source=*/NULL, LOOM_EMITTER_PASS, emission));
+      invocation->result, /*module=*/NULL, (loom_source_resolver_t){0},
+      LOOM_EMITTER_PASS, emission,
+      pass_environment ? &pass_environment->diagnostic_type_print_options
+                       : NULL));
+}
+
+static iree_status_t loomc_cmd_program_product_verify_module(
+    void* user_data, const loom_module_t* module, bool* out_valid) {
+  loomc_cmd_program_product_invocation_t* invocation =
+      (loomc_cmd_program_product_invocation_t*)user_data;
+  *out_valid = false;
+  IREE_RETURN_IF_ERROR(iree_status_from_loomc(loomc_result_verify_loom_module(
+      invocation->request.context, module, (loom_source_resolver_t){0},
+      /*max_errors=*/0, invocation->result)));
+  *out_valid = loomc_result_succeeded(invocation->result);
+  return iree_ok_status();
 }
 
 static loomc_status_t loomc_cmd_program_product_translate_plan_status(
@@ -411,9 +425,10 @@ static loomc_status_t loomc_cmd_program_product_translate_plan_status(
   if (!loomc_result_succeeded(invocation->result) ||
       loomc_result_diagnostic_count(invocation->result) !=
           diagnostic_count_before) {
+    loomc_result_set_status_code(
+        invocation->result, (loomc_status_code_t)iree_status_code(plan_status));
     iree_status_free(plan_status);
-    return loomc_result_set_state(invocation->result,
-                                  LOOMC_RESULT_STATE_FAILED);
+    return loomc_ok_status();
   }
   return loomc_status_from_iree(plan_status);
 }
@@ -488,6 +503,8 @@ static loomc_status_t loomc_cmd_program_product_build_indexed(
   loomc_status_t status = loomc_ok_status();
   loom_cmd_program_plan_index_options_t plan_options;
   loom_cmd_program_plan_index_options_initialize(&plan_options);
+  plan_options.verification.fn = loomc_cmd_program_product_verify_module;
+  plan_options.verification.user_data = &invocation;
   if (request_sink.publish != NULL) {
     plan_options.kernel_request_sink = (loom_cmd_program_kernel_request_sink_t){
         .publish = loomc_cmd_program_product_publish_kernel_request,
@@ -503,8 +520,7 @@ static loomc_status_t loomc_cmd_program_product_build_indexed(
         loom_cmd_program_artifact_set_build_from_index(
             module_index, root_symbol_ordinals, root_symbol_count,
             &(loom_cmd_program_artifact_builder_options_t){
-                .plan_options =
-                    request_sink.publish != NULL ? &plan_options : NULL,
+                .plan_options = &plan_options,
                 .pass_registry = loom_pass_builtin_registry(),
                 .cleanup_pattern_provider_set =
                     loom_cleanup_configured_pattern_provider_set(),
@@ -525,9 +541,9 @@ static loomc_status_t loomc_cmd_program_product_build_indexed(
     if (loomc_result_diagnostic_count(result) == diagnostic_count_before) {
       status = loomc_make_status(
           LOOMC_STATUS_INTERNAL,
-          "command program preparation failed without a diagnostic");
+          "command program planning failed without a diagnostic");
     } else {
-      status = loomc_result_set_state(result, LOOMC_RESULT_STATE_FAILED);
+      loomc_result_set_status_code(result, LOOMC_STATUS_FAILED_PRECONDITION);
     }
   }
   if (loomc_status_is_ok(status) && loomc_result_succeeded(result)) {
@@ -561,7 +577,10 @@ loomc_status_t loomc_cmd_program_product_build(
 
   loomc_result_t* result = NULL;
   LOOMC_RETURN_IF_ERROR(
-      loomc_result_create(LOOMC_RESULT_STATE_SUCCEEDED, allocator, &result));
+      loomc_result_create(LOOMC_STATUS_OK,
+                          loomc_context_source_retention(
+                              loomc_link_index_context(options->link_index)),
+                          allocator, &result));
   iree_arena_allocator_t scratch_arena;
   iree_arena_initialize(loomc_workspace_block_pool(workspace), &scratch_arena);
   loomc_product_t* product = NULL;
@@ -579,7 +598,9 @@ loomc_status_t loomc_cmd_program_product_build(
     loomc_link_materialization_state_initialize(
         loomc_link_index_context(options->link_index), workspace,
         options->link_index, &options->config, target_specialization, result,
-        allocator, &materialization_state);
+        &scratch_arena, allocator, &materialization_state);
+    materialization_state.specialization.kernel_profile =
+        options->kernel_target_profile;
     const loom_link_plan_materialization_environment_t
         materialization_environment =
             loomc_link_materialization_state_environment(
@@ -625,8 +646,9 @@ loomc_status_t loomc_cmd_program_product_build_request(
   }
 
   loomc_result_t* result = NULL;
-  LOOMC_RETURN_IF_ERROR(
-      loomc_result_create(LOOMC_RESULT_STATE_SUCCEEDED, allocator, &result));
+  LOOMC_RETURN_IF_ERROR(loomc_result_create(
+      LOOMC_STATUS_OK, loomc_context_source_retention(context), allocator,
+      &result));
   iree_arena_allocator_t scratch_arena;
   iree_arena_initialize(loomc_workspace_block_pool(workspace), &scratch_arena);
   loomc_request_index_overlay_t request_overlay = {0};
@@ -640,8 +662,10 @@ loomc_status_t loomc_cmd_program_product_build_request(
     loomc_link_materialization_state_initialize_overlay(
         context, workspace, options->library_index,
         request_overlay.request_provider_ordinal, loomc_request_source(request),
-        &options->config, target_specialization, result, allocator,
-        &materialization_state);
+        &options->config, target_specialization, result, &scratch_arena,
+        allocator, &materialization_state);
+    materialization_state.specialization.kernel_profile =
+        options->kernel_target_profile;
     const loom_link_plan_materialization_environment_t
         materialization_environment =
             loomc_link_materialization_state_environment(

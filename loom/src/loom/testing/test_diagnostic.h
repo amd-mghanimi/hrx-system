@@ -4,21 +4,27 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Diagnostic materialization and annotation matching for .loom-test tooling.
+// Rendered diagnostic records and annotation matching for .loom-test tooling.
 
 #ifndef LOOM_TESTING_TEST_DIAGNOSTIC_H_
 #define LOOM_TESTING_TEST_DIAGNOSTIC_H_
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
-#include "loom/error/diagnostic.h"
-#include "loom/format/text/printer.h"
-#include "loom/ir/module.h"
+#include "loom/error/error_defs.h"
 #include "loom/testing/test_file.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// One named rendered diagnostic parameter copied for annotation matching.
+typedef struct loom_test_diagnostic_param_t {
+  // Stable parameter name from the diagnostic definition.
+  iree_string_view_t name;
+  // Canonically rendered parameter value.
+  iree_string_view_t value;
+} loom_test_diagnostic_param_t;
 
 // One diagnostic copied into arena-owned storage for matching and reporting.
 typedef struct loom_test_diagnostic_t {
@@ -31,9 +37,6 @@ typedef struct loom_test_diagnostic_t {
   // Structured error code to match against DOMAIN/CODE annotations.
   uint16_t code;
 
-  // Generated error definition carrying parameter names.
-  const loom_error_def_t* error;
-
   // Original diagnostic source, independent of its rendered message.
   struct {
     // Source identity copied into the diagnostic arena.
@@ -45,11 +48,11 @@ typedef struct loom_test_diagnostic_t {
   // Rendered diagnostic message text, arena-allocated.
   iree_string_view_t message;
 
-  // Rendered parameter values in the error schema's order, arena-allocated.
-  iree_string_view_t* param_values;
+  // Named rendered parameters, arena-allocated.
+  loom_test_diagnostic_param_t* params;
 
-  // Number of populated entries in param_values.
-  iree_host_size_t param_value_count;
+  // Number of populated entries in params.
+  iree_host_size_t param_count;
 
   // Full source-rendered diagnostic text, arena-allocated.
   iree_string_view_t formatted_diagnostic;
@@ -57,23 +60,6 @@ typedef struct loom_test_diagnostic_t {
   // True once this diagnostic has matched one expected annotation.
   bool matched;
 } loom_test_diagnostic_t;
-
-// Context used to render diagnostic messages and typed parameter values.
-typedef struct loom_test_diagnostic_format_options_t {
-  // Module owning types referenced by diagnostic parameters. May be NULL while
-  // collecting parser diagnostics before a module exists.
-  const loom_module_t* module;
-
-  // Text printer options used for type-bearing diagnostic parameters.
-  loom_text_print_options_t text_print_options;
-} loom_test_diagnostic_format_options_t;
-
-// Copies and renders |diagnostic| into arena-owned |out_diagnostic| storage.
-iree_status_t loom_test_diagnostic_materialize(
-    const loom_diagnostic_t* diagnostic,
-    const loom_test_diagnostic_format_options_t* options,
-    iree_arena_allocator_t* arena, iree_allocator_t host_allocator,
-    loom_test_diagnostic_t* out_diagnostic);
 
 // Returns true when |diagnostic| belongs to |filename| and all constraints in
 // |annotation| match. A same-numbered line in another source cannot match.

@@ -28,6 +28,10 @@ iree_status_t loom_amdgpu_preselect_vector_construct_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_low_lower_plan_t* out_plan);
 
+// Publishes the tuple assembled from the actual selected element carriers.
+iree_status_t loom_amdgpu_finalize_vector_construct_plan(
+    loom_low_lower_context_t* context, loom_low_lower_plan_t plan);
+
 // Lowers a selected AMDGPU vector-construction plan.
 iree_status_t loom_amdgpu_lower_vector_construct_op(
     loom_low_lower_context_t* context, const loom_op_t* source_op,

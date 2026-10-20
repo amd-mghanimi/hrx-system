@@ -47,6 +47,12 @@ static void amdf_kmt_resolve_procedures(amdf_kmt_api_t* api) {
           api->module, "D3DKMTFreeGpuVirtualAddress");
   api->map_gpu_virtual_address = (PFND3DKMT_MAPGPUVIRTUALADDRESS)GetProcAddress(
       api->module, "D3DKMTMapGpuVirtualAddress");
+  api->update_gpu_virtual_address =
+      (PFND3DKMT_UPDATEGPUVIRTUALADDRESS)GetProcAddress(
+          api->module, "D3DKMTUpdateGpuVirtualAddress");
+  api->wait_on_hardware_queue =
+      (PFND3DKMT_SUBMITWAITFORSYNCOBJECTSTOHWQUEUE)GetProcAddress(
+          api->module, "D3DKMTSubmitWaitForSyncObjectsToHwQueue");
   api->make_resident =
       (PFND3DKMT_MAKERESIDENT)GetProcAddress(api->module, "D3DKMTMakeResident");
   api->lock = (PFND3DKMT_LOCK2)GetProcAddress(api->module, "D3DKMTLock2");
@@ -122,44 +128,6 @@ bool amdf_kmt_api_supports_xdna_kernel_execution(const amdf_kmt_api_t* api) {
 bool amdf_kmt_status_is_success_or_pending(NTSTATUS status) {
   const uint32_t code = (uint32_t)status;
   return code == 0 || code == 0x00000103u;
-}
-
-amdf_status_t amdf_kmt_wait_for_paging(
-    const amdf_kmt_api_t* api, D3DKMT_HANDLE device,
-    D3DKMT_HANDLE paging_sync_object,
-    const volatile uint64_t* current_paging_fence, uint64_t target_value) {
-  if (target_value == 0) {
-    return AMDF_STATUS_OK;
-  }
-  if (current_paging_fence != NULL) {
-    const uint64_t progress = *current_paging_fence;
-    MemoryBarrier();
-    // Reset signaling unblocks monitored-fence waiters without completing the
-    // operation. It cannot establish residency or completed page-table edits.
-    if (progress == UINT64_MAX) {
-      return amdf_make_api_status(AMDF_STATUS_CODE_DEVICE_LOST);
-    }
-    if (progress >= target_value) {
-      return AMDF_STATUS_OK;
-    }
-  }
-  D3DKMT_WAITFORSYNCHRONIZATIONOBJECTFROMCPU wait = {0};
-  wait.hDevice = device;
-  wait.ObjectCount = 1;
-  wait.ObjectHandleArray = &paging_sync_object;
-  wait.FenceValueArray = &target_value;
-  const amdf_status_t status = amdf_kmt_make_status(api->wait_from_cpu(&wait));
-  if (!amdf_status_is_ok(status)) {
-    return status;
-  }
-  if (current_paging_fence != NULL) {
-    const uint64_t progress = *current_paging_fence;
-    MemoryBarrier();
-    if (progress == UINT64_MAX) {
-      return amdf_make_api_status(AMDF_STATUS_CODE_DEVICE_LOST);
-    }
-  }
-  return AMDF_STATUS_OK;
 }
 
 amdf_status_t amdf_kmt_api_initialize(amdf_kmt_api_t* out_api) {

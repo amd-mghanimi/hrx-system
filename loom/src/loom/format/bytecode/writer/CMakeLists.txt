@@ -133,6 +133,7 @@ loom_cc_library(
     ::catalog
     iree::base
     iree::base::internal::arena
+    loom::format::block_order
     loom::ir
     loom::ops::op_defs
   PUBLIC

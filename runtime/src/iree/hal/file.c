@@ -50,7 +50,7 @@ static iree_status_t iree_hal_file_validate_queue_family_affinity(
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_file_import(
-    iree_hal_device_t* device,
+    iree_hal_device_t* device, iree_hal_pool_t* storage_pool,
     iree_hal_queue_family_affinity_t queue_family_affinity,
     iree_hal_memory_access_t access, iree_io_file_handle_t* handle,
     iree_hal_external_file_flags_t flags, iree_hal_file_t** out_file) {
@@ -69,7 +69,8 @@ IREE_API_EXPORT iree_status_t iree_hal_file_import(
   iree_hal_file_t* file = NULL;
   if (iree_status_is_ok(status)) {
     status = IREE_HAL_VTABLE_DISPATCH(device, iree_hal_device, import_file)(
-        device, queue_family_affinity, access, handle, flags, &file);
+        device, storage_pool, queue_family_affinity, access, handle, flags,
+        &file);
   }
   if (iree_status_is_ok(status)) {
     *out_file = file;
@@ -89,6 +90,12 @@ iree_hal_file_allowed_access(iree_hal_file_t* file) {
 IREE_API_EXPORT uint64_t iree_hal_file_length(iree_hal_file_t* file) {
   IREE_ASSERT_ARGUMENT(file);
   return _VTABLE_DISPATCH(file, length)(file);
+}
+
+IREE_API_EXPORT const iree_async_file_requirements_t*
+iree_hal_file_requirements(iree_hal_file_t* file) {
+  IREE_ASSERT_ARGUMENT(file);
+  return _VTABLE_DISPATCH(file, requirements)(file);
 }
 
 IREE_API_EXPORT iree_hal_buffer_t* iree_hal_file_storage_buffer(
@@ -149,15 +156,57 @@ IREE_API_EXPORT bool iree_hal_file_supports_synchronous_io(
   return _VTABLE_DISPATCH(file, supports_synchronous_io)(file);
 }
 
-IREE_API_EXPORT iree_status_t iree_hal_file_read(
-    iree_hal_file_t* file, uint64_t file_offset, iree_hal_buffer_t* buffer,
-    iree_device_size_t buffer_offset, iree_device_size_t length) {
+IREE_API_EXPORT iree_status_t iree_hal_file_prepare_transfer(
+    const iree_async_file_transfer_requirements_t* requirements,
+    uint64_t file_offset, const void* buffer, uint64_t remaining_length,
+    iree_host_size_t maximum_length, iree_host_size_t* out_length) {
+  IREE_ASSERT_ARGUMENT(requirements);
+  IREE_ASSERT_ARGUMENT(out_length);
+  *out_length = 0;
+  if (!remaining_length) {
+    return iree_ok_status();
+  }
+  if (!buffer || ((uintptr_t)buffer & (requirements->buffer_alignment - 1)) ||
+      (file_offset & (requirements->offset_alignment - 1)) ||
+      (remaining_length & (requirements->length_alignment - 1))) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "file transfer requires buffer/offset/length alignment "
+        "%" PRIhsz "/%" PRIu64 "/%" PRIhsz,
+        requirements->buffer_alignment, requirements->offset_alignment,
+        requirements->length_alignment);
+  }
+  iree_host_size_t length = (iree_host_size_t)remaining_length;
+  if (remaining_length > maximum_length) {
+    // All alignments are powers of two established by the native query. A
+    // full chunk must preserve all three, not just native request length.
+    const uint64_t stride = iree_max(requirements->offset_alignment,
+                                     iree_max(requirements->buffer_alignment,
+                                              requirements->length_alignment));
+    length = (iree_host_size_t)((uint64_t)maximum_length & ~(stride - 1));
+    if (!length) {
+      return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                              "file transfer capacity %" PRIhsz
+                              " cannot hold an aligned chunk of %" PRIu64
+                              " bytes",
+                              maximum_length, stride);
+    }
+  }
+  *out_length = length;
+  return iree_ok_status();
+}
+
+IREE_API_EXPORT iree_status_t iree_hal_file_read(iree_hal_file_t* file,
+                                                 uint64_t file_offset,
+                                                 iree_byte_span_t target) {
   IREE_ASSERT_ARGUMENT(file);
-  IREE_ASSERT_ARGUMENT(buffer);
+  if (target.data_length && !target.data) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "nonempty file read target requires storage");
+  }
   IREE_TRACE_ZONE_BEGIN(z0);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, file_offset);
-  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)buffer_offset);
-  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)length);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)target.data_length);
   if (IREE_UNLIKELY(!iree_hal_file_supports_synchronous_io(file))) {
     IREE_TRACE_ZONE_END(z0);
     return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
@@ -166,28 +215,25 @@ IREE_API_EXPORT iree_status_t iree_hal_file_read(
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_file_validate_access(file, IREE_HAL_MEMORY_ACCESS_READ));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_file_validate_range(file, file_offset, length));
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_buffer_validate_range(buffer, buffer_offset, length));
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0,
-      iree_hal_buffer_validate_access(iree_hal_buffer_allowed_access(buffer),
-                                      IREE_HAL_MEMORY_ACCESS_WRITE));
-  iree_status_t status = _VTABLE_DISPATCH(file, read)(file, file_offset, buffer,
-                                                      buffer_offset, length);
+      z0, iree_hal_file_validate_range(file, file_offset, target.data_length));
+  iree_status_t status = target.data_length ? _VTABLE_DISPATCH(file, read)(
+                                                  file, file_offset, target)
+                                            : iree_ok_status();
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
 
-IREE_API_EXPORT iree_status_t iree_hal_file_write(
-    iree_hal_file_t* file, uint64_t file_offset, iree_hal_buffer_t* buffer,
-    iree_device_size_t buffer_offset, iree_device_size_t length) {
+IREE_API_EXPORT iree_status_t
+iree_hal_file_write(iree_hal_file_t* file, uint64_t file_offset,
+                    iree_const_byte_span_t source) {
   IREE_ASSERT_ARGUMENT(file);
-  IREE_ASSERT_ARGUMENT(buffer);
+  if (source.data_length && !source.data) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "nonempty file write source requires storage");
+  }
   IREE_TRACE_ZONE_BEGIN(z0);
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, file_offset);
-  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)buffer_offset);
-  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)length);
+  IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)source.data_length);
   if (IREE_UNLIKELY(!iree_hal_file_supports_synchronous_io(file))) {
     IREE_TRACE_ZONE_END(z0);
     return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
@@ -196,15 +242,10 @@ IREE_API_EXPORT iree_status_t iree_hal_file_write(
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_hal_file_validate_access(file, IREE_HAL_MEMORY_ACCESS_WRITE));
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_file_validate_range(file, file_offset, length));
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0, iree_hal_buffer_validate_range(buffer, buffer_offset, length));
-  IREE_RETURN_AND_END_ZONE_IF_ERROR(
-      z0,
-      iree_hal_buffer_validate_access(iree_hal_buffer_allowed_access(buffer),
-                                      IREE_HAL_MEMORY_ACCESS_READ));
-  iree_status_t status = _VTABLE_DISPATCH(file, write)(
-      file, file_offset, buffer, buffer_offset, length);
+      z0, iree_hal_file_validate_range(file, file_offset, source.data_length));
+  iree_status_t status = source.data_length ? _VTABLE_DISPATCH(file, write)(
+                                                  file, file_offset, source)
+                                            : iree_ok_status();
   IREE_TRACE_ZONE_END(z0);
   return status;
 }

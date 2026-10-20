@@ -1,0 +1,147 @@
+// A byte and one high bit address a 512-entry table without a range assertion
+// or a clamp. Scalar and vector memory consumers use the same proven bound.
+func.def device inline @compute_table_index(%low_byte: i8, %high_byte: i8) -> (index) {
+  %low_word = scalar.extui %low_byte : i8 to i32
+  %high_word = scalar.extui %high_byte : i8 to i32
+  %high_mask = scalar.constant 1 : i32
+  %high_shift = scalar.constant 8 : i32
+  %high_bit = scalar.andi %high_word, %high_mask : i32
+  %high_code = scalar.shli %high_bit, %high_shift : i32
+  %code = scalar.ori %low_word, %high_code : i32
+  %position = index.cast %code : i32 to index
+  func.return %position : index
+}
+
+kernel.def @lookup_scalar() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 8 : index
+  %width = index.constant 32 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%low: buffer, %high: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %width = index.constant 32 : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %group_start = index.mul %group, %width : index
+  %position = index.add %group_start, %lane : index
+  %low_view = buffer.view %low[%base] : buffer -> view<256xi8>
+  %high_view = buffer.view %high[%base] : buffer -> view<256xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<512xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<256xi32>
+  %low_byte = view.load %low_view[%position] : view<256xi8> -> i8
+  %high_byte = view.load %high_view[%position] : view<256xi8> -> i8
+  %table_index = func.call pure @compute_table_index(%low_byte, %high_byte) : (i8, i8) -> (index)
+  %value = view.load %table_view[%table_index] : view<512xi32> -> i32
+  view.store %value, %output_view[%position] : i32, view<256xi32>
+  kernel.return
+}
+
+kernel.def @lookup_vector() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 2 : index
+  %width = index.constant 32 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%low: buffer, %high: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %origin = index.constant 0 : index
+  %width = index.constant 32 : index
+  %elements = index.constant 4 : index
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %group_start = index.mul %group, %width : index
+  %thread = index.add %group_start, %lane : index
+  %position = index.mul %thread, %elements : index
+  %low_view = buffer.view %low[%base] : buffer -> view<256xi8>
+  %high_view = buffer.view %high[%base] : buffer -> view<256xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<512xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<256xi32>
+  %low_bytes = vector.load %low_view[%position] : view<256xi8> -> vector<4xi8>
+  %high_bytes = vector.load %high_view[%position] : view<256xi8> -> vector<4xi8>
+  %low_words = vector.extui %low_bytes : vector<4xi8> to vector<4xi32>
+  %high_words = vector.extui %high_bytes : vector<4xi8> to vector<4xi32>
+  %high_mask = vector.constant 1 : vector<4xi32>
+  %high_shift = vector.constant 8 : vector<4xi32>
+  %high_bits = vector.andi %high_words, %high_mask : vector<4xi32>
+  %high_codes = vector.shli %high_bits, %high_shift : vector<4xi32>
+  %codes = vector.ori %low_words, %high_codes : vector<4xi32>
+  %values = vector.gather %table_view[%origin][%codes] : view<512xi32>, vector<4xi32> -> vector<4xi32>
+  vector.store %values, %output_view[%position] : vector<4xi32>, view<256xi32>
+  kernel.return
+}
+
+func.def @lookup_table_oracle(%low: buffer, %high: buffer, %table: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %low_view = buffer.view %low[%base] : buffer -> view<256xi8>
+  %high_view = buffer.view %high[%base] : buffer -> view<256xi8>
+  %table_view = buffer.view %table[%base] : buffer -> view<512xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<256xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 256 : index
+  %step = index.constant 1 : index
+  scf.for %position = [%begin to %end step %step] {
+    %low_byte = view.load %low_view[%position] : view<256xi8> -> i8
+    %high_byte = view.load %high_view[%position] : view<256xi8> -> i8
+    %table_index = func.call pure @compute_table_index(%low_byte, %high_byte) : (i8, i8) -> (index)
+    %value = view.load %table_view[%table_index] : view<512xi32> -> i32
+    view.store %value, %output_view[%position] : i32, view<256xi32>
+  }
+  func.return
+}
+
+check.scenario @bitwise_table_index_values {
+  // Every byte pattern, including 0x80 and 0xff, is zero-extended. Nonzero
+  // discarded high-byte bits distinguish masking from shifting the whole byte.
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %low = check.generate.iota offset(-128) step(1) : tensor<256xi8>
+    %high = check.generate.fill value(-2) : tensor<256xi8>
+    %table = check.generate.iota offset(-700001) step(17) : tensor<512xi32>
+    %storage = check.generate.fill value(-99) : tensor<264xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<264xi32> -> tensor<256xi32>
+    check.compare<@lookup_scalar, @lookup_table_oracle>(%low, %high, %table, %output) : (tensor<256xi8>, tensor<256xi8>, tensor<512xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%low) expected(%low) : tensor<256xi8>
+      check.expect.bitwise actual(%high) expected(%high) : tensor<256xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<512xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<264xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %low = check.generate.iota offset(-128) step(1) : tensor<256xi8>
+    %high = check.generate.fill value(-2) : tensor<256xi8>
+    %table = check.generate.iota offset(-700001) step(17) : tensor<512xi32>
+    %storage = check.generate.fill value(-99) : tensor<264xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<264xi32> -> tensor<256xi32>
+    check.compare<@lookup_vector, @lookup_table_oracle>(%low, %high, %table, %output) : (tensor<256xi8>, tensor<256xi8>, tensor<512xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%low) expected(%low) : tensor<256xi8>
+      check.expect.bitwise actual(%high) expected(%high) : tensor<256xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<512xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<264xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %low = check.generate.iota offset(-128) step(1) : tensor<256xi8>
+    %high = check.generate.fill value(-1) : tensor<256xi8>
+    %table = check.generate.iota offset(-700001) step(17) : tensor<512xi32>
+    %storage = check.generate.fill value(-99) : tensor<264xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<264xi32> -> tensor<256xi32>
+    check.compare<@lookup_scalar, @lookup_table_oracle>(%low, %high, %table, %output) : (tensor<256xi8>, tensor<256xi8>, tensor<512xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%low) expected(%low) : tensor<256xi8>
+      check.expect.bitwise actual(%high) expected(%high) : tensor<256xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<512xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<264xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %low = check.generate.iota offset(-128) step(1) : tensor<256xi8>
+    %high = check.generate.fill value(-1) : tensor<256xi8>
+    %table = check.generate.iota offset(-700001) step(17) : tensor<512xi32>
+    %storage = check.generate.fill value(-99) : tensor<264xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<264xi32> -> tensor<256xi32>
+    check.compare<@lookup_vector, @lookup_table_oracle>(%low, %high, %table, %output) : (tensor<256xi8>, tensor<256xi8>, tensor<512xi32>, tensor<256xi32>) -> () {
+      check.expect.bitwise actual(%low) expected(%low) : tensor<256xi8>
+      check.expect.bitwise actual(%high) expected(%high) : tensor<256xi8>
+      check.expect.bitwise actual(%table) expected(%table) : tensor<512xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<264xi32>
+    }
+  }
+  check.return
+}

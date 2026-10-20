@@ -1,0 +1,191 @@
+// RUN: verify
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+Vector entry(Vector value) {
+  // ERROR@+1: LOWERING/059 "fragment operation has an unknown role"
+  return loom::vector::fragment::attach<
+      static_cast<loom::vector::fragment::role>(4)>(
+      value, loom::vector::fragment::shape{2, 2});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Bytes = signed char __attribute__((ext_vector_type(4)));
+using Integers = int __attribute__((ext_vector_type(4)));
+Integers entry(Bytes lhs, Bytes rhs, Integers init) {
+  // ERROR@+1: LOWERING/059 "vector.mma has unsupported flags"
+  return loom::vector::mma<static_cast<loom::vector::mma_flags>(2)>(lhs, rhs,
+                                                                    init);
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+struct WrongShape {
+  loom::type::size_type columns;
+  loom::type::size_type rows;
+};
+Vector entry(Vector value, loom::type::size_type rows,
+             loom::type::size_type columns) {
+  // ERROR@+1: LOWERING/059 "fragment shape requires flat {rows, columns} or {blocks, rows, columns} integer fields"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, WrongShape{columns, rows});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+struct WrongShape {
+  loom::type::size_type rows;
+  double columns;
+};
+Vector entry(Vector value, loom::type::size_type rows, double columns) {
+  // ERROR@+1: LOWERING/059 "fragment shape requires an integer value"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, WrongShape{rows, columns});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+struct WrongShape {
+  loom::type::size_type rows;
+};
+Vector entry(Vector value, loom::type::size_type rows) {
+  // ERROR@+1: LOWERING/059 "fragment shape requires flat {rows, columns} or {blocks, rows, columns} integer fields"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, WrongShape{rows});
+}
+
+// ====
+#include <loomcxx/vector.h>
+int entry(int value) {
+  // ERROR@+1: LOWERING/059 "vector.fragment must preserve its vector type"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, loom::vector::fragment::shape{2, 2});
+}
+
+// ====
+#include <loomcxx/encoding_type.h>
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+using Schema = loom::type::encoding<loom::encoding::role::schema>;
+struct Parameters {
+  Vector scales;
+  Schema schema;
+};
+Vector entry(Vector value, Schema schema) {
+  // ERROR@+1: LOWERING/059 "unknown fragment named operand 'scales'"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, loom::vector::fragment::shape{2, 2},
+      Parameters{value, schema});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+struct Parameters {
+  unsigned scale;
+};
+Vector entry(Vector value, unsigned scale) {
+  // ERROR@+1: LOWERING/059 "fragment auxiliary operands must be vectors"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, loom::vector::fragment::shape{2, 2}, Parameters{scale});
+}
+
+// ====
+#include <loomcxx/encoding_type.h>
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+using Layout = loom::type::encoding<loom::encoding::role::layout>;
+struct Parameters {
+  Layout schema;
+};
+Vector entry(Vector value, Layout layout) {
+  // ERROR@+1: LOWERING/059 "fragment schema must be a schema encoding value"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, loom::vector::fragment::shape{2, 2}, Parameters{layout});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+template <loom::vector::fragment::role Role, class Shape>
+[[loom::op("vector.fragment.load")]] Vector invalid(
+    Vector source, loom::type::coordinates<1> origin,
+    Shape shape);
+Vector entry(Vector source) {
+  // ERROR@+1: LOWERING/059 "fragment memory operation requires a view value"
+  return invalid<loom::vector::fragment::role::lhs>(source, {0}, loom::vector::fragment::shape{2, 2});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+using View = loom::type::view<loom::type::shape<4, 4>, const float>;
+template <loom::vector::fragment::role Role, class Shape>
+[[loom::op("vector.fragment.load")]] Vector invalid(
+    View source, loom::type::coordinates<1> origin,
+    Shape shape);
+Vector entry(View source) {
+  // ERROR@+1: LOWERING/059 "fragment origin has the wrong arity"
+  return invalid<loom::vector::fragment::role::lhs>(source, {0}, loom::vector::fragment::shape{2, 2});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+using View = loom::type::view<loom::type::shape<4, 4>, const float>;
+template <loom::vector::fragment::role Role, class Shape>
+[[loom::op("vector.fragment.load")]] float invalid(
+    View source, loom::type::coordinates<2> origin,
+    Shape shape);
+float entry(View source) {
+  // ERROR@+1: LOWERING/059 "vector.fragment.load must return a vector"
+  return invalid<loom::vector::fragment::role::lhs>(source, {0, 0}, loom::vector::fragment::shape{2, 2});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+using View = loom::type::view<loom::type::shape<4, 4>, const float>;
+void entry(Vector value, View destination) {
+  // ERROR@+1: LOWERING/059 "vector.fragment.store requires a mutable view"
+  loom::vector::fragment::store<loom::vector::fragment::role::result>(
+      value, destination, {0, 0}, loom::vector::fragment::shape{2, 2});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+using View = loom::type::view<loom::type::shape<4, 4>, volatile float>;
+void entry(Vector value, View destination) {
+  // ERROR@+1: LOWERING/059 "vector.fragment.store does not support volatile views"
+  loom::vector::fragment::store<loom::vector::fragment::role::result>(
+      value, destination, {0, 0}, loom::vector::fragment::shape{2, 2});
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+using View = loom::type::view<loom::type::shape<4, 4>, const float>;
+template <loom::vector::fragment::role Role, class Shape>
+[[loom::op("vector.fragment.load")]] Vector invalid(
+    View source, loom::type::coordinates<2> origin,
+    Shape shape, Vector scale);
+Vector entry(View source, Vector scale) {
+  // ERROR@+1: LOWERING/059 "fragment named operands must be a flat record"
+  return invalid<loom::vector::fragment::role::lhs>(source, {0, 0}, loom::vector::fragment::shape{2, 2}, scale);
+}
+
+// ====
+#include <loomcxx/vector.h>
+using Vector = float __attribute__((ext_vector_type(4)));
+struct Parameters {
+  Vector scale;
+};
+Vector entry(Vector value, Vector scale) {
+  // ERROR@+1: LOWERING/059 "fragment parameter 'schema' is required"
+  return loom::vector::fragment::attach<loom::vector::fragment::role::lhs>(
+      value, loom::vector::fragment::shape{2, 2}, Parameters{scale});
+}

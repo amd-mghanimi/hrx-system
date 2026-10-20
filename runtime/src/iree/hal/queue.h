@@ -18,6 +18,8 @@ extern "C" {
 #endif  // __cplusplus
 
 typedef struct iree_hal_buffer_t iree_hal_buffer_t;
+typedef struct iree_hal_memory_mapping_t iree_hal_memory_mapping_t;
+typedef struct iree_hal_barrier_t iree_hal_barrier_t;
 typedef struct iree_hal_buffer_ref_list_t iree_hal_buffer_ref_list_t;
 typedef struct iree_hal_command_buffer_t iree_hal_command_buffer_t;
 typedef struct iree_hal_device_t iree_hal_device_t;
@@ -210,6 +212,55 @@ static inline bool iree_hal_buffer_binding_table_is_empty(
   return binding_table.count == 0;
 }
 
+// Explicit local execution and memory dependencies at one queue boundary.
+// The queue captures the list and all nested descriptor storage before the
+// enqueue call returns. Buffer references must be direct; queue operations
+// have no binding table for resolving indirect references.
+// Implementations may combine records and promote buffer ranges to global
+// cache operations. Any buffer objects needed after capture follow the
+// enclosing operation's retain/borrow policy; barriers do not extend external
+// storage lifetimes or retain allocations managed outside the HAL.
+typedef struct iree_hal_barrier_list_t {
+  // Number of barrier records in |values|. Zero explicitly requests no
+  // barriers.
+  iree_host_size_t count;
+  // Borrowed records combined at this boundary. May be NULL when count is zero.
+  const iree_hal_barrier_t* values;
+} iree_hal_barrier_list_t;
+
+// Visibility boundaries surrounding one complete logical queue operation.
+//
+// Execution proceeds through the wait semaphores, before barriers, operation,
+// after barriers, and finally signal semaphores. A transfer batch's after
+// barriers follow every child and any host staging or file I/O. Empty
+// operations still perform their barriers. Barriers add no ordering between
+// sibling transfers; dependencies between separate submissions remain semaphore
+// edges.
+//
+// NULL, including a NULL pointer to this wrapper, selects conservative system
+// visibility at that boundary. A supplied list replaces the optional payload
+// visibility defaults. A supplied empty list requests no extra payload
+// barriers. This permits specializing either side while retaining defaults on
+// the other. Mandatory native control, staging and explicit atomic ordering
+// remain intact.
+//
+// Defaults operate only within the backend's qualified memory model. They do
+// not publish unrelated host mappings, transfer external ownership, or
+// establish an unsupported topology relationship. Callers select compatible
+// storage, perform required host maintenance and arrange producer/consumer
+// synchronization.
+//
+// Boundary names describe positions, not acquire/release semantics: publishing
+// an atomic flag can require a release before its store, and consuming a flag
+// can require an acquire after its wait. Each supplied barrier names its actual
+// action and must be executable by the receiving queue.
+typedef struct iree_hal_queue_barriers_t {
+  // Before the operation, after all waits. NULL retains conservative defaults.
+  const iree_hal_barrier_list_t* before;
+  // After the entire operation, before signaling. NULL retains defaults.
+  const iree_hal_barrier_list_t* after;
+} iree_hal_queue_barriers_t;
+
 // Bitfield controlling an exact-queue barrier operation.
 typedef uint64_t iree_hal_queue_barrier_flags_t;
 enum iree_hal_queue_barrier_flag_bits_t {
@@ -387,6 +438,14 @@ static inline bool iree_hal_dispatch_uses_indirect_arguments(
       flags, IREE_HAL_DISPATCH_FLAG_STATIC_INDIRECT_ARGUMENTS |
                  IREE_HAL_DISPATCH_FLAG_DYNAMIC_INDIRECT_ARGUMENTS);
 }
+
+typedef uint64_t iree_hal_queue_map_flags_t;
+enum iree_hal_queue_map_flag_bits_e {
+  IREE_HAL_QUEUE_MAP_FLAG_NONE = 0,
+  // Borrow source and target buffer wrappers until terminal completion instead
+  // of retaining them. Descriptor arrays are always captured before returning.
+  IREE_HAL_QUEUE_MAP_FLAG_BORROW_BUFFERS = 1ull << 0,
+};
 
 // Bitfield specifying flags controlling a timestamp operation.
 typedef uint64_t iree_hal_timestamp_flags_t;
@@ -704,7 +763,34 @@ IREE_API_EXPORT iree_status_t
 iree_hal_queue_barrier(iree_hal_queue_t* queue,
                        const iree_hal_semaphore_list_t wait_semaphore_list,
                        const iree_hal_semaphore_list_t signal_semaphore_list,
+                       const iree_hal_queue_barriers_t* barriers,
                        iree_hal_queue_barrier_flags_t flags);
+
+// Changes mappings in one batch after every wait prerequisite. Signals publish
+// native translation readiness for every change. Queue order is not FIFO:
+// old users -> queue_map -> new users require explicit semaphore edges.
+// Updates to the same reservation must also be ordered, including disjoint
+// ranges and distinct native projections. Separate reservations are
+// independent.
+//
+// Descriptor arrays are captured before returning. Source/target wrappers are
+// retained until completion unless BORROW_BUFFERS is set. Mapped backing is
+// always caller-owned and must remain allocated until successful detach or
+// replacement and completion of its other uses. Mapping never copies data.
+//
+// Entries may span several reservations and projections. Overlapping target
+// ranges in the same native projection are rejected. Native failures may apply
+// a prefix of the batch; affected native projections then require destruction.
+// Preparation or validation failures leave unchanged reservations usable. An
+// accepted failure propagates through the signal semaphores. Mapping
+// establishes translation readiness, not data visibility; existing memory
+// barriers describe producer/consumer cache transitions using the actual
+// backing buffers.
+IREE_API_EXPORT iree_status_t iree_hal_queue_map(
+    iree_hal_queue_t* queue, iree_hal_semaphore_list_t waits,
+    iree_hal_semaphore_list_t signals, iree_host_size_t mapping_count,
+    const iree_hal_memory_mapping_t* mappings,
+    iree_hal_queue_map_flags_t flags);
 
 // Executes |command_buffer| on the exact hardware |queue|.
 //
@@ -788,7 +874,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_dispatch(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_executable_t* executable, iree_hal_executable_function_t function,
     const iree_hal_dispatch_config_t config, iree_const_byte_span_t constants,
-    const iree_hal_buffer_ref_list_t bindings, iree_hal_dispatch_flags_t flags);
+    const iree_hal_buffer_ref_list_t bindings,
+    const iree_hal_queue_barriers_t* barriers, iree_hal_dispatch_flags_t flags);
 
 // Enqueues an asynchronous atomic wait on the exact hardware |queue|.
 //
@@ -805,7 +892,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_wait(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_wait_params_t params);
+    iree_hal_atomic_wait_params_t params,
+    const iree_hal_queue_barriers_t* barriers);
 
 // Enqueues an asynchronous atomic store on the exact hardware |queue|.
 //
@@ -818,7 +906,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_store(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_store_params_t params);
+    iree_hal_atomic_store_params_t params,
+    const iree_hal_queue_barriers_t* barriers);
 
 // Enqueues an asynchronous no-result atomic read-modify-write on the exact
 // hardware |queue|.
@@ -832,7 +921,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_atomic_rmw(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_hal_atomic_rmw_params_t params);
+    iree_hal_atomic_rmw_params_t params,
+    const iree_hal_queue_barriers_t* barriers);
 
 // Enqueues a device-side timestamp capture on the exact hardware |queue|.
 //
@@ -851,6 +941,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_timestamp(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
+    const iree_hal_queue_barriers_t* barriers,
     iree_hal_timestamp_flags_t flags);
 
 // Flushes locally pending submissions on the exact hardware |queue|.
@@ -936,7 +1027,8 @@ iree_hal_queue_transfer(iree_hal_queue_t* queue,
                         const iree_hal_semaphore_list_t wait_semaphore_list,
                         const iree_hal_semaphore_list_t signal_semaphore_list,
                         iree_host_size_t operation_count,
-                        const iree_hal_transfer_operation_t* operations);
+                        const iree_hal_transfer_operation_t* operations,
+                        const iree_hal_queue_barriers_t* barriers);
 
 // Enqueues a scalar fill as a one-operation transfer transaction.
 IREE_API_EXPORT iree_status_t iree_hal_queue_fill(
@@ -945,7 +1037,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_fill(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length, const void* pattern,
-    iree_host_size_t pattern_length, iree_hal_fill_flags_t flags);
+    iree_host_size_t pattern_length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_fill_flags_t flags);
 
 // Enqueues a scalar captured update as a one-operation transfer transaction.
 IREE_API_EXPORT iree_status_t iree_hal_queue_update(
@@ -954,7 +1047,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_update(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     const void* source_buffer, iree_host_size_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_update_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_update_flags_t flags);
 
 // Enqueues a scalar device buffer copy as a one-operation transaction.
 IREE_API_EXPORT iree_status_t iree_hal_queue_copy(
@@ -963,7 +1057,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_copy(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_copy_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_copy_flags_t flags);
 
 // Enqueues a scalar upload from borrowed host memory.
 // The non-empty |source| range remains live and unmodified until terminal
@@ -973,7 +1068,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_upload(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list, const void* source,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers);
 
 // Enqueues a scalar download into borrowed host memory.
 // The non-empty |target| range remains live and inaccessible until terminal
@@ -983,7 +1078,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_download(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
-    void* target, iree_device_size_t length);
+    void* target, iree_device_size_t length,
+    const iree_hal_queue_barriers_t* barriers);
 
 // Enqueues a file read on the exact hardware |queue|.
 //
@@ -999,7 +1095,7 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_download(
 // implementation.
 //
 // A zero-length read performs no data access, ignores the file, buffer, offset,
-// and flag arguments, and forwards the wait dependencies to the signal
+// and flag arguments, and executes |barriers| between the wait and signal
 // dependencies as an empty transfer transaction.
 IREE_API_EXPORT iree_status_t iree_hal_queue_read(
     iree_hal_queue_t* queue,
@@ -1007,7 +1103,8 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_read(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_file_t* source_file, uint64_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, iree_hal_read_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_read_flags_t flags);
 
 // Enqueues a file write on the exact hardware |queue|.
 //
@@ -1022,15 +1119,16 @@ IREE_API_EXPORT iree_status_t iree_hal_queue_read(
 // implementation.
 //
 // A zero-length write performs no data access, ignores the buffer, file,
-// offset, and flag arguments, and forwards the wait dependencies to the signal
-// dependencies as an empty transfer transaction.
+// offset, and flag arguments, and executes |barriers| between the wait and
+// signal dependencies as an empty transfer transaction.
 IREE_API_EXPORT iree_status_t iree_hal_queue_write(
     iree_hal_queue_t* queue,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t* target_file, uint64_t target_offset,
-    iree_device_size_t length, iree_hal_write_flags_t flags);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+    iree_hal_write_flags_t flags);
 
 //===----------------------------------------------------------------------===//
 // iree_hal_queue_family_t implementation details
@@ -1047,6 +1145,15 @@ struct iree_hal_queue_family_t {
 
   // Exact immutable specification row. Borrowed from the parent device.
   const iree_hal_queue_family_spec_t* spec;
+
+  // Assigned once when the containing group is sealed. Instrumentation groups
+  // preserve the underlying namespace and ordinal aliases.
+  struct {
+    // Borrowed group memory namespace, or NULL before group assignment.
+    const void* domain;
+    // Dense queue site; the program site is the following coordinate.
+    uint32_t queue_scope_id;
+  } memory;
 };
 
 // Initializes the canonical family cell owned by |device| with its |ordinal|
@@ -1072,6 +1179,7 @@ typedef struct iree_hal_queue_vtable_t {
       iree_hal_queue_t* queue,
       const iree_hal_semaphore_list_t wait_semaphore_list,
       const iree_hal_semaphore_list_t signal_semaphore_list,
+      const iree_hal_queue_barriers_t* barriers,
       iree_hal_queue_barrier_flags_t flags);
 
   // Executes one command buffer.
@@ -1108,6 +1216,7 @@ typedef struct iree_hal_queue_vtable_t {
       iree_hal_executable_function_t function,
       const iree_hal_dispatch_config_t config, iree_const_byte_span_t constants,
       const iree_hal_buffer_ref_list_t bindings,
+      const iree_hal_queue_barriers_t* barriers,
       iree_hal_dispatch_flags_t flags);
 
   // Enqueues an asynchronous atomic wait.
@@ -1116,7 +1225,8 @@ typedef struct iree_hal_queue_vtable_t {
       const iree_hal_semaphore_list_t wait_semaphore_list,
       const iree_hal_semaphore_list_t signal_semaphore_list,
       iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-      iree_hal_atomic_wait_params_t params);
+      iree_hal_atomic_wait_params_t params,
+      const iree_hal_queue_barriers_t* barriers);
 
   // Enqueues an asynchronous atomic store.
   iree_status_t(IREE_API_PTR* atomic_store)(
@@ -1124,7 +1234,8 @@ typedef struct iree_hal_queue_vtable_t {
       const iree_hal_semaphore_list_t wait_semaphore_list,
       const iree_hal_semaphore_list_t signal_semaphore_list,
       iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-      iree_hal_atomic_store_params_t params);
+      iree_hal_atomic_store_params_t params,
+      const iree_hal_queue_barriers_t* barriers);
 
   // Enqueues an asynchronous atomic read-modify-write.
   iree_status_t(IREE_API_PTR* atomic_rmw)(
@@ -1132,7 +1243,8 @@ typedef struct iree_hal_queue_vtable_t {
       const iree_hal_semaphore_list_t wait_semaphore_list,
       const iree_hal_semaphore_list_t signal_semaphore_list,
       iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-      iree_hal_atomic_rmw_params_t params);
+      iree_hal_atomic_rmw_params_t params,
+      const iree_hal_queue_barriers_t* barriers);
 
   // Enqueues a device-side timestamp capture.
   iree_status_t(IREE_API_PTR* timestamp)(
@@ -1140,6 +1252,7 @@ typedef struct iree_hal_queue_vtable_t {
       const iree_hal_semaphore_list_t wait_semaphore_list,
       const iree_hal_semaphore_list_t signal_semaphore_list,
       iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
+      const iree_hal_queue_barriers_t* barriers,
       iree_hal_timestamp_flags_t flags);
 
   // Flushes locally pending submissions.
@@ -1167,7 +1280,8 @@ typedef struct iree_hal_queue_vtable_t {
       const iree_hal_semaphore_list_t wait_semaphore_list,
       const iree_hal_semaphore_list_t signal_semaphore_list,
       iree_host_size_t operation_count,
-      const iree_hal_transfer_operation_t* operations);
+      const iree_hal_transfer_operation_t* operations,
+      const iree_hal_queue_barriers_t* barriers);
 
   // Enqueues a file read operation.
   iree_status_t(IREE_API_PTR* read)(
@@ -1176,7 +1290,8 @@ typedef struct iree_hal_queue_vtable_t {
       const iree_hal_semaphore_list_t signal_semaphore_list,
       iree_hal_file_t* source_file, uint64_t source_offset,
       iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-      iree_device_size_t length, iree_hal_read_flags_t flags);
+      iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+      iree_hal_read_flags_t flags);
 
   // Enqueues a file write operation.
   iree_status_t(IREE_API_PTR* write)(
@@ -1185,7 +1300,16 @@ typedef struct iree_hal_queue_vtable_t {
       const iree_hal_semaphore_list_t signal_semaphore_list,
       iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
       iree_hal_file_t* target_file, uint64_t target_offset,
-      iree_device_size_t length, iree_hal_write_flags_t flags);
+      iree_device_size_t length, const iree_hal_queue_barriers_t* barriers,
+      iree_hal_write_flags_t flags);
+  // Optional native queue-ordered mapping submission. NULL selects one captured
+  // host call using the reservation backend's synchronous update operation.
+  iree_status_t(IREE_API_PTR* map)(iree_hal_queue_t* queue,
+                                   iree_hal_semaphore_list_t waits,
+                                   iree_hal_semaphore_list_t signals,
+                                   iree_host_size_t mapping_count,
+                                   const iree_hal_memory_mapping_t* mappings,
+                                   iree_hal_queue_map_flags_t flags);
 } iree_hal_queue_vtable_t;
 IREE_HAL_ASSERT_VTABLE_LAYOUT(iree_hal_queue_vtable_t);
 

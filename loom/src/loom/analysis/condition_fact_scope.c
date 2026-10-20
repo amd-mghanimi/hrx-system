@@ -16,6 +16,35 @@ void loom_condition_fact_scope_initialize_local(
   };
 }
 
+void loom_condition_fact_scope_initialize_projected(
+    const loom_condition_fact_scope_t* parent,
+    const loom_condition_edge_projection_t* projection,
+    loom_condition_fact_scope_t* out_scope) {
+  *out_scope = (loom_condition_fact_scope_t){
+      .parent = parent,
+      .edge_projection = projection,
+  };
+}
+
+iree_status_t loom_condition_fact_scope_extend_region(
+    const loom_value_fact_table_t* fact_table, const loom_region_t* region,
+    const loom_condition_fact_scope_t* parent, iree_arena_allocator_t* arena,
+    const loom_condition_fact_scope_t** out_scope) {
+  *out_scope = parent;
+  const loom_condition_edge_projection_t* projection =
+      loom_value_fact_table_lookup_region_condition_projection(fact_table,
+                                                               region);
+  if (!projection || loom_condition_edge_projection_is_empty(projection)) {
+    return iree_ok_status();
+  }
+  loom_condition_fact_scope_t* scope = NULL;
+  IREE_RETURN_IF_ERROR(
+      iree_arena_allocate(arena, sizeof(*scope), (void**)&scope));
+  loom_condition_fact_scope_initialize_projected(parent, projection, scope);
+  *out_scope = scope;
+  return iree_ok_status();
+}
+
 void loom_condition_fact_scope_initialize_indexed(
     const loom_condition_fact_scope_t* parent,
     const loom_cfg_condition_relation_table_t* table,
@@ -35,6 +64,8 @@ bool loom_condition_fact_scope_has_integer_relations(
     if ((current->local_derivation != NULL &&
          current->local_derivation->integer_facts.integer_relation_count !=
              0) ||
+        (current->edge_projection != NULL &&
+         current->edge_projection->visible_integer_relation_count != 0) ||
         (current->relation_view != NULL &&
          current->relation_view->integer_relations.entry_count != 0)) {
       return true;
@@ -85,6 +116,9 @@ bool loom_condition_fact_scope_apply_to_value_facts(
       state.applied |= loom_condition_fact_set_apply_to_value_facts(
           &current->local_derivation->integer_facts, fact_table, value_id,
           inout_facts);
+    } else if (current->edge_projection != NULL) {
+      state.applied |= loom_condition_edge_projection_apply_to_value_facts(
+          current->edge_projection, fact_table, value_id, inout_facts);
     } else if (current->relation_view != NULL) {
       (void)loom_cfg_condition_relation_view_for_each_while(
           current->relation_table, current->relation_view, fact_table, anchor,
@@ -94,86 +128,70 @@ bool loom_condition_fact_scope_apply_to_value_facts(
   return state.applied;
 }
 
-static loom_condition_relation_outcome_bits_t
+static loom_integer_order_outcome_bits_t
 loom_condition_fact_scope_flat_exclusions(
     const loom_condition_fact_set_t* facts,
     const loom_value_fact_table_t* fact_table,
     const loom_condition_integer_relation_t* queried) {
-  static const loom_symbolic_integer_relation_t outcome_relations[] = {
-      LOOM_SYMBOLIC_INTEGER_RELATION_LT,
-      LOOM_SYMBOLIC_INTEGER_RELATION_EQ,
-      LOOM_SYMBOLIC_INTEGER_RELATION_GT,
-  };
-  loom_condition_relation_outcome_bits_t exclusions = 0;
-  for (loom_condition_relation_outcome_t outcome = 0;
-       outcome < LOOM_CONDITION_RELATION_OUTCOME_COUNT; ++outcome) {
+  loom_integer_order_outcome_bits_t exclusions = 0;
+  for (loom_integer_order_outcome_t outcome = 0;
+       outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
     loom_condition_integer_relation_t outcome_query = *queried;
-    outcome_query.relation = outcome_relations[outcome];
+    outcome_query.relation = loom_integer_order_outcome_relation(outcome);
     bool result = false;
     if (loom_condition_fact_set_proves_integer_relation(
             facts, fact_table, &outcome_query, &result) &&
         !result) {
-      exclusions |= (loom_condition_relation_outcome_bits_t)(1u << outcome);
+      exclusions |= (loom_integer_order_outcome_bits_t)(1u << outcome);
     }
   }
   return exclusions;
 }
 
-static loom_condition_relation_outcome_bits_t
-loom_condition_fact_scope_relation_outcomes(
-    loom_symbolic_integer_relation_t relation) {
-  switch (relation) {
-    case LOOM_SYMBOLIC_INTEGER_RELATION_EQ:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_NE:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS |
-             LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_LT:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_LE:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_LESS |
-             LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_GT:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER;
-    case LOOM_SYMBOLIC_INTEGER_RELATION_GE:
-      return LOOM_CONDITION_RELATION_OUTCOME_BIT_EQUAL |
-             LOOM_CONDITION_RELATION_OUTCOME_BIT_GREATER;
-    default:
-      return 0;
+static loom_integer_order_outcome_bits_t
+loom_condition_fact_scope_projection_exclusions(
+    const loom_condition_edge_projection_t* projection,
+    const loom_value_fact_table_t* fact_table,
+    const loom_condition_integer_relation_t* queried) {
+  loom_integer_order_outcome_bits_t exclusions = 0;
+  for (loom_integer_order_outcome_t outcome = 0;
+       outcome < LOOM_INTEGER_ORDER_OUTCOME_COUNT; ++outcome) {
+    loom_condition_integer_relation_t outcome_query = *queried;
+    outcome_query.relation = loom_integer_order_outcome_relation(outcome);
+    bool result = false;
+    if (loom_condition_edge_projection_proves_integer_relation(
+            projection, fact_table, &outcome_query, &result) &&
+        !result) {
+      exclusions |= (loom_integer_order_outcome_bits_t)(1u << outcome);
+    }
   }
+  return exclusions;
 }
 
 bool loom_condition_fact_scope_proves_integer_relation(
     const loom_condition_fact_scope_t* scope,
     const loom_value_fact_table_t* fact_table,
     const loom_condition_integer_relation_t* queried, bool* out_result) {
-  loom_condition_relation_outcome_bits_t exclusions = 0;
+  loom_integer_order_outcome_bits_t exclusions = 0;
   for (const loom_condition_fact_scope_t* current = scope; current != NULL;
        current = current->parent) {
     if (current->local_derivation != NULL) {
       exclusions |= loom_condition_fact_scope_flat_exclusions(
           &current->local_derivation->integer_facts, fact_table, queried);
+    } else if (current->edge_projection != NULL) {
+      exclusions |= loom_condition_fact_scope_projection_exclusions(
+          current->edge_projection, fact_table, queried);
     } else if (current->relation_view != NULL) {
       exclusions |= loom_cfg_condition_relation_view_query_excluded_outcomes(
           current->relation_table, current->relation_view, fact_table,
           queried->left, queried->right);
     }
   }
-  const loom_condition_relation_outcome_bits_t outcomes =
-      LOOM_CONDITION_RELATION_OUTCOME_BIT_ALL &
-      (loom_condition_relation_outcome_bits_t)~exclusions;
-  if (outcomes == 0) {
-    return false;
-  }
-  const loom_condition_relation_outcome_bits_t queried_outcomes =
-      loom_condition_fact_scope_relation_outcomes(queried->relation);
-  const loom_condition_relation_outcome_bits_t matching =
-      outcomes & queried_outcomes;
-  if (matching != 0 && matching != outcomes) {
-    return false;
-  }
-  *out_result = matching != 0;
-  return true;
+  const loom_integer_order_outcome_bits_t outcomes =
+      LOOM_INTEGER_ORDER_OUTCOME_BIT_ALL &
+      (loom_integer_order_outcome_bits_t)~exclusions;
+  return loom_symbolic_integer_relation_resolve(outcomes, queried->relation,
+                                                out_result);
 }
 
 static bool loom_condition_fact_scope_query_local_boolean(
@@ -213,6 +231,9 @@ static bool loom_condition_fact_scope_query_boolean(
     if (current->local_derivation != NULL) {
       found = loom_condition_fact_scope_query_local_boolean(
           current->local_derivation, value_id, &value);
+    } else if (current->edge_projection != NULL) {
+      found = loom_condition_edge_projection_query_boolean(
+          current->edge_projection, value_id, &value);
     } else if (current->relation_view != NULL) {
       found = loom_cfg_condition_relation_view_query_boolean(
           current->relation_table, current->relation_view, value_id, &value);
@@ -267,6 +288,54 @@ iree_status_t loom_condition_fact_scope_proves_condition(
       out_condition, out_proven);
 }
 
+typedef struct loom_condition_fact_scope_anchor_list_t {
+  // Explicit relation operands, when supplied by symbolic proof.
+  const loom_condition_integer_operand_t* operands;
+
+  // Number of entries in operands.
+  iree_host_size_t count;
+} loom_condition_fact_scope_anchor_list_t;
+
+static bool loom_condition_fact_scope_visit_projected_relations(
+    const loom_condition_edge_projection_t* projection,
+    loom_condition_fact_scope_anchor_list_t anchors,
+    loom_cfg_condition_relation_visit_fn_t visit, void* user_data) {
+  const loom_condition_fact_set_t* facts =
+      &projection->source_derivation.integer_facts;
+  for (iree_host_size_t i = 0; i < facts->integer_relation_count; ++i) {
+    const loom_condition_integer_relation_t* source =
+        &facts->integer_relations[i];
+    loom_condition_integer_relation_t projected = *source;
+    if (!loom_condition_edge_projection_target_operand(projection, source->left,
+                                                       &projected.left) ||
+        !loom_condition_edge_projection_target_operand(
+            projection, source->right, &projected.right)) {
+      continue;
+    }
+    bool selected_left_anchor = false;
+    bool selected_right_anchor = false;
+    for (iree_host_size_t j = 0; j < anchors.count; ++j) {
+      const loom_condition_integer_operand_t anchor = anchors.operands[j];
+      const loom_condition_integer_operand_t source_anchor =
+          loom_condition_edge_projection_source_operand(projection, anchor);
+      if (!selected_left_anchor &&
+          loom_condition_integer_operands_equal(source_anchor, source->left)) {
+        projected.left = anchor;
+        selected_left_anchor = true;
+      }
+      if (!selected_right_anchor &&
+          loom_condition_integer_operands_equal(source_anchor, source->right)) {
+        projected.right = anchor;
+        selected_right_anchor = true;
+      }
+    }
+    if (!visit(user_data, &projected)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool loom_condition_fact_scope_for_each_anchored_while(
     const loom_condition_fact_scope_t* scope,
     const loom_value_fact_table_t* fact_table,
@@ -282,6 +351,16 @@ bool loom_condition_fact_scope_for_each_anchored_while(
         if (!visit(user_data, &facts->integer_relations[i])) {
           return false;
         }
+      }
+    } else if (current->edge_projection != NULL) {
+      if (!loom_condition_fact_scope_visit_projected_relations(
+              current->edge_projection,
+              (loom_condition_fact_scope_anchor_list_t){
+                  .operands = anchors,
+                  .count = anchor_count,
+              },
+              visit, user_data)) {
+        return false;
       }
     } else if (current->relation_view != NULL) {
       for (iree_host_size_t i = 0; i < anchor_count; ++i) {
@@ -310,6 +389,12 @@ bool loom_condition_fact_scope_for_each_value_anchored_while(
         if (!visit(user_data, &facts->integer_relations[i])) {
           return false;
         }
+      }
+    } else if (current->edge_projection != NULL) {
+      if (!loom_condition_fact_scope_visit_projected_relations(
+              current->edge_projection,
+              (loom_condition_fact_scope_anchor_list_t){0}, visit, user_data)) {
+        return false;
       }
     } else if (current->relation_view != NULL) {
       for (iree_host_size_t i = 0; i < value_count; ++i) {

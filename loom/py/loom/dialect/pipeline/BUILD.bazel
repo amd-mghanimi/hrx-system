@@ -37,7 +37,6 @@ iree_py_test(
         ":pipeline",
         "//loom/py/loom/dialect/buffer",
         "//loom/py/loom/dialect/func",
-        "//loom/py/loom/dialect/group",
         "//loom/py/loom/dialect/index",
         "//loom/py/loom/dialect/scalar",
         "//loom/py/loom/dialect/test",

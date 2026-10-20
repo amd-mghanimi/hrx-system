@@ -19,6 +19,9 @@ iree_setup_c_src_root(
   PACKAGE_ROOT_PREFIX "libamdf"
 )
 set(IREE_IMPLICIT_DEFS_CC_DEPS)
+# Private components are archives folded into the explicit public shared/static
+# pair. They are not independently deployable shared libraries.
+set(BUILD_SHARED_LIBS OFF)
 # Private C++ tests and tools use standard designated initializers.
 set(IREE_CXX_STANDARD 20)
 # These clients use headers, not C++ modules requiring dependency scans.
@@ -39,9 +42,13 @@ amdf_library(
         "include/amdf/base.h",
         "include/amdf/gpu.h",
         "include/amdf/memory.h",
+        "include/amdf/memory_reservation.h",
         "include/amdf/native_event.h",
+        "include/amdf/observation.h",
         "include/amdf/queue.h",
         "include/amdf/xdna.h",
+        "include/amdf/xdna_result.h",
+        "include/amdf/xdna_trace.h",
     ],
     components = ["//libamdf/src/provider"],
     runtime_data = select({

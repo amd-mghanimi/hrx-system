@@ -291,6 +291,8 @@ iree_string_view_t loom_amdgpu_encoding_format_name(uint16_t encoding_format) {
       return IREE_SV("vopc_dpp16");
     case LOOM_AMDGPU_ENCODING_FORMAT_VOPC_DPP8:
       return IREE_SV("vopc_dpp8");
+    case LOOM_AMDGPU_ENCODING_FORMAT_VOPC_SDWA:
+      return IREE_SV("vopc_sdwa");
     case LOOM_AMDGPU_ENCODING_FORMAT_VOPDXY:
       return IREE_SV("vopdxy");
     case LOOM_AMDGPU_ENCODING_FORMAT_VOPDXY_LITERAL:
@@ -457,6 +459,12 @@ bool loom_amdgpu_encoding_inline_u32_source(
   }
   if (value < table->scalar_inline_u32_count) {
     *out_source = (uint16_t)(table->scalar_inline_u32_zero + value);
+    return true;
+  }
+  const uint32_t magnitude = 0u - value;
+  if (magnitude >= 1 && magnitude <= 16) {
+    *out_source = (uint16_t)(table->scalar_inline_u32_zero +
+                             table->scalar_inline_u32_count + magnitude - 1);
     return true;
   }
   return false;
@@ -678,6 +686,29 @@ iree_status_t loom_amdgpu_encoding_pack_v_mov_b32_vgpr(
       {
           .field_id = LOOM_AMDGPU_ENCODING_FIELD_SRC0,
           .value = (uint64_t)table->vector_source_vgpr0 + vsrc0,
+      },
+  };
+  return loom_amdgpu_encoding_pack(table, LOOM_AMDGPU_ENCODING_FORMAT_VOP1,
+                                   table->v_mov_b32_opcode, field_values,
+                                   IREE_ARRAYSIZE(field_values), out_packet);
+}
+
+iree_status_t loom_amdgpu_encoding_pack_v_mov_b32_sgpr(
+    const loom_amdgpu_encoding_table_t* table, uint16_t vdst, uint16_t ssrc0,
+    loom_amdgpu_encoding_packet_t* out_packet) {
+  if (table == NULL) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "AMDGPU v_mov_b32 encoding requires an encoding table");
+  }
+  loom_amdgpu_encoding_field_value_t field_values[] = {
+      {
+          .field_id = LOOM_AMDGPU_ENCODING_FIELD_VDST,
+          .value = vdst,
+      },
+      {
+          .field_id = LOOM_AMDGPU_ENCODING_FIELD_SRC0,
+          .value = ssrc0,
       },
   };
   return loom_amdgpu_encoding_pack(table, LOOM_AMDGPU_ENCODING_FORMAT_VOP1,

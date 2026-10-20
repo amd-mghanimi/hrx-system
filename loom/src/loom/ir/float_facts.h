@@ -43,17 +43,32 @@ typedef enum loom_float_turns_kind_e {
 } loom_float_turns_kind_t;
 
 typedef enum loom_float_integer_conversion_kind_e {
-  // Signed destination interpretation used by scalar.fptosi.
+  // Interpret the integer side of a conversion as signed.
   LOOM_FLOAT_INTEGER_CONVERSION_SIGNED = 0,
-  // Unsigned destination interpretation used by scalar.fptoui.
+  // Interpret the integer side of a conversion as unsigned raw bits.
   LOOM_FLOAT_INTEGER_CONVERSION_UNSIGNED = 1,
 } loom_float_integer_conversion_kind_t;
+
+// Subnormal-handling permissions carried by a floating-point conversion.
+typedef struct loom_float_conversion_policy_t {
+  // Whether a subnormal input may be replaced by its corresponding signed zero.
+  bool may_flush_input_subnormal;
+  // Whether a subnormal rounded result may be replaced by its signed zero.
+  bool may_flush_result_subnormal;
+} loom_float_conversion_policy_t;
 
 // Returns exact floating-point facts after rounding |value| to |scalar_type|.
 // The compact fact payload stores the rounded value as a host double; callers
 // must continue to provide the declared scalar type when interpreting it.
 loom_value_facts_t loom_value_facts_exact_float(loom_scalar_type_t scalar_type,
                                                 double value);
+
+// Returns facts bounding every result obtained by rounding a finite interval
+// to |scalar_type|. Finite rounded endpoints are retained in the compact fact
+// payload. A destination overflow keeps the guaranteed non-NaN class but drops
+// the interval because its result may be infinite.
+loom_value_facts_t loom_value_facts_make_float_range(
+    loom_scalar_type_t scalar_type, double lo, double hi);
 
 // Returns facts for the raw bit pattern of |scalar_type|, ignoring bits above
 // its declared width. Non-NaN values are represented exactly. NaN payloads
@@ -68,10 +83,52 @@ bool loom_value_facts_from_float_bits(loom_scalar_type_t scalar_type,
 // payload, such as signaling NaNs discovered through integer bitcasts.
 loom_value_facts_t loom_value_facts_known_nan(void);
 
+// Adds authored non-NaN/non-infinite result promises to floating-point facts.
+// The two promises are independent; together they imply FINITE but say nothing
+// about exact destination formats, signed zeros, or subnormals. Existing
+// numeric payloads and execution distribution remain unchanged. Known
+// nonfinite answers retain their ordinary classification even if a promise
+// is violated, so the fact lattice never contains conflicting class bits.
+void loom_value_facts_assume_float_class(loom_value_facts_t* facts,
+                                         bool not_nan, bool not_inf);
+
+// Evaluates a floating-width conversion under |policy|. Each policy field adds
+// the flushed value to the permitted result set; it does not require flushing.
+// All other rounding and special-value behavior remains exact.
+void loom_value_facts_eval_float_conversion(
+    loom_scalar_type_t source_type, loom_scalar_type_t result_type,
+    loom_float_conversion_policy_t policy,
+    const loom_value_facts_t* input_facts,
+    loom_value_facts_t* out_result_facts);
+
 // Extracts an exact floating-point value interpreted as |scalar_type|.
 bool loom_value_facts_as_exact_float(loom_scalar_type_t scalar_type,
                                      loom_value_facts_t facts,
                                      double* out_value);
+
+// Extracts the mathematical base-two exponent of an exact finite nonzero
+// floating-point value whose magnitude is a power of two. Both positive and
+// negative values are accepted; the sign does not affect |out_exponent|.
+bool loom_value_facts_as_exact_power_of_two_float(
+    loom_scalar_type_t scalar_type, loom_value_facts_t facts,
+    int32_t* out_exponent);
+
+// Extracts inclusive finite interval endpoints interpreted as |scalar_type|.
+// Returns false for class-only facts and non-finite exact values.
+bool loom_value_facts_as_float_range(loom_scalar_type_t scalar_type,
+                                     loom_value_facts_t facts, double* out_lo,
+                                     double* out_hi);
+
+// Returns true when a retained finite interval lies wholly within
+// [minimum_value, maximum_value].
+bool loom_value_facts_float_range_within(loom_scalar_type_t scalar_type,
+                                         loom_value_facts_t facts,
+                                         double minimum_value,
+                                         double maximum_value);
+
+// Drops a retained finite interval while preserving float-class and execution
+// distribution facts. Used by widening when bounds continue to grow.
+void loom_value_facts_drop_float_range(loom_value_facts_t* facts);
 
 // Returns the exact floating-point value encoded in its declared scalar
 // format. NaN facts without a retained payload are not exact bit patterns.
@@ -160,6 +217,16 @@ void loom_value_facts_eval_float_clamp(loom_scalar_type_t scalar_type,
 // infinity, and out-of-range values produce unknown facts without executing an
 // undefined host floating-point-to-integer conversion.
 void loom_value_facts_eval_float_to_integer(
+    loom_scalar_type_t source_type, loom_scalar_type_t result_type,
+    loom_float_integer_conversion_kind_t kind,
+    const loom_value_facts_t* source_facts,
+    loom_value_facts_t* out_result_facts);
+
+// Converts an integer fact interval to a floating-point interval. The source
+// interval is first constrained to its declared bit width. Unsigned conversion
+// interprets negative integer facts as raw two's-complement payloads and falls
+// back to the full unsigned domain only when an interval crosses zero.
+void loom_value_facts_eval_integer_to_float(
     loom_scalar_type_t source_type, loom_scalar_type_t result_type,
     loom_float_integer_conversion_kind_t kind,
     const loom_value_facts_t* source_facts,

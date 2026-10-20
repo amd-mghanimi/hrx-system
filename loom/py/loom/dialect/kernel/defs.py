@@ -33,6 +33,7 @@ from loom.assembly import (
     Scope,
     SymbolRef,
     TemplateParam,
+    TemplateParamFlags,
     TypeOf,
     TypesOf,
     kw,
@@ -41,10 +42,12 @@ from loom.dialect.atomic import AtomicOrdering, AtomicScope
 from loom.dialect.cache import CacheScope, CacheTemporal
 from loom.dialect.combining import CombiningKind
 from loom.dialect.memory import MemorySpace
+from loom.dialect.symbol import Linkage
 from loom.dialect.target.defs import ExportLinkage
 from loom.dsl import (
     ANY,
     ATTR_TYPE_ENUM,
+    ATTR_TYPE_FLAGS,
     ATTR_TYPE_I64,
     ATTR_TYPE_STRING,
     COMMAND_EFFECT,
@@ -70,7 +73,7 @@ from loom.dsl import (
     EnumCase,
     EnumDef,
     FuncLikeInterface,
-    HasAncestor,
+    HasAnyAncestor,
     HasParent,
     ImplicitTerminator,
     NoAncestor,
@@ -80,6 +83,7 @@ from loom.dsl import (
     OpPhase,
     Reads,
     RegionDef,
+    RegionExecution,
     Result,
     SameType,
     SymbolDefinition,
@@ -88,10 +92,14 @@ from loom.dsl import (
     SymbolReference,
     TypeDef,
     TypeSemantic,
+    VariadicValuesMatch,
     Writes,
 )
 
-_KERNEL_CONVERGENT_TRAITS = [CONVERGENT, HasAncestor("kernel.def")]
+# Execution queries and collectives retain their worker context while strands
+# are outlined and materialized into kernels. Construction has no such context.
+_KERNEL_EXECUTION_CONTEXT = HasAnyAncestor("kernel.def", "pipeline.strand")
+_KERNEL_CONVERGENT_TRAITS = [CONVERGENT, _KERNEL_EXECUTION_CONTEXT]
 
 # ============================================================================
 # Dialect
@@ -119,6 +127,13 @@ kernel_async_group_type = TypeDef(
     doc=("Opaque handle for one ordered asynchronous copy group. A group must be waited before leaving the kernel async-copy stream."),
     semantic=TypeSemantic.CONTROL_TOKEN,
     contracts=[ContractFamily.KERNEL_ASYNC],
+)
+
+kernel_barrier_phase_type = TypeDef(
+    name="kernel.barrier.phase",
+    doc=("Opaque identity for one arrived split-barrier lifetime. The value is consumed exactly once by kernel.barrier.wait and has no runtime representation."),
+    semantic=TypeSemantic.CONTROL_TOKEN,
+    contracts=[ContractFamily.KERNEL_SYNCHRONIZATION],
 )
 
 kernel_tensor_lds_descriptor_type = TypeDef(
@@ -246,6 +261,10 @@ _ENTRY_RETAIN_FORMAT: list[FormatElement] = [
     OptionalGroup([Attr("retain")], anchor="retain"),
 ]
 
+_ENTRY_LINKAGE_FORMAT: list[FormatElement] = [
+    OptionalGroup([Attr("linkage")], anchor="linkage"),
+]
+
 _ENTRY_TARGET_FORMAT: list[FormatElement] = [
     OptionalGroup(
         [kw("target"), GLUE, LPAREN, SymbolRef("target"), GLUE, RPAREN],
@@ -303,20 +322,33 @@ kernel_def = Op(
     phase=OpPhase.EXECUTABLE,
     doc=("Dispatchable source-level kernel entry. Kernel entries own launch and export contracts; ordinary func.def bodies remain helper/callable code."),
     traits=[SYMBOL_DEFINE, ISOLATED_FROM_ABOVE],
-    attrs=list(_ENTRY_ATTRS),
+    attrs=[
+        _ENTRY_ATTRS[0],
+        AttrDef("linkage", "enum", enum_def=Linkage, optional=True),
+        *_ENTRY_ATTRS[1:],
+    ],
     symbol_def=SymbolDefinition(
         field="callee",
         name="kernel",
         interfaces=["func_like", "kernel", "kernel_entry"],
         bytecode_kind="LOOM_SYMBOL_FUNC_DEF",
         fact_domain="loom_func_symbol_fact_domain",
+        linkage="linkage",
         retain="retain",
         kernel_contract=SymbolKernelContract(workload_region="config"),
     ),
     regions=[
         RegionDef(
             "config",
-            doc=("Pure launch configuration region. The region computes launch parameters from its workload arguments and immutable compilation inputs and must terminate with kernel.launch.config."),
+            doc=(
+                "Deterministic launch configuration region. The region "
+                "computes launch parameters from its workload arguments and "
+                "immutable compilation inputs and must terminate with "
+                "kernel.launch.config. Workgroup counts may use deterministic "
+                "loads from explicit buffer or view workload arguments. "
+                "Workgroup and cluster sizes remain independent of loaded "
+                "workload data."
+            ),
             single_block=True,
             terminator="kernel.launch.config",
             buffer_arg_memory_space="global",
@@ -341,6 +373,7 @@ kernel_def = Op(
     ],
     verify="loom_kernel_def_verify",
     format=[
+        *_ENTRY_LINKAGE_FORMAT,
         *_ENTRY_RETAIN_FORMAT,
         *_ENTRY_TARGET_FORMAT,
         *_ENTRY_EXPORT_FORMAT,
@@ -480,6 +513,7 @@ kernel_exit = Op(
             "body",
             doc="Optional work to run before leaving the kernel.",
             single_block=True,
+            execution=RegionExecution.EXIT,
             optional=True,
             terminator="kernel.return",
         ),
@@ -533,7 +567,7 @@ kernel_assert = Op(
             doc="Optional human-readable assertion message.",
         ),
     ],
-    traits=[UNKNOWN_EFFECTS, HasAncestor("kernel.def")],
+    traits=[UNKNOWN_EFFECTS, _KERNEL_EXECUTION_CONTEXT],
     format=[
         Ref("condition"),
         OptionalGroup(
@@ -592,7 +626,7 @@ kernel_workitem_id = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_workitem_id_facts",
     format=[
         TemplateParam("dimension"),
@@ -630,7 +664,7 @@ kernel_workgroup_id = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_workgroup_id_facts",
     format=[
         TemplateParam("dimension"),
@@ -661,7 +695,7 @@ kernel_workgroup_size = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_workgroup_size_facts",
     format=[TemplateParam("dimension"), COLON, ResultType("result")],
     examples=["%size = kernel.workgroup.size<x> : index"],
@@ -681,7 +715,7 @@ kernel_workgroup_count = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_workgroup_count_facts",
     format=[TemplateParam("dimension"), COLON, ResultType("result")],
     examples=["%count = kernel.workgroup.count<x> : index"],
@@ -712,7 +746,7 @@ kernel_cluster_id = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_cluster_id_facts",
     canonicalize="loom_kernel_cluster_id_canonicalize",
     format=[TemplateParam("dimension"), COLON, ResultType("result")],
@@ -739,7 +773,7 @@ kernel_cluster_workgroup_id = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_cluster_workgroup_id_facts",
     canonicalize="loom_kernel_cluster_workgroup_id_canonicalize",
     format=[TemplateParam("dimension"), COLON, ResultType("result")],
@@ -759,7 +793,7 @@ kernel_cluster_workgroup_flat_id = Op(
             doc="Flat current-workgroup coordinate within its cluster.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_cluster_workgroup_flat_id_facts",
     canonicalize="loom_kernel_cluster_workgroup_flat_id_canonicalize",
     format=[COLON, ResultType("result")],
@@ -786,7 +820,7 @@ kernel_cluster_size = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_cluster_size_facts",
     canonicalize="loom_kernel_cluster_size_canonicalize",
     format=[TemplateParam("dimension"), COLON, ResultType("result")],
@@ -813,7 +847,7 @@ kernel_cluster_count = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_cluster_count_facts",
     canonicalize="loom_kernel_cluster_count_canonicalize",
     format=[TemplateParam("dimension"), COLON, ResultType("result")],
@@ -839,8 +873,9 @@ kernel_workitem_dispatch_id = Op(
             doc="Coordinate axis to read.",
         ),
     ],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_workitem_dispatch_id_facts",
+    canonicalize="loom_kernel_workitem_dispatch_id_canonicalize",
     format=[TemplateParam("dimension"), COLON, ResultType("result")],
     examples=["%gid = kernel.workitem.dispatch.id<x> : index"],
 )
@@ -856,7 +891,7 @@ kernel_subgroup_id = Op(
     phase=OpPhase.EXECUTABLE,
     doc="Read the current subgroup coordinate within the workgroup.",
     results=[Result("result", INDEX, doc="Current subgroup id within the workgroup.")],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_subgroup_id_facts",
     format=[COLON, ResultType("result")],
     examples=["%sg = kernel.subgroup.id : index"],
@@ -868,7 +903,7 @@ kernel_subgroup_count = Op(
     phase=OpPhase.EXECUTABLE,
     doc="Read the number of subgroups in the current workgroup.",
     results=[Result("result", INDEX, doc="Subgroup count in the workgroup.")],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_subgroup_count_facts",
     format=[COLON, ResultType("result")],
     examples=["%count = kernel.subgroup.count : index"],
@@ -880,7 +915,7 @@ kernel_subgroup_size = Op(
     phase=OpPhase.EXECUTABLE,
     doc=("Read the execution width of the current subgroup. The width includes inactive lanes and may exceed the workgroup's invocation count."),
     results=[Result("result", INDEX, doc="Current subgroup size.")],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_subgroup_size_facts",
     format=[COLON, ResultType("result")],
     examples=["%size = kernel.subgroup.size : index"],
@@ -892,7 +927,7 @@ kernel_subgroup_lane_id = Op(
     phase=OpPhase.EXECUTABLE,
     doc="Read the current invocation coordinate within its subgroup.",
     results=[Result("result", INDEX, doc="Current subgroup lane id.")],
-    traits=[PURE, HasAncestor("kernel.def")],
+    traits=[PURE, _KERNEL_EXECUTION_CONTEXT],
     facts="loom_kernel_subgroup_lane_id_facts",
     format=[COLON, ResultType("result")],
     examples=["%lane = kernel.subgroup.lane.id : index"],
@@ -989,8 +1024,50 @@ kernel_subgroup_broadcast_first = Op(
 )
 
 
+CollectiveMathFlags = EnumDef(
+    "CollectiveMathFlags",
+    [
+        EnumCase(
+            "preserve",
+            1,
+            doc=(
+                "Require a parallel tree of source-format combining operations, "
+                "preserving their rounding, subnormal, signed-zero, and nonfinite "
+                "semantics. This does not prescribe a tree or serial evaluation order."
+            ),
+        ),
+    ],
+    doc=(
+        "Floating-point collective requirements. Without preserve, sums and "
+        "products use the target's native collective arithmetic, including its "
+        "intermediate precision and exceptional-value behavior. Extrema always "
+        "retain the selected combining kind's NaN and signed-zero semantics. "
+        "Unsupported requirements fail compilation rather than weakening semantics."
+    ),
+)
+
+_COLLECTIVE_MATH_DOC = (
+    " Each active contribution participates once per component; association is "
+    "unspecified. Floating sums and products default to native target arithmetic, "
+    "which may change signed zeros, flush subnormals, or relax nonfinite handling. "
+    "The optional preserve requirement instead evaluates each combine with the "
+    "source format's arithmetic semantics. Neither mode promises serial-reference "
+    "bits, reproducibility, or a correctly rounded real-number sum. Integer "
+    "arithmetic and the selected floating-extremum kind keep their exact semantics."
+)
+
+
 def _collective_combining_attrs() -> list[AttrDef]:
-    return [AttrDef("kind", ATTR_TYPE_ENUM, enum_def=CombiningKind, doc="Combining operation.")]
+    return [
+        AttrDef("kind", ATTR_TYPE_ENUM, enum_def=CombiningKind, doc="Combining operation."),
+        AttrDef(
+            "math",
+            ATTR_TYPE_FLAGS,
+            optional=True,
+            enum_def=CollectiveMathFlags,
+            doc="Optional floating-point preservation requirement; omission selects native arithmetic.",
+        ),
+    ]
 
 
 def _clustered_combining_attrs() -> list[AttrDef]:
@@ -1006,7 +1083,7 @@ kernel_subgroup_reduce = Op(
     group=kernel_ops,
     contracts=[ContractFamily.KERNEL_SYNCHRONIZATION],
     phase=OpPhase.EXECUTABLE,
-    doc="Reduce a scalar or rank-1 vector value across the current subgroup.",
+    doc="Reduce a scalar or rank-1 vector value across the current subgroup." + _COLLECTIVE_MATH_DOC,
     operands=[Operand("value", ANY, doc="Per-invocation value to reduce.")],
     results=[Result("result", ANY, doc="Reduced value.")],
     attrs=_clustered_combining_attrs(),
@@ -1015,7 +1092,7 @@ kernel_subgroup_reduce = Op(
     verify="loom_kernel_subgroup_reduce_verify",
     facts="loom_kernel_subgroup_reduce_facts",
     format=[
-        TemplateParam("kind"),
+        TemplateParamFlags("kind", "math"),
         Ref("value"),
         AttrDict(),
         COLON,
@@ -1029,7 +1106,7 @@ kernel_subgroup_scan = Op(
     group=kernel_ops,
     contracts=[ContractFamily.KERNEL_SYNCHRONIZATION],
     phase=OpPhase.EXECUTABLE,
-    doc="Prefix-scan a scalar or rank-1 vector value across the current subgroup.",
+    doc="Prefix-scan a scalar or rank-1 vector value across the current subgroup." + _COLLECTIVE_MATH_DOC,
     operands=[Operand("value", ANY, doc="Per-invocation value to scan.")],
     results=[Result("result", ANY, doc="Scanned value.")],
     attrs=[
@@ -1042,7 +1119,7 @@ kernel_subgroup_scan = Op(
     verify="loom_kernel_subgroup_scan_verify",
     facts="loom_kernel_scan_facts",
     format=[
-        TemplateParam("kind"),
+        TemplateParamFlags("kind", "math"),
         Ref("value"),
         AttrDict(),
         COLON,
@@ -1157,16 +1234,20 @@ kernel_workgroup_reduce = Op(
     group=kernel_ops,
     contracts=[ContractFamily.KERNEL_SYNCHRONIZATION],
     phase=OpPhase.EXECUTABLE,
-    doc="Reduce a scalar or rank-1 vector value across the current workgroup.",
-    operands=[Operand("value", ANY, doc="Per-invocation value to reduce.")],
-    results=[Result("result", ANY, doc="Reduced value.")],
+    doc="Reduce one or more independent scalar or rank-1 vector payloads at one workgroup convergence point. Each result has the type of the operand in the same position. All payloads share the combining kind and math requirement; no combination occurs between payloads."
+    + _COLLECTIVE_MATH_DOC,
+    operands=[Operand("values", ANY, variadic=True, doc="Nonempty independent per-invocation payloads to reduce.")],
+    results=[Result("results", ANY, variadic=True, doc="Workgroup-uniform results corresponding positionally to the payloads.")],
     attrs=_collective_combining_attrs(),
-    constraints=[SameType("value", "result")],
+    constraints=[VariadicValuesMatch("values", "results")],
     traits=_KERNEL_CONVERGENT_TRAITS,
     verify="loom_kernel_workgroup_reduce_verify",
     facts="loom_kernel_workgroup_reduce_facts",
-    format=[TemplateParam("kind"), Ref("value"), COLON, TypeOf("value")],
-    examples=["%sum = kernel.workgroup.reduce<addf> %v : f32"],
+    format=[TemplateParamFlags("kind", "math"), Refs("values"), COLON, TypesOf("results")],
+    examples=[
+        "%sum = kernel.workgroup.reduce<addf> %v : f32",
+        "%sum, %moment = kernel.workgroup.reduce<addf> %value, %squared : f32, vector<4xf32>",
+    ],
 )
 
 kernel_workgroup_scan = Op(
@@ -1174,7 +1255,7 @@ kernel_workgroup_scan = Op(
     group=kernel_ops,
     contracts=[ContractFamily.KERNEL_SYNCHRONIZATION],
     phase=OpPhase.EXECUTABLE,
-    doc="Prefix-scan a scalar or rank-1 vector value across the current workgroup.",
+    doc="Prefix-scan a scalar or rank-1 vector value across the current workgroup." + _COLLECTIVE_MATH_DOC,
     operands=[Operand("value", ANY, doc="Per-invocation value to scan.")],
     results=[Result("result", ANY, doc="Scanned value.")],
     attrs=[
@@ -1187,7 +1268,7 @@ kernel_workgroup_scan = Op(
     verify="loom_kernel_workgroup_scan_verify",
     facts="loom_kernel_scan_facts",
     format=[
-        TemplateParam("kind"),
+        TemplateParamFlags("kind", "math"),
         Ref("value"),
         AttrDict(),
         COLON,
@@ -1340,6 +1421,90 @@ kernel_barrier = Op(
 )
 
 # ============================================================================
+# kernel.barrier.arrive/wait — split scoped execution barrier
+# ============================================================================
+
+kernel_barrier_arrive = Op(
+    name="kernel.barrier.arrive",
+    group=kernel_ops,
+    builder_name="barrier_arrive",
+    contracts=[ContractFamily.KERNEL_SYNCHRONIZATION],
+    doc=(
+        "Arrive at a split execution barrier and begin its memory-ordering "
+        "lifetime. Release ordering is applied at arrival; acquire ordering "
+        "is completed by the unique kernel.barrier.wait consuming the returned "
+        "phase. Every participant in the execution scope must execute matching "
+        "dynamic arrive and wait instances. The interval may contain ordinary "
+        "per-invocation work and pure calls. Other convergent operations, "
+        "barriers, and impure calls must remain outside the interval."
+    ),
+    results=[
+        Result(
+            "phase",
+            ANY,
+            doc="Opaque identity consumed by the matching barrier wait.",
+        ),
+    ],
+    attrs=[
+        AttrDef(
+            "memory_space",
+            ATTR_TYPE_ENUM,
+            enum_def=KernelMemorySpace,
+            doc="Memory space ordered by the split barrier.",
+        ),
+        AttrDef(
+            "ordering",
+            ATTR_TYPE_ENUM,
+            enum_def=KernelOrdering,
+            doc="Whole-pair memory ordering split across arrival and wait.",
+        ),
+        AttrDef(
+            "scope",
+            ATTR_TYPE_ENUM,
+            enum_def=KernelScope,
+            doc="Execution scope participating in the split barrier.",
+        ),
+    ],
+    traits=[MEMORY_FENCE, CONVERGENT],
+    verify="loom_kernel_barrier_arrive_verify",
+    format=[
+        TemplateParam("memory_space"),
+        Clause("scope", Attr("scope")),
+        Clause("ordering", Attr("ordering")),
+        ARROW,
+        ResultType("phase"),
+    ],
+    examples=[
+        "%phase = kernel.barrier.arrive<workgroup> scope(workgroup) ordering(acq_rel) -> kernel.barrier.phase",
+    ],
+)
+
+kernel_barrier_wait = Op(
+    name="kernel.barrier.wait",
+    group=kernel_ops,
+    builder_name="barrier_wait",
+    contracts=[ContractFamily.KERNEL_SYNCHRONIZATION],
+    doc=(
+        "Wait for every participant in a split-barrier phase to arrive and "
+        "complete the acquire portion of that phase's memory ordering. The "
+        "operand must be the unique use of a kernel.barrier.arrive result."
+    ),
+    operands=[
+        Operand(
+            "phase",
+            ANY,
+            doc="Phase identity defined by the matching barrier arrival.",
+        ),
+    ],
+    traits=[MEMORY_FENCE, CONVERGENT],
+    verify="loom_kernel_barrier_wait_verify",
+    format=[Ref("phase"), COLON, TypeOf("phase")],
+    examples=[
+        "kernel.barrier.wait %phase : kernel.barrier.phase",
+    ],
+)
+
+# ============================================================================
 # kernel.async.copy — initiate a view-to-view asynchronous copy
 # ============================================================================
 
@@ -1364,7 +1529,11 @@ kernel_async_copy = Op(
         "Initiate an asynchronous byte-for-byte transfer between two already "
         "originated views. The source and destination view types may use "
         "different logical element types or shapes, but they must describe the "
-        "same static byte footprint. The direction attribute makes the "
+        "same logical payload byte count. Each view's layout determines the "
+        "addresses visited in logical element order; padding is not copied. "
+        "Dimensions may remain symbolic in source; specialization and value "
+        "facts must establish equal concrete payload sizes before target "
+        "transfer selection. The direction attribute makes the "
         "required memory-space flow explicit. The returned token must be "
         "committed to exactly one kernel.async.group before the copied bytes "
         "are waited or consumed."
@@ -1393,7 +1562,7 @@ kernel_async_copy = Op(
         ResultType("token"),
     ],
     examples=[
-        "%copy = kernel.async.copy %src to %dst {cache_scope = cu, cache_temporal = regular, direction = global_to_workgroup} : view<16xi8> to view<16xi8> -> kernel.async.token",
+        "%copy = kernel.async.copy %src to %dst {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<16xi8> to view<16xi8> -> kernel.async.token",
     ],
 )
 
@@ -1440,7 +1609,7 @@ kernel_async_copy_mask = Op(
         ResultType("token"),
     ],
     examples=[
-        "%copy = kernel.async.copy.mask %src to %dst, %in_bounds {cache_scope = cu, cache_temporal = non_temporal, direction = global_to_workgroup} : view<16xi8> to view<16xi8>, i1 -> kernel.async.token",
+        "%copy = kernel.async.copy.mask %src to %dst, %in_bounds {cache_scope = workgroup, cache_temporal = non_temporal, direction = global_to_workgroup} : view<16xi8> to view<16xi8>, i1 -> kernel.async.token",
     ],
 )
 
@@ -1490,8 +1659,8 @@ kernel_async_gather = Op(
         ResultType("token"),
     ],
     examples=[
-        "%copy = kernel.async.gather %src_lane to %lds_tile {cache_scope = cu, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8> -> kernel.async.token",
-        "%copy = kernel.async.gather %src_lane to %lds_tile {cache_scope = cu, cache_temporal = regular} : view<12xi8> to view<64x16xi8> -> kernel.async.token",
+        "%copy = kernel.async.gather %src_lane to %lds_tile {cache_scope = workgroup, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8> -> kernel.async.token",
+        "%copy = kernel.async.gather %src_lane to %lds_tile {cache_scope = workgroup, cache_temporal = regular} : view<12xi8> to view<64x16xi8> -> kernel.async.token",
     ],
 )
 
@@ -1538,7 +1707,7 @@ kernel_async_gather_mask = Op(
         ResultType("token"),
     ],
     examples=[
-        "%copy = kernel.async.gather.mask %src_lane to %lds_tile, %in_bounds {cache_scope = cu, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8>, i1 -> kernel.async.token",
+        "%copy = kernel.async.gather.mask %src_lane to %lds_tile, %in_bounds {cache_scope = workgroup, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8>, i1 -> kernel.async.token",
     ],
 )
 
@@ -1592,7 +1761,7 @@ kernel_async_cluster_gather = Op(
         ResultType("token"),
     ],
     examples=[
-        "%copy = kernel.async.cluster.gather %src to %lds using %mask {cache_scope = se, cache_temporal = high_temporal} : view<16xi8> to view<16xi8>, i32 -> kernel.async.token",
+        "%copy = kernel.async.cluster.gather %src to %lds using %mask {cache_scope = cluster, cache_temporal = high_temporal} : view<16xi8> to view<16xi8>, i32 -> kernel.async.token",
     ],
 )
 
@@ -1646,7 +1815,7 @@ kernel_async_cluster_gather_mask = Op(
         ResultType("token"),
     ],
     examples=[
-        "%copy = kernel.async.cluster.gather.mask %src to %lds using %mask, %in_bounds {cache_scope = cu, cache_temporal = regular} : view<4xi8> to view<4xi8>, i32, i1 -> kernel.async.token",
+        "%copy = kernel.async.cluster.gather.mask %src to %lds using %mask, %in_bounds {cache_scope = workgroup, cache_temporal = regular} : view<4xi8> to view<4xi8>, i32, i1 -> kernel.async.token",
     ],
 )
 
@@ -1698,7 +1867,7 @@ kernel_async_tensor_load_to_lds = Op(
         ResultType("token"),
     ],
     examples=[
-        "%copy = kernel.async.tensor.load.to.lds %global_tile to %lds_tile using %desc {cache_scope = cu, cache_temporal = regular} : view<64x64xf32> to view<64x64xf32>, kernel.tensor.lds.descriptor -> kernel.async.token",
+        "%copy = kernel.async.tensor.load.to.lds %global_tile to %lds_tile using %desc {cache_scope = workgroup, cache_temporal = regular} : view<64x64xf32> to view<64x64xf32>, kernel.tensor.lds.descriptor -> kernel.async.token",
     ],
 )
 
@@ -1803,6 +1972,7 @@ kernel_async_group = Op(
 kernel_async_wait = Op(
     name="kernel.async.wait",
     group=kernel_ops,
+    builder_name="wait",
     contracts=[ContractFamily.KERNEL_ASYNC],
     doc=(
         "Wait until a committed async-copy group has completed. This completes "
@@ -1855,7 +2025,7 @@ kernel_decl = Op(
     symbol_def=SymbolDefinition(
         field="callee",
         name="kernel",
-        interfaces=["func_like", "kernel"],
+        interfaces=["func_like", "kernel", "kernel_entry"],
         bytecode_kind="LOOM_SYMBOL_FUNC_DECL",
         fact_domain="loom_func_symbol_fact_domain",
         retain="retain",
@@ -1872,6 +2042,7 @@ kernel_decl = Op(
             args="args",
         )
     ],
+    verify="loom_kernel_decl_verify",
     format=[
         *_ENTRY_RETAIN_FORMAT,
         *_ENTRY_TARGET_FORMAT,
@@ -1948,7 +2119,12 @@ kernel_launch = Op(
     "kernel.launch",
     group=kernel_ops,
     phase=OpPhase.EXECUTABLE,
-    doc=("Launch a kernel with explicit workload and device-ABI operands. Workloads configure the launch and never alter the kernel ABI."),
+    doc=(
+        "Launch a kernel or issue a kernel-scoped pipeline with explicit "
+        "configuration and device-ABI operands. Workloads configure a kernel "
+        "launch; for a pipeline they supply the leading specialization "
+        "arguments."
+    ),
     operands=[
         Operand("workloads", ANY, variadic=True),
         Operand("arguments", ANY, variadic=True),
@@ -1957,7 +2133,7 @@ kernel_launch = Op(
         AttrDef(
             "callee",
             "symbol",
-            symbol_ref=SymbolReference("kernel", ["kernel"]),
+            symbol_ref=SymbolReference("kernel or kernel-scoped pipeline", ["kernel", "pipeline"]),
         ),
     ],
     traits=[UNKNOWN_EFFECTS, COMMAND_EFFECT, NoAncestor("kernel.def")],
@@ -2001,11 +2177,12 @@ kernel_dispatch = Op(
     group=kernel_ops,
     phase=OpPhase.EXECUTABLE,
     doc=(
-        "Dispatch an executable kernel entry with exact workgroup counts and "
-        "device-ABI operands. Counts are one to three index values or one "
-        "dense view<3xi32> for indirect dispatch. An optional XYZ workgroup "
-        "size overrides the executable entry default for targets supporting "
-        "dispatch-time workgroup sizes."
+        "Dispatch a resolved kernel.entry.decl with exact workgroup counts "
+        "and device-ABI operands. Configured kernel.def and kernel.decl "
+        "symbols are invoked with kernel.launch instead. Counts are one to "
+        "three index values or one dense view<3xi32> for indirect dispatch. "
+        "An optional XYZ workgroup size overrides the executable entry "
+        "default for targets supporting dispatch-time workgroup sizes."
     ),
     operands=[
         Operand("workgroup_counts", ANY, variadic=True),
@@ -2081,7 +2258,7 @@ def _launch_schedule(name: str, doc: str) -> Op:
         regions=[
             RegionDef(
                 "body",
-                doc="Nested kernel launches and launch schedules.",
+                doc=("Nested kernel launches, launch schedules, and pure or deterministic read-only launch preparation."),
                 single_block=True,
                 terminator="kernel.launch.yield",
             ),
@@ -2116,6 +2293,7 @@ ALL_KERNEL_TYPES: tuple[TypeDef, ...] = (
     kernel_async_group_type,
     kernel_async_token_type,
     kernel_tensor_lds_descriptor_type,
+    kernel_barrier_phase_type,
 )
 
 ALL_KERNEL_OPS: tuple[Op, ...] = (
@@ -2173,4 +2351,6 @@ ALL_KERNEL_OPS: tuple[Op, ...] = (
     kernel_launch_yield,
     kernel_launch_serial,
     kernel_launch_concurrent,
+    kernel_barrier_arrive,
+    kernel_barrier_wait,
 )

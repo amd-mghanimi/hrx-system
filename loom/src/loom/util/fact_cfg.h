@@ -12,6 +12,7 @@
 #ifndef LOOM_UTIL_FACT_CFG_H_
 #define LOOM_UTIL_FACT_CFG_H_
 
+#include "iree/base/bitmap.h"
 #include "loom/analysis/scc.h"
 #include "loom/util/cfg_graph.h"
 #include "loom/util/cfg_loop_nest.h"
@@ -62,6 +63,10 @@ typedef struct loom_value_fact_cfg_region_t {
   loom_cfg_loop_nest_t loops;
   // Current recurrence equations, indexed by loops.loops.
   loom_value_fact_induction_t* inductions;
+  // Borrowed additive equations during a cyclic solve, indexed by loops.loops.
+  // The owner clears these sets before releasing the solve's scratch storage;
+  // published value facts do not retain the equation storage.
+  loom_value_fact_recurrence_set_t* recurrences;
   // Immutable compressed control dependencies for this graph snapshot.
   loom_cfg_control_t control_structure;
   // Selector distributions and live execution facts with snapshot lifetime.
@@ -79,8 +84,8 @@ typedef struct loom_value_fact_cfg_region_t {
   iree_host_size_t* component_nodes;
   // Component index for each forwarding node.
   iree_host_size_t* argument_components;
-  // Control-flow components bound the values that must restart together when
-  // an edit changes a cyclic dataflow equation.
+  // Control-flow components own pending joins and bound the values that must
+  // restart together when an edit changes a cyclic dataflow equation.
   struct {
     // Member spans grouped by graph-owned reachable component ordinal, with
     // each span in reverse postorder for initial and restarted propagation.
@@ -91,8 +96,10 @@ typedef struct loom_value_fact_cfg_region_t {
     // summary, including cycles with observations but no carried block
     // arguments.
     loom_op_t** anchors;
-    // True when semantic edits or input changes require a cyclic summary.
-    bool* dirty;
+    // Pending argument joins or cyclic summaries, indexed by graph component.
+    // Incoming payload/control changes invalidate either kind; semantic edits
+    // inside a component invalidate only cyclic summaries.
+    iree_bitmap_t dirty;
   } control_flow;
 } loom_value_fact_cfg_region_t;
 
@@ -107,6 +114,13 @@ iree_status_t loom_value_fact_cfg_region_initialize(
 void loom_value_fact_cfg_update_induction(
     const loom_value_fact_table_t* table, const loom_module_t* module,
     const loom_value_fact_cfg_region_t* region, uint16_t block_index);
+
+// Replaces a natural-loop header's additive equations after producer seeding.
+// Called once per summary restart, not during numeric fixed-point sweeps.
+iree_status_t loom_value_fact_cfg_build_recurrences(
+    const loom_value_fact_table_t* table, const loom_module_t* module,
+    const loom_value_fact_cfg_region_t* region, uint16_t block_index,
+    iree_arena_allocator_t* arena);
 
 // Refreshes one retained selector from its current SSA identity and facts,
 // then settles indexed control dependents. Returns whether execution changed.

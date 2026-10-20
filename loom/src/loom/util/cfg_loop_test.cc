@@ -49,8 +49,8 @@ class CfgLoopTest : public ::testing::Test {
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
     const loom_symbol_ref_t callee = {
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
     IREE_ASSERT_OK(loom_test_func_build(&builder_, 0, 0, 0, callee, nullptr, 0,
                                         nullptr, 0, nullptr, 0, nullptr, 0,
@@ -136,8 +136,7 @@ TEST_F(CfgLoopTest, AcyclicGraphHasEmptyForest) {
 
 TEST_F(CfgLoopTest, EdgelessScheduleDoesNotNeedAdjacencyStorage) {
   // The Low function model omits adjacency for structured single-block bodies.
-  loom_cfg_graph_t graph = {};
-  graph.block_count = 1;
+  loom_cfg_graph_t graph = {.block_count = 1};
   loom_cfg_loop_forest_t forest = {};
   uint64_t block_count = 0;
   EXPECT_TRUE(loom_cfg_loop_forest_calculate_block_execution_counts(
@@ -270,6 +269,9 @@ TEST_F(CfgLoopTest, AcyclicDiamondDoesNotHaveExactCounts) {
   uint64_t block_counts[4] = {0};
   EXPECT_FALSE(loom_cfg_loop_forest_calculate_block_execution_counts(
       &forest, &graph, nullptr, block_counts));
+  EXPECT_TRUE(loom_cfg_loop_forest_calculate_block_multipliers(
+      &forest, &graph, nullptr, block_counts));
+  EXPECT_THAT(block_counts, ::testing::ElementsAre(1u, 1u, 1u, 1u));
 }
 
 TEST_F(CfgLoopTest, UnreachableBranchDoesNotInvalidateCounts) {
@@ -316,6 +318,9 @@ TEST_F(CfgLoopTest, RejectsUnmodeledBranchingInsideLoop) {
   uint64_t block_counts[5] = {0};
   EXPECT_FALSE(loom_cfg_loop_forest_calculate_block_execution_counts(
       &forest, &graph, trip_counts, block_counts));
+  EXPECT_TRUE(loom_cfg_loop_forest_calculate_block_multipliers(
+      &forest, &graph, trip_counts, block_counts));
+  EXPECT_THAT(block_counts, ::testing::ElementsAre(1u, 5u, 4u, 4u, 1u));
 }
 
 TEST_F(CfgLoopTest, RejectsUnrepresentedBackwardEdges) {

@@ -9,7 +9,7 @@
 from __future__ import annotations
 
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 
 from loom.dsl import ATTR_TYPE_FLAGS, Op
 from loom.target.contracts.emits import (
@@ -108,6 +108,8 @@ def _lower_emit_kind(
         return LowerEmitKind.DESCRIPTOR_OP
     if emit.form == DescriptorEmitForm.CONST:
         return LowerEmitKind.DESCRIPTOR_CONST
+    if emit.form == DescriptorEmitForm.COND_BR:
+        return LowerEmitKind.DESCRIPTOR_COND_BR
     if emit.form == DescriptorEmitForm.FIRST_LANE:
         return LowerEmitKind.DESCRIPTOR_OP_FIRST_LANE
     if emit.form == DescriptorEmitForm.PER_LANE:
@@ -119,6 +121,8 @@ def _lower_emit_kind(
 
     if emit.descriptor.op_kind is DescriptorOpKind.CONST:
         return LowerEmitKind.DESCRIPTOR_CONST
+    if emit.descriptor.op_kind is DescriptorOpKind.COND_BR:
+        return LowerEmitKind.DESCRIPTOR_COND_BR
 
     result_bindings = (
         emit.result_types
@@ -233,7 +237,14 @@ def _lower_value_ref(
         source_node_index=source_node_index,
         element_index=(
             value_ref.element
-            if value_ref.kind in (SourceValueKind.OPERAND, SourceValueKind.RESULT)
+            if value_ref.kind
+            in (
+                SourceValueKind.OPERAND,
+                SourceValueKind.RESULT,
+                SourceValueKind.EXACT_LANE_ORIGIN_OPERAND,
+                SourceValueKind.EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND,
+                SourceValueKind.UNIFORM_ELEMENT_ORIGIN_OPERAND,
+            )
             else 0
         ),
         materializer_index=materializer_index,
@@ -245,7 +256,12 @@ def _source_value_index(
     value_ref: ValueRef,
     temporary_ordinals: Mapping[str, int],
 ) -> int:
-    if value_ref.kind == SourceValueKind.OPERAND:
+    if value_ref.kind in (
+        SourceValueKind.OPERAND,
+        SourceValueKind.EXACT_LANE_ORIGIN_OPERAND,
+        SourceValueKind.EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND,
+        SourceValueKind.UNIFORM_ELEMENT_ORIGIN_OPERAND,
+    ):
         operand = source_op.operand(value_ref.field)
         if operand is not None:
             return source_op.operands.index(operand)
@@ -257,13 +273,17 @@ def _source_value_index(
         ordinal = temporary_ordinals.get(value_ref.field)
         if ordinal is not None:
             return ordinal
-    if value_ref.kind == SourceValueKind.SOURCE_MEMORY_DYNAMIC_TERM:
+    if value_ref.kind in (
+        SourceValueKind.SOURCE_MEMORY_DYNAMIC_TERM,
+        SourceValueKind.SOURCE_MEMORY_ELEMENT_STRIDE,
+    ):
         return value_ref.element
-    if value_ref.kind == SourceValueKind.SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET:
-        return 0
-    if value_ref.kind == SourceValueKind.SOURCE_MEMORY_ADDRESS:
-        return 0
-    if value_ref.kind == SourceValueKind.SOURCE_MEMORY_ROOT:
+    if value_ref.kind in (
+        SourceValueKind.SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET,
+        SourceValueKind.SOURCE_MEMORY_BYTE_OFFSET,
+        SourceValueKind.SOURCE_MEMORY_ADDRESS,
+        SourceValueKind.SOURCE_MEMORY_ROOT,
+    ):
         return 0
     raise ValueError(f"source value field '{value_ref.field}' is not declared")
 
@@ -363,6 +383,7 @@ def _descriptor_operand_is_output(role: OperandRole) -> bool:
 def _lower_descriptor_ties(
     descriptor: Descriptor,
     operand_ordinals_by_descriptor_field: Mapping[str, int],
+    transferred_descriptor_fields: Collection[str],
 ) -> tuple[tuple[LowerTiedResult, ...], int]:
     result_ordinals_by_descriptor_index: dict[int, int] = {}
     operand_ordinals_by_descriptor_index: dict[int, int] = {}
@@ -380,6 +401,10 @@ def _lower_descriptor_ties(
 
     tied_results: list[LowerTiedResult] = []
     copy_operand_mask = 0
+    transferred_operand_ordinals = {
+        operand_ordinals_by_descriptor_field[field]
+        for field in transferred_descriptor_fields
+    }
     for constraint in descriptor.constraints:
         if constraint.kind not in (ConstraintKind.TIED, ConstraintKind.DESTRUCTIVE):
             continue
@@ -406,7 +431,7 @@ def _lower_descriptor_ties(
                     operand_index=operand_index,
                 )
             )
-        else:
+        elif operand_index not in transferred_operand_ordinals:
             copy_operand_mask |= 1 << operand_index
     return tuple(tied_results), copy_operand_mask
 

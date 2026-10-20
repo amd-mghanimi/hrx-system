@@ -11,6 +11,7 @@
 
 #include "libamdf/src/allocator.h"
 #include "libamdf/src/gpu/umd/wddm/device.h"
+#include "libamdf/src/gpu/umd/wddm/memory.h"
 #include "libamdf/src/gpu/umd/wddm/memory_profile.h"
 #include "libamdf/src/platform/windows/host_cache.h"
 
@@ -59,6 +60,29 @@ struct amdf_gpu_umd_memory_t {
   // Native allocation handles in increasing byte-offset order.
   D3DKMT_HANDLE allocation_handles[];
 };
+
+uintptr_t amdf_gpu_umd_memory_host_mapping_source(
+    amdf_gpu_umd_memory_t* memory) {
+  (void)memory;
+  amdf_assert(false && "WDDM does not advertise HOST_MAPPING_SOURCE");
+  return 0;
+}
+
+amdf_gpu_wddm_memory_span_t amdf_gpu_wddm_memory_span(
+    const amdf_gpu_umd_memory_t* memory, uint64_t byte_offset) {
+  const uint64_t index =
+      byte_offset / memory->maximum_native_allocation_byte_length;
+  const uint64_t offset =
+      byte_offset % memory->maximum_native_allocation_byte_length;
+  const uint64_t remaining = memory->byte_length - byte_offset;
+  const uint64_t available =
+      memory->maximum_native_allocation_byte_length - offset;
+  return (amdf_gpu_wddm_memory_span_t){
+      .allocation = memory->allocation_handles[index],
+      .byte_offset = offset,
+      .byte_length = remaining < available ? remaining : available,
+  };
+}
 
 static bool amdf_windows_gpu_align_up(uint64_t value, uint64_t alignment,
                                       uint64_t* out_value) {
@@ -249,8 +273,8 @@ static amdf_status_t amdf_windows_gpu_memory_map_device_address(
     }
   }
   if (amdf_status_is_ok(status)) {
-    status = amdf_kmt_wait_for_paging(
-        memory->device->kmt, memory->device->device,
+    status = amdf_kmt_device_status_wait_for_paging(
+        &memory->device->status, memory->device->kmt, memory->device->device,
         memory->device->paging_sync_object, memory->device->paging_fence,
         last_paging_fence_value);
   }
@@ -269,8 +293,8 @@ static amdf_status_t amdf_windows_gpu_memory_make_resident(
   if (!amdf_kmt_status_is_success_or_pending(native_status)) {
     return amdf_kmt_make_status(native_status);
   }
-  const amdf_status_t status = amdf_kmt_wait_for_paging(
-      memory->device->kmt, memory->device->device,
+  const amdf_status_t status = amdf_kmt_device_status_wait_for_paging(
+      &memory->device->status, memory->device->kmt, memory->device->device,
       memory->device->paging_sync_object, memory->device->paging_fence,
       make_resident.PagingFenceValue);
   if (amdf_status_is_ok(status) &&
@@ -398,9 +422,9 @@ amdf_status_t amdf_gpu_umd_device_query_memory_profile(
     return amdf_make_api_status(AMDF_STATUS_CODE_OUT_OF_RANGE);
   }
   const amdf_status_t status = amdf_gpu_wddm_query_memory_profile(
-      &device->memory_capabilities, memory_profile_ordinal, out_profile);
+      &device->memory_capabilities, &device->properties, memory_profile_ordinal,
+      out_profile);
   if (amdf_status_is_ok(status)) {
-    out_profile->visibility.describe_site = amdf_gpu_umd_memory_describe_site;
     out_profile->visibility.describe_host = amdf_gpu_umd_memory_describe_host;
     out_profile->visibility.data = device;
   }
@@ -424,7 +448,7 @@ amdf_status_t amdf_gpu_umd_memory_prepare_import(
   }
   memory->device = device;
   memory->allocation_capacity = 1;
-  memory->flags = profile->guaranteed_flags;
+  memory->flags = profile->guaranteed_flags | import_info->required_flags;
   memory->device_access = import_info->device_access;
   *memory_state = memory;
   if (!DuplicateHandle(GetCurrentProcess(),

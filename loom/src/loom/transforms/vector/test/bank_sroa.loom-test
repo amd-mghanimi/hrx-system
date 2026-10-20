@@ -438,6 +438,81 @@ func.def @rank1_native_vector_use(%initial: vector<4xf32>, %bias: vector<4xf32>,
 }
 
 // ====
+// RUN: pass sroa-vector-banks
+
+// A whole-vector recurrence remains in its target-native representation while
+// an independent aggregate recurrence in the same loop is decomposed.
+func.def @aggregate_bank_with_native_vector(%initial_bank: vector<2x2xf32>, %initial_native: vector<4xf32>, %increment: f32, %bias: vector<4xf32>, %end: index) -> (f32, vector<4xf32>) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %bank_result, %native_result = scf.for %i = [%begin to %end step %step](%bank = %initial_bank : vector<2x2xf32>, %native = %initial_native : vector<4xf32>) -> (vector<2x2xf32>, vector<4xf32>) {
+    %old = vector.extract %bank[1, 0] : vector<2x2xf32> -> f32
+    %next = scalar.addf %old, %increment : f32
+    %updated = vector.insert %next into %bank[1, 0] : f32, vector<2x2xf32>
+    %next_native = vector.addf %native, %bias : vector<4xf32>
+    scf.yield %updated, %next_native : vector<2x2xf32>, vector<4xf32>
+  }
+  %value = vector.extract %bank_result[1, 0] : vector<2x2xf32> -> f32
+  func.return %value, %native_result : f32, vector<4xf32>
+}
+
+// ----
+func.def @aggregate_bank_with_native_vector(%initial_bank: vector<2x2xf32>, %initial_native: vector<4xf32>, %increment: f32, %bias: vector<4xf32>, %end: index) -> (f32, vector<4xf32>) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %initial_bank_slot_0 = vector.extract %initial_bank[0, 0] : vector<2x2xf32> -> f32
+  %initial_bank_slot_1 = vector.extract %initial_bank[0, 1] : vector<2x2xf32> -> f32
+  %initial_bank_slot_2 = vector.extract %initial_bank[1, 0] : vector<2x2xf32> -> f32
+  %initial_bank_slot_3 = vector.extract %initial_bank[1, 1] : vector<2x2xf32> -> f32
+  %bank_result_slot_0, %bank_result_slot_1, %bank_result_slot_2, %bank_result_slot_3, %native_result = scf.for %i = [%begin to %end step %step](%bank_slot_0 = %initial_bank_slot_0 : f32, %bank_slot_1 = %initial_bank_slot_1 : f32, %bank_slot_2 = %initial_bank_slot_2 : f32, %bank_slot_3 = %initial_bank_slot_3 : f32, %native = %initial_native : vector<4xf32>) -> (f32, f32, f32, f32, vector<4xf32>) {
+    %next = scalar.addf %bank_slot_2, %increment : f32
+    %next_native = vector.addf %native, %bias : vector<4xf32>
+    scf.yield %bank_slot_0, %bank_slot_1, %next, %bank_slot_3, %next_native : f32, f32, f32, f32, vector<4xf32>
+  }
+  func.return %bank_result_slot_2, %native_result : f32, vector<4xf32>
+}
+
+// ====
+// RUN: pass pipeline-scf-for,canonicalize,cse,sroa-vector-banks,canonicalize,cse
+
+// Pipelining adds the loaded vector as an independent loop recurrence. It must
+// not prevent the oversized aggregate recurrence from being decomposed.
+func.def @pipelined_aggregate_bank(%input: view<64xf32>, %initial: vector<8x8xf32>) -> (vector<8xf32>) {
+  %begin = index.constant 0 : index
+  %end = index.constant 8 : index
+  %step = index.constant 1 : index
+  %depth = index.constant 2 : index
+  %width = index.constant 8 : index
+  %result = scf.for %i = [%begin to %end step %step](%bank = %initial : vector<8x8xf32>) -> (vector<8x8xf32>) pipeline(%depth) {
+    %offset = index.mul %i, %width : index
+    %loaded = vector.load %input[%offset] : view<64xf32> -> vector<8xf32>
+    %row = vector.extract %bank[3] : vector<8x8xf32> -> vector<8xf32>
+    %next = vector.addf %row, %loaded : vector<8xf32>
+    %updated = vector.insert %next into %bank[3] : vector<8xf32>, vector<8x8xf32>
+    scf.yield %updated : vector<8x8xf32>
+  }
+  %row = vector.extract %result[3] : vector<8x8xf32> -> vector<8xf32>
+  func.return %row : vector<8xf32>
+}
+
+// ----
+func.def @pipelined_aggregate_bank(%input: view<64xf32>, %initial: vector<8x8xf32>) -> (vector<8xf32>) {
+  %end = index.constant 8 : index
+  %step = index.constant 1 : index
+  %offset = index.constant 0 : index
+  %loaded = vector.load %input[%offset] : view<64xf32> -> vector<8xf32>
+  %initial_slot_3 = vector.extract %initial[3] : vector<8x8xf32> -> vector<8xf32>
+  %row, %75 = scf.for %71 = [%step to %end step %step](%row = %initial_slot_3 : vector<8xf32>, %73 = %loaded : vector<8xf32>) -> (vector<8xf32>, vector<8xf32>) {
+    %offset = index.mul %71, %end : index
+    %loaded = vector.load %input[%offset] : view<64xf32> -> vector<8xf32>
+    %next = vector.addf %row, %73 : vector<8xf32>
+    scf.yield %next, %loaded : vector<8xf32>, vector<8xf32>
+  }
+  %next = vector.addf %row, %75 : vector<8xf32>
+  func.return %next : vector<8xf32>
+}
+
+// ====
 // RUN: pass sroa-vector-banks,canonicalize
 
 // Replacing a higher-rank bank preserves each trailing vector payload.
@@ -504,9 +579,9 @@ CHECK: test.use %view, * : view<[%rows]x4xi32, %layout>, vector<4xf32>
 // ====
 // RUN: pass sroa-vector-banks
 
-// Condition-controlled loops project the before, after, and result endpoints
-// through one shared bank schema. Inserts in either region forward unchanged
-// slots directly and replace only the addressed payload.
+// Condition-controlled loops project the header and body/result domains while
+// preserving the current matching signatures. Inserts in either region
+// forward unchanged slots directly and replace only the addressed payload.
 func.def @condition_bank(%initial: vector<2xi32>, %keep_going: i1) -> (i32, i32) {
   %result = scf.while(%before_bank = %initial : vector<2xi32>) -> (vector<2xi32>) {
     %head = vector.extract %before_bank[0] : vector<2xi32> -> i32
@@ -540,6 +615,44 @@ func.def @condition_bank(%initial: vector<2xi32>, %keep_going: i1) -> (i32, i32)
 }
 
 // ====
+// RUN: pass sroa-vector-banks
+
+// Bank transport follows the authored SSA edges rather than pairing condition
+// and backedge operands by ordinal.
+func.def @condition_banks_follow_ssa_edges(%first_initial: vector<2xi32>, %second_initial: vector<2xi32>, %keep_going: i1) -> (i32, i32) {
+  %first_result, %second_result = scf.while(%first_before = %first_initial : vector<2xi32>, %second_before = %second_initial : vector<2xi32>) -> (vector<2xi32>, vector<2xi32>) {
+    %first_head = vector.extract %first_before[0] : vector<2xi32> -> i32
+    %first_updated = vector.insert %first_head into %first_before[1] : i32, vector<2xi32>
+    %second_head = vector.extract %second_before[0] : vector<2xi32> -> i32
+    %second_updated = vector.insert %second_head into %second_before[1] : i32, vector<2xi32>
+    scf.condition %keep_going, %second_updated, %first_updated : i1, vector<2xi32>, vector<2xi32>
+  } do(%first_body: vector<2xi32>, %second_body: vector<2xi32>) {
+    %first_tail = vector.extract %first_body[1] : vector<2xi32> -> i32
+    %first_next = vector.insert %first_tail into %first_body[0] : i32, vector<2xi32>
+    %second_tail = vector.extract %second_body[1] : vector<2xi32> -> i32
+    %second_next = vector.insert %second_tail into %second_body[0] : i32, vector<2xi32>
+    scf.yield %second_next, %first_next : vector<2xi32>, vector<2xi32>
+  }
+  %first = vector.extract %first_result[0] : vector<2xi32> -> i32
+  %second = vector.extract %second_result[1] : vector<2xi32> -> i32
+  func.return %first, %second : i32, i32
+}
+
+// ----
+func.def @condition_banks_follow_ssa_edges(%first_initial: vector<2xi32>, %second_initial: vector<2xi32>, %keep_going: i1) -> (i32, i32) {
+  %first_initial_slot_0 = vector.extract %first_initial[0] : vector<2xi32> -> i32
+  %first_initial_slot_1 = vector.extract %first_initial[1] : vector<2xi32> -> i32
+  %second_initial_slot_0 = vector.extract %second_initial[0] : vector<2xi32> -> i32
+  %second_initial_slot_1 = vector.extract %second_initial[1] : vector<2xi32> -> i32
+  %first_result_slot_0, %first_result_slot_1, %second_result_slot_0, %second_result_slot_1 = scf.while(%first_before_slot_0 = %first_initial_slot_0 : i32, %first_before_slot_1 = %first_initial_slot_1 : i32, %second_before_slot_0 = %second_initial_slot_0 : i32, %second_before_slot_1 = %second_initial_slot_1 : i32) -> (i32, i32, i32, i32) {
+    scf.condition %keep_going, %second_before_slot_0, %second_before_slot_0, %first_before_slot_0, %first_before_slot_0 : i1, i32, i32, i32, i32
+  } do(%first_body_slot_0: i32, %first_body_slot_1: i32, %second_body_slot_0: i32, %second_body_slot_1: i32) {
+    scf.yield %second_body_slot_1, %second_body_slot_1, %first_body_slot_1, %first_body_slot_1 : i32, i32, i32, i32
+  }
+  func.return %first_result_slot_0, %second_result_slot_1 : i32, i32
+}
+
+// ====
 // RUN: with-checks pass-report sroa-vector-banks
 
 // The report retains the established SROA accounting while the shared boundary
@@ -560,7 +673,7 @@ func.def @reports_condition_bank(%initial: vector<2xi32>, %keep_going: i1) -> (i
 
 // ----
 CHECK: *"changed":true,*
-CHECK: *"statistics":{"loops-checked":1,"loops-scalarized":1,"banks-scalarized":1,"slots-materialized":2,"extracts-eliminated":3,"inserts-eliminated":2}*
+CHECK: *"statistics":{"loops-checked":1,"loops-scalarized":1,"banks-scalarized":2,"slots-materialized":4,"extracts-eliminated":3,"inserts-eliminated":2}*
 
 // ====
 // RUN: pass sroa-vector-banks
@@ -685,7 +798,7 @@ func.def @report_rejected_whole_use_after_access(%initial: vector<2xf32>, %end: 
   func.return %result : vector<2xf32>
 }
 
-func.def @report_rejected_peer_bank(%first_initial: vector<2xi32>, %second_initial: vector<2xi32>, %dynamic: index, %end: index) -> (i32, i32) {
+func.def @report_mixed_static_dynamic_banks(%first_initial: vector<2xi32>, %second_initial: vector<2xi32>, %dynamic: index, %end: index) -> (i32, i32) {
   %begin = index.constant 0 : index
   %step = index.constant 1 : index
   %first_result, %second_result = scf.for %i = [%begin to %end step %step](%first = %first_initial : vector<2xi32>, %second = %second_initial : vector<2xi32>) -> (vector<2xi32>, vector<2xi32>) {
@@ -696,6 +809,20 @@ func.def @report_rejected_peer_bank(%first_initial: vector<2xi32>, %second_initi
   }
   %first_value = vector.extract %first_result[0] : vector<2xi32> -> i32
   %second_value = vector.extract %second_result[0] : vector<2xi32> -> i32
+  func.return %first_value, %second_value : i32, i32
+}
+
+func.def @report_rejected_cross_wired_bank(%first_initial: vector<2xi32>, %second_initial: vector<2xi32>, %dynamic: index, %end: index) -> (i32, i32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %first_result, %second_result = scf.for %i = [%begin to %end step %step](%first = %first_initial : vector<2xi32>, %second = %second_initial : vector<2xi32>) -> (vector<2xi32>, vector<2xi32>) {
+    %first_element = vector.extract %first[0] : vector<2xi32> -> i32
+    %second_element = vector.extract %second[%dynamic] : vector<2xi32> -> i32
+    test.use %first_element, %second_element : i32, i32
+    scf.yield %first, %first : vector<2xi32>, vector<2xi32>
+  }
+  %first_value = vector.extract %first_result[0] : vector<2xi32> -> i32
+  %second_value = vector.extract %second_result[%dynamic] : vector<2xi32> -> i32
   func.return %first_value, %second_value : i32, i32
 }
 
@@ -723,15 +850,17 @@ func.def @report_rejected_component_limit(%initial: vector<256x256xi8>, %end: in
 
 // ----
 COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
-COMPILE-REPORT: source_low selected_ops=0 emitted_ops=0 rows=0
-COMPILE-REPORT: source_boundary_projections rows=10 selected=1 preserved=2 rejected=7
+COMPILE-REPORT: source_low selected_ops=0 emitted_ops=0 rows=0 unkeyed_maximum_emitted_ops=0
+COMPILE-REPORT: source_boundary_projections rows=12 selected=2 preserved=2 rejected=8
 COMPILE-REPORT: source_boundary_projection[0] function=report_selected_static_bank source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=selected reason=static_component_accesses operation=0 source_value=0 source_type=vector<2x2xf32> prefix_rank=2 component_type=f32 components=4
 COMPILE-REPORT: source_boundary_projection[1] function=report_preserved_whole_vector source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=preserved reason=whole_value_use operation=0 source_value=0 source_type=vector<4xf32>
 COMPILE-REPORT: source_boundary_projection[2] function=report_preserved_unobserved_bank source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=preserved reason=no_component_access operation=0 source_value=0 source_type=vector<2xi32>
 COMPILE-REPORT: source_boundary_projection[3] function=report_rejected_dynamic_access source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=non_static_component_access operation=0 source_value=0 source_type=vector<4xf32>
 COMPILE-REPORT: source_boundary_projection[4] function=report_rejected_inconsistent_access source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=inconsistent_component_access operation=0 source_value=0 source_type=vector<2x2xf32> prefix_rank=1 component_type=vector<2xf32> components=2
 COMPILE-REPORT: source_boundary_projection[5] function=report_rejected_whole_use_after_access source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=unsupported_value_use operation=0 source_value=0 source_type=vector<2xf32> prefix_rank=1 component_type=f32 components=2
-COMPILE-REPORT: source_boundary_projection[6] function=report_rejected_peer_bank source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=peer_bank_rejected operation=0 source_value=0 source_type=vector<2xi32> prefix_rank=1 component_type=i32 components=2
-COMPILE-REPORT: source_boundary_projection[7] function=report_rejected_peer_bank source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=non_static_component_access operation=0 source_value=1 source_type=vector<2xi32>
-COMPILE-REPORT: source_boundary_projection[8] function=report_rejected_dynamic_shape source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=non_static_component_access operation=0 source_value=0 source_type=vector<?xf32>
-COMPILE-REPORT: source_boundary_projection[9] function=report_rejected_component_limit source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=component_count_limit operation=0 source_value=0 source_type=vector<256x256xi8>
+COMPILE-REPORT: source_boundary_projection[6] function=report_mixed_static_dynamic_banks source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=selected reason=static_component_accesses operation=0 source_value=0 source_type=vector<2xi32> prefix_rank=1 component_type=i32 components=2
+COMPILE-REPORT: source_boundary_projection[7] function=report_mixed_static_dynamic_banks source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=non_static_component_access operation=0 source_value=1 source_type=vector<2xi32>
+COMPILE-REPORT: source_boundary_projection[8] function=report_rejected_cross_wired_bank source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=boundary_projection_rejected operation=0 source_value=0 source_type=vector<2xi32> prefix_rank=1 component_type=i32 components=2
+COMPILE-REPORT: source_boundary_projection[9] function=report_rejected_cross_wired_bank source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=non_static_component_access operation=0 source_value=1 source_type=vector<2xi32>
+COMPILE-REPORT: source_boundary_projection[10] function=report_rejected_dynamic_shape source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=non_static_component_access operation=0 source_value=0 source_type=vector<?xf32>
+COMPILE-REPORT: source_boundary_projection[11] function=report_rejected_component_limit source_op=scf.for projection=loop-vector-bank boundary=loop_state outcome=rejected reason=component_count_limit operation=0 source_value=0 source_type=vector<256x256xi8>

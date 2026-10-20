@@ -85,7 +85,7 @@ extern "C" {
 
 #define LOOM_BYTECODE_MAGIC "LOOM"
 #define LOOM_BYTECODE_MAGIC_LENGTH 4
-#define LOOM_BYTECODE_FORMAT_VERSION 38
+#define LOOM_BYTECODE_FORMAT_VERSION 42
 
 #define LOOM_BYTECODE_SOURCE_TRIVIA_LEADING_BLANK_LINE (1u << 0)
 #define LOOM_BYTECODE_SOURCE_TRIVIA_COMMENT_COUNT_SHIFT 1
@@ -342,7 +342,7 @@ typedef enum loom_bytecode_section_kind_e {
 //       0 = none, 1 = scalar, 2 = tile, 3 = tensor, 4 = unassigned,
 //       5 = function, 6 = dialect, 7 = encoding, 8 = pool,
 //       9 = vector, 10 = view, 11 = buffer, 12 = register,
-//       13 = storage, 14 = parameterized
+//       13 = storage, 14 = parameterized, 15 = group
 //     (SCALAR: [element_type: byte])
 //     (TILE/TENSOR/VECTOR/VIEW:
 //       [element_type: byte]
@@ -368,9 +368,12 @@ typedef enum loom_bytecode_section_kind_e {
 //       For each param: [type_index: varint])
 //     (ENCODING:
 //       [role: byte]                (loom_bytecode_encoding_role_t))
-//     (POOL:
-//       [is_dynamic: byte]          (0 = static, 1 = dynamic)
-//       (if static: [size: varint]) (block size in bytes))
+//     (POOL: no additional data)
+//     (GROUP:
+//       [rank: byte]
+//       For each dim (rank times):
+//         [is_dynamic: byte]        (0 = static, 1 = dynamic)
+//         (if static: [size: varint]))
 //     (REGISTER:
 //       [payload0: varint]          (target-owned register payload word)
 //       [payload1: varint]          (target-owned register payload word)
@@ -440,6 +443,10 @@ typedef enum loom_bytecode_section_kind_e {
 //     dimension, otherwise the scope-local SSA value number plus 1.
 //   POOL:
 //     Dynamic block-size SSA value number plus 1, or 0 if unbound.
+//   GROUP:
+//     rank, then is_dynamic and dimension_payload for each dimension. A
+//     static payload is its size. A dynamic payload is 0 for an unbound
+//     dimension, otherwise the scope-local SSA value number plus 1.
 //   FUNCTION:
 //     arg_count, result_count, then one child reference per argument/result.
 //     Each count is at most UINT16_MAX.
@@ -643,7 +650,7 @@ typedef enum loom_bytecode_section_kind_e {
 //       [comment_length: varint]
 //       [comment_data: comment_length bytes]  bytes after the leading // marker
 //     [calling_convention: byte]
-//     [purity: byte]
+//     [effect_contract: byte]
 //     [kernel_workload_arg_count: varint]
 //                         Workload signature count for symbols implementing
 //                         the kernel interface; zero for ordinary functions.
@@ -678,8 +685,8 @@ typedef enum loom_bytecode_section_kind_e {
 //
 //     [attr_count: varint]      Present attributes except the identity symbol
 //                               attr and shared function metadata attrs:
-//                               visibility, cc, purity, predicates, import
-//                               attrs, implements, and priority.
+//                               visibility, cc, effect_contract, predicates,
+//                               import attrs, implements, and priority.
 //     For each present function-specific attribute:
 //       [key_id: varint]
 //       [value_kind: byte]
@@ -772,13 +779,13 @@ typedef enum loom_bytecode_section_kind_e {
 //   For each module dependency:
 //     [source_root_region_index_plus_one: varint] (must be zero)
 //     [target_symbol_index: varint]
-//     [target_interfaces: varint]
+//     [dependency_contract: varint]
 //   For each symbol in SYMBOLS ordinal order:
 //     [dependency_count: varint]
 //     For each dependency:
 //       [source_root_region_index_plus_one: varint]
 //       [target_symbol_index: varint]
-//       [target_interfaces: varint]
+//       [dependency_contract: varint]
 //     [template_demand_count: varint]
 //     For each abstract provider demand:
 //       [source_root_region_index_plus_one: varint]
@@ -878,8 +885,7 @@ typedef enum loom_bytecode_section_kind_e {
 // 7=TYPE, 8=PREDICATE_LIST, 9=DICT, 10=ENCODING, 11=BYTES,
 // 12=SCOPED_ENUM, 13=ENUM_ARRAY, 14=PARAMETERIZED,
 // 15=PARAMETERIZED_ARRAY, 16=SIGNED_ENUM_SET, 17=SYMBOL_ARRAY,
-// 18=SYMBOL_SET. ABSENT is never
-// encoded as a payload value.
+// 18=SYMBOL_SET, 19=STRING_ARRAY. ABSENT is never encoded as a payload value.
 // TYPE value_data follows the Scoped type uses contract above: a complete type
 // use in SSA scopes, a completed child reference inside a scoped record, or an
 // untagged TYPES index in module-level metadata.
@@ -928,6 +934,10 @@ typedef enum loom_bytecode_section_kind_e {
 // MUST be stored in strict decoded UTF-8 byte order with no duplicates.
 // Readers reject noncanonical order; writers trust canonical IR and emit
 // references as-is.
+// STRING_ARRAY value_data:
+//       [count: varint]
+//       [string_id: varint] repeated count times
+// Ordering and duplicate strings are preserved.
 //       [region_count: varint]
 //       For each region:
 //         (recursive: source_flags, block_count, blocks...)
@@ -956,6 +966,7 @@ typedef enum loom_bytecode_attr_kind_e {
   LOOM_BYTECODE_ATTR_SIGNED_ENUM_SET = 16,
   LOOM_BYTECODE_ATTR_SYMBOL_ARRAY = 17,
   LOOM_BYTECODE_ATTR_SYMBOL_SET = 18,
+  LOOM_BYTECODE_ATTR_STRING_ARRAY = 19,
   LOOM_BYTECODE_ATTR_COUNT,
 } loom_bytecode_attr_kind_t;
 
@@ -1058,6 +1069,7 @@ typedef enum loom_bytecode_type_kind_e {
   LOOM_BYTECODE_TYPE_STORAGE = 13,
   // Descriptor-backed type with stable named attribute parameter slots.
   LOOM_BYTECODE_TYPE_PARAMETERIZED = 14,
+  LOOM_BYTECODE_TYPE_GROUP = 15,
 } loom_bytecode_type_kind_t;
 
 // Encoding role byte in the TYPES section (ENCODING payload).
@@ -1211,6 +1223,10 @@ enum loom_bytecode_symbol_flag_bits_e {
   // of source visibility so an explicit export contract can export a private
   // func-like definition without making it a public source symbol.
   LOOM_BYTECODE_SYMBOL_FLAG_EXPORT = 1u << 7,
+  // Concrete definition may coalesce with same-named link-once definitions.
+  // The producer promises equivalent semantics; linking validates contracts
+  // but does not compare bodies.
+  LOOM_BYTECODE_SYMBOL_FLAG_LINK_ONCE = 1u << 8,
 };
 typedef uint16_t loom_bytecode_symbol_flags_t;
 

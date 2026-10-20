@@ -231,23 +231,23 @@ loomc_spirv_cooperative_matrix_row_t MakeCustomMatrixRow(
     loomc_string_view_t name, loomc_target_fact_state_t state,
     loomc_string_view_t provenance) {
   return {
-      /*.name=*/name,
-      /*.state=*/state,
-      /*.provenance=*/provenance,
-      /*.required_features=*/
-      loomc_spirv_feature_bit(LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR) |
+      .name = name,
+      .state = state,
+      .provenance = provenance,
+      .required_features =
+          loomc_spirv_feature_bit(LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR) |
           loomc_spirv_feature_bit(LOOMC_SPIRV_FEATURE_FLOAT16),
-      /*.m_size=*/8,
-      /*.n_size=*/8,
-      /*.k_size=*/16,
-      /*.lhs_type=*/LOOMC_SPIRV_SCALAR_TYPE_F16,
-      /*.rhs_type=*/LOOMC_SPIRV_SCALAR_TYPE_F16,
-      /*.accumulator_type=*/LOOMC_SPIRV_SCALAR_TYPE_F32,
-      /*.result_type=*/LOOMC_SPIRV_SCALAR_TYPE_F32,
-      /*.scope=*/LOOMC_SPIRV_SCOPE_SUBGROUP,
-      /*.layout_flags=*/LOOMC_SPIRV_COOPERATIVE_MATRIX_LAYOUT_ROW_MAJOR_BIT,
-      /*.storage_class_flags=*/LOOMC_SPIRV_STORAGE_CLASS_BIT_STORAGE_BUFFER,
-      /*.operand_flags=*/0,
+      .m_size = 8,
+      .n_size = 8,
+      .k_size = 16,
+      .lhs_type = LOOMC_SPIRV_SCALAR_TYPE_F16,
+      .rhs_type = LOOMC_SPIRV_SCALAR_TYPE_F16,
+      .accumulator_type = LOOMC_SPIRV_SCALAR_TYPE_F32,
+      .result_type = LOOMC_SPIRV_SCALAR_TYPE_F32,
+      .scope = LOOMC_SPIRV_SCOPE_SUBGROUP,
+      .layout_flags = LOOMC_SPIRV_COOPERATIVE_MATRIX_LAYOUT_ROW_MAJOR_BIT,
+      .storage_class_flags = LOOMC_SPIRV_STORAGE_CLASS_BIT_STORAGE_BUFFER,
+      .operand_flags = 0,
   };
 }
 
@@ -255,24 +255,23 @@ loomc_spirv_cooperative_vector_row_t MakeCustomVectorRow(
     loomc_string_view_t name, loomc_target_fact_state_t state,
     loomc_string_view_t provenance) {
   return {
-      /*.name=*/name,
-      /*.state=*/state,
-      /*.provenance=*/provenance,
-      /*.required_features=*/
-      loomc_spirv_feature_bit(LOOMC_SPIRV_FEATURE_COOPERATIVE_VECTOR_NV),
-      /*.m_size=*/64,
-      /*.k_size=*/32,
-      /*.input_type=*/LOOMC_SPIRV_COMPONENT_TYPE_UNSIGNED_INT32_NV,
-      /*.input_interpretation=*/
-      LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT8_PACKED_NV,
-      /*.matrix_interpretation=*/LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT8_NV,
-      /*.bias_interpretation=*/LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT32_NV,
-      /*.result_type=*/LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT32_NV,
-      /*.matrix_layout_flags=*/
-      LOOMC_SPIRV_COOPERATIVE_VECTOR_MATRIX_LAYOUT_INFERENCING_OPTIMAL_BIT,
-      /*.storage_class_flags=*/
-      LOOMC_SPIRV_STORAGE_CLASS_BIT_PHYSICAL_STORAGE_BUFFER,
-      /*.flags=*/0,
+      .name = name,
+      .state = state,
+      .provenance = provenance,
+      .required_features =
+          loomc_spirv_feature_bit(LOOMC_SPIRV_FEATURE_COOPERATIVE_VECTOR_NV),
+      .m_size = 64,
+      .k_size = 32,
+      .input_type = LOOMC_SPIRV_COMPONENT_TYPE_UNSIGNED_INT32_NV,
+      .input_interpretation = LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT8_PACKED_NV,
+      .matrix_interpretation = LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT8_NV,
+      .bias_interpretation = LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT32_NV,
+      .result_type = LOOMC_SPIRV_COMPONENT_TYPE_SIGNED_INT32_NV,
+      .matrix_layout_flags =
+          LOOMC_SPIRV_COOPERATIVE_VECTOR_MATRIX_LAYOUT_INFERENCING_OPTIMAL_BIT,
+      .storage_class_flags =
+          LOOMC_SPIRV_STORAGE_CLASS_BIT_PHYSICAL_STORAGE_BUFFER,
+      .flags = 0,
   };
 }
 
@@ -281,8 +280,8 @@ void ExpectLimitValue(const loomc_target_profile_t* profile,
                       loomc_target_fact_state_t expected_state,
                       uint64_t expected_value) {
   loomc_spirv_limit_value_t value = {
-      /*.state=*/LOOMC_TARGET_FACT_STATE_UNKNOWN,
-      /*.value=*/0,
+      .state = LOOMC_TARGET_FACT_STATE_UNKNOWN,
+      .value = 0,
   };
   LOOMC_EXPECT_OK(
       loomc_spirv_target_profile_query_limit(profile, limit, &value));
@@ -295,8 +294,8 @@ void ExpectEnvironmentValue(const loomc_target_profile_t* profile,
                             loomc_target_fact_state_t expected_state,
                             uint64_t expected_value) {
   loomc_spirv_environment_value_t value = {
-      /*.state=*/LOOMC_TARGET_FACT_STATE_UNKNOWN,
-      /*.value=*/0,
+      .state = LOOMC_TARGET_FACT_STATE_UNKNOWN,
+      .value = 0,
   };
   LOOMC_EXPECT_OK(loomc_spirv_target_profile_query_environment(
       profile, environment, &value));
@@ -323,6 +322,219 @@ void ExpectVulkanBdaProfileBundle(const loomc_target_profile_t* profile) {
   EXPECT_EQ(bundle->snapshot->codegen_format, LOOM_TARGET_CODEGEN_FORMAT_SPIRV);
   EXPECT_EQ(bundle->snapshot->artifact_format,
             LOOM_TARGET_ARTIFACT_FORMAT_SPIRV_BINARY);
+}
+
+class TargetSpirvNamedProfileTest
+    : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(TargetSpirvNamedProfileTest, QueriesAndRefinesWithoutChangingContract) {
+  TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
+  loomc_target_profile_t* raw_profile = nullptr;
+  LOOMC_ASSERT_OK(loomc_target_profile_select(
+      target_environment.get(), loomc_make_cstring_view(GetParam()),
+      loomc_allocator_system(), &raw_profile));
+  TargetProfilePtr profile(raw_profile);
+  const std::string selector(GetParam());
+  const bool extended = selector.find("extended-types") != std::string::npos;
+  const bool subgroup = selector.find("subgroup32") != std::string::npos;
+  const bool hal = selector.find("+hal") != std::string::npos;
+  loomc_target_fact_state_t state = LOOMC_TARGET_FACT_STATE_UNKNOWN;
+  LOOMC_ASSERT_OK(loomc_spirv_target_profile_query_feature(
+      profile.get(), LOOMC_SPIRV_FEATURE_VULKAN_SHADER, &state));
+  EXPECT_EQ(state, LOOMC_TARGET_FACT_STATE_TRUE);
+  LOOMC_ASSERT_OK(loomc_spirv_target_profile_query_feature(
+      profile.get(), LOOMC_SPIRV_FEATURE_FLOAT16, &state));
+  EXPECT_EQ(state, extended ? LOOMC_TARGET_FACT_STATE_TRUE
+                            : LOOMC_TARGET_FACT_STATE_UNKNOWN);
+  for (uint32_t i = LOOMC_SPIRV_LIMIT_UNKNOWN + 1; i < LOOMC_SPIRV_LIMIT_COUNT;
+       ++i) {
+    const bool supplied = subgroup && i == LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE;
+    ExpectLimitValue(profile.get(), static_cast<loomc_spirv_limit_t>(i),
+                     supplied ? LOOMC_TARGET_FACT_STATE_TRUE
+                              : LOOMC_TARGET_FACT_STATE_UNKNOWN,
+                     supplied ? 32 : 0);
+  }
+  ExpectEnvironmentValue(profile.get(),
+                         LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
+                         LOOMC_TARGET_FACT_STATE_UNKNOWN, 0);
+
+  const loomc_spirv_limit_fact_t limit = {
+      .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
+      .state = LOOMC_TARGET_FACT_STATE_TRUE,
+      .value = 256,
+      .provenance = loomc_make_cstring_view("application:workgroup-limit"),
+  };
+  const loomc_spirv_profile_options_t options = {
+      .limit_facts = &limit,
+      .limit_fact_count = 1,
+  };
+  TargetProfilePtr refined = RefineSpirvProfile(profile.get(), &options);
+  ASSERT_NE(refined, nullptr);
+  for (uint32_t i = LOOMC_SPIRV_FEATURE_UNKNOWN + 1;
+       i < LOOMC_SPIRV_FEATURE_COUNT; ++i) {
+    const auto feature = static_cast<loomc_spirv_feature_t>(i);
+    loomc_target_fact_state_t refined_state = LOOMC_TARGET_FACT_STATE_UNKNOWN;
+    LOOMC_ASSERT_OK(loomc_spirv_target_profile_query_feature(profile.get(),
+                                                             feature, &state));
+    LOOMC_ASSERT_OK(loomc_spirv_target_profile_query_feature(
+        refined.get(), feature, &refined_state));
+    EXPECT_EQ(refined_state, state) << i;
+  }
+
+  loomc_spirv_profile_info_t info = {};
+  LOOMC_ASSERT_OK(loomc_spirv_target_profile_query_info(profile.get(), &info));
+  EXPECT_EQ(info.addressing_model,
+            kSpirvAddressingModelPhysicalStorageBuffer64);
+  EXPECT_EQ(info.memory_model, kSpirvMemoryModelVulkan);
+  EXPECT_GT(info.minimum_spirv_version, 0u);
+  // Model rows are enumerable even when their required features are absent.
+  EXPECT_EQ(info.cooperative_matrix_row_count, 35u);
+  EXPECT_EQ(info.cooperative_vector_row_count, 4u);
+  for (loomc_host_size_t i = 0; i < info.extension_count; ++i) {
+    loomc_string_view_t extension = {};
+    LOOMC_ASSERT_OK(
+        loomc_spirv_target_profile_extension_at(profile.get(), i, &extension));
+    EXPECT_TRUE(
+        ProfileHasExtension(refined.get(), ToString(extension).c_str()));
+  }
+  // Every indexed declaration query shares the same profile boundary, including
+  // empty collections and their one-past-end diagnostics.
+  struct DeclarationQuery {
+    // Named profile's number of declarations.
+    loomc_host_size_t count;
+    // Public query for one declaration.
+    loomc_status_t (*at)(const loomc_target_profile_t*, loomc_host_size_t,
+                         uint32_t*);
+  };
+  const DeclarationQuery queries[] = {
+      {info.capability_count, loomc_spirv_target_profile_capability_at},
+      {info.opcode_count, loomc_spirv_target_profile_opcode_at},
+      {info.storage_class_count, loomc_spirv_target_profile_storage_class_at},
+      {info.decoration_count, loomc_spirv_target_profile_decoration_at},
+  };
+  for (const auto& query : queries) {
+    for (loomc_host_size_t i = 0; i < query.count; ++i) {
+      uint32_t value = 0;
+      uint32_t refined_value = 0;
+      LOOMC_ASSERT_OK(query.at(profile.get(), i, &value));
+      LOOMC_ASSERT_OK(query.at(refined.get(), i, &refined_value));
+      EXPECT_EQ(value, refined_value);
+    }
+    uint32_t value = 0;
+    LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_OUT_OF_RANGE,
+                           query.at(profile.get(), query.count, &value));
+  }
+  loomc_string_view_t extension = {};
+  LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_OUT_OF_RANGE,
+                         loomc_spirv_target_profile_extension_at(
+                             profile.get(), info.extension_count, &extension));
+  loomc_spirv_cooperative_matrix_row_t matrix = {};
+  for (loomc_host_size_t i = 0; i < info.cooperative_matrix_row_count; ++i) {
+    loomc_spirv_cooperative_matrix_row_t refined_matrix = {};
+    LOOMC_ASSERT_OK(loomc_spirv_target_profile_cooperative_matrix_row_at(
+        profile.get(), i, &matrix));
+    LOOMC_ASSERT_OK(loomc_spirv_target_profile_cooperative_matrix_row_at(
+        refined.get(), i, &refined_matrix));
+    EXPECT_EQ(ToString(matrix.name), ToString(refined_matrix.name));
+    EXPECT_EQ(matrix.state, LOOMC_TARGET_FACT_STATE_TRUE);
+    EXPECT_EQ(matrix.required_features, refined_matrix.required_features);
+  }
+  LOOMC_EXPECT_STATUS_IS(
+      LOOMC_STATUS_OUT_OF_RANGE,
+      loomc_spirv_target_profile_cooperative_matrix_row_at(
+          profile.get(), info.cooperative_matrix_row_count, &matrix));
+  loomc_spirv_cooperative_vector_row_t vector = {};
+  for (loomc_host_size_t i = 0; i < info.cooperative_vector_row_count; ++i) {
+    loomc_spirv_cooperative_vector_row_t refined_vector = {};
+    LOOMC_ASSERT_OK(loomc_spirv_target_profile_cooperative_vector_row_at(
+        profile.get(), i, &vector));
+    LOOMC_ASSERT_OK(loomc_spirv_target_profile_cooperative_vector_row_at(
+        refined.get(), i, &refined_vector));
+    EXPECT_EQ(ToString(vector.name), ToString(refined_vector.name));
+    EXPECT_EQ(vector.state, LOOMC_TARGET_FACT_STATE_TRUE);
+    EXPECT_EQ(vector.required_features, refined_vector.required_features);
+  }
+  LOOMC_EXPECT_STATUS_IS(
+      LOOMC_STATUS_OUT_OF_RANGE,
+      loomc_spirv_target_profile_cooperative_vector_row_at(
+          profile.get(), info.cooperative_vector_row_count, &vector));
+
+  profile.reset();
+  ExpectLimitValue(refined.get(), LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
+                   LOOMC_TARGET_FACT_STATE_TRUE, 256);
+  ExpectLimitValue(
+      refined.get(), LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+      subgroup ? LOOMC_TARGET_FACT_STATE_TRUE : LOOMC_TARGET_FACT_STATE_UNKNOWN,
+      subgroup ? 32 : 0);
+  EXPECT_TRUE(ProfileHasCapability(refined.get(), kSpirvCapabilityShader));
+  const auto* native = loomc_target_profile_loom_target_profile(refined.get());
+  ASSERT_NE(native, nullptr);
+  EXPECT_EQ(
+      native->target_bundle->export_plan->abi_kind,
+      hal ? LOOM_TARGET_ABI_HAL_KERNEL : LOOM_TARGET_ABI_SHADER_ENTRY_POINT);
+  EXPECT_EQ(loom_target_fact_field_set_contains(native->explicit_fields,
+                                                LOOM_TARGET_FACT_FIELD_ABI),
+            hal);
+  TargetProfilePtr cloned = RefineSpirvProfile(refined.get(), nullptr);
+  refined.reset();
+  EXPECT_EQ(
+      loomc_target_profile_loom_target_profile(cloned.get())
+          ->target_bundle->export_plan->abi_kind,
+      hal ? LOOM_TARGET_ABI_HAL_KERNEL : LOOM_TARGET_ABI_SHADER_ENTRY_POINT);
+  iree_arena_block_pool_t block_pool;
+  iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
+  iree_arena_allocator_t arena;
+  iree_arena_initialize(&block_pool, &arena);
+  loom_target_facts_t* facts = nullptr;
+  IREE_ASSERT_OK(loom_target_profile_project_facts(
+      loomc_target_profile_loom_target_profile(cloned.get()), &arena, &facts));
+  EXPECT_EQ(
+      facts->storage.export_plan.abi_kind,
+      hal ? LOOM_TARGET_ABI_HAL_KERNEL : LOOM_TARGET_ABI_SHADER_ENTRY_POINT);
+  EXPECT_EQ(facts->storage.snapshot.subgroup_size, subgroup ? 32u : 0u);
+  EXPECT_EQ(facts->storage.snapshot.max_workgroup_size.x, 256u);
+  iree_arena_deinitialize(&arena);
+  iree_arena_block_pool_deinitialize(&block_pool);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    NamedPresets, TargetSpirvNamedProfileTest,
+    ::testing::Values("spirv:vulkan1.3+bda",
+                      "spirv:vulkan1.3+bda+extended-types",
+                      "spirv:vulkan1.3+bda+hal",
+                      "spirv:vulkan1.3+bda+subgroup32+ballot+hal"));
+
+TEST(TargetSpirvProfileTest, NamedProfileRefinementReportsInheritedProvenance) {
+  TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
+  loomc_target_profile_t* raw_profile = nullptr;
+  LOOMC_ASSERT_OK(loomc_target_profile_select(
+      target_environment.get(),
+      loomc_make_cstring_view("spirv:vulkan1.3+bda+subgroup32+ballot+hal"),
+      loomc_allocator_system(), &raw_profile));
+  TargetProfilePtr profile(raw_profile);
+  const loomc_spirv_limit_fact_t limit = {
+      .limit = LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+      .state = LOOMC_TARGET_FACT_STATE_TRUE,
+      .value = 64,
+      .provenance = loomc_make_cstring_view("application:subgroup64"),
+  };
+  const loomc_spirv_profile_options_t options = {
+      .limit_facts = &limit,
+      .limit_fact_count = 1,
+  };
+  loomc_target_profile_t* raw_refined = nullptr;
+  loomc_result_t* raw_result = nullptr;
+  LOOMC_ASSERT_OK(loomc_spirv_target_profile_refine(profile.get(), &options,
+                                                    loomc_allocator_system(),
+                                                    &raw_refined, &raw_result));
+  TargetProfilePtr refined(raw_refined);
+  ResultPtr result(raw_result);
+  EXPECT_EQ(refined, nullptr);
+  ExpectFailedResult(result.get());
+  const std::string message =
+      ToString(loomc_result_diagnostic_at(result.get(), 0)->message);
+  EXPECT_THAT(message, ::testing::HasSubstr("subgroup32+ballot+hal"));
+  EXPECT_THAT(message, ::testing::HasSubstr("application:subgroup64"));
 }
 
 TEST(TargetSpirvProfileTest, CreatesEmptyPartialProfile) {
@@ -356,70 +568,70 @@ TEST(TargetSpirvProfileTest, PreservesExplicitNumericLimitFacts) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_limit_fact_t limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/1024,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:maxComputeWorkGroupSize[0]"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 1024,
+          .provenance =
+              loomc_make_cstring_view("vulkaninfo:maxComputeWorkGroupSize[0]"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_FLAT_WORKGROUP_SIZE,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/1024,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:maxComputeWorkGroupInvocations"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_FLAT_WORKGROUP_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 1024,
+          .provenance = loomc_make_cstring_view(
+              "vulkaninfo:maxComputeWorkGroupInvocations"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/UINT64_C(49152),
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:maxComputeSharedMemorySize"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = UINT64_C(49152),
+          .provenance =
+              loomc_make_cstring_view("vulkaninfo:maxComputeSharedMemorySize"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/32,
-          /*.provenance=*/loomc_make_cstring_view("vulkaninfo:subgroupSize"),
+          .limit = LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 32,
+          .provenance = loomc_make_cstring_view("vulkaninfo:subgroupSize"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_COUNT_Z,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/65535,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:maxComputeWorkGroupCount[2]"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_COUNT_Z,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 65535,
+          .provenance =
+              loomc_make_cstring_view("vulkaninfo:maxComputeWorkGroupCount[2]"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_GRID_SIZE_X,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/4096,
-          /*.provenance=*/loomc_make_cstring_view("profile:maxGridSize[0]"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_GRID_SIZE_X,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 4096,
+          .provenance = loomc_make_cstring_view("profile:maxGridSize[0]"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_GRID_SIZE_Y,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/2048,
-          /*.provenance=*/loomc_make_cstring_view("profile:maxGridSize[1]"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_GRID_SIZE_Y,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 2048,
+          .provenance = loomc_make_cstring_view("profile:maxGridSize[1]"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_FLAT_GRID_SIZE,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/UINT64_C(0x100000000),
-          /*.provenance=*/loomc_make_cstring_view("profile:maxFlatGridSize"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_FLAT_GRID_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = UINT64_C(0x100000000),
+          .provenance = loomc_make_cstring_view("profile:maxFlatGridSize"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("offline-vulkan13-limits"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/limits,
-      /*.limit_fact_count=*/8,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("offline-vulkan13-limits"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = limits,
+      .limit_fact_count = 8,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -487,24 +699,24 @@ TEST(TargetSpirvProfileTest, PreservesExplicitEnvironmentFacts) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_environment_fact_t environment[] = {
       {
-          /*.environment=*/LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/kSpirvVersion13,
-          /*.provenance=*/loomc_make_cstring_view("vulkaninfo:apiVersion"),
+          .environment = LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = kSpirvVersion13,
+          .provenance = loomc_make_cstring_view("vulkaninfo:apiVersion"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("offline-vulkan13-environment"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/environment,
-      /*.environment_fact_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("offline-vulkan13-environment"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = environment,
+      .environment_fact_count = 1,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -518,24 +730,24 @@ TEST(TargetSpirvProfileTest, RefinesProfileWithAdditionalFacts) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_limit_fact_t base_limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/32,
-          /*.provenance=*/loomc_make_cstring_view("base:subgroup"),
+          .limit = LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 32,
+          .provenance = loomc_make_cstring_view("base:subgroup"),
       },
   };
   loomc_spirv_profile_options_t base_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(base_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("base-profile"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/base_limits,
-      /*.limit_fact_count=*/1,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(base_options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("base-profile"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = base_limits,
+      .limit_fact_count = 1,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr base_profile =
       CreateSpirvProfile(target_environment.get(), &base_options);
@@ -545,24 +757,24 @@ TEST(TargetSpirvProfileTest, RefinesProfileWithAdditionalFacts) {
 
   loomc_spirv_environment_fact_t environment[] = {
       {
-          /*.environment=*/LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/kSpirvVersion13,
-          /*.provenance=*/loomc_make_cstring_view("refine:apiVersion"),
+          .environment = LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = kSpirvVersion13,
+          .provenance = loomc_make_cstring_view("refine:apiVersion"),
       },
   };
   loomc_spirv_profile_options_t refine_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(refine_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("refined-profile"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/environment,
-      /*.environment_fact_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(refine_options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("refined-profile"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = environment,
+      .environment_fact_count = 1,
   };
   TargetProfilePtr refined_profile =
       RefineSpirvProfile(base_profile.get(), &refine_options);
@@ -587,24 +799,24 @@ TEST(TargetSpirvProfileTest, RefinementCanCloneProfile) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_limit_fact_t limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/256,
-          /*.provenance=*/loomc_make_cstring_view("base:workgroup-x"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 256,
+          .provenance = loomc_make_cstring_view("base:workgroup-x"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("clone-source"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/limits,
-      /*.limit_fact_count=*/1,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("clone-source"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = limits,
+      .limit_fact_count = 1,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr base_profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -618,17 +830,17 @@ TEST(TargetSpirvProfileTest, RefinementCanCloneProfile) {
 TEST(TargetSpirvProfileTest, CreatesPresetProfileAndQueriesRows) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("offline-vulkan13"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("offline-vulkan13"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -682,28 +894,89 @@ TEST(TargetSpirvProfileTest, CreatesPresetProfileAndQueriesRows) {
   LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_OUT_OF_RANGE, extension_status);
 }
 
+TEST(TargetSpirvProfileTest, AcceptsEveryExtendedCompilerFeature) {
+  TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
+  const loomc_spirv_feature_t features[] = {
+      LOOMC_SPIRV_FEATURE_FLOAT16,
+      LOOMC_SPIRV_FEATURE_FLOAT64,
+      LOOMC_SPIRV_FEATURE_VULKAN_MEMORY_MODEL_DEVICE_SCOPE,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_INT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_INT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT16_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT16_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT32_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT32_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMICS,
+      LOOMC_SPIRV_FEATURE_STORAGE_BUFFER_FLOAT64_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_WORKGROUP_FLOAT64_ATOMIC_ADD,
+      LOOMC_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_BALLOT,
+      LOOMC_SPIRV_FEATURE_GROUP_NON_UNIFORM_VOTE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_64_DENORM_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_64_ROUNDING_RTE,
+      LOOMC_SPIRV_FEATURE_FLOAT32_ROUNDING_RTE,
+      LOOMC_SPIRV_FEATURE_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE,
+      LOOMC_SPIRV_FEATURE_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE,
+  };
+  loomc_spirv_feature_fact_t facts[sizeof(features) / sizeof(features[0])] = {};
+  for (size_t i = 0; i < sizeof(features) / sizeof(features[0]); ++i) {
+    facts[i] = {
+        .feature = features[i],
+        .state = LOOMC_TARGET_FACT_STATE_TRUE,
+        .provenance = loomc_make_cstring_view("programmatic-profile"),
+    };
+  }
+  loomc_spirv_profile_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("all-compiler-features"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = sizeof(facts) / sizeof(facts[0]),
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+  };
+  TargetProfilePtr profile =
+      CreateSpirvProfile(target_environment.get(), &options);
+
+  for (loomc_spirv_feature_t feature : features) {
+    loomc_target_fact_state_t state = LOOMC_TARGET_FACT_STATE_UNKNOWN;
+    LOOMC_EXPECT_OK(loomc_spirv_target_profile_query_feature(profile.get(),
+                                                             feature, &state));
+    EXPECT_EQ(state, LOOMC_TARGET_FACT_STATE_TRUE);
+  }
+}
+
 TEST(TargetSpirvProfileTest, RefinesPresetWithExplicitTrueFact) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:shaderFloat16"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("vulkaninfo:shaderFloat16"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("offline-vulkan13-f16"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/1,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("offline-vulkan13-f16"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 1,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -725,36 +998,34 @@ TEST(TargetSpirvProfileTest, QueriesCooperativePropertyRows) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:shaderFloat16"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("vulkaninfo:shaderFloat16"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:cooperativeMatrix"),
+          .feature = LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("vulkaninfo:cooperativeMatrix"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_COOPERATIVE_VECTOR_NV,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:cooperativeVectorNV"),
+          .feature = LOOMC_SPIRV_FEATURE_COOPERATIVE_VECTOR_NV,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance =
+              loomc_make_cstring_view("vulkaninfo:cooperativeVectorNV"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("offline-vulkan13-coop"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/3,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("offline-vulkan13-coop"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 3,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -838,32 +1109,32 @@ TEST(TargetSpirvProfileTest, ExplicitCooperativeRowsAnnotateModelRows) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:float16"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:float16"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:matrix"),
+          .feature = LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:matrix"),
       },
   };
   loomc_spirv_profile_options_t model_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(model_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("cooperative-row-model"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/2,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
-      /*.cooperative_matrix_rows=*/nullptr,
-      /*.cooperative_matrix_row_count=*/0,
-      /*.cooperative_vector_rows=*/nullptr,
-      /*.cooperative_vector_row_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(model_options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("cooperative-row-model"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 2,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+      .cooperative_matrix_rows = nullptr,
+      .cooperative_matrix_row_count = 0,
+      .cooperative_vector_rows = nullptr,
+      .cooperative_vector_row_count = 0,
   };
   TargetProfilePtr model_profile =
       CreateSpirvProfile(target_environment.get(), &model_options);
@@ -877,21 +1148,21 @@ TEST(TargetSpirvProfileTest, ExplicitCooperativeRowsAnnotateModelRows) {
   explicit_row.provenance = loomc_make_cstring_view("vulkaninfo:row[0]");
 
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("cooperative-row-annotated"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/2,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
-      /*.cooperative_matrix_rows=*/&explicit_row,
-      /*.cooperative_matrix_row_count=*/1,
-      /*.cooperative_vector_rows=*/nullptr,
-      /*.cooperative_vector_row_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("cooperative-row-annotated"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 2,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+      .cooperative_matrix_rows = &explicit_row,
+      .cooperative_matrix_row_count = 1,
+      .cooperative_vector_rows = nullptr,
+      .cooperative_vector_row_count = 0,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -907,23 +1178,79 @@ TEST(TargetSpirvProfileTest, ExplicitCooperativeRowsAnnotateModelRows) {
   EXPECT_EQ(ToString(matrix_row.provenance), "vulkaninfo:row[0]");
 }
 
+TEST(TargetSpirvProfileTest, MatrixOperandFlagsMatchEveryComponentType) {
+  TargetEnvironmentPtr environment = CreateSpirvTargetEnvironment();
+  const loomc_spirv_cooperative_matrix_operand_flags_t signed_flags[] = {
+      LOOMC_SPIRV_COOPERATIVE_MATRIX_OPERAND_A_SIGNED_COMPONENTS,
+      LOOMC_SPIRV_COOPERATIVE_MATRIX_OPERAND_B_SIGNED_COMPONENTS,
+      LOOMC_SPIRV_COOPERATIVE_MATRIX_OPERAND_C_SIGNED_COMPONENTS,
+      LOOMC_SPIRV_COOPERATIVE_MATRIX_OPERAND_RESULT_SIGNED_COMPONENTS};
+  for (auto type : {LOOMC_SPIRV_SCALAR_TYPE_F16, LOOMC_SPIRV_SCALAR_TYPE_F32,
+                    LOOMC_SPIRV_SCALAR_TYPE_F64, LOOMC_SPIRV_SCALAR_TYPE_BF16,
+                    LOOMC_SPIRV_SCALAR_TYPE_S8, LOOMC_SPIRV_SCALAR_TYPE_S16,
+                    LOOMC_SPIRV_SCALAR_TYPE_S32, LOOMC_SPIRV_SCALAR_TYPE_S64,
+                    LOOMC_SPIRV_SCALAR_TYPE_U8, LOOMC_SPIRV_SCALAR_TYPE_U16,
+                    LOOMC_SPIRV_SCALAR_TYPE_U32, LOOMC_SPIRV_SCALAR_TYPE_U64}) {
+    SCOPED_TRACE(type);
+    for (auto state :
+         {LOOMC_TARGET_FACT_STATE_TRUE, LOOMC_TARGET_FACT_STATE_FALSE}) {
+      SCOPED_TRACE(state);
+      auto row = MakeCustomMatrixRow(loomc_make_cstring_view("custom.matrix"),
+                                     state, loomc_string_view_empty());
+      row.lhs_type = row.rhs_type = row.accumulator_type = row.result_type =
+          type;
+      if (type == LOOMC_SPIRV_SCALAR_TYPE_S8 ||
+          type == LOOMC_SPIRV_SCALAR_TYPE_S16 ||
+          type == LOOMC_SPIRV_SCALAR_TYPE_S32 ||
+          type == LOOMC_SPIRV_SCALAR_TYPE_S64) {
+        for (auto flag : signed_flags) {
+          row.operand_flags |= flag;
+        }
+      }
+      const loomc_spirv_profile_options_t options = {
+          .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+          .cooperative_matrix_rows = &row,
+          .cooperative_matrix_row_count = 1,
+      };
+      auto valid = CreateSpirvProfile(environment.get(), &options);
+      ASSERT_NE(valid.get(), nullptr);
+      for (auto flag : signed_flags) {
+        SCOPED_TRACE(flag);
+        row.operand_flags ^= flag;
+        loomc_target_profile_t* profile = nullptr;
+        loomc_result_t* result = nullptr;
+        LOOMC_EXPECT_STATUS_IS(
+            LOOMC_STATUS_INVALID_ARGUMENT,
+            loomc_target_profile_create_spirv(environment.get(), &options,
+                                              loomc_allocator_system(),
+                                              &profile, &result));
+        EXPECT_EQ(profile, nullptr);
+        EXPECT_EQ(result, nullptr);
+        loomc_target_profile_release(profile);
+        loomc_result_release(result);
+        row.operand_flags ^= flag;
+      }
+    }
+  }
+}
+
 TEST(TargetSpirvProfileTest, AppliesExplicitCooperativeRowFacts) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:float16"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:float16"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:matrix"),
+          .feature = LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:matrix"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_COOPERATIVE_VECTOR_NV,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:vector"),
+          .feature = LOOMC_SPIRV_FEATURE_COOPERATIVE_VECTOR_NV,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:vector"),
       },
   };
   loomc_spirv_cooperative_matrix_row_t matrix_rows[] = {
@@ -939,21 +1266,21 @@ TEST(TargetSpirvProfileTest, AppliesExplicitCooperativeRowFacts) {
           loomc_make_cstring_view("vulkaninfo:vector-row")),
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("explicit-cooperative-rows"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/3,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
-      /*.cooperative_matrix_rows=*/matrix_rows,
-      /*.cooperative_matrix_row_count=*/1,
-      /*.cooperative_vector_rows=*/vector_rows,
-      /*.cooperative_vector_row_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("explicit-cooperative-rows"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 3,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+      .cooperative_matrix_rows = matrix_rows,
+      .cooperative_matrix_row_count = 1,
+      .cooperative_vector_rows = vector_rows,
+      .cooperative_vector_row_count = 1,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -989,32 +1316,32 @@ TEST(TargetSpirvProfileTest, UnavailableCooperativeRowsSuppressModelRows) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:float16"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:float16"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:matrix"),
+          .feature = LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:matrix"),
       },
   };
   loomc_spirv_profile_options_t model_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(model_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("cooperative-row-model"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/2,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
-      /*.cooperative_matrix_rows=*/nullptr,
-      /*.cooperative_matrix_row_count=*/0,
-      /*.cooperative_vector_rows=*/nullptr,
-      /*.cooperative_vector_row_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(model_options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("cooperative-row-model"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 2,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+      .cooperative_matrix_rows = nullptr,
+      .cooperative_matrix_row_count = 0,
+      .cooperative_vector_rows = nullptr,
+      .cooperative_vector_row_count = 0,
   };
   TargetProfilePtr model_profile =
       CreateSpirvProfile(target_environment.get(), &model_options);
@@ -1025,21 +1352,21 @@ TEST(TargetSpirvProfileTest, UnavailableCooperativeRowsSuppressModelRows) {
   unavailable_row.provenance = loomc_make_cstring_view("override:no-f16-row");
 
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("cooperative-row-unavailable"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/2,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
-      /*.cooperative_matrix_rows=*/&unavailable_row,
-      /*.cooperative_matrix_row_count=*/1,
-      /*.cooperative_vector_rows=*/nullptr,
-      /*.cooperative_vector_row_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("cooperative-row-unavailable"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 2,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+      .cooperative_matrix_rows = &unavailable_row,
+      .cooperative_matrix_row_count = 1,
+      .cooperative_vector_rows = nullptr,
+      .cooperative_vector_row_count = 0,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -1063,21 +1390,21 @@ TEST(TargetSpirvProfileTest,
                           loomc_make_cstring_view("override:matrix-false")),
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("contradictory-matrix-rows"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
-      /*.cooperative_matrix_rows=*/matrix_rows,
-      /*.cooperative_matrix_row_count=*/2,
-      /*.cooperative_vector_rows=*/nullptr,
-      /*.cooperative_vector_row_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("contradictory-matrix-rows"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+      .cooperative_matrix_rows = matrix_rows,
+      .cooperative_matrix_row_count = 2,
+      .cooperative_vector_rows = nullptr,
+      .cooperative_vector_row_count = 0,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1104,14 +1431,14 @@ TEST(TargetSpirvProfileTest, RefinesCooperativeRowsWithOwnedProvenance) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:float16"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:float16"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:matrix"),
+          .feature = LOOMC_SPIRV_FEATURE_COOPERATIVE_MATRIX_KHR,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:matrix"),
       },
   };
   std::string provenance = "base:matrix-row";
@@ -1122,21 +1449,21 @@ TEST(TargetSpirvProfileTest, RefinesCooperativeRowsWithOwnedProvenance) {
           loomc_make_string_view(provenance.data(), provenance.size())),
   };
   loomc_spirv_profile_options_t base_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(base_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("base-cooperative-row"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/2,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
-      /*.cooperative_matrix_rows=*/matrix_rows,
-      /*.cooperative_matrix_row_count=*/1,
-      /*.cooperative_vector_rows=*/nullptr,
-      /*.cooperative_vector_row_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(base_options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("base-cooperative-row"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = facts,
+      .feature_fact_count = 2,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
+      .cooperative_matrix_rows = matrix_rows,
+      .cooperative_matrix_row_count = 1,
+      .cooperative_vector_rows = nullptr,
+      .cooperative_vector_row_count = 0,
   };
   TargetProfilePtr base_profile =
       CreateSpirvProfile(target_environment.get(), &base_options);
@@ -1157,24 +1484,23 @@ TEST(TargetSpirvProfileTest, PreservesKnownFalseFeatureFacts) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT64,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_FALSE,
-          /*.provenance=*/
-          loomc_make_cstring_view("vulkaninfo:shaderFloat64"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT64,
+          .state = LOOMC_TARGET_FACT_STATE_FALSE,
+          .provenance = loomc_make_cstring_view("vulkaninfo:shaderFloat64"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("partial-no-f64"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/1,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("partial-no-f64"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = facts,
+      .feature_fact_count = 1,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr profile =
       CreateSpirvProfile(target_environment.get(), &options);
@@ -1190,28 +1516,28 @@ TEST(TargetSpirvProfileTest, ReportsContradictoryFactsWithProvenance) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/loomc_make_cstring_view("probe:a"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance = loomc_make_cstring_view("probe:a"),
       },
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_FLOAT16,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_FALSE,
-          /*.provenance=*/loomc_make_cstring_view("override:b"),
+          .feature = LOOMC_SPIRV_FEATURE_FLOAT16,
+          .state = LOOMC_TARGET_FACT_STATE_FALSE,
+          .provenance = loomc_make_cstring_view("override:b"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("contradiction"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/2,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("contradiction"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = facts,
+      .feature_fact_count = 2,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1239,30 +1565,30 @@ TEST(TargetSpirvProfileTest, ReportsContradictoryLimitFactsWithProvenance) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_limit_fact_t limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/UINT64_C(49152),
-          /*.provenance=*/loomc_make_cstring_view("probe:a"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = UINT64_C(49152),
+          .provenance = loomc_make_cstring_view("probe:a"),
       },
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/UINT64_C(32768),
-          /*.provenance=*/loomc_make_cstring_view("override:b"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = UINT64_C(32768),
+          .provenance = loomc_make_cstring_view("override:b"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("contradictory-limits"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/limits,
-      /*.limit_fact_count=*/2,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("contradictory-limits"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = limits,
+      .limit_fact_count = 2,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1294,26 +1620,25 @@ TEST(TargetSpirvProfileTest,
   std::string base_provenance = "base:subgroup";
   loomc_spirv_limit_fact_t base_limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/32,
-          /*.provenance=*/
-          loomc_make_string_view(base_provenance.data(),
-                                 base_provenance.size()),
+          .limit = LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 32,
+          .provenance = loomc_make_string_view(base_provenance.data(),
+                                               base_provenance.size()),
       },
   };
   loomc_spirv_profile_options_t base_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(base_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("refine-contradiction-base"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/base_limits,
-      /*.limit_fact_count=*/1,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(base_options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("refine-contradiction-base"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = base_limits,
+      .limit_fact_count = 1,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   TargetProfilePtr base_profile =
       CreateSpirvProfile(target_environment.get(), &base_options);
@@ -1323,24 +1648,24 @@ TEST(TargetSpirvProfileTest,
 
   loomc_spirv_limit_fact_t refine_limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/64,
-          /*.provenance=*/loomc_make_cstring_view("refine:subgroup"),
+          .limit = LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 64,
+          .provenance = loomc_make_cstring_view("refine:subgroup"),
       },
   };
   loomc_spirv_profile_options_t refine_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(refine_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("refine-contradiction"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/refine_limits,
-      /*.limit_fact_count=*/1,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(refine_options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("refine-contradiction"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = refine_limits,
+      .limit_fact_count = 1,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   loomc_target_profile_t* refined_profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1368,30 +1693,30 @@ TEST(TargetSpirvProfileTest,
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_environment_fact_t environment[] = {
       {
-          /*.environment=*/LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/kSpirvVersion13,
-          /*.provenance=*/loomc_make_cstring_view("probe:a"),
+          .environment = LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = kSpirvVersion13,
+          .provenance = loomc_make_cstring_view("probe:a"),
       },
       {
-          /*.environment=*/LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/kSpirvVersion10,
-          /*.provenance=*/loomc_make_cstring_view("override:b"),
+          .environment = LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = kSpirvVersion10,
+          .provenance = loomc_make_cstring_view("override:b"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("contradictory-environment"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/environment,
-      /*.environment_fact_count=*/2,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("contradictory-environment"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = environment,
+      .environment_fact_count = 2,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1415,28 +1740,140 @@ TEST(TargetSpirvProfileTest,
               ::testing::HasSubstr("override:b"));
 }
 
+TEST(TargetSpirvProfileTest, ValidatesSubgroupWidthFamily) {
+  TargetEnvironmentPtr environment = CreateSpirvTargetEnvironment();
+  for (auto identifier : {LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+                          LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE,
+                          LOOMC_SPIRV_LIMIT_MIN_SUBGROUP_SIZE,
+                          LOOMC_SPIRV_LIMIT_MAX_SUBGROUP_SIZE}) {
+    SCOPED_TRACE(identifier);
+    for (uint32_t width : {0u, 1u, 2u, 4u, 8u, 16u, 32u, 48u, 64u, 128u}) {
+      SCOPED_TRACE(width);
+      const loomc_spirv_limit_fact_t limit = {
+          .limit = identifier,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = width,
+          .provenance = loomc_make_cstring_view("device:width"),
+      };
+      const loomc_spirv_profile_options_t options = {
+          .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+          .limit_facts = &limit,
+          .limit_fact_count = 1,
+      };
+      loomc_target_profile_t* profile = nullptr;
+      loomc_result_t* result = nullptr;
+      LOOMC_EXPECT_OK(loomc_target_profile_create_spirv(
+          environment.get(), &options, loomc_allocator_system(), &profile,
+          &result));
+      TargetProfilePtr owned_profile(profile);
+      ResultPtr owned_result(result);
+      if (width == 0 || width == 48) {
+        EXPECT_EQ(profile, nullptr);
+        ExpectFailedResult(result);
+      } else {
+        ASSERT_NE(profile, nullptr);
+        ExpectSucceededResult(result);
+        ExpectLimitValue(profile, identifier, LOOMC_TARGET_FACT_STATE_TRUE,
+                         width);
+      }
+    }
+  }
+}
+
+TEST(TargetSpirvProfileTest, ValidatesSubgroupRangeRelationships) {
+  TargetEnvironmentPtr environment = CreateSpirvTargetEnvironment();
+  for (auto identifier : {LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE,
+                          LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE}) {
+    for (uint32_t width : {16u, 32u, 64u, 128u}) {
+      SCOPED_TRACE(identifier);
+      SCOPED_TRACE(width);
+      const loomc_spirv_limit_fact_t limits[] = {
+          {
+              .limit = LOOMC_SPIRV_LIMIT_MIN_SUBGROUP_SIZE,
+              .state = LOOMC_TARGET_FACT_STATE_TRUE,
+              .value = 32,
+          },
+          {
+              .limit = LOOMC_SPIRV_LIMIT_MAX_SUBGROUP_SIZE,
+              .state = LOOMC_TARGET_FACT_STATE_TRUE,
+              .value = 64,
+          },
+          {
+              .limit = identifier,
+              .state = LOOMC_TARGET_FACT_STATE_TRUE,
+              .value = width,
+          },
+      };
+      const loomc_spirv_profile_options_t options = {
+          .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+          .limit_facts = limits,
+          .limit_fact_count = 3,
+      };
+      loomc_target_profile_t* profile = nullptr;
+      loomc_result_t* result = nullptr;
+      LOOMC_EXPECT_OK(loomc_target_profile_create_spirv(
+          environment.get(), &options, loomc_allocator_system(), &profile,
+          &result));
+      TargetProfilePtr owned_profile(profile);
+      ResultPtr owned_result(result);
+      if (width < 32 || width > 64) {
+        EXPECT_EQ(profile, nullptr);
+        ExpectFailedResult(result);
+      } else {
+        ASSERT_NE(profile, nullptr);
+        ExpectSucceededResult(result);
+      }
+    }
+  }
+  const loomc_spirv_limit_fact_t reversed[] = {
+      {
+          .limit = LOOMC_SPIRV_LIMIT_MIN_SUBGROUP_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 64,
+      },
+      {
+          .limit = LOOMC_SPIRV_LIMIT_MAX_SUBGROUP_SIZE,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 32,
+      },
+  };
+  const loomc_spirv_profile_options_t options = {
+      .limit_facts = reversed,
+      .limit_fact_count = 2,
+  };
+  loomc_target_profile_t* profile = nullptr;
+  loomc_result_t* result = nullptr;
+  LOOMC_EXPECT_OK(loomc_target_profile_create_spirv(environment.get(), &options,
+                                                    loomc_allocator_system(),
+                                                    &profile, &result));
+  TargetProfilePtr owned_profile(profile);
+  ResultPtr owned_result(result);
+  EXPECT_EQ(profile, nullptr);
+  ExpectFailedResult(result);
+}
+
 TEST(TargetSpirvProfileTest, ReportsInvalidZeroLimitValuesAsResult) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_limit_fact_t limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/0,
-          /*.provenance=*/loomc_make_cstring_view("probe:zero"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_SIZE_X,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = 0,
+          .provenance = loomc_make_cstring_view("probe:zero"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("invalid-zero-limit"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/limits,
-      /*.limit_fact_count=*/1,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("invalid-zero-limit"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = limits,
+      .limit_fact_count = 1,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1463,24 +1900,24 @@ TEST(TargetSpirvProfileTest, ReportsOutOfRangeLimitValuesAsResult) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_limit_fact_t limits[] = {
       {
-          /*.limit=*/LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_COUNT_X,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/UINT64_C(0x100000000),
-          /*.provenance=*/loomc_make_cstring_view("probe:too-large"),
+          .limit = LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_COUNT_X,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = UINT64_C(0x100000000),
+          .provenance = loomc_make_cstring_view("probe:too-large"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("out-of-range-limit"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/limits,
-      /*.limit_fact_count=*/1,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("out-of-range-limit"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = limits,
+      .limit_fact_count = 1,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1503,28 +1940,73 @@ TEST(TargetSpirvProfileTest, ReportsOutOfRangeLimitValuesAsResult) {
               ::testing::HasSubstr("probe:too-large"));
 }
 
+TEST(TargetSpirvProfileTest, NumericLimitRangesMatchIRRepresentation) {
+  auto environment = CreateSpirvTargetEnvironment();
+  for (int i = 1; i < LOOMC_SPIRV_LIMIT_COUNT; ++i) {
+    const auto limit = static_cast<loomc_spirv_limit_t>(i);
+    SCOPED_TRACE(limit);
+    const uint64_t numeric_maximum =
+        limit == LOOMC_SPIRV_LIMIT_MAX_FLAT_GRID_SIZE ||
+                limit == LOOMC_SPIRV_LIMIT_MAX_WORKGROUP_STORAGE_BYTES
+            ? static_cast<uint64_t>(INT64_MAX)
+            : UINT32_MAX;
+    const bool subgroup_width =
+        limit == LOOMC_SPIRV_LIMIT_SUBGROUP_SIZE ||
+        limit == LOOMC_SPIRV_LIMIT_DEFAULT_SUBGROUP_SIZE ||
+        limit == LOOMC_SPIRV_LIMIT_MIN_SUBGROUP_SIZE ||
+        limit == LOOMC_SPIRV_LIMIT_MAX_SUBGROUP_SIZE;
+    const uint64_t maximum =
+        subgroup_width ? uint64_t{1} << 31 : numeric_maximum;
+    loomc_spirv_limit_fact_t fact = {
+        .limit = limit,
+        .state = LOOMC_TARGET_FACT_STATE_TRUE,
+        .value = maximum,
+    };
+    const loomc_spirv_profile_options_t options = {
+        .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+        .limit_facts = &fact,
+        .limit_fact_count = 1,
+    };
+    auto valid = CreateSpirvProfile(environment.get(), &options);
+    ASSERT_NE(valid.get(), nullptr);
+    ExpectLimitValue(valid.get(), limit, LOOMC_TARGET_FACT_STATE_TRUE, maximum);
+    fact.value = numeric_maximum + 1;
+    loomc_target_profile_t* profile = nullptr;
+    loomc_result_t* result = nullptr;
+    LOOMC_ASSERT_OK(loomc_target_profile_create_spirv(
+        environment.get(), &options, loomc_allocator_system(), &profile,
+        &result));
+    TargetProfilePtr profile_ptr(profile);
+    ResultPtr result_ptr(result);
+    EXPECT_EQ(profile, nullptr);
+    ExpectFailedResult(result);
+    EXPECT_THAT(ToString(loomc_result_diagnostic_at(result, 0)->message),
+                ::testing::HasSubstr("range"));
+  }
+}
+
 TEST(TargetSpirvProfileTest, ReportsEnvironmentVersionTooLowAsResult) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_environment_fact_t environment[] = {
       {
-          /*.environment=*/LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.value=*/kSpirvVersion10,
-          /*.provenance=*/loomc_make_cstring_view("vulkaninfo:apiVersion"),
+          .environment = LOOMC_SPIRV_ENVIRONMENT_MAX_SPIRV_VERSION,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .value = kSpirvVersion10,
+          .provenance = loomc_make_cstring_view("vulkaninfo:apiVersion"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("vulkan13-on-spirv10"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
-      /*.feature_facts=*/nullptr,
-      /*.feature_fact_count=*/0,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/environment,
-      /*.environment_fact_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("vulkan13-on-spirv10"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_VULKAN_1_3_BDA,
+      .feature_facts = nullptr,
+      .feature_fact_count = 0,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = environment,
+      .environment_fact_count = 1,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;
@@ -1551,24 +2033,24 @@ TEST(TargetSpirvProfileTest, ReportsMissingFeatureDependenciesAsResult) {
   TargetEnvironmentPtr target_environment = CreateSpirvTargetEnvironment();
   loomc_spirv_feature_fact_t facts[] = {
       {
-          /*.feature=*/LOOMC_SPIRV_FEATURE_PHYSICAL_STORAGE_BUFFER,
-          /*.state=*/LOOMC_TARGET_FACT_STATE_TRUE,
-          /*.provenance=*/
-          loomc_make_cstring_view("override:physical-storage-buffer"),
+          .feature = LOOMC_SPIRV_FEATURE_PHYSICAL_STORAGE_BUFFER,
+          .state = LOOMC_TARGET_FACT_STATE_TRUE,
+          .provenance =
+              loomc_make_cstring_view("override:physical-storage-buffer"),
       },
   };
   loomc_spirv_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("missing-dependency"),
-      /*.preset=*/LOOMC_SPIRV_PROFILE_PRESET_NONE,
-      /*.feature_facts=*/facts,
-      /*.feature_fact_count=*/1,
-      /*.limit_facts=*/nullptr,
-      /*.limit_fact_count=*/0,
-      /*.environment_facts=*/nullptr,
-      /*.environment_fact_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_SPIRV_PROFILE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("missing-dependency"),
+      .preset = LOOMC_SPIRV_PROFILE_PRESET_NONE,
+      .feature_facts = facts,
+      .feature_fact_count = 1,
+      .limit_facts = nullptr,
+      .limit_fact_count = 0,
+      .environment_facts = nullptr,
+      .environment_fact_count = 0,
   };
   loomc_target_profile_t* profile = nullptr;
   loomc_result_t* result = nullptr;

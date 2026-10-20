@@ -118,3 +118,46 @@ low.kernel.def target<amdgpu.gfx11.generic.core>(@paired_scope_target) abi_layou
   global_store_b128_saddr %56, %61, %b_view {offset = 16}
   return
 }
+
+// ====
+
+// RUN: emit amdgpu-assembly @overlapping_scopes strategy=resource-stall
+
+// Independent scopes can overlap their reads. Consuming an earlier read must
+// leave a later read in flight instead of draining the entire load counter.
+amdgpu.target<gfx1151> @target
+
+low.func.def target<amdgpu.rdna3_5.core>(@target) @overlapping_scopes(%offset: reg<amdgpu.vgpr>, %first: reg<amdgpu.sgpr x2>, %second: reg<amdgpu.sgpr x2>) -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
+  low.schedule.begin
+  %first_old = global_load_b32_saddr %offset, %first
+  low.schedule.phase
+  %first_sum = v_add_u32 %first_old, %offset
+  low.schedule.phase
+  %first_new = global_load_b32_saddr %offset, %first {offset = 4}
+  %first_total = v_add_u32 %first_new, %first_sum
+  low.schedule.end
+  low.schedule.begin
+  %second_old = global_load_b32_saddr %offset, %second
+  low.schedule.phase
+  %second_sum = v_add_u32 %second_old, %offset
+  low.schedule.phase
+  %second_new = global_load_b32_saddr %offset, %second {offset = 4}
+  %second_total = v_add_u32 %second_new, %second_sum
+  low.schedule.end
+  return %first_total, %second_total
+}
+
+// ----
+  global_load_b32 v1, v0, s[0:1] offset:0
+  global_load_b32 v2, v0, s[2:3] offset:0
+  s_waitcnt vmcnt(1) lgkmcnt(63)
+  v_add_u32 v1, v1, v0
+  s_waitcnt vmcnt(0) lgkmcnt(63)
+  v_add_u32 v2, v2, v0
+  global_load_b32 v3, v0, s[0:1] offset:4
+  global_load_b32 v0, v0, s[2:3] offset:4
+  s_waitcnt vmcnt(1) lgkmcnt(63)
+  v_add_u32 v1, v3, v1
+  s_waitcnt vmcnt(0) lgkmcnt(63)
+  v_add_u32 v0, v0, v2
+  s_endpgm

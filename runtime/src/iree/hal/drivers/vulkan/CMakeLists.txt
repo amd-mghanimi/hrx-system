@@ -80,6 +80,7 @@ iree_cc_library(
     iree::base
     iree::hal
     iree::hal::drivers::vulkan::util::libvulkan
+    iree::hal::memory::tracing
     iree::third_party::vulkan_headers
   PUBLIC
 )
@@ -145,6 +146,7 @@ iree_cc_test(
   NAME
     command_buffer_test
   SRCS
+    "barrier.h"
     "command_buffer_test.cc"
   DEPS
     ::headers
@@ -152,6 +154,7 @@ iree_cc_test(
     iree::base
     iree::base::internal::arena
     iree::hal
+    iree::hal::drivers::vulkan::util::libvulkan
     iree::hal::testing::mock_device
     iree::testing::gtest
     iree::testing::gtest_main
@@ -271,6 +274,7 @@ iree_cc_library(
   SRCS
     "transient_buffer.c"
   DEPS
+    ::headers
     iree::async
     iree::base
     iree::base::threading
@@ -316,8 +320,72 @@ endif()
 if(IREE_HAL_DRIVER_VULKAN)
 iree_cc_library(
   NAME
+    queue_test_util
+  HDRS
+    "queue_test_util.h"
+  SRCS
+    "allocator.h"
+    "barrier.h"
+    "builtins.h"
+    "queue.h"
+    "queue_test_util.cc"
+    "semaphore.h"
+  DEPS
+    ::headers
+    ::profile
+    ::vulkan
+    iree::async
+    iree::base
+    iree::base::internal
+    iree::base::threading
+    iree::base::threading::thread
+    iree::hal
+    iree::hal::drivers::vulkan::util::libvulkan
+    iree::hal::utils::submitted_signal
+  TESTONLY
+  PUBLIC
+)
+endif()
+
+if(IREE_HAL_DRIVER_VULKAN)
+iree_cc_library(
+  NAME
+    sparse_binding_test
+  SRCS
+    "allocator.h"
+    "barrier.h"
+    "builtins.h"
+    "queue.h"
+    "semaphore.h"
+    "sparse_binding_test.cc"
+  DEPS
+    ::headers
+    ::profile
+    ::queue_test_util
+    ::vulkan
+    iree::async
+    iree::base
+    iree::base::internal
+    iree::base::threading
+    iree::base::threading::thread
+    iree::hal
+    iree::hal::cts::util::test_base
+    iree::hal::drivers::vulkan::util::libvulkan
+    iree::hal::utils::submitted_signal
+    iree::testing::gtest
+  TESTONLY
+  ALWAYSLINK
+  PUBLIC
+)
+endif()
+
+if(IREE_HAL_DRIVER_VULKAN)
+iree_cc_library(
+  NAME
     vulkan
   SRCS
+    "allocation_queue.c"
+    "allocation_queue.h"
     "allocator.c"
     "allocator.h"
     "api.c"
@@ -341,14 +409,19 @@ iree_cc_library(
     "driver.h"
     "executable.c"
     "executable.h"
+    "file_transfer.c"
+    "file_transfer.h"
     "logical_device.c"
     "logical_device.h"
+    "memory_backend.c"
+    "memory_backend.h"
     "physical_device.c"
     "physical_device.h"
     "physical_device_selection.c"
     "physical_device_selection.h"
     "queue.c"
     "queue.h"
+    "queue_memory.c"
     "queue_stats.h"
     "semaphore.c"
     "semaphore.h"
@@ -359,6 +432,7 @@ iree_cc_library(
     "spirv.c"
     "spirv.h"
     "syms.h"
+    "virtual_buffer.c"
   DEPS
     ::api
     ::device_spec_builder
@@ -370,6 +444,7 @@ iree_cc_library(
     iree::base::core_headers
     iree::base::internal
     iree::base::internal::arena
+    iree::base::internal::memory
     iree::base::threading
     iree::base::threading::thread
     iree::hal
@@ -377,10 +452,10 @@ iree_cc_library(
     iree::hal::drivers::vulkan::util::libvulkan
     iree::hal::memory::passthrough_pool
     iree::hal::memory::slab_provider
-    iree::hal::memory::tlsf_pool
     iree::hal::memory::tracing
     iree::hal::utils::files
     iree::hal::utils::resource_set
+    iree::hal::utils::submitted_signal
     iree::third_party::vulkan_headers
   PUBLIC
 )

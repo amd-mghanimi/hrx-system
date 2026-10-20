@@ -9,7 +9,7 @@
 #include "loom/ops/encoding/storage.h"
 
 static bool loom_type_refinement_type_has_dimensions(loom_type_t type) {
-  return loom_type_is_shaped(type) || loom_type_is_pool(type);
+  return loom_type_has_dimensions(type);
 }
 
 static void loom_type_refinement_merge_analysis_result(

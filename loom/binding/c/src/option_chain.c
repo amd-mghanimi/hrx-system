@@ -6,7 +6,9 @@
 
 #include "option_chain.h"
 
+#include "loomc/interop.h"
 #include "loomc/iree.h"
+#include "pass_trace.h"
 #include "target.h"
 
 static loomc_status_t loomc_sanitizer_reporting_mode_to_internal(
@@ -124,6 +126,83 @@ loomc_status_t loomc_option_chain_resolve(
             sanitizer_options, &out_options->sanitizer));
         out_options->has_sanitizer = true;
         next = sanitizer_options->next;
+        break;
+      }
+      case LOOMC_STRUCTURE_TYPE_PASS_TRACE_OPTIONS: {
+        if (!iree_all_bits_set(allowed_options,
+                               LOOMC_OPTION_CHAIN_ALLOW_PASS_TRACE)) {
+          return loomc_make_status(
+              LOOMC_STATUS_UNIMPLEMENTED,
+              "pass trace option extension is not supported here");
+        }
+        if (out_options->pass_trace != NULL) {
+          return loomc_make_status(
+              LOOMC_STATUS_INVALID_ARGUMENT,
+              "option chain contains duplicate pass trace options");
+        }
+        const loomc_pass_trace_options_t* pass_trace_options =
+            (const loomc_pass_trace_options_t*)next;
+        LOOMC_RETURN_IF_ERROR(
+            loomc_pass_trace_options_validate(pass_trace_options));
+        out_options->pass_trace = pass_trace_options;
+        next = pass_trace_options->next;
+        break;
+      }
+      case LOOMC_STRUCTURE_TYPE_NATIVE_PASS_REPORT_OPTIONS: {
+        if (!iree_all_bits_set(allowed_options,
+                               LOOMC_OPTION_CHAIN_ALLOW_NATIVE_PASS_REPORT)) {
+          return loomc_make_status(
+              LOOMC_STATUS_UNIMPLEMENTED,
+              "native pass report option extension is not supported here");
+        }
+        if (out_options->pass_report != NULL) {
+          return loomc_make_status(
+              LOOMC_STATUS_INVALID_ARGUMENT,
+              "option chain contains duplicate native pass report options");
+        }
+        const loomc_native_pass_report_options_t* report_options =
+            (const loomc_native_pass_report_options_t*)next;
+        if (report_options->structure_size != 0 &&
+            report_options->structure_size < sizeof(*report_options)) {
+          return loomc_make_status(
+              LOOMC_STATUS_INVALID_ARGUMENT,
+              "native pass report options structure_size is too small");
+        }
+        if (report_options->report == NULL) {
+          return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                                   "native pass report must not be NULL");
+        }
+        out_options->pass_report = report_options->report;
+        next = report_options->next;
+        break;
+      }
+      case LOOMC_STRUCTURE_TYPE_NATIVE_COMPILE_REPORT_OPTIONS: {
+        if (!iree_all_bits_set(
+                allowed_options,
+                LOOMC_OPTION_CHAIN_ALLOW_NATIVE_COMPILE_REPORT)) {
+          return loomc_make_status(
+              LOOMC_STATUS_UNIMPLEMENTED,
+              "native compile report option extension is not supported here");
+        }
+        if (out_options->compile_report != NULL) {
+          return loomc_make_status(
+              LOOMC_STATUS_INVALID_ARGUMENT,
+              "option chain contains duplicate native compile report options");
+        }
+        const loomc_native_compile_report_options_t* report_options =
+            (const loomc_native_compile_report_options_t*)next;
+        if (report_options->structure_size != 0 &&
+            report_options->structure_size < sizeof(*report_options)) {
+          return loomc_make_status(
+              LOOMC_STATUS_INVALID_ARGUMENT,
+              "native compile report options structure_size is too small");
+        }
+        if (report_options->report == NULL) {
+          return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                                   "native compile report must not be NULL");
+        }
+        out_options->compile_report = report_options->report;
+        next = report_options->next;
         break;
       }
       case LOOMC_STRUCTURE_TYPE_NONE:

@@ -42,6 +42,39 @@ loom_cc_library(
 
 loom_cc_test(
   NAME
+    cfg_facts_test
+  SRCS
+    "cfg_facts_test.cc"
+  DEPS
+    ::rewriter
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::cfg
+    loom::ops::test
+    loom::util::fact_table
+)
+
+loom_cc_test(
+  NAME
+    erasure_test
+  SRCS
+    "erasure_test.cc"
+  DEPS
+    ::rewriter
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::scalar
+    loom::ops::test
+    loom::ops::vector
+    loom::util::fact_table
+)
+
+loom_cc_test(
+  NAME
     pattern_registry_test
   SRCS
     "pattern_registry_test.cc"
@@ -100,8 +133,10 @@ loom_cc_library(
     "remap.h"
   SRCS
     "remap.c"
+    "remap_payload.c"
   DEPS
     iree::base
+    iree::base::internal
     iree::base::internal::arena
     loom::ir
   PUBLIC
@@ -163,6 +198,8 @@ loom_cc_test(
     "loop_like_test.cc"
   DEPS
     ::loop_like
+    ::materialize
+    ::remap
     ::rewriter
     iree::base::internal::arena
     iree::testing::gtest
@@ -170,6 +207,7 @@ loom_cc_test(
     loom::ir
     loom::ops::scf
     loom::ops::test
+    loom::util::fact_table
     loom::verify
 )
 
@@ -284,6 +322,7 @@ loom_cc_library(
     loom::target::registers
     loom::util::cfg_graph
     loom::util::fact_table
+    loom::util::segmented_storage
   PUBLIC
 )
 

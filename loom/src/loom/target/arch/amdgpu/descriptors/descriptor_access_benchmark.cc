@@ -114,10 +114,12 @@ static void BM_StructuralFacts(benchmark::State& state,
                         uint32_t descriptor_ordinal) {
                        const loom_low_descriptor_t* descriptor =
                            &descriptor_set->descriptors[descriptor_ordinal];
+                       const auto* layout = loom_low_descriptor_layout(
+                           descriptor_set, descriptor);
                        return descriptor->stable_id +
                               descriptor->operand_start +
-                              descriptor->immediate_start +
-                              descriptor->effect_start + descriptor->flags;
+                              layout->immediate_start + layout->effect_start +
+                              descriptor->flags;
                      });
 }
 
@@ -131,8 +133,8 @@ static void BM_ScheduleFacts(benchmark::State& state,
         const loom_low_descriptor_view_t* descriptor_view =
             &descriptor_set->descriptor_views[descriptor_ordinal];
         const loom_low_schedule_class_t* schedule_class =
-            &descriptor_set
-                 ->schedule_classes[descriptor_view->schedule_class_id];
+            loom_low_descriptor_set_schedule_class(descriptor_set,
+                                                   descriptor_view);
         return static_cast<uint64_t>(descriptor_view->instruction_class_flags) +
                schedule_class->latency_cycles +
                schedule_class->schedule_distance_cycles +
@@ -158,9 +160,11 @@ static void BM_AssemblyFacts(benchmark::State& state,
         }
         const loom_low_asm_form_t* asm_form =
             &descriptor_set->asm_forms[asm_form_ordinal];
+        const loom_low_asm_layout_t* layout =
+            &descriptor_set->asm_layouts[asm_form->layout_index];
         return static_cast<uint64_t>(asm_form_ordinal) +
-               asm_form->descriptor_ordinal + asm_form->operand_index_count +
-               asm_form->immediate_count;
+               asm_form->descriptor_ordinal + layout->tied_result_count +
+               layout->explicit_immediate_count;
       });
 }
 
@@ -176,10 +180,11 @@ static void BM_MixedFacts(benchmark::State& state,
         const loom_low_descriptor_view_t* descriptor_view =
             &descriptor_set->descriptor_views[descriptor_ordinal];
         const loom_low_schedule_class_t* schedule_class =
-            &descriptor_set
-                 ->schedule_classes[descriptor_view->schedule_class_id];
+            loom_low_descriptor_set_schedule_class(descriptor_set,
+                                                   descriptor_view);
         uint64_t result = descriptor->stable_id + descriptor->operand_start +
-                          descriptor->effect_start +
+                          loom_low_descriptor_layout(descriptor_set, descriptor)
+                              ->effect_start +
                           descriptor_view->instruction_class_flags +
                           schedule_class->latency_cycles +
                           schedule_class->flags;
@@ -188,8 +193,10 @@ static void BM_MixedFacts(benchmark::State& state,
         if (asm_form_ordinal != LOOM_LOW_ASM_FORM_ORDINAL_NONE) {
           const loom_low_asm_form_t* asm_form =
               &descriptor_set->asm_forms[asm_form_ordinal];
+          const loom_low_asm_layout_t* layout =
+              &descriptor_set->asm_layouts[asm_form->layout_index];
           result += asm_form_ordinal + asm_form->descriptor_ordinal +
-                    asm_form->operand_index_count;
+                    layout->tied_result_count;
         }
         return result;
       });

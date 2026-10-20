@@ -95,38 +95,12 @@ hrx_status_t hrx_status_from_iree(iree_status_t iree_status) {
     return hrx_ok_status();
   }
 
-  // Map IREE status code to hrx code.
-  iree_status_code_t iree_code = iree_status_code(iree_status);
-  hrx_status_code_t hrx_code;
-  switch (iree_code) {
-    case IREE_STATUS_INVALID_ARGUMENT:
-      hrx_code = HRX_STATUS_INVALID_ARGUMENT;
-      break;
-    case IREE_STATUS_NOT_FOUND:
-      hrx_code = HRX_STATUS_NOT_FOUND;
-      break;
-    case IREE_STATUS_ALREADY_EXISTS:
-      hrx_code = HRX_STATUS_ALREADY_EXISTS;
-      break;
-    case IREE_STATUS_OUT_OF_RANGE:
-      hrx_code = HRX_STATUS_OUT_OF_RANGE;
-      break;
-    case IREE_STATUS_UNIMPLEMENTED:
-      hrx_code = HRX_STATUS_UNIMPLEMENTED;
-      break;
-    case IREE_STATUS_UNAVAILABLE:
-      hrx_code = HRX_STATUS_UNAVAILABLE;
-      break;
-    case IREE_STATUS_RESOURCE_EXHAUSTED:
-      hrx_code = HRX_STATUS_OUT_OF_MEMORY;
-      break;
-    case IREE_STATUS_DEADLINE_EXCEEDED:
-      hrx_code = HRX_STATUS_DEADLINE_EXCEEDED;
-      break;
-    default:
-      hrx_code = HRX_STATUS_INTERNAL;
-      break;
-  }
+  // The public codes match IREE; hrx_internal.h verifies every shared value.
+  // Preserve representable failures instead of converting them to INTERNAL.
+  const iree_status_code_t iree_code = iree_status_code(iree_status);
+  const hrx_status_code_t hrx_code = iree_code <= IREE_STATUS_DATA_LOSS
+                                         ? (hrx_status_code_t)iree_code
+                                         : HRX_STATUS_UNKNOWN;
 
   // Extract IREE error message.
   iree_allocator_t allocator = iree_allocator_system();

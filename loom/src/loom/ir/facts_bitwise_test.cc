@@ -6,10 +6,12 @@
 
 #include <climits>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "iree/testing/gtest.h"
 #include "loom/ir/facts.h"
+#include "loom/ir/facts_bitwise_test_util.h"
 
 namespace loom {
 namespace {
@@ -244,45 +246,31 @@ TEST(AndiTransfer, NegativeMaskPreservesNonnegativeBound) {
   loom_value_facts_t output;
   loom_value_facts_andi(&input, &mask, &output);
   EXPECT_EQ(output.range_lo, 0);
-  EXPECT_LE(output.range_hi, 31);
+  EXPECT_EQ(output.range_hi, 24);
   EXPECT_EQ(output.known_divisor, 8);
 }
 
-TEST(AndiTransfer, BoundedConcreteValuesSatisfyResultFacts) {
-  std::vector<loom_value_facts_t> inputs;
-  for (int64_t value = -16; value <= 16; ++value) {
-    inputs.push_back(loom_value_facts_exact_i64(value));
-  }
-  for (int64_t lower : {-16, 0, 4}) {
-    for (int64_t upper : {-1, 0, 16}) {
-      if (lower > upper) {
-        continue;
-      }
-      for (int64_t divisor : {1, 2, 3, 4, 6, 8}) {
-        inputs.push_back(loom_value_facts_make(lower, upper, divisor));
-      }
-    }
-  }
-  for (const auto& left : inputs) {
-    for (const auto& right : inputs) {
-      loom_value_facts_t output;
-      loom_value_facts_andi(&left, &right, &output);
-      ASSERT_GE(output.known_divisor, 1);
-      for (int64_t lhs = left.range_lo; lhs <= left.range_hi; ++lhs) {
-        if (lhs % left.known_divisor != 0) {
-          continue;
-        }
-        for (int64_t rhs = right.range_lo; rhs <= right.range_hi; ++rhs) {
-          if (rhs % right.known_divisor != 0) {
-            continue;
-          }
-          const int64_t result = lhs & rhs;
-          ASSERT_LE(output.range_lo, result) << lhs << " & " << rhs;
-          ASSERT_GE(output.range_hi, result) << lhs << " & " << rhs;
-          ASSERT_EQ(result % output.known_divisor, 0) << lhs << " & " << rhs;
-        }
-      }
-    }
+TEST(AndiTransfer, LowMasksEliminateAlignedValues) {
+  for (int shift = 1; shift < 63; ++shift) {
+    const int64_t alignment = INT64_C(1) << shift;
+    loom_value_facts_t aligned =
+        loom_value_facts_make(INT64_MIN, INT64_MAX, alignment);
+    loom_value_facts_mark_lane_varying(&aligned);
+    const loom_value_facts_t mask = loom_value_facts_exact_i64(alignment - 1);
+    loom_value_facts_t result;
+    loom_value_facts_andi(&aligned, &mask, &result);
+    EXPECT_TRUE(loom_value_facts_is_zero(result));
+    EXPECT_TRUE(loom_value_facts_is_cluster_uniform(result));
+    loom_value_facts_andi(&mask, &aligned, &result);
+    EXPECT_TRUE(loom_value_facts_is_zero(result));
+
+    // Including the first possible bit permits a nonzero result.
+    const loom_value_facts_t inclusive_mask =
+        loom_value_facts_exact_i64(alignment);
+    loom_value_facts_andi(&aligned, &inclusive_mask, &result);
+    EXPECT_EQ(result.range_lo, 0);
+    EXPECT_EQ(result.range_hi, alignment);
+    EXPECT_FALSE(loom_value_facts_is_exact(result));
   }
 }
 
@@ -403,6 +391,78 @@ TEST(BitwiseTransfer, NonNegativeEnvelopeAtEveryBitWidth) {
   }
 }
 
+TEST(BitwiseTransfer, RetainsOnlyPowerOfTwoFactors) {
+  for (auto transfer :
+       {loom_value_facts_andi, loom_value_facts_ori, loom_value_facts_xori}) {
+    const bool is_and = transfer == loom_value_facts_andi;
+    for (int64_t lower : {INT64_C(-96), INT64_C(0)}) {
+      const loom_value_facts_t left = loom_value_facts_make(lower, 96, 24);
+      const loom_value_facts_t right = loom_value_facts_make(lower, 96, 12);
+      loom_value_facts_t result;
+      transfer(&left, &right, &result);
+      EXPECT_EQ(result.known_divisor, is_and ? 8 : 4);
+      EXPECT_EQ(result.range_hi % result.known_divisor, 0);
+      if (lower == 0) {
+        EXPECT_EQ(result.range_lo, 0);
+        EXPECT_EQ(result.range_hi, is_and ? 96 : 124);
+      }
+    }
+    const loom_value_facts_t odd = loom_value_facts_make(-9, 9, 3);
+    loom_value_facts_t result;
+    transfer(&odd, &odd, &result);
+    EXPECT_EQ(result.known_divisor, 1);
+  }
+}
+
+TEST(BitwiseTransfer, ExactZeroAndSignBitRetainRepresentableFactors) {
+  const loom_value_facts_t aligned = loom_value_facts_make(-96, 96, 24);
+  for (auto transfer :
+       {loom_value_facts_andi, loom_value_facts_ori, loom_value_facts_xori}) {
+    for (int64_t value : {INT64_C(0), INT64_MIN}) {
+      const loom_value_facts_t exact = loom_value_facts_exact_i64(value);
+      loom_value_facts_t result;
+      transfer(&aligned, &exact, &result);
+      if (transfer == loom_value_facts_andi && value == 0) {
+        EXPECT_TRUE(loom_value_facts_is_zero(result));
+      } else {
+        EXPECT_EQ(result.known_divisor,
+                  transfer == loom_value_facts_andi ? INT64_C(1) << 62 : 8);
+      }
+      for (int64_t input : {INT64_C(-96), INT64_C(0), INT64_C(96)}) {
+        const int64_t expected =
+            transfer == loom_value_facts_andi  ? input & value
+            : transfer == loom_value_facts_ori ? input | value
+                                               : input ^ value;
+        EXPECT_LE(result.range_lo, expected);
+        EXPECT_GE(result.range_hi, expected);
+        EXPECT_EQ(expected % result.known_divisor, 0);
+      }
+    }
+  }
+}
+
+TEST(BitwiseTransfer, AlignedEnvelopeAtEveryBitWidth) {
+  for (auto transfer : {loom_value_facts_ori, loom_value_facts_xori}) {
+    for (uint32_t bit = 1; bit < 63; ++bit) {
+      for (uint32_t shift = 1; shift <= bit; ++shift) {
+        SCOPED_TRACE(bit);
+        SCOPED_TRACE(shift);
+        const int64_t alignment = INT64_C(1) << shift;
+        const int64_t upper = INT64_C(1) << bit;
+        const int64_t envelope =
+            (int64_t)((UINT64_C(1) << (bit + 1)) - alignment);
+        const loom_value_facts_t bounded =
+            loom_value_facts_make(0, upper, alignment);
+        loom_value_facts_t result;
+        transfer(&bounded, &bounded, &result);
+        EXPECT_EQ(result.range_lo, 0);
+        EXPECT_EQ(result.range_hi, envelope);
+        EXPECT_EQ(result.known_divisor, alignment);
+      }
+    }
+  }
+}
+
 TEST(BitwiseTransfer, SignedBoundaryConstantsFoldExactly) {
   for (int64_t lhs : {INT64_MIN, INT64_MIN + 1, INT64_C(-1), INT64_C(0),
                       INT64_C(1), INT64_C(1) << 62, INT64_MAX}) {
@@ -411,6 +471,9 @@ TEST(BitwiseTransfer, SignedBoundaryConstantsFoldExactly) {
                         INT64_C(1), INT64_C(1) << 62, INT64_MAX}) {
       const loom_value_facts_t right = loom_value_facts_exact_i64(rhs);
       loom_value_facts_t result;
+      loom_value_facts_andi(&left, &right, &result);
+      EXPECT_TRUE(loom_value_facts_equal(
+          result, loom_value_facts_exact_i64(lhs & rhs)));
       loom_value_facts_ori(&left, &right, &result);
       EXPECT_TRUE(loom_value_facts_equal(
           result, loom_value_facts_exact_i64(lhs | rhs)));
@@ -421,37 +484,19 @@ TEST(BitwiseTransfer, SignedBoundaryConstantsFoldExactly) {
   }
 }
 
-TEST(BitwiseTransfer, SmallSignedIntervalsContainEveryConcreteResult) {
+TEST(BitwiseTransfer,
+     RepresentativeIntervalsAndDivisorsContainEveryConcreteResult) {
   std::vector<loom_value_facts_t> inputs;
-  for (int64_t lower = -8; lower <= 8; ++lower) {
-    for (int64_t upper = lower; upper <= 8; ++upper) {
-      inputs.push_back(loom_value_facts_make(lower, upper, 1));
+  for (int64_t value : {-8, -1, 0, 1, 8}) {
+    inputs.push_back(loom_value_facts_exact_i64(value));
+  }
+  for (const auto& [lower, upper] : {std::pair{-8, -1}, std::pair{-8, 8},
+                                     std::pair{0, 8}, std::pair{1, 8}}) {
+    for (int64_t divisor = 1; divisor <= 8; ++divisor) {
+      inputs.push_back(loom_value_facts_make(lower, upper, divisor));
     }
   }
-  for (const auto& left : inputs) {
-    for (const auto& right : inputs) {
-      loom_value_facts_t result_or;
-      loom_value_facts_t result_xor;
-      loom_value_facts_ori(&left, &right, &result_or);
-      loom_value_facts_xori(&left, &right, &result_xor);
-      for (int64_t lhs = left.range_lo; lhs <= left.range_hi; ++lhs) {
-        for (int64_t rhs = right.range_lo; rhs <= right.range_hi; ++rhs) {
-          const int64_t value_or = lhs | rhs;
-          const int64_t value_xor = lhs ^ rhs;
-          ASSERT_LE(result_or.range_lo, value_or) << lhs << " | " << rhs;
-          ASSERT_GE(result_or.range_hi, value_or) << lhs << " | " << rhs;
-          ASSERT_LE(result_xor.range_lo, value_xor) << lhs << " ^ " << rhs;
-          ASSERT_GE(result_xor.range_hi, value_xor) << lhs << " ^ " << rhs;
-          ASSERT_EQ(value_or % result_or.known_divisor, 0);
-          ASSERT_EQ(value_xor % result_xor.known_divisor, 0);
-          ASSERT_TRUE(!loom_value_facts_is_non_zero(result_or) ||
-                      value_or != 0);
-          ASSERT_TRUE(!loom_value_facts_is_non_zero(result_xor) ||
-                      value_xor != 0);
-        }
-      }
-    }
-  }
+  testing::CheckBoundedBitwiseConcreteResults(inputs.size(), inputs.data());
 }
 
 TEST(BitwiseTransfer, InPlaceTransferPreservesEveryFact) {
@@ -467,6 +512,7 @@ TEST(BitwiseTransfer, InPlaceTransferPreservesEveryFact) {
                                        loom_value_facts_exact_i64(INT64_MAX),
                                        loom_value_facts_exact_i64(0),
                                        loom_value_facts_make(0, 256, 256),
+                                       loom_value_facts_make(-96, 96, 24),
                                        varying_mask,
                                        nonzero};
   for (auto transfer :
@@ -489,10 +535,11 @@ TEST(BitwiseTransfer, InPlaceTransferPreservesEveryFact) {
 TEST(BitwiseTransfer, RetainsDistributionAndLaneMaskIdentity) {
   for (auto transfer :
        {loom_value_facts_andi, loom_value_facts_ori, loom_value_facts_xori}) {
-    loom_value_facts_t left = loom_value_facts_make(0, 255, 1);
+    loom_value_facts_t left = loom_value_facts_make(0, 255, 4);
     loom_value_facts_mark_workgroup_uniform(&left);
     loom_value_facts_mark_subgroup_lane_mask(&left);
-    loom_value_facts_t right = loom_value_facts_make(0, 256, 256);
+    // Overlapping possible bits keep each operation dependent on both inputs.
+    loom_value_facts_t right = loom_value_facts_make(0, 256, 128);
     loom_value_facts_mark_subgroup_uniform(&right);
     loom_value_facts_mark_subgroup_lane_mask(&right);
     loom_value_facts_t result;

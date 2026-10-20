@@ -23,6 +23,7 @@ loom_cc_library(
     loom::codegen::low::allocation_live_range_splitting
     loom::codegen::low::allocation_materialization
     loom::codegen::low::descriptors
+    loom::codegen::low::diagnostics
     loom::codegen::low::function
     loom::codegen::low::function_model
     loom::codegen::low::pipeline::pass_environment
@@ -30,6 +31,7 @@ loom_cc_library(
     loom::ir
     loom::ops::low
     loom::ops::type_registry
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types
@@ -71,6 +73,7 @@ loom_cc_library(
     loom::codegen::low::descriptors
     loom::codegen::low::function
     loom::codegen::low::pipeline::pass_environment
+    loom::codegen::low::representation_binding
     loom::codegen::low::target_binding
     loom::ir
     loom::ops::op_defs
@@ -92,6 +95,7 @@ loom_cc_library(
     loom::codegen::low::descriptors
     loom::codegen::low::function
     loom::codegen::low::pipeline::pass_environment
+    loom::codegen::low::representation_binding
     loom::codegen::low::target_binding
     loom::error::emitter
     loom::ir
@@ -120,13 +124,18 @@ loom_cc_library(
     loom::codegen::low::descriptors
     loom::codegen::low::diagnostics
     loom::codegen::low::function
+    loom::codegen::low::memory_access
+    loom::codegen::low::operand_ties
     loom::codegen::low::pipeline::pass_environment
+    loom::codegen::low::representation_binding
     loom::codegen::low::storage_relation
     loom::codegen::low::target_binding
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::low
     loom::ops::op_defs
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types
@@ -135,6 +144,39 @@ loom_cc_library(
     loom::rewrite::remap
     loom::rewrite::rewriter
     loom::target::function_version
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    task_abi
+  HDRS
+    "task_abi.h"
+  SRCS
+    "task_abi.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::analysis::symbol_facts
+    loom::codegen::low::descriptors
+    loom::codegen::low::pipeline::pass_environment
+    loom::codegen::low::target_binding
+    loom::error::error_defs
+    loom::error::parameter
+    loom::ir
+    loom::ops::func_symbol_facts
+    loom::ops::global
+    loom::ops::low
+    loom::ops::op_defs
+    loom::pass::types
+    loom::rewrite::remap
+    loom::rewrite::rewriter
+    loom::target::abi::task::parameter_layout
+    loom::target::abi::task::state_layout
+    loom::target::facts
+    loom::target::function_contract
+    loom::target::function_version
+    loom::target::pass_environment
   PUBLIC
 )
 

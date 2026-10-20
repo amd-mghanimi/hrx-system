@@ -33,4 +33,34 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_library(
+  NAME
+    block_order
+  HDRS
+    "block_order.h"
+  SRCS
+    "block_order.c"
+  DEPS
+    iree::base::internal::arena
+    loom::ir
+    loom::util::cfg_dominance
+    loom::util::cfg_graph
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    block_order_test
+  SRCS
+    "block_order_test.cc"
+  DEPS
+    ::block_order
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::cfg
+    loom::ops::test
+)
+
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

@@ -194,8 +194,10 @@ typedef struct iree_tokenizer_builder_t {
   iree_tokenizer_normalizer_t* normalizer;
   iree_tokenizer_segmenter_t* segmenter;  // Required.
   iree_tokenizer_model_t* model;          // Required.
-  // Optional - NULL for no-op decode.
+  // Optional - NULL disables decoding.
   iree_tokenizer_decoder_t* decoder;
+  // Optional owned transform on joined decoder text, finalized at decode EOF.
+  iree_tokenizer_normalizer_t* decode_transform;
 
   // Post-processor (value type, embedded directly). When all template counts
   // are zero and both flags are false (the zero-initialized state), runtime
@@ -250,6 +252,13 @@ void iree_tokenizer_builder_set_model(iree_tokenizer_builder_t* builder,
 // Optional - if not set, decode operations will fail.
 void iree_tokenizer_builder_set_decoder(iree_tokenizer_builder_t* builder,
                                         iree_tokenizer_decoder_t* decoder);
+
+// Sets the transform applied to joined decoder text. Transfers ownership to
+// the builder. The decoder remains token-oriented and may use predecoded
+// tables; this transform receives a continuing UTF-8 stream across all tokens.
+// Requires a decoder. NULL leaves decoder output unchanged.
+void iree_tokenizer_builder_set_decode_transform(
+    iree_tokenizer_builder_t* builder, iree_tokenizer_normalizer_t* transform);
 
 // Sets the post-processor for the tokenizer. Copies the value into the builder.
 // Optional - if not set (zero-initialized), postprocessor operations are no-ops
@@ -419,6 +428,8 @@ typedef struct iree_tokenizer_encode_batch_item_t {
 // Caller provides |state_storage| (at least encode_state_calculate_size bytes)
 // and |transform_buffer| for scratch space. For offset tracking across all
 // items, provide |offset_runs| storage; otherwise pass an empty list.
+// |workspace_allocator| owns model workspace growth and remains valid for this
+// call. Capacity is reused across items and released before returning.
 //
 // Each item in |items| must have valid text and output.token_ids pointer. If
 // any item's output.token_offsets is non-NULL, offset tracking is enabled for
@@ -433,7 +444,8 @@ iree_status_t iree_tokenizer_encode_batch(
     iree_tokenizer_encode_batch_item_t* items, iree_host_size_t item_count,
     iree_tokenizer_encode_flags_t flags, iree_byte_span_t state_storage,
     iree_byte_span_t transform_buffer,
-    iree_tokenizer_offset_run_list_t offset_runs);
+    iree_tokenizer_offset_run_list_t offset_runs,
+    iree_allocator_t workspace_allocator);
 
 // Input/output item for multi-item batch decoding. Caller allocates arrays of
 // these items, fills in the inputs (tokens, text_output), and the batch
@@ -539,13 +551,15 @@ static inline iree_host_size_t iree_tokenizer_transform_buffer_oneshot_size(
 // list.
 //
 // The initialized state is returned in |out_state|. The state does not own the
-// storage buffers; the caller is responsible for keeping them valid until
-// deinitialize is called.
+// storage buffers; the caller keeps them valid until deinitialize. Model work
+// may grow through |workspace_allocator|, which must also outlive the state.
+// Reset retains that workspace; deinitialize releases it. A null or bounded
+// allocator can explicitly reject growth beyond the model's inline storage.
 iree_status_t iree_tokenizer_encode_state_initialize(
     const iree_tokenizer_t* tokenizer, iree_byte_span_t state_storage,
     iree_byte_span_t transform_buffer,
     iree_tokenizer_offset_run_list_t offset_runs,
-    iree_tokenizer_encode_flags_t flags,
+    iree_tokenizer_encode_flags_t flags, iree_allocator_t workspace_allocator,
     iree_tokenizer_encode_state_t** out_state);
 
 // Cleans up encode state. Does not free |state_storage| or other buffers
@@ -562,23 +576,10 @@ void iree_tokenizer_encode_state_deinitialize(
 iree_status_t iree_tokenizer_encode_state_reset(
     iree_tokenizer_encode_state_t* state, iree_tokenizer_encode_flags_t flags);
 
-// Returns true if the encode state has pending data that would produce tokens
-// on finalize. Useful for determining whether to call finalize or whether the
-// state is "clean" after processing. This is a lightweight query that does not
-// modify state.
+// Returns true if the encode state retains work that may produce more tokens.
+// Finalize must be called at least once after all input is accepted, then
+// repeated while this query is true. This query does not modify the state.
 bool iree_tokenizer_encode_state_has_pending(
-    const iree_tokenizer_encode_state_t* state);
-
-// Returns an upper bound on the number of tokens that finalize() could produce.
-// This accounts for all pending data in the pipeline (ring buffer, segments,
-// model state, deferred special tokens, post-processor). The actual count may
-// be less due to BPE merges. Use this to size the output buffer for finalize.
-//
-// Callers SHOULD use this before finalize() because finalize is non-retryable:
-// it consumes pipeline state destructively, so RESOURCE_EXHAUSTED from an
-// undersized buffer is not recoverable. Allocating at least this many tokens
-// guarantees finalize will succeed.
-iree_host_size_t iree_tokenizer_encode_state_pending_token_bound(
     const iree_tokenizer_encode_state_t* state);
 
 // Feeds an input |chunk| to the encoder. Tokens that can be definitively
@@ -598,18 +599,26 @@ iree_host_size_t iree_tokenizer_encode_state_pending_token_bound(
 //
 // The function always makes progress if possible: it will consume input
 // and/or produce tokens. Returns iree_ok_status() even if not all input
-// was consumed (check out_bytes_consumed).
+// was consumed (check out_bytes_consumed). If output has no credit or input
+// ends inside a UTF-8 codepoint, it may return without progress. Retain the
+// unconsumed bytes and supply more input or output capacity before retrying.
+// Once finalize begins, reset is required before feeding another input stream.
 iree_status_t iree_tokenizer_encode_state_feed(
     iree_tokenizer_encode_state_t* state, iree_string_view_t chunk,
     iree_tokenizer_token_output_t output, iree_host_size_t* out_bytes_consumed,
     iree_host_size_t* out_token_count);
 
-// Finalizes encoding by flushing any buffered data through the pipeline. Must
-// be called after all input chunks have been fed. Any remaining tokens are
-// written to |output|.
+// Ends input and drains retained work through the pipeline. Call only after
+// feed has accepted every input byte. Output credit controls progress; zero
+// capacity is valid. Remaining bytes, tokens, and completion state stay owned
+// by the encoder when output fills, and the call returns success with the
+// number of tokens written in |out_token_count|.
 //
-// Returns the number of tokens written in |out_token_count|. Returns
-// IREE_STATUS_RESOURCE_EXHAUSTED if the output would exceed output.capacity.
+// Call again with more output space while state_has_pending() is true.
+// Completion is idempotent: subsequent calls emit no tokens. Prefix and suffix
+// tokens retain their order across calls. No further feed is allowed until
+// reset. Complete encode/batch APIs report insufficient final output capacity
+// themselves because their callers cannot supply another output span.
 iree_status_t iree_tokenizer_encode_state_finalize(
     iree_tokenizer_encode_state_t* state, iree_tokenizer_token_output_t output,
     iree_host_size_t* out_token_count);
@@ -681,6 +690,11 @@ iree_status_t iree_tokenizer_decode_state_feed(
 //
 // Returns the number of bytes written in |out_text_length|. Returns
 // IREE_STATUS_RESOURCE_EXHAUSTED if the output would exceed text_output.size.
+// Queued token strings are processed before decoder finalization. On capacity
+// exhaustion, the written prefix is counted and remaining state is retained;
+// callers can provide more output space and call finalize again. Token decoder
+// output drains before any joined-text transform receives end-of-input. Once
+// finalization begins, no further feed is allowed until state is reinitialized.
 iree_status_t iree_tokenizer_decode_state_finalize(
     iree_tokenizer_decode_state_t* state,
     iree_mutable_string_view_t text_output, iree_host_size_t* out_text_length);

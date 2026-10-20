@@ -1,0 +1,66 @@
+// RUN: verify
+// Constant storage is not an allocatable scratch domain.
+#include <loomcxx/buffer.h>
+void constant_space(__SIZE_TYPE__ count) {
+  // ERROR@+1: LOWERING/059 "allocatable memory space"
+  loom::buffer::alloca<unsigned, loom::memory_space::constant>(count);
+}
+
+// ====
+// Descriptor storage is supplied by a target interface, not allocated.
+#include <loomcxx/buffer.h>
+void descriptor_space(__SIZE_TYPE__ count) {
+  // ERROR@+1: LOWERING/059 "allocatable memory space"
+  loom::buffer::alloca<unsigned, loom::memory_space::descriptor>(count);
+}
+
+// ====
+// Unknown enum values do not become open-ended High memory spaces.
+#include <loomcxx/buffer.h>
+void unknown_space(__SIZE_TYPE__ count) {
+  // ERROR@+1: LOWERING/059 "allocatable memory space"
+  loom::buffer::alloca<unsigned, static_cast<loom::memory_space>(99)>(count);
+}
+
+// ====
+// Explicit alignment remains a positive power-of-two byte count.
+#include <loomcxx/buffer.h>
+void non_power_of_two(__SIZE_TYPE__ count) {
+  // ERROR@+1: LOWERING/059 "positive power-of-two byte count"
+  loom::buffer::alloca<unsigned, loom::memory_space::private_, 3>(count);
+}
+
+// ====
+#include <loomcxx/buffer.h>
+void zero_alignment(__SIZE_TYPE__ count) {
+  // ERROR@+1: LOWERING/059 "positive power-of-two byte count"
+  loom::buffer::alloca<unsigned, loom::memory_space::private_, 0>(count);
+}
+
+// ====
+// Pointer objects need a storage representation before they can be allocated.
+#include <loomcxx/buffer.h>
+void pointer_elements(__SIZE_TYPE__ count) {
+  // ERROR@+1: LOWERING/059 "stored pointers and references"
+  loom::buffer::alloca<unsigned*, loom::memory_space::private_>(count);
+}
+
+// ====
+// A custom binding cannot change the runtime count type.
+#include <loomcxx/buffer.h>
+template <class T, loom::memory_space Space, __SIZE_TYPE__ Alignment>
+[[loom::op("buffer.alloca")]] T* wrong_count(unsigned);
+void count_type(unsigned count) {
+  // ERROR@+1: LOWERING/059 "buffer.alloca element count must be size_t"
+  wrong_count<unsigned, loom::memory_space::private_, 4>(count);
+}
+
+// ====
+// A custom binding must return a pointer to its template element type.
+#include <loomcxx/buffer.h>
+template <class T, loom::memory_space Space, __SIZE_TYPE__ Alignment>
+[[loom::op("buffer.alloca")]] unsigned* wrong_result(__SIZE_TYPE__);
+void result_type(__SIZE_TYPE__ count) {
+  // ERROR@+1: LOWERING/059 "element type must match"
+  wrong_result<float, loom::memory_space::private_, 4>(count);
+}

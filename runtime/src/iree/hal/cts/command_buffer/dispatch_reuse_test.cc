@@ -26,7 +26,6 @@
 
 #include "iree/hal/cts/util/profile_test_util.h"
 #include "iree/hal/cts/util/test_base.h"
-#include "iree/hal/memory/passthrough_pool.h"
 
 namespace iree::hal::cts {
 
@@ -44,14 +43,9 @@ class DispatchReuseTest : public CtsTestBase<> {
       GTEST_SKIP() << "device has no provisioned transfer-capable queue";
     }
 
-    iree_hal_queue_pool_backend_t backend = {};
-    IREE_ASSERT_OK(iree_hal_device_query_queue_pool_backend(
-        device_, iree_hal_queue_family(transfer_queue_), &backend));
-    iree_hal_passthrough_pool_options_t options = {};
-    options.asan = backend.asan;
-    IREE_ASSERT_OK(iree_hal_passthrough_pool_create(
-        options, backend.slab_provider, backend.notification,
-        iree_allocator_system(), &transient_pool_));
+    IREE_ASSERT_OK(CreateDevicePool(
+        IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_DISPATCH,
+        &transient_pool_));
 
     // Load the workgroup-ID kernel: writes workgroup_id[0] to buffer[wg_id].
     LoadExecutableOrSkipUnsupported(
@@ -78,15 +72,11 @@ class DispatchReuseTest : public CtsTestBase<> {
 
   iree_status_t QueueAlloca(iree_hal_semaphore_list_t wait_semaphore_list,
                             iree_hal_semaphore_list_t signal_semaphore_list,
-                            iree_hal_buffer_params_t params,
                             iree_device_size_t allocation_size,
                             iree_hal_buffer_t** out_buffer) {
-    params.queue_family_affinity = iree_hal_make_queue_family_affinity(
-        iree_hal_queue_family_ordinal(iree_hal_queue_family(transfer_queue_)));
-    const iree_hal_pool_reservation_request_t request = {
-        /*.params=*/params,
-        /*.allocation_size=*/allocation_size,
-    };
+    const iree_hal_pool_reservation_request_t request =
+        iree_hal_make_pool_reservation_request(allocation_size,
+                                               /*min_alignment=*/0);
     return iree_hal_queue_alloca(transfer_queue_, wait_semaphore_list,
                                  signal_semaphore_list, transient_pool_,
                                  /*request_count=*/1, &request, out_buffer);
@@ -107,16 +97,22 @@ class DispatchReuseTest : public CtsTestBase<> {
             IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE,
         IREE_HAL_ACCESS_SCOPE_DISPATCH_READ | IREE_HAL_ACCESS_SCOPE_MEMORY_READ,
     };
-    IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-        command_buffer,
-        IREE_HAL_EXECUTION_STAGE_DISPATCH | IREE_HAL_EXECUTION_STAGE_TRANSFER |
-            IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-        IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
-            IREE_HAL_EXECUTION_STAGE_DISPATCH |
-            IREE_HAL_EXECUTION_STAGE_TRANSFER,
-        IREE_HAL_EXECUTION_BARRIER_FLAG_NONE, /*memory_barrier_count=*/1,
-        /*memory_barriers=*/&memory_barrier,
-        /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+    const iree_hal_barrier_t execution_barrier = {
+        .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                             IREE_HAL_EXECUTION_STAGE_TRANSFER |
+                             IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+        .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
+                             IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                             IREE_HAL_EXECUTION_STAGE_TRANSFER,
+        .flags = IREE_HAL_BARRIER_FLAG_NONE,
+        .effects = {},
+        .memory_barrier_count = 1,
+        .memory_barriers = &memory_barrier,
+        .buffer_barrier_count = 0,
+        .buffer_barriers = nullptr,
+    };
+    IREE_ASSERT_OK(
+        iree_hal_command_buffer_barrier(command_buffer, &execution_barrier));
   }
 
   // Records a reusable command buffer that dispatches the workgroup-ID kernel
@@ -140,8 +136,8 @@ class DispatchReuseTest : public CtsTestBase<> {
         /*length=*/workgroup_count * sizeof(uint32_t),
     }};
     iree_hal_buffer_ref_list_t bindings = {
-        /*.count=*/1,
-        /*.values=*/binding_refs,
+        .count = 1,
+        .values = binding_refs,
     };
 
     IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
@@ -181,8 +177,8 @@ class DispatchReuseTest : public CtsTestBase<> {
           /*length=*/workgroup_count * sizeof(uint32_t),
       }};
       iree_hal_buffer_ref_list_t bindings = {
-          /*.count=*/1,
-          /*.values=*/binding_refs,
+          .count = 1,
+          .values = binding_refs,
       };
       IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
           command_buffer, workgroup_id_executable_,
@@ -234,8 +230,8 @@ TEST_P(DispatchReuseTest, ResubmitWithDifferentBindings) {
         /*length=*/buffer_size,
     }};
     iree_hal_buffer_binding_table_t binding_table = {
-        /*.count=*/1,
-        /*.bindings=*/bindings,
+        .count = 1,
+        .bindings = bindings,
     };
 
     SubmitWithBindingsAndWait(command_buffer, binding_table);
@@ -246,6 +242,149 @@ TEST_P(DispatchReuseTest, ResubmitWithDifferentBindings) {
     EXPECT_THAT(data, ContainerEq(expected))
         << "Mismatch on iteration " << iteration;
   }
+}
+
+// Whole-buffer references resolve against the range supplied for each issue,
+// including both the binding-table offset and the recorded reference offset.
+TEST_P(DispatchReuseTest, WholeBufferReferences) {
+  static constexpr iree_device_size_t kByteLength = 8 * sizeof(float);
+  Ref<iree_hal_buffer_t> input;
+  IREE_ASSERT_OK(
+      CreateFilledDeviceBuffer<float>(kByteLength, -2.5f, input.out()));
+
+  for (iree_device_size_t reference_offset : {0u, 4u}) {
+    Ref<iree_hal_command_buffer_t> command_buffer;
+    IREE_ASSERT_OK(CreateCommandBuffer(IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+                                       IREE_HAL_COMMAND_CATEGORY_DISPATCH,
+                                       /*binding_capacity=*/1,
+                                       command_buffer.out()));
+    IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
+    const iree_hal_buffer_ref_t references[] = {
+        iree_hal_make_buffer_ref(input, reference_offset,
+                                 IREE_HAL_WHOLE_BUFFER),
+        iree_hal_make_indirect_buffer_ref(0, reference_offset,
+                                          IREE_HAL_WHOLE_BUFFER),
+    };
+    IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
+        command_buffer, absf_executable_,
+        iree_hal_executable_function_from_index(0),
+        iree_hal_make_static_dispatch_config(1, 1, 1),
+        iree_const_byte_span_empty(), {IREE_ARRAYSIZE(references), references},
+        IREE_HAL_DISPATCH_FLAG_NONE));
+    RecordDispatchBarrier(command_buffer);
+    IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
+
+    for (iree_device_size_t binding_offset : {0u, 4u}) {
+      const iree_device_size_t lengths[] = {
+          reference_offset + 2 * sizeof(float), IREE_HAL_WHOLE_BUFFER};
+      for (iree_device_size_t binding_length : lengths) {
+        Ref<iree_hal_buffer_t> output;
+        IREE_ASSERT_OK(
+            CreateFilledDeviceBuffer<float>(kByteLength, -9.0f, output.out()));
+        const iree_hal_buffer_binding_t binding = {output, binding_offset,
+                                                   binding_length};
+        ASSERT_NO_FATAL_FAILURE(
+            SubmitWithBindingsAndWait(command_buffer, {1, &binding}));
+
+        std::vector<float> expected(8, -9.0f);
+        const size_t start =
+            (binding_offset + reference_offset) / sizeof(float);
+        expected[start] = expected[start + 1] = 2.5f;
+        EXPECT_THAT(ReadBufferData<float>(output), ContainerEq(expected));
+      }
+    }
+  }
+}
+
+// A remaining-range use must neither inflate nor erase another command's exact
+// extent requirement for the same slot. Invalid tables are rejected before any
+// backend execution, and the recorded command remains reusable afterward.
+TEST_P(DispatchReuseTest, WholeAndExactReferenceRequirements) {
+  Ref<iree_hal_command_buffer_t> command_buffer;
+  IREE_ASSERT_OK(CreateCommandBuffer(
+      IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT, IREE_HAL_COMMAND_CATEGORY_DISPATCH,
+      /*binding_capacity=*/1, command_buffer.out()));
+  IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
+  const iree_hal_buffer_ref_t references[] = {
+      iree_hal_make_indirect_buffer_ref(0, 4 * sizeof(uint32_t),
+                                        4 * sizeof(uint32_t)),
+      iree_hal_make_indirect_buffer_ref(0, 0, IREE_HAL_WHOLE_BUFFER),
+  };
+  for (const iree_hal_buffer_ref_t& reference : references) {
+    IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
+        command_buffer, workgroup_id_executable_,
+        iree_hal_executable_function_from_index(0),
+        iree_hal_make_static_dispatch_config(4, 1, 1),
+        iree_const_byte_span_empty(), {1, &reference},
+        IREE_HAL_DISPATCH_FLAG_NONE));
+    RecordDispatchBarrier(command_buffer);
+  }
+  IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
+
+  Ref<iree_hal_buffer_t> output;
+  IREE_ASSERT_OK(CreateZeroedDeviceBuffer(64, output.out()));
+#if IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
+  const iree_hal_buffer_binding_t invalid_bindings[] = {
+      {output, 0, 31},
+      {output, 48, IREE_HAL_WHOLE_BUFFER},
+      {output, 32, 64},
+      {output, 68, IREE_HAL_WHOLE_BUFFER},
+      {output, 8, IREE_DEVICE_SIZE_MAX - 1},
+  };
+  for (const iree_hal_buffer_binding_t& binding : invalid_bindings) {
+    IREE_EXPECT_STATUS_IS(IREE_STATUS_OUT_OF_RANGE,
+                          iree_hal_command_buffer_validate_submission(
+                              command_buffer, {1, &binding}));
+  }
+#endif  // IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
+
+  const iree_hal_buffer_binding_t binding = {output, 16, 32};
+  ASSERT_NO_FATAL_FAILURE(
+      SubmitWithBindingsAndWait(command_buffer, {1, &binding}));
+  EXPECT_THAT(
+      ReadBufferData<uint32_t>(output),
+      ::testing::ElementsAre(0, 0, 0, 0, 0, 1, 2, 3, 0, 1, 2, 3, 0, 0, 0, 0));
+}
+
+TEST_P(DispatchReuseTest, RejectsOutOfRangeReferences) {
+#if !IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
+  GTEST_SKIP() << "command buffer validation disabled";
+#endif  // !IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
+  Ref<iree_hal_buffer_t> output;
+  IREE_ASSERT_OK(CreateZeroedDeviceBuffer(64, output.out()));
+  Ref<iree_hal_command_buffer_t> command_buffer;
+  IREE_ASSERT_OK(CreateCommandBuffer(
+      IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT, IREE_HAL_COMMAND_CATEGORY_DISPATCH,
+      /*binding_capacity=*/1, command_buffer.out()));
+  IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
+  const iree_hal_buffer_ref_t invalid_references[] = {
+      iree_hal_make_buffer_ref(output, 68, IREE_HAL_WHOLE_BUFFER),
+      iree_hal_make_buffer_ref(output, 60, 8),
+      iree_hal_make_indirect_buffer_ref(0, IREE_DEVICE_SIZE_MAX - 3, 8),
+  };
+  for (const iree_hal_buffer_ref_t& reference : invalid_references) {
+    IREE_EXPECT_STATUS_IS(IREE_STATUS_OUT_OF_RANGE,
+                          iree_hal_command_buffer_dispatch(
+                              command_buffer, workgroup_id_executable_,
+                              iree_hal_executable_function_from_index(0),
+                              iree_hal_make_static_dispatch_config(1, 1, 1),
+                              iree_const_byte_span_empty(), {1, &reference},
+                              IREE_HAL_DISPATCH_FLAG_NONE));
+  }
+  // A remaining-range reference still requires its start to fit the binding.
+  const iree_hal_buffer_ref_t reference =
+      iree_hal_make_indirect_buffer_ref(0, 64, IREE_HAL_WHOLE_BUFFER);
+  IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
+      command_buffer, workgroup_id_executable_,
+      iree_hal_executable_function_from_index(0),
+      iree_hal_make_static_dispatch_config(1, 1, 1),
+      iree_const_byte_span_empty(), {1, &reference},
+      IREE_HAL_DISPATCH_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
+  const iree_hal_buffer_binding_t binding = {output, 0, 63};
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_OUT_OF_RANGE,
+                        iree_hal_command_buffer_validate_submission(
+                            command_buffer, {1, &binding}));
 }
 
 TEST_P(DispatchReuseTest, DispatchProfilingRecordsCommandBufferDispatch) {
@@ -266,8 +405,8 @@ TEST_P(DispatchReuseTest, DispatchProfilingRecordsCommandBufferDispatch) {
       /*length=*/buffer_size,
   }};
   iree_hal_buffer_binding_table_t binding_table = {
-      /*.count=*/1,
-      /*.bindings=*/bindings,
+      .count = 1,
+      .bindings = bindings,
   };
 
   TestProfileSink sink = {};
@@ -349,6 +488,70 @@ TEST_P(DispatchReuseTest, LargeWorkgroupCount) {
   EXPECT_THAT(data, ContainerEq(expected));
 }
 
+// Storage roles constrain the executable's accesses without requiring the
+// opposite direction. Exercise both recorded and submission-supplied bindings.
+TEST_P(DispatchReuseTest, DirectionalStorageBindings) {
+  constexpr iree_device_size_t kByteLength = 4 * sizeof(float);
+  const iree_hal_buffer_usage_t usages[] = {
+      IREE_HAL_BUFFER_USAGE_STORAGE_READ,
+      IREE_HAL_BUFFER_USAGE_STORAGE_WRITE,
+  };
+  Ref<iree_hal_pool_t> pools[2];
+  Ref<iree_hal_buffer_t> buffers[2];
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(buffers); ++i) {
+    IREE_ASSERT_OK(CreateDevicePool(usages[i] | IREE_HAL_BUFFER_USAGE_TRANSFER,
+                                    pools[i].out()));
+    IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+        pools[i],
+        iree_hal_make_pool_reservation_request(kByteLength,
+                                               /*min_alignment=*/1),
+        iree_infinite_timeout(), buffers[i].out()));
+    EXPECT_EQ(iree_hal_buffer_allowed_usage(buffers[i]) &
+                  IREE_HAL_BUFFER_USAGE_STORAGE,
+              usages[i]);
+    const float value = i == 0 ? -2.5f : -9.0f;
+    SemaphoreList signal(device_, {0}, {1});
+    IREE_ASSERT_OK(iree_hal_queue_fill(
+        transfer_queue_, iree_hal_semaphore_list_empty(), signal, buffers[i], 0,
+        kByteLength, &value, sizeof(value), /*barriers=*/NULL,
+        IREE_HAL_FILL_FLAG_NONE));
+    IREE_ASSERT_OK(iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
+                                                IREE_ASYNC_WAIT_FLAG_NONE));
+  }
+
+  for (bool indirect : {false, true}) {
+    SCOPED_TRACE(indirect);
+    Ref<iree_hal_command_buffer_t> command_buffer;
+    IREE_ASSERT_OK(CreateCommandBuffer(IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+                                       IREE_HAL_COMMAND_CATEGORY_DISPATCH,
+                                       indirect ? 2 : 0, command_buffer.out()));
+    IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
+    iree_hal_buffer_ref_t refs[2] = {};
+    for (uint32_t i = 0; i < IREE_ARRAYSIZE(refs); ++i) {
+      refs[i].buffer = indirect ? nullptr : buffers[i].get();
+      refs[i].buffer_slot = indirect ? i : 0;
+      refs[i].offset = sizeof(float);
+      refs[i].length = 2 * sizeof(float);
+    }
+    const iree_hal_buffer_ref_list_t bindings = {IREE_ARRAYSIZE(refs), refs};
+    IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
+        command_buffer, absf_executable_,
+        iree_hal_executable_function_from_index(0),
+        iree_hal_make_static_dispatch_config(1, 1, 1),
+        iree_const_byte_span_empty(), bindings, IREE_HAL_DISPATCH_FLAG_NONE));
+    RecordDispatchBarrier(command_buffer);
+    IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
+    iree_hal_buffer_binding_t table_entries[] = {{buffers[0], 0, kByteLength},
+                                                 {buffers[1], 0, kByteLength}};
+    const iree_hal_buffer_binding_table_t table = {
+        indirect ? IREE_ARRAYSIZE(table_entries) : 0,
+        indirect ? table_entries : nullptr};
+    SubmitWithBindingsAndWait(command_buffer, table);
+    EXPECT_THAT(ReadBufferData<float>(buffers[1]),
+                ::testing::ElementsAre(-9.0f, 2.5f, 2.5f, -9.0f));
+  }
+}
+
 // Records one dispatch with a direct input buffer and an indirect output
 // buffer. This is distinct from the all-direct/all-indirect cases: replay must
 // combine the baked static pointer source and the queue_execute binding-table
@@ -368,7 +571,8 @@ TEST_P(DispatchReuseTest, MixedDirectAndIndirectBindings) {
 
   Ref<iree_hal_command_buffer_t> command_buffer;
   IREE_ASSERT_OK(CreateCommandBuffer(
-      IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT, IREE_HAL_COMMAND_CATEGORY_DISPATCH,
+      IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+      IREE_HAL_COMMAND_CATEGORY_DISPATCH | IREE_HAL_COMMAND_CATEGORY_TRANSFER,
       /*binding_capacity=*/1, command_buffer.out()));
   IREE_ASSERT_OK(iree_hal_command_buffer_begin(command_buffer));
 
@@ -379,21 +583,50 @@ TEST_P(DispatchReuseTest, MixedDirectAndIndirectBindings) {
        /*offset=*/1 * sizeof(float), /*length=*/2 * sizeof(float)},
   };
   iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
+  const float fill_value = -1.0f;
+  IREE_ASSERT_OK(iree_hal_command_buffer_fill_buffer(
+      command_buffer, binding_refs[1], &fill_value, sizeof(fill_value),
+      IREE_HAL_FILL_FLAG_NONE));
+  const iree_hal_memory_barrier_t fill_barrier = {
+      IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE,
+      IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE,
+  };
+  const iree_hal_barrier_t fill_dependency = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 1,
+      .memory_barriers = &fill_barrier,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(
+      iree_hal_command_buffer_barrier(command_buffer, &fill_dependency));
   IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
       command_buffer, absf_executable_,
       iree_hal_executable_function_from_index(0),
       iree_hal_make_static_dispatch_config(1, 1, 1),
       iree_const_byte_span_empty(), bindings, IREE_HAL_DISPATCH_FLAG_NONE));
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer,
-      IREE_HAL_EXECUTION_STAGE_DISPATCH | IREE_HAL_EXECUTION_STAGE_TRANSFER |
-          IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-      IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
-          IREE_HAL_EXECUTION_STAGE_DISPATCH | IREE_HAL_EXECUTION_STAGE_TRANSFER,
-      IREE_HAL_EXECUTION_BARRIER_FLAG_NONE, 0, nullptr, 0, nullptr));
+  const iree_hal_barrier_t retire_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                           IREE_HAL_EXECUTION_STAGE_TRANSFER |
+                           IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
+                           IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                           IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 0,
+      .memory_barriers = nullptr,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(
+      iree_hal_command_buffer_barrier(command_buffer, &retire_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
 
   iree_hal_buffer_binding_t table_bindings[1] = {{
@@ -402,6 +635,25 @@ TEST_P(DispatchReuseTest, MixedDirectAndIndirectBindings) {
       /*length=*/IREE_HAL_WHOLE_BUFFER,
   }};
   iree_hal_buffer_binding_table_t binding_table = {1, table_bindings};
+#if IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
+  // An opaque dispatch binding must preserve the known WRITE requirement
+  // contributed by the fill using the same indirect slot.
+  Ref<iree_hal_pool_t> read_only_pool;
+  IREE_ASSERT_OK(CreateDevicePool(IREE_HAL_BUFFER_USAGE_STORAGE_READ |
+                                      IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE,
+                                  read_only_pool.out()));
+  Ref<iree_hal_buffer_t> read_only_buffer;
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      read_only_pool,
+      iree_hal_make_pool_reservation_request(kByteLength,
+                                             /*min_alignment=*/1),
+      iree_infinite_timeout(), read_only_buffer.out()));
+  table_bindings[0].buffer = read_only_buffer;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_PERMISSION_DENIED,
+                        iree_hal_command_buffer_validate_submission(
+                            command_buffer, binding_table));
+  table_bindings[0].buffer = output;
+#endif  // IREE_HAL_COMMAND_BUFFER_VALIDATION_ENABLE
   SubmitWithBindingsAndWait(command_buffer, binding_table);
 
   auto data = ReadBufferData<float>(output);
@@ -437,21 +689,30 @@ TEST_P(DispatchReuseTest, DeferredExecuteRetainsDispatchBindingTable) {
        /*offset=*/1 * sizeof(float), /*length=*/2 * sizeof(float)},
   };
   iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
   IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
       command_buffer, absf_executable_,
       iree_hal_executable_function_from_index(0),
       iree_hal_make_static_dispatch_config(1, 1, 1),
       iree_const_byte_span_empty(), bindings, IREE_HAL_DISPATCH_FLAG_NONE));
-  IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-      command_buffer,
-      IREE_HAL_EXECUTION_STAGE_DISPATCH | IREE_HAL_EXECUTION_STAGE_TRANSFER |
-          IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-      IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
-          IREE_HAL_EXECUTION_STAGE_DISPATCH | IREE_HAL_EXECUTION_STAGE_TRANSFER,
-      IREE_HAL_EXECUTION_BARRIER_FLAG_NONE, 0, nullptr, 0, nullptr));
+  const iree_hal_barrier_t retire_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                           IREE_HAL_EXECUTION_STAGE_TRANSFER |
+                           IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
+                           IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                           IREE_HAL_EXECUTION_STAGE_TRANSFER,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 0,
+      .memory_barriers = nullptr,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  IREE_ASSERT_OK(
+      iree_hal_command_buffer_barrier(command_buffer, &retire_barrier));
   IREE_ASSERT_OK(iree_hal_command_buffer_end(command_buffer));
 
   SemaphoreList wait(device_, {0}, {1});
@@ -493,11 +754,6 @@ TEST_P(DispatchReuseTest, AllocaExecuteDeallocaCycle) {
   Ref<iree_hal_command_buffer_t> command_buffer;
   RecordWorkgroupIdDispatch(kWorkgroupCount, command_buffer.out());
 
-  iree_hal_buffer_params_t alloca_params = {0};
-  alloca_params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
-  alloca_params.usage =
-      IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
-
   // Run the alloca → execute → verify → dealloca cycle 3 times.
   // The dealloca must be deferred until AFTER host readback because the
   // dealloca decommits the transient buffer's backing. Since the dealloca
@@ -508,8 +764,8 @@ TEST_P(DispatchReuseTest, AllocaExecuteDeallocaCycle) {
     SemaphoreList alloca_signal(device_, {0}, {1});
     SemaphoreList empty_wait;
     iree_hal_buffer_t* transient_buffer = nullptr;
-    IREE_ASSERT_OK(QueueAlloca(empty_wait, alloca_signal, alloca_params,
-                               buffer_size, &transient_buffer));
+    IREE_ASSERT_OK(
+        QueueAlloca(empty_wait, alloca_signal, buffer_size, &transient_buffer));
     Ref<iree_hal_buffer_t> transient(transient_buffer);
 
     // Step 2: execute — waits on alloca, signals execute.
@@ -548,18 +804,12 @@ TEST_P(DispatchReuseTest, PipelinedAllocaExecuteDealloca) {
   Ref<iree_hal_command_buffer_t> command_buffer;
   RecordWorkgroupIdDispatch(kWorkgroupCount, command_buffer.out());
 
-  iree_hal_buffer_params_t alloca_params = {0};
-  alloca_params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
-  alloca_params.usage =
-      IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
-
   SemaphoreList empty_wait;
 
   // Phase 1: alloca + execute for buffer A.
   SemaphoreList alloca_a_signal(device_, {0}, {1});
   iree_hal_buffer_t* raw_a = nullptr;
-  IREE_ASSERT_OK(QueueAlloca(empty_wait, alloca_a_signal, alloca_params,
-                             buffer_size, &raw_a));
+  IREE_ASSERT_OK(QueueAlloca(empty_wait, alloca_a_signal, buffer_size, &raw_a));
   Ref<iree_hal_buffer_t> buffer_a(raw_a);
 
   SemaphoreList execute_a_signal(device_, {0}, {1});
@@ -572,8 +822,7 @@ TEST_P(DispatchReuseTest, PipelinedAllocaExecuteDealloca) {
   // Phase 2: alloca + execute for buffer B (independent of phase 1).
   SemaphoreList alloca_b_signal(device_, {0}, {1});
   iree_hal_buffer_t* raw_b = nullptr;
-  IREE_ASSERT_OK(QueueAlloca(empty_wait, alloca_b_signal, alloca_params,
-                             buffer_size, &raw_b));
+  IREE_ASSERT_OK(QueueAlloca(empty_wait, alloca_b_signal, buffer_size, &raw_b));
   Ref<iree_hal_buffer_t> buffer_b(raw_b);
 
   SemaphoreList execute_b_signal(device_, {0}, {1});

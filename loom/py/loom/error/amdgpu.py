@@ -801,7 +801,7 @@ ERR_AMDGPU_038 = ErrorDef(
     message=(
         "AMDGPU spill lowering rejected '{op_name}' in '@{function_name}': "
         "value '{value_name}' has type {actual_type}, but spill traffic "
-        "lowering supports AMDGPU SGPR or VGPR register values"
+        "lowering supports AMDGPU SGPR, VGPR, or AGPR register values"
     ),
     params=(
         ErrorParam("function_name", ParamKind.STRING),
@@ -810,7 +810,7 @@ ERR_AMDGPU_038 = ErrorDef(
         ErrorParam("actual_type", ParamKind.TYPE),
     ),
     fix_hint=(
-        "Spill only values allocated in the selected AMDGPU SGPR or VGPR "
+        "Spill only values allocated in the selected AMDGPU SGPR, VGPR, or AGPR "
         "descriptor register class"
     ),
 )
@@ -1000,6 +1000,33 @@ ERR_AMDGPU_045 = ErrorDef(
     ),
 )
 
+# ERR_AMDGPU_046: AMDGPU TSAN history layout is not representable.
+ERR_AMDGPU_046 = ErrorDef(
+    domain=ErrorDomain.AMDGPU,
+    code=46,
+    severity=Severity.ERROR,
+    summary="AMDGPU TSAN history layout is not representable.",
+    message=(
+        "AMDGPU target '{target_key}' export '{export_name}' config "
+        "'{config_key}' rejected subgroup race instrumentation for "
+        "'{op_name}' in '@{function_name}': fixed workgroup size "
+        "{workgroup_size}, {function_site_count} function sanitizer site(s), "
+        "and wavefront size {wavefront_size} cannot fit the 64-bit history "
+        "format for reason '{reason_key}'"
+    ),
+    params=(
+        *_TARGET_CONTEXT_PARAMS,
+        ErrorParam("workgroup_size", ParamKind.U32),
+        ErrorParam("function_site_count", ParamKind.U32),
+        ErrorParam("wavefront_size", ParamKind.U32),
+        ErrorParam("reason_key", ParamKind.STRING),
+    ),
+    fix_hint=(
+        "Use a supported wavefront width, reduce the fixed workgroup size, "
+        "or split the sanitizer-instrumented function"
+    ),
+)
+
 # ERR_AMDGPU_047: target instruction constraint requires legalization.
 ERR_AMDGPU_047 = ErrorDef(
     domain=ErrorDomain.AMDGPU,
@@ -1082,6 +1109,64 @@ ERR_AMDGPU_050 = ErrorDef(
     fix_hint="Omit the optional features field when no assertions are required",
 )
 
+# ERR_AMDGPU_051: AMDGPU code object mixes target identities.
+ERR_AMDGPU_051 = ErrorDef(
+    domain=ErrorDomain.AMDGPU,
+    code=51,
+    severity=Severity.ERROR,
+    summary="AMDGPU code object mixes target identities.",
+    message=(
+        "AMDGPU HAL kernel '@{function_name}' targets '{target_key}', but "
+        "code object target '{code_object_target_key}' was selected by "
+        "'@{first_function_name}'"
+    ),
+    params=(
+        ErrorParam("function_name", ParamKind.STRING),
+        ErrorParam("target_key", ParamKind.STRING),
+        ErrorParam("first_function_name", ParamKind.STRING),
+        ErrorParam("code_object_target_key", ParamKind.STRING),
+    ),
+    fix_hint=(
+        "Partition AMDGPU HAL kernels by exact target identity and emit one "
+        "code object per target"
+    ),
+)
+
+# ERR_AMDGPU_052: final resources cannot admit one complete workgroup.
+ERR_AMDGPU_052 = ErrorDef(
+    domain=ErrorDomain.AMDGPU,
+    code=52,
+    severity=Severity.ERROR,
+    summary="AMDGPU final resources cannot admit one complete workgroup.",
+    message=(
+        "AMDGPU target '{target_key}' export '{export_name}' config "
+        "'{config_key}' rejected '@{function_name}' for processor "
+        "'{processor}': its fixed {workgroup_size}-workitem workgroup uses "
+        "{waves_per_workgroup} wave{wave_size} waves and requires at least "
+        "{required_waves_per_simd} resident waves per SIMD, but final "
+        "resources admit {resident_waves_per_simd} (SGPRs={sgpr_count}, "
+        "VGPRs={vgpr_count}, LDS={local_memory_bytes} bytes, limiting "
+        "resource='{limiting_resource}')"
+    ),
+    params=(
+        *_TARGET_CONTEXT_PARAMS,
+        ErrorParam("processor", ParamKind.STRING),
+        ErrorParam("workgroup_size", ParamKind.U32),
+        ErrorParam("waves_per_workgroup", ParamKind.U32),
+        ErrorParam("wave_size", ParamKind.U32),
+        ErrorParam("required_waves_per_simd", ParamKind.U32),
+        ErrorParam("resident_waves_per_simd", ParamKind.U32),
+        ErrorParam("sgpr_count", ParamKind.U32),
+        ErrorParam("vgpr_count", ParamKind.U32),
+        ErrorParam("local_memory_bytes", ParamKind.U32),
+        ErrorParam("limiting_resource", ParamKind.STRING),
+    ),
+    fix_hint=(
+        "Reduce register use, workgroup size, or workgroup-local storage until "
+        "one complete workgroup fits in the occupancy domain"
+    ),
+)
+
 ALL_AMDGPU_ERRORS = (
     ERR_AMDGPU_001,
     ERR_AMDGPU_006,
@@ -1124,8 +1209,11 @@ ALL_AMDGPU_ERRORS = (
     ERR_AMDGPU_043,
     ERR_AMDGPU_044,
     ERR_AMDGPU_045,
+    ERR_AMDGPU_046,
     ERR_AMDGPU_047,
     ERR_AMDGPU_048,
     ERR_AMDGPU_049,
     ERR_AMDGPU_050,
+    ERR_AMDGPU_051,
+    ERR_AMDGPU_052,
 )

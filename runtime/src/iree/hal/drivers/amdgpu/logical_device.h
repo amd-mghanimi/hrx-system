@@ -15,6 +15,7 @@
 #include "iree/hal/drivers/amdgpu/api.h"
 #include "iree/hal/drivers/amdgpu/asan_state.h"
 #include "iree/hal/drivers/amdgpu/feedback_state.h"
+#include "iree/hal/drivers/amdgpu/memory_backend.h"
 #include "iree/hal/drivers/amdgpu/profile_events.h"
 #include "iree/hal/drivers/amdgpu/profile_metadata.h"
 #include "iree/hal/drivers/amdgpu/tsan_state.h"
@@ -179,6 +180,9 @@ typedef struct iree_hal_amdgpu_logical_device_t {
   // Logical allocator.
   iree_hal_allocator_t* device_allocator;
 
+  // Borrowed native owners exposed to cold scoped memory construction.
+  iree_hal_amdgpu_memory_backend_t memory_backend;
+
   // Optional provider used for creating/configuring collective channels.
   iree_hal_channel_provider_t* channel_provider;
 
@@ -300,7 +304,7 @@ bool iree_hal_amdgpu_logical_device_should_profile_dispatch(
     uint32_t export_ordinal, uint64_t command_buffer_id, uint32_t command_index,
     uint32_t physical_device_ordinal, uint32_t queue_ordinal);
 
-// Returns a session-local allocation id, or 0 when memory profiling is off.
+// Returns a process-wide allocation id, or 0 when memory profiling is off.
 //
 // |out_session_id| receives the active profiling session id owning the returned
 // allocation id. Callers that may release after a later profiling session

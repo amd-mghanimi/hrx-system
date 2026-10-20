@@ -28,6 +28,16 @@ typedef uint16_t loom_target_context_ordinal_t;
 #define LOOM_TARGET_CONTEXT_ORDINAL_INVALID \
   ((loom_target_context_ordinal_t)UINT16_MAX)
 
+typedef struct loom_low_memory_access_map_t loom_low_memory_access_map_t;
+typedef struct loom_low_loop_execution_map_t loom_low_loop_execution_map_t;
+
+typedef enum loom_target_function_representation_flag_bits_e {
+  // At least one callable, CFG, or LoopLike boundary carries vector packets
+  // materialized by the shared boundary projection driver.
+  LOOM_TARGET_FUNCTION_REPRESENTATION_FLAG_VECTOR_PACKET_BOUNDARIES = 1u << 0,
+} loom_target_function_representation_flag_bits_t;
+typedef uint8_t loom_target_function_representation_flags_t;
+
 typedef struct loom_target_function_version_t {
   // Generic compiler function-version base. Must remain the first field.
   loom_function_version_t base;
@@ -52,6 +62,9 @@ typedef struct loom_target_function_version_t {
   // versions can leave gaps in the ordinal space.
   loom_target_context_ordinal_t target_context_ordinal;
 
+  // Compiler-owned representation facts retained across function replacement.
+  loom_target_function_representation_flags_t representation_flags;
+
   // True when the live function's authored target definition is an exact IR
   // witness for |resolved_target|.
   bool authored_target_is_exact;
@@ -62,6 +75,12 @@ typedef struct loom_target_function_version_t {
 
   // Applied source schedules retained across lowering and separate emit calls.
   loom_source_loop_pipeline_list_t loop_pipelines;
+
+  // Captured source memory proofs bound to current Low packet effects.
+  loom_low_memory_access_map_t* memory_accesses;
+
+  // Captured source loop execution proofs bound to current Low controls.
+  loom_low_loop_execution_map_t* loop_execution;
 } loom_target_function_version_t;
 
 // Static identity for target-refined function versions.

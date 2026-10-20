@@ -1019,21 +1019,21 @@ func.def @integer_coordinates(%limit: i32) -> (vector<4xi32>, vector<4xi1>) {
 
 // Static aggregate constructors expose lanes but keep vector.from_elements as
 // the explicit vector ABI boundary.
-func.def @static_constant_poison() -> (vector<2xi32>, vector<2xf32>) {
+func.def @static_constant_poison(%x: f32, %y: f32) -> (vector<2xi32>, vector<2xf32>) {
   %c = vector.constant 7 : vector<2xi32>
   %p = vector.poison : vector<2xf32>
-  func.return %c, %p : vector<2xi32>, vector<2xf32>
+  %first = vector.insert %x into %p[0] : f32, vector<2xf32>
+  %filled = vector.insert %y into %first[1] : f32, vector<2xf32>
+  func.return %c, %filled : vector<2xi32>, vector<2xf32>
 }
 
 // ----
-func.def @static_constant_poison() -> (vector<2xi32>, vector<2xf32>) {
-  %7 = scalar.constant 7 : i32
-  %8 = scalar.constant 7 : i32
-  %c = vector.from_elements %7, %8 : vector<2xi32>
-  %4 = scalar.poison : f32
-  %5 = scalar.poison : f32
-  %p = vector.from_elements %4, %5 : vector<2xf32>
-  func.return %c, %p : vector<2xi32>, vector<2xf32>
+func.def @static_constant_poison(%x: f32, %y: f32) -> (vector<2xi32>, vector<2xf32>) {
+  %9 = scalar.constant 7 : i32
+  %10 = scalar.constant 7 : i32
+  %c = vector.from_elements %9, %10 : vector<2xi32>
+  %filled = vector.from_elements %x, %y : vector<2xf32>
+  func.return %c, %filled : vector<2xi32>, vector<2xf32>
 }
 
 // ====
@@ -1101,29 +1101,178 @@ func.def @static_shape_changing_bitcast(%bytes: vector<2xi8>, %half: vector<1xf1
 
 // ----
 func.def @static_shape_changing_bitcast(%bytes: vector<2xi8>, %half: vector<1xf16>) -> (vector<1xf16>, vector<2xi8>) {
-  %19 = vector.extract %bytes[0] : vector<2xi8> -> i8
-  %20 = scalar.extui %19 : i8 to i16
-  %21 = vector.extract %bytes[1] : vector<2xi8> -> i8
-  %22 = scalar.extui %21 : i8 to i16
-  %23 = scalar.constant 8 : i16
-  %24 = scalar.shli %22, %23 : i16
-  %25 = scalar.ori %20, %24 : i16
-  %26 = scalar.bitcast %25 : i16 to f16
-  %to_half = vector.from_elements %26 : vector<1xf16>
+  %15 = vector.extract %bytes[0] : vector<2xi8> -> i8
+  %16 = scalar.extui %15 : i8 to i16
+  %17 = vector.extract %bytes[1] : vector<2xi8> -> i8
+  %18 = scalar.extui %17 : i8 to i16
+  %19 = scalar.constant 8 : i16
+  %20 = scalar.shli %18, %19 : i16
+  %21 = scalar.ori %16, %20 : i16
+  %22 = scalar.bitcast %21 : i16 to f16
+  %to_half = vector.from_elements %22 : vector<1xf16>
   %6 = vector.extract %half[0] : vector<1xf16> -> f16
   %7 = scalar.bitcast %6 : f16 to i16
-  %8 = scalar.constant 255 : i16
-  %9 = scalar.andi %7, %8 : i16
-  %10 = scalar.trunci %9 : i16 to i8
-  %11 = vector.extract %half[0] : vector<1xf16> -> f16
-  %12 = scalar.bitcast %11 : f16 to i16
-  %13 = scalar.constant 8 : i16
-  %14 = scalar.shrui %12, %13 : i16
-  %15 = scalar.constant 255 : i16
-  %16 = scalar.andi %14, %15 : i16
-  %17 = scalar.trunci %16 : i16 to i8
-  %to_bytes = vector.from_elements %10, %17 : vector<2xi8>
+  %8 = scalar.bitfield.extractu %7 {offset = 0, width = 8} : i16 -> i16
+  %9 = scalar.trunci %8 : i16 to i8
+  %10 = vector.extract %half[0] : vector<1xf16> -> f16
+  %11 = scalar.bitcast %10 : f16 to i16
+  %12 = scalar.bitfield.extractu %11 {offset = 8, width = 8} : i16 -> i16
+  %13 = scalar.trunci %12 : i16 to i8
+  %to_bytes = vector.from_elements %9, %13 : vector<2xi8>
   func.return %to_half, %to_bytes : vector<1xf16>, vector<2xi8>
+}
+
+// ====
+
+// Static integer carriers preserve partial source lanes as bitfield extracts
+// across the complete legal width family. Packing consumes whole source lanes,
+// including multidimensional source shapes in row-major order.
+func.def @static_shape_changing_bitcast_integer_family(%byte: vector<1xi8>, %half: vector<1xi16>, %word: vector<1xi32>, %dword: vector<1xi64>, %bits: vector<8xi1>, %matrix: vector<2x2xi8>, %quarters: vector<4xi16>) -> (vector<8xi1>, vector<2xi8>, vector<4xi8>, vector<4xi16>, vector<1xi8>, vector<1xi32>, vector<1xi64>) {
+  %byte_bits = vector.bitcast %byte : vector<1xi8> to vector<8xi1>
+  %half_bytes = vector.bitcast %half : vector<1xi16> to vector<2xi8>
+  %word_bytes = vector.bitcast %word : vector<1xi32> to vector<4xi8>
+  %dword_halves = vector.bitcast %dword : vector<1xi64> to vector<4xi16>
+  %packed_bits = vector.bitcast %bits : vector<8xi1> to vector<1xi8>
+  %packed_matrix = vector.bitcast %matrix : vector<2x2xi8> to vector<1xi32>
+  %packed_quarters = vector.bitcast %quarters : vector<4xi16> to vector<1xi64>
+  func.return %byte_bits, %half_bytes, %word_bytes, %dword_halves, %packed_bits, %packed_matrix, %packed_quarters : vector<8xi1>, vector<2xi8>, vector<4xi8>, vector<4xi16>, vector<1xi8>, vector<1xi32>, vector<1xi64>
+}
+
+// ----
+func.def @static_shape_changing_bitcast_integer_family(%byte: vector<1xi8>, %half: vector<1xi16>, %word: vector<1xi32>, %dword: vector<1xi64>, %bits: vector<8xi1>, %matrix: vector<2x2xi8>, %quarters: vector<4xi16>) -> (vector<8xi1>, vector<2xi8>, vector<4xi8>, vector<4xi16>, vector<1xi8>, vector<1xi32>, vector<1xi64>) {
+  %128 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %129 = scalar.bitfield.extractu %128 {offset = 0, width = 1} : i8 -> i8
+  %130 = scalar.trunci %129 : i8 to i1
+  %131 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %132 = scalar.bitfield.extractu %131 {offset = 1, width = 1} : i8 -> i8
+  %133 = scalar.trunci %132 : i8 to i1
+  %134 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %135 = scalar.bitfield.extractu %134 {offset = 2, width = 1} : i8 -> i8
+  %136 = scalar.trunci %135 : i8 to i1
+  %137 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %138 = scalar.bitfield.extractu %137 {offset = 3, width = 1} : i8 -> i8
+  %139 = scalar.trunci %138 : i8 to i1
+  %140 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %141 = scalar.bitfield.extractu %140 {offset = 4, width = 1} : i8 -> i8
+  %142 = scalar.trunci %141 : i8 to i1
+  %143 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %144 = scalar.bitfield.extractu %143 {offset = 5, width = 1} : i8 -> i8
+  %145 = scalar.trunci %144 : i8 to i1
+  %146 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %147 = scalar.bitfield.extractu %146 {offset = 6, width = 1} : i8 -> i8
+  %148 = scalar.trunci %147 : i8 to i1
+  %149 = vector.extract %byte[0] : vector<1xi8> -> i8
+  %150 = scalar.bitfield.extractu %149 {offset = 7, width = 1} : i8 -> i8
+  %151 = scalar.trunci %150 : i8 to i1
+  %byte_bits = vector.from_elements %130, %133, %136, %139, %142, %145, %148, %151 : vector<8xi1>
+  %121 = vector.extract %half[0] : vector<1xi16> -> i16
+  %122 = scalar.bitfield.extractu %121 {offset = 0, width = 8} : i16 -> i16
+  %123 = scalar.trunci %122 : i16 to i8
+  %124 = vector.extract %half[0] : vector<1xi16> -> i16
+  %125 = scalar.bitfield.extractu %124 {offset = 8, width = 8} : i16 -> i16
+  %126 = scalar.trunci %125 : i16 to i8
+  %half_bytes = vector.from_elements %123, %126 : vector<2xi8>
+  %108 = vector.extract %word[0] : vector<1xi32> -> i32
+  %109 = scalar.bitfield.extractu %108 {offset = 0, width = 8} : i32 -> i32
+  %110 = scalar.trunci %109 : i32 to i8
+  %111 = vector.extract %word[0] : vector<1xi32> -> i32
+  %112 = scalar.bitfield.extractu %111 {offset = 8, width = 8} : i32 -> i32
+  %113 = scalar.trunci %112 : i32 to i8
+  %114 = vector.extract %word[0] : vector<1xi32> -> i32
+  %115 = scalar.bitfield.extractu %114 {offset = 16, width = 8} : i32 -> i32
+  %116 = scalar.trunci %115 : i32 to i8
+  %117 = vector.extract %word[0] : vector<1xi32> -> i32
+  %118 = scalar.bitfield.extractu %117 {offset = 24, width = 8} : i32 -> i32
+  %119 = scalar.trunci %118 : i32 to i8
+  %word_bytes = vector.from_elements %110, %113, %116, %119 : vector<4xi8>
+  %95 = vector.extract %dword[0] : vector<1xi64> -> i64
+  %96 = scalar.bitfield.extractu %95 {offset = 0, width = 16} : i64 -> i64
+  %97 = scalar.trunci %96 : i64 to i16
+  %98 = vector.extract %dword[0] : vector<1xi64> -> i64
+  %99 = scalar.bitfield.extractu %98 {offset = 16, width = 16} : i64 -> i64
+  %100 = scalar.trunci %99 : i64 to i16
+  %101 = vector.extract %dword[0] : vector<1xi64> -> i64
+  %102 = scalar.bitfield.extractu %101 {offset = 32, width = 16} : i64 -> i64
+  %103 = scalar.trunci %102 : i64 to i16
+  %104 = vector.extract %dword[0] : vector<1xi64> -> i64
+  %105 = scalar.bitfield.extractu %104 {offset = 48, width = 16} : i64 -> i64
+  %106 = scalar.trunci %105 : i64 to i16
+  %dword_halves = vector.from_elements %97, %100, %103, %106 : vector<4xi16>
+  %57 = vector.extract %bits[0] : vector<8xi1> -> i1
+  %58 = scalar.extui %57 : i1 to i8
+  %59 = vector.extract %bits[1] : vector<8xi1> -> i1
+  %60 = scalar.extui %59 : i1 to i8
+  %61 = scalar.constant 1 : i8
+  %62 = scalar.shli %60, %61 : i8
+  %63 = scalar.ori %58, %62 : i8
+  %64 = vector.extract %bits[2] : vector<8xi1> -> i1
+  %65 = scalar.extui %64 : i1 to i8
+  %66 = scalar.constant 2 : i8
+  %67 = scalar.shli %65, %66 : i8
+  %68 = scalar.ori %63, %67 : i8
+  %69 = vector.extract %bits[3] : vector<8xi1> -> i1
+  %70 = scalar.extui %69 : i1 to i8
+  %71 = scalar.constant 3 : i8
+  %72 = scalar.shli %70, %71 : i8
+  %73 = scalar.ori %68, %72 : i8
+  %74 = vector.extract %bits[4] : vector<8xi1> -> i1
+  %75 = scalar.extui %74 : i1 to i8
+  %76 = scalar.constant 4 : i8
+  %77 = scalar.shli %75, %76 : i8
+  %78 = scalar.ori %73, %77 : i8
+  %79 = vector.extract %bits[5] : vector<8xi1> -> i1
+  %80 = scalar.extui %79 : i1 to i8
+  %81 = scalar.constant 5 : i8
+  %82 = scalar.shli %80, %81 : i8
+  %83 = scalar.ori %78, %82 : i8
+  %84 = vector.extract %bits[6] : vector<8xi1> -> i1
+  %85 = scalar.extui %84 : i1 to i8
+  %86 = scalar.constant 6 : i8
+  %87 = scalar.shli %85, %86 : i8
+  %88 = scalar.ori %83, %87 : i8
+  %89 = vector.extract %bits[7] : vector<8xi1> -> i1
+  %90 = scalar.extui %89 : i1 to i8
+  %91 = scalar.constant 7 : i8
+  %92 = scalar.shli %90, %91 : i8
+  %93 = scalar.ori %88, %92 : i8
+  %packed_bits = vector.from_elements %93 : vector<1xi8>
+  %39 = vector.extract %matrix[0, 0] : vector<2x2xi8> -> i8
+  %40 = scalar.extui %39 : i8 to i32
+  %41 = vector.extract %matrix[0, 1] : vector<2x2xi8> -> i8
+  %42 = scalar.extui %41 : i8 to i32
+  %43 = scalar.constant 8 : i32
+  %44 = scalar.shli %42, %43 : i32
+  %45 = scalar.ori %40, %44 : i32
+  %46 = vector.extract %matrix[1, 0] : vector<2x2xi8> -> i8
+  %47 = scalar.extui %46 : i8 to i32
+  %48 = scalar.constant 16 : i32
+  %49 = scalar.shli %47, %48 : i32
+  %50 = scalar.ori %45, %49 : i32
+  %51 = vector.extract %matrix[1, 1] : vector<2x2xi8> -> i8
+  %52 = scalar.extui %51 : i8 to i32
+  %53 = scalar.constant 24 : i32
+  %54 = scalar.shli %52, %53 : i32
+  %55 = scalar.ori %50, %54 : i32
+  %packed_matrix = vector.from_elements %55 : vector<1xi32>
+  %21 = vector.extract %quarters[0] : vector<4xi16> -> i16
+  %22 = scalar.extui %21 : i16 to i64
+  %23 = vector.extract %quarters[1] : vector<4xi16> -> i16
+  %24 = scalar.extui %23 : i16 to i64
+  %25 = scalar.constant 16 : i64
+  %26 = scalar.shli %24, %25 : i64
+  %27 = scalar.ori %22, %26 : i64
+  %28 = vector.extract %quarters[2] : vector<4xi16> -> i16
+  %29 = scalar.extui %28 : i16 to i64
+  %30 = scalar.constant 32 : i64
+  %31 = scalar.shli %29, %30 : i64
+  %32 = scalar.ori %27, %31 : i64
+  %33 = vector.extract %quarters[3] : vector<4xi16> -> i16
+  %34 = scalar.extui %33 : i16 to i64
+  %35 = scalar.constant 48 : i64
+  %36 = scalar.shli %34, %35 : i64
+  %37 = scalar.ori %32, %36 : i64
+  %packed_quarters = vector.from_elements %37 : vector<1xi64>
+  func.return %byte_bits, %half_bytes, %word_bytes, %dword_halves, %packed_bits, %packed_matrix, %packed_quarters : vector<8xi1>, vector<2xi8>, vector<4xi8>, vector<4xi16>, vector<1xi8>, vector<1xi32>, vector<1xi64>
 }
 
 // ====
@@ -1469,8 +1618,8 @@ func.def @static_bitfields(%bytes: vector<2xi8>, %zero: vector<2xi8>) -> (vector
 
 // ====
 
-// dot2f extends each f16/bf16 source lane to f32 before feeding scalar.fmaf,
-// preserving the widened fused pair-dot semantics used by AMDGPU fdot2.
+// Scalar expansion uses dot2f's target-independent reference evaluation:
+// widen the source lanes and accumulate two ordered f32 fused products.
 func.def @static_dot2f(%lhs: vector<2xf16>, %rhs: vector<2xf16>, %acc: vector<1xf32>) -> (vector<1xf32>) {
   %r = vector.dot2f %lhs, %rhs, %acc : vector<2xf16>, vector<2xf16>, vector<1xf32>
   func.return %r : vector<1xf32>
@@ -1530,7 +1679,7 @@ func.def @dynamic_dot2f(%n: index, %m: index, %lhs: vector<[%n]xbf16>, %rhs: vec
 
 // ====
 
-// dot4i groups the last source axis into four-lane scalar multiply/add chains
+// dot4i groups the last source axis into four-lane scalar multiply-add chains
 // while preserving the signedness template at each scalar extension.
 func.def @static_dot4i(%lhs: vector<4xi8>, %rhs: vector<4xi8>, %acc: vector<1xi32>) -> (vector<1xi32>) {
   %r = vector.dot4i<s8u8> %lhs, %rhs, %acc : vector<4xi8>, vector<4xi8>, vector<1xi32>
@@ -1544,27 +1693,23 @@ func.def @static_dot4i(%lhs: vector<4xi8>, %rhs: vector<4xi8>, %acc: vector<1xi3
   %7 = vector.extract %rhs[0] : vector<4xi8> -> i8
   %8 = scalar.extsi %6 : i8 to i32
   %9 = scalar.extui %7 : i8 to i32
-  %10 = scalar.muli %8, %9 : i32
-  %11 = scalar.addi %5, %10 : i32
-  %12 = vector.extract %lhs[1] : vector<4xi8> -> i8
-  %13 = vector.extract %rhs[1] : vector<4xi8> -> i8
-  %14 = scalar.extsi %12 : i8 to i32
-  %15 = scalar.extui %13 : i8 to i32
-  %16 = scalar.muli %14, %15 : i32
-  %17 = scalar.addi %11, %16 : i32
-  %18 = vector.extract %lhs[2] : vector<4xi8> -> i8
-  %19 = vector.extract %rhs[2] : vector<4xi8> -> i8
-  %20 = scalar.extsi %18 : i8 to i32
-  %21 = scalar.extui %19 : i8 to i32
-  %22 = scalar.muli %20, %21 : i32
-  %23 = scalar.addi %17, %22 : i32
-  %24 = vector.extract %lhs[3] : vector<4xi8> -> i8
-  %25 = vector.extract %rhs[3] : vector<4xi8> -> i8
-  %26 = scalar.extsi %24 : i8 to i32
-  %27 = scalar.extui %25 : i8 to i32
-  %28 = scalar.muli %26, %27 : i32
-  %29 = scalar.addi %23, %28 : i32
-  %r = vector.from_elements %29 : vector<1xi32>
+  %10 = scalar.fmai %8, %9, %5 : i32
+  %11 = vector.extract %lhs[1] : vector<4xi8> -> i8
+  %12 = vector.extract %rhs[1] : vector<4xi8> -> i8
+  %13 = scalar.extsi %11 : i8 to i32
+  %14 = scalar.extui %12 : i8 to i32
+  %15 = scalar.fmai %13, %14, %10 : i32
+  %16 = vector.extract %lhs[2] : vector<4xi8> -> i8
+  %17 = vector.extract %rhs[2] : vector<4xi8> -> i8
+  %18 = scalar.extsi %16 : i8 to i32
+  %19 = scalar.extui %17 : i8 to i32
+  %20 = scalar.fmai %18, %19, %15 : i32
+  %21 = vector.extract %lhs[3] : vector<4xi8> -> i8
+  %22 = vector.extract %rhs[3] : vector<4xi8> -> i8
+  %23 = scalar.extsi %21 : i8 to i32
+  %24 = scalar.extui %22 : i8 to i32
+  %25 = scalar.fmai %23, %24, %20 : i32
+  %r = vector.from_elements %25 : vector<1xi32>
   func.return %r : vector<1xi32>
 }
 
@@ -1589,34 +1734,30 @@ func.def @dynamic_dot4i(%n: index, %m: index, %lhs: vector<[%n]xi8>, %rhs: vecto
     %16 = vector.extract %rhs[%14] : vector<[%n]xi8> -> i8
     %17 = scalar.extui %15 : i8 to i32
     %18 = scalar.extsi %16 : i8 to i32
-    %19 = scalar.muli %17, %18 : i32
-    %20 = scalar.addi %12, %19 : i32
-    %21 = index.constant 1 : index
-    %22 = index.add %14, %21 : index
-    %23 = vector.extract %lhs[%22] : vector<[%n]xi8> -> i8
-    %24 = vector.extract %rhs[%22] : vector<[%n]xi8> -> i8
-    %25 = scalar.extui %23 : i8 to i32
-    %26 = scalar.extsi %24 : i8 to i32
-    %27 = scalar.muli %25, %26 : i32
-    %28 = scalar.addi %20, %27 : i32
-    %29 = index.constant 2 : index
-    %30 = index.add %14, %29 : index
-    %31 = vector.extract %lhs[%30] : vector<[%n]xi8> -> i8
-    %32 = vector.extract %rhs[%30] : vector<[%n]xi8> -> i8
-    %33 = scalar.extui %31 : i8 to i32
-    %34 = scalar.extsi %32 : i8 to i32
-    %35 = scalar.muli %33, %34 : i32
-    %36 = scalar.addi %28, %35 : i32
-    %37 = index.constant 3 : index
-    %38 = index.add %14, %37 : index
-    %39 = vector.extract %lhs[%38] : vector<[%n]xi8> -> i8
-    %40 = vector.extract %rhs[%38] : vector<[%n]xi8> -> i8
-    %41 = scalar.extui %39 : i8 to i32
-    %42 = scalar.extsi %40 : i8 to i32
-    %43 = scalar.muli %41, %42 : i32
-    %44 = scalar.addi %36, %43 : i32
-    %45 = vector.insert %44 into %10[%9] : i32, vector<[%m]xi32>
-    scf.yield %45 : vector<[%m]xi32>
+    %19 = scalar.fmai %17, %18, %12 : i32
+    %20 = index.constant 1 : index
+    %21 = index.add %14, %20 : index
+    %22 = vector.extract %lhs[%21] : vector<[%n]xi8> -> i8
+    %23 = vector.extract %rhs[%21] : vector<[%n]xi8> -> i8
+    %24 = scalar.extui %22 : i8 to i32
+    %25 = scalar.extsi %23 : i8 to i32
+    %26 = scalar.fmai %24, %25, %19 : i32
+    %27 = index.constant 2 : index
+    %28 = index.add %14, %27 : index
+    %29 = vector.extract %lhs[%28] : vector<[%n]xi8> -> i8
+    %30 = vector.extract %rhs[%28] : vector<[%n]xi8> -> i8
+    %31 = scalar.extui %29 : i8 to i32
+    %32 = scalar.extsi %30 : i8 to i32
+    %33 = scalar.fmai %31, %32, %26 : i32
+    %34 = index.constant 3 : index
+    %35 = index.add %14, %34 : index
+    %36 = vector.extract %lhs[%35] : vector<[%n]xi8> -> i8
+    %37 = vector.extract %rhs[%35] : vector<[%n]xi8> -> i8
+    %38 = scalar.extui %36 : i8 to i32
+    %39 = scalar.extsi %37 : i8 to i32
+    %40 = scalar.fmai %38, %39, %33 : i32
+    %41 = vector.insert %40 into %10[%9] : i32, vector<[%m]xi32>
+    scf.yield %41 : vector<[%m]xi32>
   }
   func.return %r : vector<[%m]xi32>
 }
@@ -1647,65 +1788,57 @@ func.def @static_dot8i4(%lhs: vector<1xi32>, %rhs: vector<1xi32>, %acc: vector<1
   %17 = scalar.andi %6, %8 : i32
   %18 = scalar.shli %17, %15 : i32
   %19 = scalar.shrsi %18, %15 : i32
-  %20 = scalar.muli %16, %19 : i32
-  %21 = scalar.addi %7, %20 : i32
-  %22 = scalar.shrui %5, %9 : i32
-  %23 = scalar.andi %22, %8 : i32
-  %24 = scalar.shrui %6, %9 : i32
-  %25 = scalar.andi %24, %8 : i32
-  %26 = scalar.shli %25, %15 : i32
-  %27 = scalar.shrsi %26, %15 : i32
-  %28 = scalar.muli %23, %27 : i32
-  %29 = scalar.addi %21, %28 : i32
-  %30 = scalar.shrui %5, %10 : i32
+  %20 = scalar.fmai %16, %19, %7 : i32
+  %21 = scalar.shrui %5, %9 : i32
+  %22 = scalar.andi %21, %8 : i32
+  %23 = scalar.shrui %6, %9 : i32
+  %24 = scalar.andi %23, %8 : i32
+  %25 = scalar.shli %24, %15 : i32
+  %26 = scalar.shrsi %25, %15 : i32
+  %27 = scalar.fmai %22, %26, %20 : i32
+  %28 = scalar.shrui %5, %10 : i32
+  %29 = scalar.andi %28, %8 : i32
+  %30 = scalar.shrui %6, %10 : i32
   %31 = scalar.andi %30, %8 : i32
-  %32 = scalar.shrui %6, %10 : i32
-  %33 = scalar.andi %32, %8 : i32
-  %34 = scalar.shli %33, %15 : i32
-  %35 = scalar.shrsi %34, %15 : i32
-  %36 = scalar.muli %31, %35 : i32
-  %37 = scalar.addi %29, %36 : i32
-  %38 = scalar.shrui %5, %11 : i32
-  %39 = scalar.andi %38, %8 : i32
-  %40 = scalar.shrui %6, %11 : i32
-  %41 = scalar.andi %40, %8 : i32
-  %42 = scalar.shli %41, %15 : i32
-  %43 = scalar.shrsi %42, %15 : i32
-  %44 = scalar.muli %39, %43 : i32
-  %45 = scalar.addi %37, %44 : i32
-  %46 = scalar.shrui %5, %12 : i32
-  %47 = scalar.andi %46, %8 : i32
-  %48 = scalar.shrui %6, %12 : i32
-  %49 = scalar.andi %48, %8 : i32
-  %50 = scalar.shli %49, %15 : i32
-  %51 = scalar.shrsi %50, %15 : i32
-  %52 = scalar.muli %47, %51 : i32
-  %53 = scalar.addi %45, %52 : i32
-  %54 = scalar.shrui %5, %13 : i32
-  %55 = scalar.andi %54, %8 : i32
-  %56 = scalar.shrui %6, %13 : i32
+  %32 = scalar.shli %31, %15 : i32
+  %33 = scalar.shrsi %32, %15 : i32
+  %34 = scalar.fmai %29, %33, %27 : i32
+  %35 = scalar.shrui %5, %11 : i32
+  %36 = scalar.andi %35, %8 : i32
+  %37 = scalar.shrui %6, %11 : i32
+  %38 = scalar.andi %37, %8 : i32
+  %39 = scalar.shli %38, %15 : i32
+  %40 = scalar.shrsi %39, %15 : i32
+  %41 = scalar.fmai %36, %40, %34 : i32
+  %42 = scalar.shrui %5, %12 : i32
+  %43 = scalar.andi %42, %8 : i32
+  %44 = scalar.shrui %6, %12 : i32
+  %45 = scalar.andi %44, %8 : i32
+  %46 = scalar.shli %45, %15 : i32
+  %47 = scalar.shrsi %46, %15 : i32
+  %48 = scalar.fmai %43, %47, %41 : i32
+  %49 = scalar.shrui %5, %13 : i32
+  %50 = scalar.andi %49, %8 : i32
+  %51 = scalar.shrui %6, %13 : i32
+  %52 = scalar.andi %51, %8 : i32
+  %53 = scalar.shli %52, %15 : i32
+  %54 = scalar.shrsi %53, %15 : i32
+  %55 = scalar.fmai %50, %54, %48 : i32
+  %56 = scalar.shrui %5, %14 : i32
   %57 = scalar.andi %56, %8 : i32
-  %58 = scalar.shli %57, %15 : i32
-  %59 = scalar.shrsi %58, %15 : i32
-  %60 = scalar.muli %55, %59 : i32
-  %61 = scalar.addi %53, %60 : i32
-  %62 = scalar.shrui %5, %14 : i32
-  %63 = scalar.andi %62, %8 : i32
-  %64 = scalar.shrui %6, %14 : i32
-  %65 = scalar.andi %64, %8 : i32
-  %66 = scalar.shli %65, %15 : i32
-  %67 = scalar.shrsi %66, %15 : i32
-  %68 = scalar.muli %63, %67 : i32
-  %69 = scalar.addi %61, %68 : i32
-  %70 = scalar.shrui %5, %15 : i32
-  %71 = scalar.andi %70, %8 : i32
-  %72 = scalar.shrui %6, %15 : i32
-  %73 = scalar.andi %72, %8 : i32
-  %74 = scalar.shli %73, %15 : i32
-  %75 = scalar.shrsi %74, %15 : i32
-  %76 = scalar.muli %71, %75 : i32
-  %77 = scalar.addi %69, %76 : i32
-  %r = vector.from_elements %77 : vector<1xi32>
+  %58 = scalar.shrui %6, %14 : i32
+  %59 = scalar.andi %58, %8 : i32
+  %60 = scalar.shli %59, %15 : i32
+  %61 = scalar.shrsi %60, %15 : i32
+  %62 = scalar.fmai %57, %61, %55 : i32
+  %63 = scalar.shrui %5, %15 : i32
+  %64 = scalar.andi %63, %8 : i32
+  %65 = scalar.shrui %6, %15 : i32
+  %66 = scalar.andi %65, %8 : i32
+  %67 = scalar.shli %66, %15 : i32
+  %68 = scalar.shrsi %67, %15 : i32
+  %69 = scalar.fmai %64, %68, %62 : i32
+  %r = vector.from_elements %69 : vector<1xi32>
   func.return %r : vector<1xi32>
 }
 
@@ -1736,52 +1869,44 @@ func.def @dynamic_dot8i4(%n: index, %lhs: vector<[%n]xi32>, %rhs: vector<[%n]xi3
     %21 = scalar.constant 28 : i32
     %22 = scalar.andi %11, %14 : i32
     %23 = scalar.andi %12, %14 : i32
-    %24 = scalar.muli %22, %23 : i32
-    %25 = scalar.addi %13, %24 : i32
-    %26 = scalar.shrui %11, %15 : i32
-    %27 = scalar.andi %26, %14 : i32
-    %28 = scalar.shrui %12, %15 : i32
-    %29 = scalar.andi %28, %14 : i32
-    %30 = scalar.muli %27, %29 : i32
-    %31 = scalar.addi %25, %30 : i32
-    %32 = scalar.shrui %11, %16 : i32
+    %24 = scalar.fmai %22, %23, %13 : i32
+    %25 = scalar.shrui %11, %15 : i32
+    %26 = scalar.andi %25, %14 : i32
+    %27 = scalar.shrui %12, %15 : i32
+    %28 = scalar.andi %27, %14 : i32
+    %29 = scalar.fmai %26, %28, %24 : i32
+    %30 = scalar.shrui %11, %16 : i32
+    %31 = scalar.andi %30, %14 : i32
+    %32 = scalar.shrui %12, %16 : i32
     %33 = scalar.andi %32, %14 : i32
-    %34 = scalar.shrui %12, %16 : i32
-    %35 = scalar.andi %34, %14 : i32
-    %36 = scalar.muli %33, %35 : i32
-    %37 = scalar.addi %31, %36 : i32
-    %38 = scalar.shrui %11, %17 : i32
-    %39 = scalar.andi %38, %14 : i32
-    %40 = scalar.shrui %12, %17 : i32
+    %34 = scalar.fmai %31, %33, %29 : i32
+    %35 = scalar.shrui %11, %17 : i32
+    %36 = scalar.andi %35, %14 : i32
+    %37 = scalar.shrui %12, %17 : i32
+    %38 = scalar.andi %37, %14 : i32
+    %39 = scalar.fmai %36, %38, %34 : i32
+    %40 = scalar.shrui %11, %18 : i32
     %41 = scalar.andi %40, %14 : i32
-    %42 = scalar.muli %39, %41 : i32
-    %43 = scalar.addi %37, %42 : i32
-    %44 = scalar.shrui %11, %18 : i32
-    %45 = scalar.andi %44, %14 : i32
-    %46 = scalar.shrui %12, %18 : i32
-    %47 = scalar.andi %46, %14 : i32
-    %48 = scalar.muli %45, %47 : i32
-    %49 = scalar.addi %43, %48 : i32
-    %50 = scalar.shrui %11, %19 : i32
+    %42 = scalar.shrui %12, %18 : i32
+    %43 = scalar.andi %42, %14 : i32
+    %44 = scalar.fmai %41, %43, %39 : i32
+    %45 = scalar.shrui %11, %19 : i32
+    %46 = scalar.andi %45, %14 : i32
+    %47 = scalar.shrui %12, %19 : i32
+    %48 = scalar.andi %47, %14 : i32
+    %49 = scalar.fmai %46, %48, %44 : i32
+    %50 = scalar.shrui %11, %20 : i32
     %51 = scalar.andi %50, %14 : i32
-    %52 = scalar.shrui %12, %19 : i32
+    %52 = scalar.shrui %12, %20 : i32
     %53 = scalar.andi %52, %14 : i32
-    %54 = scalar.muli %51, %53 : i32
-    %55 = scalar.addi %49, %54 : i32
-    %56 = scalar.shrui %11, %20 : i32
-    %57 = scalar.andi %56, %14 : i32
-    %58 = scalar.shrui %12, %20 : i32
-    %59 = scalar.andi %58, %14 : i32
-    %60 = scalar.muli %57, %59 : i32
-    %61 = scalar.addi %55, %60 : i32
-    %62 = scalar.shrui %11, %21 : i32
-    %63 = scalar.andi %62, %14 : i32
-    %64 = scalar.shrui %12, %21 : i32
-    %65 = scalar.andi %64, %14 : i32
-    %66 = scalar.muli %63, %65 : i32
-    %67 = scalar.addi %61, %66 : i32
-    %68 = vector.insert %67 into %9[%8] : i32, vector<[%n]xi32>
-    scf.yield %68 : vector<[%n]xi32>
+    %54 = scalar.fmai %51, %53, %49 : i32
+    %55 = scalar.shrui %11, %21 : i32
+    %56 = scalar.andi %55, %14 : i32
+    %57 = scalar.shrui %12, %21 : i32
+    %58 = scalar.andi %57, %14 : i32
+    %59 = scalar.fmai %56, %58, %54 : i32
+    %60 = vector.insert %59 into %9[%8] : i32, vector<[%n]xi32>
+    scf.yield %60 : vector<[%n]xi32>
   }
   func.return %r : vector<[%n]xi32>
 }

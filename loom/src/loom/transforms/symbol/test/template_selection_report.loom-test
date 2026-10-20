@@ -2,7 +2,7 @@
 
 template.decl @demo.report(%m: index) -> (index)
 
-template.def<@demo.report> priority(10) @aligned(%m: index) -> (index) where [mul(%m, 16)] {
+template.def<@demo.report> priority(10) @aligned(%m: index) -> (index) where [multiple_of(%m, 16)] {
   template.return %m : index
 }
 
@@ -20,6 +20,8 @@ func.def public @entry() -> (index) {
 CHECK: *"changed":true,*
 CHECK: *"selected-sites":1,"fallback-selected-sites":1,"unresolved-sites":0,*
 CHECK: *{"category":"template-selection","outcome":"fallback_selected","function":"entry","application_op":"template.apply","family":"demo.report","selected_provider":"fallback","selected_priority":1,"highest_provider_priority":10,"provider_count":2,"target_identity_match_count":2,"target_identity_unresolved_count":0,"possible_count":1,"best_match_count":1}*
+CHECK: *{"category":"template-provider","outcome":"rejected","function":"entry","application_op":"template.apply","family":"demo.report","provider":"aligned","priority":10,"selected":false,"constraint":"value_predicate","predicate":"multiple_of"}*
+CHECK: *{"category":"template-provider","outcome":"accepted","function":"entry","application_op":"template.apply","family":"demo.report","provider":"fallback","priority":1,"selected":true}*
 
 // ====
 // RUN: with-checks pass-report select-templates{mode=final}
@@ -43,6 +45,8 @@ func.def public @entry(%arg: i32) -> (i32) {
 CHECK: *"changed":true,*
 CHECK: *"selected-sites":1,"fallback-selected-sites":1,"unresolved-sites":0,*
 CHECK: *{"category":"template-selection","outcome":"fallback_selected","function":"entry","application_op":"template.apply","family":"demo.target_condition_report","selected_provider":"fallback","selected_priority":1,"unresolved_provider":"wave64","unresolved_priority":10,"unresolved_contract":"provider","unresolved_reason":"target_condition","unresolved_condition":"target.subgroup.size","highest_provider_priority":10,"provider_count":2,"target_identity_match_count":2,"target_identity_unresolved_count":0,"possible_count":2,"best_match_count":1}*
+CHECK: *{"category":"template-provider","outcome":"unresolved","function":"entry","application_op":"template.apply","family":"demo.target_condition_report","provider":"wave64","priority":10,"selected":false,"constraint":"target_condition","condition":"target.subgroup.size"}*
+CHECK: *{"category":"template-provider","outcome":"accepted","function":"entry","application_op":"template.apply","family":"demo.target_condition_report","provider":"fallback","priority":1,"selected":true}*
 
 // ====
 // RUN: with-checks pass-report select-templates{mode=final}
@@ -68,3 +72,5 @@ func.def public @entry(%arg: i32) -> (i32) {
 CHECK: *"changed":true,*
 CHECK: *"selected-sites":1,"fallback-selected-sites":1,"unresolved-sites":0,*
 CHECK: *{"category":"template-selection","outcome":"fallback_selected","function":"entry","application_op":"template.apply","family":"demo.target_identity_report","selected_provider":"fallback","selected_priority":1,"unresolved_provider":"targeted","unresolved_priority":10,"unresolved_contract":"provider","unresolved_reason":"target_identity","highest_provider_priority":10,"provider_count":2,"target_identity_match_count":1,"target_identity_unresolved_count":1,"possible_count":2,"best_match_count":1}*
+CHECK: *{"category":"template-provider","outcome":"unresolved","function":"entry","application_op":"template.apply","family":"demo.target_identity_report","provider":"targeted","priority":10,"selected":false,"constraint":"target_identity"}*
+CHECK: *{"category":"template-provider","outcome":"accepted","function":"entry","application_op":"template.apply","family":"demo.target_identity_report","provider":"fallback","priority":1,"selected":true}*

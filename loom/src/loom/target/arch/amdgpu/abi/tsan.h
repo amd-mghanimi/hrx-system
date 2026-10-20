@@ -26,65 +26,65 @@ extern "C" {
 
 enum loom_amdgpu_tsan_config_layout_e {
   // Total byte length of the TSAN runtime config record.
-  LOOM_AMDGPU_TSAN_CONFIG_BYTE_LENGTH = 96u,
+  LOOM_AMDGPU_TSAN_CONFIG_BYTE_LENGTH = 32u,
   // Offset of the TSAN config flags bitfield.
   LOOM_AMDGPU_TSAN_CONFIG_FLAGS_OFFSET = 8u,
-  // Offset of the TSAN memory granule shift.
-  LOOM_AMDGPU_TSAN_CONFIG_MEMORY_GRANULE_SHIFT_OFFSET = 12u,
   // Offset of the TSAN shadow allocation base pointer.
   LOOM_AMDGPU_TSAN_CONFIG_SHADOW_BASE_OFFSET = 16u,
-  // Offset of the TSAN dispatch shadow byte stride.
-  LOOM_AMDGPU_TSAN_CONFIG_DISPATCH_SHADOW_STRIDE_OFFSET = 32u,
-  // Offset of the TSAN workgroup shadow byte stride.
-  LOOM_AMDGPU_TSAN_CONFIG_WORKGROUP_SHADOW_STRIDE_OFFSET = 40u,
-  // Offset of the TSAN workgroup capacity.
-  LOOM_AMDGPU_TSAN_CONFIG_WORKGROUP_CAPACITY_OFFSET = 48u,
-  // Offset of the TSAN shadow entry byte size.
-  LOOM_AMDGPU_TSAN_CONFIG_SHADOW_ENTRY_SIZE_OFFSET = 52u,
-  // Offset of the host-observed queue AQL ring base pointer.
-  LOOM_AMDGPU_TSAN_CONFIG_QUEUE_AQL_BASE_OFFSET = 56u,
-  // Offset of the host packet ID queue AQL ring slot mask.
-  LOOM_AMDGPU_TSAN_CONFIG_QUEUE_AQL_SLOT_MASK_OFFSET = 64u,
-  // Offset of the queue-local TSAN state pointer.
-  LOOM_AMDGPU_TSAN_CONFIG_QUEUE_STATE_BASE_OFFSET = 72u,
-  // Offset of the queue-local shadow slot count.
-  LOOM_AMDGPU_TSAN_CONFIG_SHADOW_SLOT_COUNT_OFFSET = 80u,
+  // Offset of the TSAN shadow allocation byte length.
+  LOOM_AMDGPU_TSAN_CONFIG_SHADOW_SIZE_OFFSET = 24u,
 };
 
 enum loom_amdgpu_tsan_config_flag_bits_e {
   // TSAN checking is enabled for the owning runtime.
   LOOM_AMDGPU_TSAN_CONFIG_FLAG_ENABLED = 1u << 0,
-  // Queue-local TSAN state is available.
-  LOOM_AMDGPU_TSAN_CONFIG_FLAG_QUEUE_STATE = 1u << 1,
-};
-
-enum loom_amdgpu_tsan_queue_state_layout_e {
-  // Total byte length of one queue-local TSAN state record.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_BYTE_LENGTH = 112u,
-  // Offset of the queue shadow allocation base pointer.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_SHADOW_BASE_OFFSET = 56u,
-  // Offset of the queue shadow allocation byte length.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_SHADOW_SIZE_OFFSET = 64u,
-  // Offset of the per-dispatch shadow stride.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_DISPATCH_SHADOW_STRIDE_OFFSET = 72u,
-  // Offset of the per-workgroup shadow stride.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_WORKGROUP_SHADOW_STRIDE_OFFSET = 80u,
-  // Offset of the queue workgroup capacity.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_WORKGROUP_CAPACITY_OFFSET = 88u,
-  // Offset of the queue shadow entry byte size.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_SHADOW_ENTRY_SIZE_OFFSET = 92u,
-  // Offset of the queue memory granule shift.
-  LOOM_AMDGPU_TSAN_QUEUE_STATE_MEMORY_GRANULE_SHIFT_OFFSET = 96u,
+  // Queue-local TSAN shadow storage is available.
+  LOOM_AMDGPU_TSAN_CONFIG_FLAG_QUEUE_SHADOW = 1u << 1,
 };
 
 enum loom_amdgpu_tsan_shadow_layout_e {
-  // Byte length of each TSAN local-memory shadow entry.
-  LOOM_AMDGPU_TSAN_SHADOW_ENTRY_BYTE_LENGTH = 8u,
+  // Byte length of one encoded access history.
+  LOOM_AMDGPU_TSAN_SHADOW_HISTORY_BYTE_LENGTH = 8u,
+  // Access histories retained for each application byte.
+  LOOM_AMDGPU_TSAN_SHADOW_HISTORY_COUNT = 2u,
+  // Byte length of each application-byte shadow cell.
+  LOOM_AMDGPU_TSAN_SHADOW_CELL_BYTE_LENGTH =
+      LOOM_AMDGPU_TSAN_SHADOW_HISTORY_BYTE_LENGTH *
+      LOOM_AMDGPU_TSAN_SHADOW_HISTORY_COUNT,
   // Per-workgroup shadow header byte length.
-  LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_HEADER_BYTE_LENGTH = 8u,
+  LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_HEADER_BYTE_LENGTH = 32u,
   // Offset of the low 32-bit per-workgroup barrier epoch inside the shadow
-  // header. The upper 32 bits of the 8-byte header are reserved.
+  // header. The upper 32 bits of the 8-byte epoch word are reserved.
   LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_EPOCH_OFFSET = 0u,
+  // Offset of the marked shadow-record stride used to identify the layout
+  // that initialized this workgroup record.
+  LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_LAYOUT_TAG_OFFSET = 8u,
+  // Offset of the full dispatch-generation window tag that owns this record.
+  LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_GENERATION_TAG_OFFSET = 16u,
+  // Offset of the reserved zero word that distinguishes headers displaced by
+  // one 16-byte shadow cell.
+  LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_RESERVED_OFFSET = 24u,
+  // Low-nibble marker combined with the 16-byte-aligned record stride. Its low
+  // three bits are not an access kind, and its low two bits are the forbidden
+  // chunk state, so neither histories nor the state bitmap can mimic a header.
+  LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_LAYOUT_TAG_MARKER = 0xEu,
+  // Offset of the chunk-state bitmap following the fixed record header.
+  LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_CHUNK_STATE_OFFSET =
+      LOOM_AMDGPU_TSAN_WORKGROUP_SHADOW_HEADER_BYTE_LENGTH,
+  // Application bytes retired together on their first access in a record
+  // lifetime.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_APPLICATION_BYTE_LENGTH = 16u,
+  // Shift mapping an application byte offset to its chunk index.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_APPLICATION_BYTE_SHIFT = 4u,
+  // Bits retained for each chunk state in the record bitmap.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_STATE_BIT_COUNT = 2u,
+  // Byte length of one atomically updated chunk-state word.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_STATE_WORD_BYTE_LENGTH = 4u,
+  // Chunk states packed into one 32-bit state word.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNKS_PER_STATE_WORD =
+      32u / LOOM_AMDGPU_TSAN_SHADOW_CHUNK_STATE_BIT_COUNT,
+  // Alignment of the history array following the chunk-state bitmap.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_STATE_BITMAP_ALIGNMENT = 16u,
   // Bit offset of the encoded prior access kind in a shadow entry.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_ACCESS_KIND_SHIFT = 0u,
   // Bit count of the encoded prior access kind in a shadow entry.
@@ -93,18 +93,50 @@ enum loom_amdgpu_tsan_shadow_layout_e {
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_WORKITEM_SHIFT = 3u,
   // Bit count of the encoded prior linear local workitem id.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_WORKITEM_BIT_COUNT = 10u,
+  // Number of distinct local workitem ids representable in a shadow entry.
+  LOOM_AMDGPU_TSAN_SHADOW_ENTRY_WORKITEM_CAPACITY =
+      1u << LOOM_AMDGPU_TSAN_SHADOW_ENTRY_WORKITEM_BIT_COUNT,
   // Bit offset of the encoded workgroup barrier epoch.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_EPOCH_SHIFT = 13u,
   // Bit count of the encoded workgroup barrier epoch.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_EPOCH_BIT_COUNT = 10u,
+  // Barrier epochs distinguished by each compact history entry.
+  LOOM_AMDGPU_TSAN_SHADOW_EPOCH_CAPACITY =
+      1u << LOOM_AMDGPU_TSAN_SHADOW_ENTRY_EPOCH_BIT_COUNT,
   // Bit offset of the encoded dispatch generation low bits.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_GENERATION_SHIFT = 23u,
   // Bit count of the encoded dispatch generation low bits.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_GENERATION_BIT_COUNT = 20u,
+  // Dispatch-ID shift selecting the full generation window stored in the
+  // workgroup header. The stored tag adds one so zero means uninitialized.
+  LOOM_AMDGPU_TSAN_SHADOW_GENERATION_WINDOW_SHIFT =
+      LOOM_AMDGPU_TSAN_SHADOW_ENTRY_GENERATION_BIT_COUNT,
+  // Number of dispatch IDs distinguished by compact history generation bits.
+  LOOM_AMDGPU_TSAN_SHADOW_GENERATION_WINDOW_CAPACITY =
+      1u << LOOM_AMDGPU_TSAN_SHADOW_GENERATION_WINDOW_SHIFT,
+  // Dispatch generation bits encoded in the low shadow entry word.
+  LOOM_AMDGPU_TSAN_SHADOW_ENTRY_LOW_GENERATION_BIT_COUNT =
+      32u - LOOM_AMDGPU_TSAN_SHADOW_ENTRY_GENERATION_SHIFT,
+  // Dispatch generation bits encoded in the high shadow entry word.
+  LOOM_AMDGPU_TSAN_SHADOW_ENTRY_HIGH_GENERATION_BIT_COUNT =
+      LOOM_AMDGPU_TSAN_SHADOW_ENTRY_GENERATION_BIT_COUNT -
+      LOOM_AMDGPU_TSAN_SHADOW_ENTRY_LOW_GENERATION_BIT_COUNT,
   // Bit offset of the encoded instrumentation site low bits.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_SITE_SHIFT = 43u,
   // Bit count of the encoded instrumentation site low bits.
   LOOM_AMDGPU_TSAN_SHADOW_ENTRY_SITE_BIT_COUNT = 21u,
+};
+
+// State of one lazily retired shadow-history chunk.
+typedef uint32_t loom_amdgpu_tsan_shadow_chunk_state_t;
+
+enum loom_amdgpu_tsan_shadow_chunk_state_e {
+  // No access has established this chunk in the current record lifetime.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_STATE_UNINITIALIZED = 0u,
+  // One access owns history retirement while competitors wait.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_STATE_CLAIMED = 1u,
+  // Histories are retired and may participate in race observations.
+  LOOM_AMDGPU_TSAN_SHADOW_CHUNK_STATE_READY = 3u,
 };
 
 // Encoded access kind stored in each TSAN shadow entry.
@@ -132,6 +164,12 @@ enum loom_amdgpu_tsan_check_kind_e {
   // Conflicting accesses to the same memory location were observed without
   // intervening synchronization.
   LOOM_AMDGPU_TSAN_CHECK_KIND_DATA_RACE = 1u,
+  // The dispatch requires more workgroup shadow bytes than the queue arena
+  // provides.
+  LOOM_AMDGPU_TSAN_CHECK_KIND_SHADOW_CAPACITY = 2u,
+  // A subgroup synchronization clock cannot advance without aliasing an
+  // earlier synchronization epoch still retained in shadow history.
+  LOOM_AMDGPU_TSAN_CHECK_KIND_SYNCHRONIZATION_CAPACITY = 3u,
 };
 
 // Memory space containing the observed address in AMDGPU TSAN reports.
@@ -234,6 +272,59 @@ enum loom_amdgpu_tsan_report_layout_e {
   LOOM_AMDGPU_TSAN_REPORT_PRIOR_WORKITEM_ID_Y_OFFSET = 112u,
   // Offset of the prior workitem Z coordinate.
   LOOM_AMDGPU_TSAN_REPORT_PRIOR_WORKITEM_ID_Z_OFFSET = 116u,
+  // Offset of the queue shadow allocation byte length in a capacity report.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_SHADOW_SIZE_OFFSET = 16u,
+  // Offset of the first invalid workgroup's required exclusive byte end.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_REQUIRED_SHADOW_END_OFFSET = 24u,
+  // Offset of the dispatch-specific workgroup shadow stride.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKGROUP_SHADOW_STRIDE_OFFSET = 32u,
+  // Offset of the first invalid flattened workgroup ordinal.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKGROUP_ORDINAL_OFFSET = 40u,
+  // Offset of the dispatch's final workgroup-local memory byte size.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_LOCAL_MEMORY_SIZE_OFFSET = 48u,
+  // Offset of the application-byte shadow cell size.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_SHADOW_CELL_SIZE_OFFSET = 52u,
+  // Offset of the history count retained in each shadow cell.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_SHADOW_HISTORY_COUNT_OFFSET = 56u,
+  // Offset of the first reserved capacity-report word.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_RESERVED0_OFFSET = 60u,
+  // Offset of the reporting workgroup X coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKGROUP_ID_X_OFFSET = 64u,
+  // Offset of the reporting workgroup Y coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKGROUP_ID_Y_OFFSET = 68u,
+  // Offset of the reporting workgroup Z coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKGROUP_ID_Z_OFFSET = 72u,
+  // Offset of the reporting workitem X coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKITEM_ID_X_OFFSET = 76u,
+  // Offset of the reporting workitem Y coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKITEM_ID_Y_OFFSET = 80u,
+  // Offset of the reporting workitem Z coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_WORKITEM_ID_Z_OFFSET = 84u,
+  // Offset of the reserved capacity-report tail.
+  LOOM_AMDGPU_TSAN_REPORT_CAPACITY_RESERVED1_OFFSET = 88u,
+  // Offset of the synchronization instrumentation site identifier.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_CURRENT_SITE_ID_OFFSET = 16u,
+  // Offset of the last representable subgroup epoch.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_SUBGROUP_EPOCH_OFFSET = 24u,
+  // Offset of the number of subgroup epochs representable in one workgroup
+  // epoch.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_SUBGROUP_EPOCH_CAPACITY_OFFSET = 28u,
+  // Offset of the target wavefront width defining one subgroup.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_WAVEFRONT_SIZE_OFFSET = 32u,
+  // Offset of the flattened subgroup identifier within the workgroup.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_SUBGROUP_ID_OFFSET = 36u,
+  // Offset of the reporting workgroup X coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_WORKGROUP_ID_X_OFFSET = 40u,
+  // Offset of the reporting workgroup Y coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_WORKGROUP_ID_Y_OFFSET = 44u,
+  // Offset of the reporting workgroup Z coordinate.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_WORKGROUP_ID_Z_OFFSET = 48u,
+  // Offset of the reporting linear workitem identifier.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_WORKITEM_LINEAR_ID_OFFSET = 52u,
+  // Offset of the exhausted subgroup clock shadow address.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_SUBGROUP_CLOCK_ADDRESS_OFFSET = 56u,
+  // Offset of the reserved synchronization-capacity report tail.
+  LOOM_AMDGPU_TSAN_REPORT_SYNC_CAPACITY_RESERVED_OFFSET = 64u,
 };
 
 #ifdef __cplusplus

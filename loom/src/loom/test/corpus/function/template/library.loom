@@ -1,0 +1,140 @@
+// Library materialization preserves requirements that become provable when
+// an ordinary helper or enclosing template is instantiated by its caller.
+template.decl @scale(%width: i32, %value: i32) -> (i32)
+
+template.decl @wrapper(%width: i32, %value: i32) -> (i32)
+
+template.def<@scale> @seven_times(%width: i32, %value: i32) -> (i32) where [eq(%width, 7)] {
+  %result = scalar.muli %width, %value : i32
+  template.return %result : i32
+}
+
+template.def<@wrapper> @forward(%width: i32, %value: i32) -> (i32) {
+  %result = template.call @seven_times(%width, %value) : (i32, i32) -> (i32)
+  template.return %result : i32
+}
+
+func.def inline @ordinary_wrapper(%width: i32, %value: i32) -> (i32) {
+  %result = template.call @forward(%width, %value) : (i32, i32) -> (i32)
+  func.return %result : i32
+}
+
+func.def @shared_nested(%value: i32) -> (i32) {
+  %required_width = scalar.constant 7 : i32
+  %increment = scalar.constant 1 : i32
+  %next = scalar.addi %value, %increment : i32
+  %first = func.call @ordinary_wrapper(%required_width, %value) : (i32, i32) -> (i32)
+  %second = func.call @ordinary_wrapper(%required_width, %next) : (i32, i32) -> (i32)
+  %result = scalar.addi %first, %second : i32
+  func.return %result : i32
+}
+
+// A specialized candidate in a reusable body must survive alongside its
+// fallback until caller substitution supplies the discriminating value.
+template.def<@scale> priority(-1) @unscaled(%width: i32, %value: i32) -> (i32) {
+  template.return %value : i32
+}
+
+func.def inline @ranked_wrapper(%width: i32, %value: i32) -> (i32) {
+  %result = template.apply<@scale>(%width, %value) : (i32, i32) -> (i32)
+  func.return %result : i32
+}
+
+func.def @ranked(%value: i32) -> (i32) {
+  %required_width = scalar.constant 7 : i32
+  %result = func.call @ranked_wrapper(%required_width, %value) : (i32, i32) -> (i32)
+  func.return %result : i32
+}
+
+// Applicability errors belong to final specialization. An unreachable family
+// application does not require an implementation at library materialization.
+template.decl @unavailable(%value: i32) -> (i32)
+
+func.def @dead_application(%value: i32) -> (i32) {
+  %never = scalar.constant false : i1
+  %result = scf.if %never -> (i32) {
+    %invalid = template.apply<@unavailable>(%value) : (i32) -> (i32)
+    scf.yield %invalid : i32
+  } else {
+    scf.yield %value : i32
+  }
+  func.return %result : i32
+}
+
+// An invalid exact call may also disappear before final specialization.
+func.def @dead_exact(%value: i32) -> (i32) {
+  %never = scalar.constant false : i1
+  %result = scf.if %never -> (i32) {
+    %outside_contract = scalar.constant 8 : i32
+    %invalid = template.call @seven_times(%outside_contract, %value) : (i32, i32) -> (i32)
+    scf.yield %invalid : i32
+  } else {
+    scf.yield %value : i32
+  }
+  func.return %result : i32
+}
+
+// Unselected provider bodies do not participate in applicability decisions.
+template.decl @choice(%value: i32) -> (i32)
+
+template.def<@choice> priority(1) @unused_choice(%value: i32) -> (i32) {
+  %outside_contract = scalar.constant 8 : i32
+  %invalid = template.call @seven_times(%outside_contract, %value) : (i32, i32) -> (i32)
+  template.return %invalid : i32
+}
+
+template.def<@choice> priority(2) @selected_choice(%value: i32) -> (i32) {
+  template.return %value : i32
+}
+
+func.def @choose(%value: i32) -> (i32) {
+  %result = template.apply<@choice>(%value) : (i32) -> (i32)
+  func.return %result : i32
+}
+
+func.def @template_library_observations(%entropy: i64, %output: buffer) {
+  %value = scalar.trunci %entropy : i64 to i32
+  %shared = func.call @shared_nested(%value) : (i32) -> (i32)
+  %ranked = func.call @ranked(%value) : (i32) -> (i32)
+  %chosen = func.call @choose(%value) : (i32) -> (i32)
+  %values = vector.from_elements %shared, %ranked, %chosen : vector<3xi32>
+  %origin = index.constant 0 : offset
+  %results = buffer.view %output[%origin] : buffer -> view<3xi32>
+  vector.store %values, %results[0] : vector<3xi32>, view<3xi32>
+  func.return
+}
+
+func.def @template_dead_library_observations(%entropy: i64, %output: buffer) {
+  %value = scalar.trunci %entropy : i64 to i32
+  %dead_application = func.call @dead_application(%value) : (i32) -> (i32)
+  %dead_exact = func.call @dead_exact(%value) : (i32) -> (i32)
+  %values = vector.from_elements %dead_application, %dead_exact : vector<2xi32>
+  %origin = index.constant 0 : offset
+  %results = buffer.view %output[%origin] : buffer -> view<2xi32>
+  vector.store %values, %results[0] : vector<2xi32>, view<2xi32>
+  func.return
+}
+
+check.scenario @template_library_values {
+  check.trial[128](%trial: index, %entropy: check.entropy) {
+    %value_source = check.entropy.fork %entropy name("value") : check.entropy
+    %value = check.entropy.read %value_source[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<3xi32>
+    check.compare<@template_library_observations>(%value, %output) : (i64, tensor<3xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<3xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @template_dead_library_values {
+  check.trial[128](%trial: index, %entropy: check.entropy) {
+    %value_source = check.entropy.fork %entropy name("value") : check.entropy
+    %value = check.entropy.read %value_source[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<2xi32>
+    check.compare<@template_dead_library_observations>(%value, %output) : (i64, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.return
+}

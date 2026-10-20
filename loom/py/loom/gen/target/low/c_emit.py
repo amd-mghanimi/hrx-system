@@ -12,18 +12,23 @@ from collections.abc import Sequence
 
 from loom.gen.support import c_arrays
 from loom.gen.support.generated_file import line_comment_header
-from loom.gen.support.string_pool import emit_c_string_pool
+from loom.gen.support.string_pool import CStringBank, CStringLayout, emit_c_string_pool, layout_c_string_pool
 from loom.gen.target.low import attr_indices, c_spelling, validation
 from loom.gen.target.low.compiled import (
     CompiledAsmForm,
+    CompiledAsmLayout,
+    CompiledAsmOperandType,
+    CompiledAsmResultType,
     CompiledDescriptorSet,
     CompiledNativeAsmValue,
     CompiledOperandForm,
+    CompiledScheduleClassTable,
+    CompiledScheduleModel,
     DescriptorSetView,
+    append_interned_sequence,
 )
 from loom.target.low_descriptors import (
     LOW_DESCRIPTOR_SET_ORDINAL_NONE,
-    AsmResultValueType,
     Descriptor,
     DescriptorSet,
     Hazard,
@@ -31,23 +36,19 @@ from loom.target.low_descriptors import (
     InstructionClass,
     Operand,
     RegClass,
+    RegClassFlag,
     descriptor_stable_id,
     operand_source_binding,
 )
 
 
-def _has_positive_effect_separations(compiled: CompiledDescriptorSet, view: DescriptorSetView) -> bool:
+def _has_positive_effect_separations(view: DescriptorSetView) -> bool:
     producer_events = {effect.producer_event for descriptor in view.descriptors for effect in descriptor.effects if effect.producer_event is not None}
     consumer_events = {effect.consumer_event for descriptor in view.descriptors for effect in descriptor.effects if effect.consumer_event is not None}
     return any(
-        separation.minimum_issue_separation_cycles > 0 and separation.producer_event in producer_events and separation.consumer_event in consumer_events for separation in compiled.event_separations
+        separation.minimum_issue_separation_cycles > 0 and separation.producer_event in producer_events and separation.consumer_event in consumer_events
+        for separation in view.schedule_model.event_separations
     )
-
-
-def _register_part_id_expr(compiled: CompiledDescriptorSet, part_name: str | None) -> str:
-    if part_name is None:
-        return "LOOM_LOW_REGISTER_PART_NONE"
-    return str(compiled.register_part_ids[part_name])
 
 
 def _operand_flag_expr(operand: Operand, rematerializable: bool) -> str:
@@ -83,7 +84,12 @@ def _hazard_reference_id(hazard: Hazard, resource_ids: dict[str, int]) -> int:
 def emit_header_for_spec(
     compiled: CompiledDescriptorSet,
     header_spec: DescriptorSet,
+    descriptor_ordinals: Sequence[int] | None = None,
 ) -> str:
+    if descriptor_ordinals is None:
+        descriptor_ordinals = range(len(header_spec.descriptors))
+    if len(descriptor_ordinals) != len(header_spec.descriptors):
+        raise ValueError(f"descriptor set header '{header_spec.key}' has mismatched descriptor ordinals")
     lines = [
         "// Copyright 2026 The IREE Authors",
         "//",
@@ -100,7 +106,18 @@ def emit_header_for_spec(
         '#include "loom/codegen/low/immediate_fields.h"',
         "",
     ]
-    lines.extend(c_spelling.descriptor_ref_define(header_spec, descriptor.key, i) for i, descriptor in enumerate(header_spec.descriptors))
+    lines.extend(
+        c_spelling.descriptor_ref_define(
+            header_spec,
+            descriptor.key,
+            descriptor_ordinal,
+        )
+        for descriptor, descriptor_ordinal in zip(
+            header_spec.descriptors,
+            descriptor_ordinals,
+            strict=True,
+        )
+    )
     lines.append(f"#define {header_spec.c_enum_prefix}_DESCRIPTOR_SET_ID UINT64_C(0x{descriptor_stable_id(header_spec.key):016x})")
     lines.append(
         f"#define {header_spec.c_enum_prefix}_DESCRIPTOR_SET_ORDINAL {c_spelling.u16_literal(header_spec.descriptor_set_ordinal if header_spec.descriptor_set_ordinal is not None else LOW_DESCRIPTOR_SET_ORDINAL_NONE)}"
@@ -165,13 +182,14 @@ def emit_header(compiled: CompiledDescriptorSet) -> str:
     return emit_header_for_spec(compiled, compiled.spec)
 
 
-def _emit_string_pool(compiled: CompiledDescriptorSet, lines: list[str]) -> None:
+def _emit_string_pool(compiled: CompiledDescriptorSet, lines: list[str], layout: CStringLayout) -> None:
     spec = compiled.spec
     pool = compiled.string_pool
     lines.extend(
         emit_c_string_pool(
             pool,
             f"k{spec.c_table_prefix}StringData",
+            layout=layout,
         )
     )
 
@@ -192,9 +210,13 @@ def _metadata_string_label(storage_spec: DescriptorSet, view_spec: DescriptorSet
     return f"{field_name}_{c_spelling.c_identifier(view_spec.key)}"
 
 
-def _intern_descriptor_set_view_metadata(compiled: CompiledDescriptorSet, view_spec: DescriptorSet) -> None:
+def _intern_descriptor_set_view_strings(
+    compiled: CompiledDescriptorSet,
+    view: DescriptorSetView,
+) -> None:
     pool = compiled.string_pool
     storage_spec = compiled.spec
+    view_spec = view.spec
     pool.intern(_metadata_string_label(storage_spec, view_spec, "set_key"), view_spec.key)
     if view_spec.target_key is not None:
         pool.intern(
@@ -206,45 +228,52 @@ def _intern_descriptor_set_view_metadata(compiled: CompiledDescriptorSet, view_s
             _metadata_string_label(storage_spec, view_spec, "feature_key"),
             view_spec.feature_key,
         )
+    for resource in view.schedule_model.resources:
+        pool.intern(f"resource_{resource.name}", resource.name)
+    for schedule_class in view.schedule_model.schedule_classes:
+        pool.intern(f"schedule_{schedule_class.name}", schedule_class.name)
+    for timing_event in view.schedule_model.timing_events:
+        pool.intern(f"timing_event_{timing_event.name}", timing_event.name)
 
 
 def _descriptor_row_lines(
     compiled: CompiledDescriptorSet,
     descriptors: Sequence[Descriptor],
     descriptor_rows: Sequence[dict[str, int]],
+    layout_rows: list[tuple[str, ...]],
+    layout_starts: dict[tuple[tuple[str, ...], ...], int],
 ) -> list[list[str]]:
     pool = compiled.string_pool
-    return [
-        [
-            f".key_string_ref = {pool.ref(f'descriptor_{descriptor.key}')},",
-            f".stable_id = {c_spelling.hex_u64_literal(descriptor_stable_id(descriptor.key))},",
-            f".mnemonic_string_ref = {c_spelling.optional_string_expr(pool, f'mnemonic_{descriptor.key}' if descriptor.mnemonic is not None else None)},",
-            f".semantic_tag_string_ref = {c_spelling.optional_string_expr(pool, f'semantic_{descriptor.key}' if descriptor.semantic_tag is not None else None)},",
-            f".feature_mask_word_start = {descriptor_rows[i]['feature_mask_word_start']},",
-            f".feature_mask_word_count = {descriptor_rows[i]['feature_mask_word_count']},",
-            f".encoding_field_value_start = {descriptor_rows[i]['encoding_field_value_start']},",
-            f".encoding_field_value_count = {descriptor_rows[i]['encoding_field_value_count']},",
-            f".encoding_format_id = {descriptor.encoding_format_id},",
-            f".encoding_id = {c_spelling.encoding_id_expr(descriptor.encoding_id)},",
-            f".operand_start = {descriptor_rows[i]['operand_start']},",
-            f".operand_count = {descriptor_rows[i]['operand_count']},",
-            f".result_count = {descriptor_rows[i]['result_count']},",
-            f".minimum_packet_operand_count = {descriptor_rows[i]['minimum_packet_operand_count']},",
-            f".immediate_start = {descriptor_rows[i]['immediate_start']},",
-            f".immediate_count = {descriptor_rows[i]['immediate_count']},",
-            f".effect_start = {descriptor_rows[i]['effect_start']},",
-            f".effect_count = {descriptor_rows[i]['effect_count']},",
-            f".constraint_start = {descriptor_rows[i]['constraint_start']},",
-            f".constraint_count = {descriptor_rows[i]['constraint_count']},",
-            f".storage_lease_start = {descriptor_rows[i]['storage_lease_start']},",
-            f".storage_lease_count = {descriptor_rows[i]['storage_lease_count']},",
-            f".operand_form_start = {descriptor_rows[i]['operand_form_start']},",
-            f".operand_form_count = {descriptor_rows[i]['operand_form_count']},",
-            f".flags = {c_spelling.flag_expr(descriptor.flags)},",
-            f".op_kind = {descriptor.op_kind.c_name},",
-        ]
-        for i, descriptor in enumerate(descriptors)
-    ]
+    rows = []
+    for descriptor, descriptor_row in zip(descriptors, descriptor_rows, strict=True):
+        layout = []
+        for span in ("feature_mask_word", "encoding_field_value", "immediate", "effect", "constraint", "storage_lease", "operand_form"):
+            count = descriptor_row[f"{span}_count"]
+            start = descriptor_row[f"{span}_start"] if count else 0
+            layout.extend((f".{span}_start = {start},", f".{span}_count = {count},"))
+        layout.extend(
+            (
+                f".encoding_format_id = {descriptor.encoding_format_id},",
+                f".minimum_packet_operand_count = {descriptor_row['minimum_packet_operand_count']},",
+                f".op_kind = {descriptor.op_kind.c_name},",
+            )
+        )
+        layout_index, _ = append_interned_sequence((tuple(layout),), layout_rows, layout_starts)
+        rows.append(
+            [
+                f".key_string_ref = {pool.ref(f'descriptor_{descriptor.key}')},",
+                f".stable_id = {c_spelling.hex_u64_literal(descriptor_stable_id(descriptor.key))},",
+                f".mnemonic_string_ref = {c_spelling.optional_string_expr(pool, f'mnemonic_{descriptor.key}' if descriptor.mnemonic is not None else None)},",
+                f".semantic_tag_string_ref = {c_spelling.optional_string_expr(pool, f'semantic_{descriptor.key}' if descriptor.semantic_tag is not None else None)},",
+                f".encoding_id = {c_spelling.encoding_id_expr(descriptor.encoding_id)},",
+                f".operand_start = {descriptor_row['operand_start']},",
+                f".operand_count = {descriptor_row['operand_count']},",
+                f".result_count = {descriptor_row['result_count']},",
+                f".layout_index = {layout_index},",
+                f".flags = {c_spelling.flag_expr(descriptor.flags)},",
+            ]
+        )
+    return rows
 
 
 def _descriptor_view_row_lines(
@@ -314,31 +343,54 @@ def _asm_form_row_lines(
             f".mnemonic_string_ref = {pool.ref(asm_form.mnemonic_label)},",
             f".native_assembly_mnemonic_string_ref = {c_spelling.optional_string_expr(pool, asm_form.native_assembly_mnemonic_label)},",
             f".descriptor_ordinal = {asm_form.descriptor_ordinal},",
-            f".result_operand_index_start = {asm_form.result_index_start},",
-            f".result_value_type_start = {asm_form.result_value_type_start if asm_form.result_value_type_start is not None else 'LOOM_LOW_ASM_RESULT_VALUE_TYPE_START_NONE'},",
-            f".result_operand_index_count = {len(asm_form.result_indices)},",
-            f".operand_index_start = {asm_form.operand_index_start},",
-            f".operand_segment_start = {asm_form.operand_segment_start},",
-            f".operand_index_count = {len(asm_form.operand_indices)},",
-            f".operand_segment_count = {len(asm_form.operand_segments)},",
-            f".immediate_start = {asm_form.immediate_start},",
-            f".immediate_count = {len(asm_form.immediates)},",
-            f".native_assembly_value_start = {asm_form.native_assembly_value_start},",
-            f".native_assembly_value_count = {len(asm_form.native_assembly_values)},",
+            f".layout_index = {asm_form.layout_index},",
         ]
         for asm_form in asm_forms
     ]
 
 
-def _asm_result_value_type_row_lines(
-    value_types: Sequence[AsmResultValueType | None],
+def _asm_layout_flags_expr(layout: CompiledAsmLayout) -> str:
+    flags = []
+    if layout.has_named_immediates:
+        flags.append("LOOM_LOW_ASM_LAYOUT_FLAG_NAMED_IMMEDIATES")
+    if layout.requires_named_immediates:
+        flags.append("LOOM_LOW_ASM_LAYOUT_FLAG_REQUIRED_NAMED_IMMEDIATES")
+    if layout.native_owns_immediate_syntax:
+        flags.append("LOOM_LOW_ASM_LAYOUT_FLAG_NATIVE_IMMEDIATE_SYNTAX")
+    return " | ".join(flags) if flags else "0"
+
+
+def _asm_layout_row_lines(layouts: Sequence[CompiledAsmLayout]) -> list[list[str]]:
+    return [
+        [
+            f".result_type_start = {layout.result_type_start if layout.result_type_start is not None else 'LOOM_LOW_ASM_RESULT_TYPE_START_NONE'},",
+            f".tied_result_start = {layout.tied_result_start},",
+            f".operand_segment_start = {layout.operand_segment_start},",
+            f".immediate_start = {layout.immediate_start},",
+            f".native_assembly_value_start = {layout.native_assembly_value_start},",
+            f".tied_result_count = {layout.tied_result_count},",
+            f".operand_segment_count = {layout.operand_segment_count},",
+            f".explicit_immediate_count = {layout.explicit_immediate_count},",
+            f".native_assembly_value_count = {layout.native_assembly_value_count},",
+            f".flags = {_asm_layout_flags_expr(layout)},",
+        ]
+        for layout in layouts
+    ]
+
+
+def _asm_result_type_row_lines(
+    value_types: Sequence[CompiledAsmResultType],
 ) -> list[list[str]]:
     rows: list[list[str]] = []
     for value_type in value_types:
         if value_type is None:
-            rows.append([".kind = LOOM_LOW_ASM_RESULT_VALUE_TYPE_KIND_NONE,"])
+            rows.append([".kind = LOOM_LOW_ASM_RESULT_TYPE_KIND_NONE,"])
             continue
-        kind = "LOOM_LOW_ASM_RESULT_VALUE_TYPE_KIND_VECTOR" if value_type.vector_lane_count else "LOOM_LOW_ASM_RESULT_VALUE_TYPE_KIND_SCALAR"
+        if isinstance(value_type, CompiledAsmOperandType):
+            kind = "TIED_OPERAND" if value_type.tied else "OPERAND"
+            rows.append([f".kind = LOOM_LOW_ASM_RESULT_TYPE_KIND_{kind},", f".operand_index = {value_type.operand_index},"])
+            continue
+        kind = "LOOM_LOW_ASM_RESULT_TYPE_KIND_VECTOR" if value_type.vector_lane_count else "LOOM_LOW_ASM_RESULT_TYPE_KIND_SCALAR"
         row = [
             f".kind = {kind},",
             f".element_type = LOOM_SCALAR_TYPE_{value_type.element_type.name},",
@@ -372,6 +424,27 @@ def _register_class_row_lines(
 ) -> list[list[str]]:
     pool = compiled.string_pool
     physical_register_widths = {register.name: len(register.atomic_units) for register in compiled.physical_registers}
+
+    def storage_lines(reg_class: RegClass) -> list[str]:
+        reg_class_id = compiled.reg_class_ids[reg_class.name]
+        if RegClassFlag.EXPLICIT_PHYSICAL_REGISTERS in reg_class.flags:
+            pressure_set_id = compiled.reg_class_pressure_set_ids[reg_class_id]
+            return [
+                ".storage = {",
+                "  .explicit_registers = {",
+                f"    .pressure_set_id = {pressure_set_id},",
+                "  },",
+                "},",
+            ]
+        return [
+            ".storage = {",
+            "  .fixed_locations = {",
+            f"    .fixed_location_base = {reg_class.fixed_location_base},",
+            f"    .fixed_location_count = {reg_class.fixed_location_count},",
+            "  },",
+            "},",
+        ]
+
     return [
         [
             f".name_string_ref = {pool.ref(f'reg_{reg_class.name}')},",
@@ -379,8 +452,7 @@ def _register_class_row_lines(
             f".flags = {c_spelling.flag_expr(reg_class.flags)},",
             f".alloc_unit_bits = {reg_class.alloc_unit_bits},",
             f".allocatable_count = {len(reg_class.physical_registers) if reg_class.physical_registers else reg_class.allocatable_count},",
-            f".fixed_location_base = {reg_class.fixed_location_base},",
-            f".fixed_location_count = {reg_class.fixed_location_count},",
+            *storage_lines(reg_class),
             f".physical_register_candidate_start = {compiled.physical_register_candidate_starts[compiled.reg_class_ids[reg_class.name]] if reg_class.physical_registers else 0},",
             ".candidate_lookup = {",
             f"  .ordinal_start = {compiled.physical_register_candidate_lookups[compiled.reg_class_ids[reg_class.name]].ordinal_start},",
@@ -402,16 +474,145 @@ def _register_class_row_lines(
     ]
 
 
+def _timing_event_row_lines(
+    compiled: CompiledDescriptorSet,
+    model: CompiledScheduleModel,
+) -> list[list[str]]:
+    separation_ranges = {}
+    for index, separation in enumerate(model.event_separations):
+        start, _, maximum = separation_ranges.get(separation.producer_event, (index, 0, 0))
+        separation_ranges[separation.producer_event] = (
+            start,
+            index - start + 1,
+            max(maximum, separation.minimum_issue_separation_cycles),
+        )
+    return [
+        [
+            f".name_string_ref = {compiled.string_pool.ref(f'timing_event_{timing_event.name}')},",
+            f".separation_start = {separation_ranges.get(timing_event.name, (0, 0, 0))[0]},",
+            f".separation_count = {separation_ranges.get(timing_event.name, (0, 0, 0))[1]},",
+            f".maximum_issue_separation_cycles = {separation_ranges.get(timing_event.name, (0, 0, 0))[2]},",
+        ]
+        for timing_event in model.timing_events
+    ]
+
+
+def _event_separation_row_lines(
+    model: CompiledScheduleModel,
+) -> list[list[str]]:
+    return [
+        [
+            f".producer_event_id = {model.timing_event_ids[separation.producer_event]},",
+            f".consumer_event_id = {model.timing_event_ids[separation.consumer_event]},",
+            f".minimum_issue_separation_cycles = {separation.minimum_issue_separation_cycles},",
+            f".model_quality = {separation.model_quality.c_name},",
+        ]
+        for separation in model.event_separations
+    ]
+
+
+def _resource_row_lines(
+    compiled: CompiledDescriptorSet,
+    model: CompiledScheduleModel,
+) -> list[list[str]]:
+    return [
+        [
+            f".name_string_ref = {compiled.string_pool.ref(f'resource_{resource.name}')},",
+            f".capacity_per_cycle = {resource.capacity_per_cycle},",
+            f".flags = {c_spelling.flag_expr(resource.flags)},",
+            f".kind = {resource.kind.c_name},",
+            f".contention_group_id = {resource.contention_group_id},",
+            ".calendar = {",
+            f"    .slot_start = {calendar.slot_start},",
+            f"    .slot_mask = {calendar.slot_mask},",
+            f"    .minimum_issue_units = {calendar.minimum_issue_units},",
+            "},",
+        ]
+        for resource, calendar in zip(
+            model.resources,
+            model.resource_calendars,
+            strict=True,
+        )
+    ]
+
+
+def _issue_use_row_lines(model: CompiledScheduleModel) -> list[list[str]]:
+    return [
+        [
+            f".resource_id = {model.resource_ids[issue_use.resource]},",
+            f".cycles = {issue_use.cycles},",
+            f".units = {issue_use.units},",
+            f".stage = {issue_use.stage},",
+            f".kind = {issue_use.kind.c_name},",
+        ]
+        for issue_use in model.issue_uses
+    ]
+
+
+def _hazard_row_lines(model: CompiledScheduleModel) -> list[list[str]]:
+    return [
+        [
+            f".kind = {hazard.kind.c_name},",
+            f".reference_kind = {_hazard_reference_kind(hazard).c_name},",
+            f".reference_id = {_hazard_reference_id(hazard, model.resource_ids)},",
+            f".producer_stage = {hazard.producer_stage},",
+            f".consumer_stage = {hazard.consumer_stage},",
+            f".distance = {hazard.distance},",
+            f".flags = {c_spelling.flag_expr(hazard.flags)},",
+        ]
+        for hazard in model.hazards
+    ]
+
+
+def _pressure_delta_row_lines(
+    compiled: CompiledDescriptorSet,
+    model: CompiledScheduleModel,
+) -> list[list[str]]:
+    return [
+        [
+            f".reg_class_id = {compiled.reg_class_ids[pressure.reg_class]},",
+            f".delta = {pressure.delta},",
+        ]
+        for pressure in model.pressure_deltas
+    ]
+
+
+def _schedule_class_row_lines(
+    compiled: CompiledDescriptorSet,
+    table: CompiledScheduleClassTable,
+) -> list[list[str]]:
+    return [
+        [
+            f".name_string_ref = {compiled.string_pool.ref(f'schedule_{schedule_class.name}')},",
+            f".latency_cycles = {schedule_class.latency_cycles},",
+            f".schedule_distance_cycles = {schedule_class.schedule_distance_cycles},",
+            f".minimum_issue_separation_cycles = {schedule_class.minimum_issue_separation_cycles},",
+            f".latency_kind = {schedule_class.latency_kind.c_name},",
+            f".issue_use_start = {table.schedule_rows[i]['issue_use_start']},",
+            f".issue_use_count = {table.schedule_rows[i]['issue_use_count']},",
+            f".hazard_start = {table.schedule_rows[i]['hazard_start']},",
+            f".hazard_count = {table.schedule_rows[i]['hazard_count']},",
+            f".flags = {c_spelling.flag_expr(schedule_class.flags)},",
+            f".minimum_issue_cycles = {table.schedule_rows[i]['minimum_issue_cycles']},",
+            f".model_quality = {schedule_class.model_quality.c_name},",
+            f".pressure_delta_start = {table.schedule_rows[i]['pressure_delta_start']},",
+            f".pressure_delta_count = {table.schedule_rows[i]['pressure_delta_count']},",
+        ]
+        for i, schedule_class in enumerate(table.schedule_classes)
+    ]
+
+
 def emit_source_for_views(
     compiled: CompiledDescriptorSet,
     *,
     views: Sequence[DescriptorSetView],
+    shared_strings: CStringBank | None = None,
 ) -> str:
     spec = compiled.spec
     pool = compiled.string_pool
     asm_table_storage = compiled.asm_table_storage
     for view in views:
-        _intern_descriptor_set_view_metadata(compiled, view.spec)
+        _intern_descriptor_set_view_strings(compiled, view)
     lines = [
         "// Copyright 2026 The IREE Authors",
         "//",
@@ -432,7 +633,10 @@ def emit_source_for_views(
         lines.append(f"const loom_low_descriptor_set_t* {view.spec.function_name}(void);")
     if len(views) > 1:
         lines.append("")
-    _emit_string_pool(compiled, lines)
+    string_layout = layout_c_string_pool(pool, shared_strings)
+    if string_layout.shared is not None:
+        lines.extend([f'#include "{string_layout.shared.header}"', ""])
+    _emit_string_pool(compiled, lines, string_layout)
 
     view_array_emitter = c_arrays.StaticArrayEmitter(lines)
     if any(view.reg_classes == tuple(compiled.reg_classes) for view in views):
@@ -477,7 +681,8 @@ def emit_source_for_views(
         [
             [
                 ".name_string_ref = " + pool.ref(f"register_packing_resource_{resource.source.name}") + ",",
-                f".capacity = {resource.source.capacity},",
+                f".capacity = {resource.capacity},",
+                f".flags = {c_spelling.flag_expr(resource.flags)},",
                 f".member_start = {resource.member_start},",
                 f".member_count = {resource.member_count},",
             ]
@@ -494,7 +699,7 @@ def emit_source_for_views(
                 f".reg_class_id = {member.reg_class_id},",
                 f".register_unit_count = {member.register_unit_count},",
                 f".resource_unit_count = {member.resource_unit_count},",
-                ".reserved = 0,",
+                f".flags = {c_spelling.flag_expr(member.flags)},",
             ]
             for member in compiled.register_packing_resource_members
         ],
@@ -574,10 +779,19 @@ def emit_source_for_views(
         [
             [
                 ".reg_class_id = " + ("LOOM_LOW_REG_CLASS_NONE" if reg_class_id is None else str(reg_class_id)) + ",",
+                ".register_part_id = " + ("LOOM_LOW_REGISTER_PART_NONE" if register_part_id is None else str(register_part_id)) + ",",
                 f".flags = {c_spelling.flag_expr(flags)},",
+                f".unit_alignment_log2 = {unit_alignment_log2},",
+                f".late_read_subgroup_size = {late_read_subgroup_size},",
             ]
-            for reg_class_id, flags in compiled.reg_class_alts
+            for reg_class_id, register_part_id, flags, unit_alignment_log2, late_read_subgroup_size in compiled.reg_class_alts
         ],
+    )
+    c_arrays.append_value_array(
+        lines,
+        "uint16_t",
+        f"k{spec.c_table_prefix}OperandIndices",
+        [str(index) for index in compiled.operand_indices],
     )
     _emit_array(
         lines,
@@ -600,11 +814,13 @@ def emit_source_for_views(
                 f".address_state_slot = {operand.address_state_slot},",
                 f".encoding_field_id = {operand.encoding_field_id},",
                 f".data_format_id = {operand.data_format_id},",
-                f".register_part_id = {_register_part_id_expr(compiled, operand.register_part)},",
                 f".read_stage = {operand.read_stage},",
                 f".ready_stage = {operand.ready_stage},",
                 ".read_event_id = " + ("LOOM_LOW_TIMING_EVENT_NONE" if operand.read_event is None else str(compiled.timing_event_ids[operand.read_event])) + ",",
                 ".write_event_id = " + ("LOOM_LOW_TIMING_EVENT_NONE" if operand.write_event is None else str(compiled.timing_event_ids[operand.write_event])) + ",",
+                ".rematerialization_source_operand_plus_one = "
+                + ("0" if compiled.operand_rematerialization_source_operand_indices[i] is None else str(compiled.operand_rematerialization_source_operand_indices[i] + 1))
+                + ",",
             ]
             for i, operand in enumerate(compiled.operands)
         ],
@@ -621,6 +837,7 @@ def emit_source_for_views(
                 f".kind = {immediate.kind.c_name},",
                 f".flags = {c_spelling.flag_expr(immediate.flags)},",
                 f".bit_width = {immediate.bit_width},",
+                *([f".encoding_subfield_offset = {immediate.encoding_field_bit_offset + 1},"] if immediate.encoding_field_bit_offset is not None else []),
                 f".value_step = {c_spelling.u64_literal(immediate.value_step)},",
                 f".encoding_field_id = {immediate.encoding_field_id},",
                 f".encoding_slice_count = {len(immediate.encoding_slices)},",
@@ -717,138 +934,56 @@ def emit_source_for_views(
         "StorageLeases",
         _storage_lease_row_lines(compiled),
     )
-    event_separation_ranges = {}
-    for index, separation in enumerate(compiled.event_separations):
-        if separation.minimum_issue_separation_cycles <= 0:
-            continue
-        start, count, maximum = event_separation_ranges.get(separation.producer_event, (index, 0, 0))
-        event_separation_ranges[separation.producer_event] = (start, index - start + 1, max(maximum, separation.minimum_issue_separation_cycles))
-    timing_event_rows = []
-    for timing_event in compiled.timing_events:
-        start, count, maximum = event_separation_ranges.get(timing_event.name, (0, 0, 0))
-        timing_event_rows.append(
-            [
-                f".name_string_ref = {pool.ref(f'timing_event_{timing_event.name}')},",
-                f".separation_start = {start},",
-                f".separation_count = {count},",
-                f".maximum_issue_separation_cycles = {maximum},",
-            ]
-        )
-    _emit_array(
-        lines,
-        "loom_low_timing_event_t",
-        spec.c_table_prefix,
-        "TimingEvents",
-        timing_event_rows,
-    )
-    _emit_array(
-        lines,
-        "loom_low_event_separation_t",
-        spec.c_table_prefix,
-        "EventSeparations",
-        [
-            [
-                f".producer_event_id = {compiled.timing_event_ids[separation.producer_event]},",
-                f".consumer_event_id = {compiled.timing_event_ids[separation.consumer_event]},",
-                f".minimum_issue_separation_cycles = {separation.minimum_issue_separation_cycles},",
-                f".model_quality = {separation.model_quality.c_name},",
-            ]
-            for separation in compiled.event_separations
-        ],
-    )
-    _emit_array(
-        lines,
-        "loom_low_resource_t",
-        spec.c_table_prefix,
-        "Resources",
-        [
-            [
-                f".name_string_ref = {pool.ref(f'resource_{resource.name}')},",
-                f".capacity_per_cycle = {resource.capacity_per_cycle},",
-                f".flags = {c_spelling.flag_expr(resource.flags)},",
-                f".kind = {resource.kind.c_name},",
-                f".contention_group_id = {resource.contention_group_id},",
-                ".calendar = {",
-                f"    .slot_start = {calendar.slot_start},",
-                f"    .slot_mask = {calendar.slot_mask},",
-                f"    .minimum_issue_units = {calendar.minimum_issue_units},",
-                "},",
-            ]
-            for resource, calendar in zip(compiled.resources, compiled.resource_calendars, strict=True)
-        ],
-    )
-    _emit_array(
-        lines,
-        "loom_low_issue_use_t",
-        spec.c_table_prefix,
-        "IssueUses",
-        [
-            [
-                f".resource_id = {compiled.resource_ids[issue_use.resource]},",
-                f".cycles = {issue_use.cycles},",
-                f".units = {issue_use.units},",
-                f".stage = {issue_use.stage},",
-                f".kind = {issue_use.kind.c_name},",
-            ]
-            for issue_use in compiled.issue_uses
-        ],
-    )
-    _emit_array(
-        lines,
-        "loom_low_hazard_t",
-        spec.c_table_prefix,
-        "Hazards",
-        [
-            [
-                f".kind = {hazard.kind.c_name},",
-                f".reference_kind = {_hazard_reference_kind(hazard).c_name},",
-                f".reference_id = {_hazard_reference_id(hazard, compiled.resource_ids)},",
-                f".producer_stage = {hazard.producer_stage},",
-                f".consumer_stage = {hazard.consumer_stage},",
-                f".distance = {hazard.distance},",
-                f".flags = {c_spelling.flag_expr(hazard.flags)},",
-            ]
-            for hazard in compiled.hazards
-        ],
-    )
-    _emit_array(
-        lines,
-        "loom_low_pressure_delta_t",
-        spec.c_table_prefix,
-        "PressureDeltas",
-        [
-            [
-                f".reg_class_id = {compiled.reg_class_ids[pressure.reg_class]},",
-                f".delta = {pressure.delta},",
-            ]
-            for pressure in compiled.pressure_deltas
-        ],
-    )
-    _emit_array(
-        lines,
+    schedule_class_table_symbol = view_array_emitter.append_struct_array(
         "loom_low_schedule_class_t",
-        spec.c_table_prefix,
-        "ScheduleClasses",
-        [
-            [
-                f".name_string_ref = {pool.ref(f'schedule_{schedule_class.name}')},",
-                f".latency_cycles = {schedule_class.latency_cycles},",
-                f".schedule_distance_cycles = {schedule_class.schedule_distance_cycles},",
-                f".minimum_issue_separation_cycles = {schedule_class.minimum_issue_separation_cycles},",
-                f".latency_kind = {schedule_class.latency_kind.c_name},",
-                f".issue_use_start = {compiled.schedule_rows[i]['issue_use_start']},",
-                f".issue_use_count = {compiled.schedule_rows[i]['issue_use_count']},",
-                f".hazard_start = {compiled.schedule_rows[i]['hazard_start']},",
-                f".hazard_count = {compiled.schedule_rows[i]['hazard_count']},",
-                f".flags = {c_spelling.flag_expr(schedule_class.flags)},",
-                f".minimum_issue_cycles = {compiled.schedule_rows[i]['minimum_issue_cycles']},",
-                f".model_quality = {schedule_class.model_quality.c_name},",
-                f".pressure_delta_start = {compiled.schedule_rows[i]['pressure_delta_start']},",
-                f".pressure_delta_count = {compiled.schedule_rows[i]['pressure_delta_count']},",
-            ]
-            for i, schedule_class in enumerate(compiled.schedule_classes)
-        ],
+        f"k{spec.c_table_prefix}ScheduleClasses",
+        _schedule_class_row_lines(compiled, compiled.schedule_class_table),
     )
+    schedule_class_row_id_symbols = {
+        view.spec.key: view_array_emitter.append_value_array(
+            "uint16_t",
+            f"k{view.spec.c_table_prefix}ScheduleClassRowIds",
+            [str(schedule_class_id) for schedule_class_id in view.schedule_class_row_ids],
+        )
+        for view in views
+        if view.schedule_class_row_ids
+    }
+    schedule_table_symbols: dict[str, dict[str, str]] = {}
+    for view in views:
+        model = view.schedule_model
+        table_prefix = view.spec.c_table_prefix
+        schedule_table_symbols[view.spec.key] = {
+            "timing_events": view_array_emitter.append_struct_array(
+                "loom_low_timing_event_t",
+                f"k{table_prefix}TimingEvents",
+                _timing_event_row_lines(compiled, model),
+            ),
+            "event_separations": view_array_emitter.append_struct_array(
+                "loom_low_event_separation_t",
+                f"k{table_prefix}EventSeparations",
+                _event_separation_row_lines(model),
+            ),
+            "resources": view_array_emitter.append_struct_array(
+                "loom_low_resource_t",
+                f"k{table_prefix}Resources",
+                _resource_row_lines(compiled, model),
+            ),
+            "issue_uses": view_array_emitter.append_struct_array(
+                "loom_low_issue_use_t",
+                f"k{table_prefix}IssueUses",
+                _issue_use_row_lines(model),
+            ),
+            "hazards": view_array_emitter.append_struct_array(
+                "loom_low_hazard_t",
+                f"k{table_prefix}Hazards",
+                _hazard_row_lines(model),
+            ),
+            "pressure_deltas": view_array_emitter.append_struct_array(
+                "loom_low_pressure_delta_t",
+                f"k{table_prefix}PressureDeltas",
+                _pressure_delta_row_lines(compiled, model),
+            ),
+        }
     if compiled.feature_mask_words:
         c_arrays.append_value_array(
             lines,
@@ -897,6 +1032,8 @@ def emit_source_for_views(
             f"k{spec.c_table_prefix}OperandFormOperandIndices",
             [str(operand_index) for operand_index in compiled.operand_form_operand_indices],
         )
+    descriptor_layout_rows: list[tuple[str, ...]] = []
+    descriptor_layout_starts: dict[tuple[tuple[str, ...], ...], int] = {}
     storage_descriptor_table_symbol = view_array_emitter.append_struct_array(
         "loom_low_descriptor_t",
         f"k{spec.c_table_prefix}Descriptors",
@@ -904,6 +1041,8 @@ def emit_source_for_views(
             compiled,
             compiled.descriptors,
             compiled.descriptor_rows,
+            descriptor_layout_rows,
+            descriptor_layout_starts,
         ),
     )
     storage_descriptor_view_table_symbol = view_array_emitter.append_struct_array(
@@ -943,6 +1082,8 @@ def emit_source_for_views(
                     compiled,
                     view.descriptors,
                     view.descriptor_rows,
+                    descriptor_layout_rows,
+                    descriptor_layout_starts,
                 ),
             )
         if view.uses_storage_descriptor_view_tables:
@@ -980,26 +1121,34 @@ def emit_source_for_views(
                     for source_ordinal, alternative_ordinal in view.schedule_alternative_rows
                 ],
             )
+    validation.validate_u16_table_count(len(descriptor_layout_rows), "descriptor layout")
+    descriptor_layout_table_symbol = view_array_emitter.append_struct_array(
+        "loom_low_descriptor_layout_t",
+        f"k{spec.c_table_prefix}DescriptorLayouts",
+        descriptor_layout_rows,
+    )
+    storage_descriptor_ref_table_symbol = view_array_emitter.append_value_array(
+        "uint32_t",
+        f"k{spec.c_table_prefix}DescriptorRefs",
+        [str(ordinal) for ordinal in compiled.descriptor_refs],
+    )
     descriptor_ref_table_symbols: dict[str, str] = {}
     for view in views:
-        descriptor_ref_table_symbols[view.spec.key] = view_array_emitter.append_struct_array(
-            "loom_low_descriptor_ref_t",
-            f"k{view.spec.c_table_prefix}DescriptorRefs",
-            [
-                [
-                    f".key_string_ref = {pool.ref(f'descriptor_{descriptor_key}')},",
-                    f".descriptor_ordinal = {descriptor_ordinal},",
-                ]
-                for descriptor_key, descriptor_ordinal in view.descriptor_refs
-            ],
-        )
-    if asm_table_storage.operand_indices:
-        c_arrays.append_value_array(
-            lines,
-            "uint16_t",
-            f"k{spec.c_table_prefix}AsmOperandIndices",
-            [str(operand_index) for operand_index in asm_table_storage.operand_indices],
-        )
+        if view.uses_storage_descriptor_ref_tables:
+            descriptor_ref_table_symbols[view.spec.key] = storage_descriptor_ref_table_symbol
+        else:
+            descriptor_ref_table_symbols[view.spec.key] = view_array_emitter.append_value_array(
+                "uint32_t",
+                f"k{view.spec.c_table_prefix}DescriptorRefs",
+                [str(ordinal) for ordinal in view.descriptor_refs],
+            )
+    _emit_array(
+        lines,
+        "loom_tied_result_t",
+        spec.c_table_prefix,
+        "AsmTiedResults",
+        [[f".result_index = {tie.result_index},", f".operand_index = {tie.operand_index},", ".has_type_change = false,"] for tie in asm_table_storage.tied_results],
+    )
     _emit_array(
         lines,
         "loom_low_asm_operand_segment_t",
@@ -1016,10 +1165,10 @@ def emit_source_for_views(
     )
     _emit_array(
         lines,
-        "loom_low_asm_result_value_type_t",
+        "loom_low_asm_result_type_t",
         spec.c_table_prefix,
-        "AsmResultValueTypes",
-        _asm_result_value_type_row_lines(asm_table_storage.result_value_types),
+        "AsmResultTypes",
+        _asm_result_type_row_lines(asm_table_storage.result_types),
     )
     _emit_array(
         lines,
@@ -1041,6 +1190,13 @@ def emit_source_for_views(
     )
     _emit_array(
         lines,
+        "loom_low_asm_layout_t",
+        spec.c_table_prefix,
+        "AsmLayouts",
+        _asm_layout_row_lines(asm_table_storage.layouts),
+    )
+    _emit_array(
+        lines,
         "loom_low_native_asm_value_t",
         spec.c_table_prefix,
         "NativeAsmValues",
@@ -1056,6 +1212,15 @@ def emit_source_for_views(
                 f"k{view.spec.c_table_prefix}AsmForms",
                 _asm_form_row_lines(compiled, view.asm_forms),
             )
+    descriptor_membership_table_symbols = {
+        view.spec.key: view_array_emitter.append_value_array(
+            "uint64_t",
+            f"k{view.spec.c_table_prefix}DescriptorMembershipWords",
+            [c_spelling.hex_u64_literal(word) for word in view.descriptor_membership_words],
+        )
+        for view in views
+        if view.descriptor_membership_words
+    }
     for view in views:
         if not view.spec.supported_target_contract_keys:
             continue
@@ -1067,6 +1232,7 @@ def emit_source_for_views(
         )
 
     table_count_fields = {
+        "operand_indices": "operand_index_count",
         "operands": "operand_count",
         "immediates": "immediate_count",
         "immediate_encoding_slices": "immediate_encoding_slice_count",
@@ -1087,7 +1253,6 @@ def emit_source_for_views(
         "register_packing_resource_members": "register_packing_resource_member_count",
         "register_parts": "register_part_count",
         "reg_class_alts": "reg_class_alt_count",
-        "schedule_classes": "schedule_class_count",
         "timing_events": "timing_event_count",
         "event_separations": "event_separation_count",
         "issue_uses": "issue_use_count",
@@ -1095,9 +1260,10 @@ def emit_source_for_views(
         "hazards": "hazard_count",
         "pressure_deltas": "pressure_delta_count",
         "asm_forms": "asm_form_count",
-        "asm_operand_indices": "asm_operand_index_count",
+        "asm_layouts": "asm_layout_count",
+        "asm_tied_results": "asm_tied_result_count",
         "asm_operand_segments": "asm_operand_segment_count",
-        "asm_result_value_types": "asm_result_value_type_count",
+        "asm_result_types": "asm_result_type_count",
         "asm_immediates": "asm_immediate_count",
         "native_asm_values": "native_asm_value_count",
         "encoding_field_values": "encoding_field_value_count",
@@ -1118,10 +1284,12 @@ def emit_source_for_views(
 
     for view in views:
         view_spec = view.spec
+        schedule_model = view.schedule_model
+        view_schedule_table_symbols = schedule_table_symbols[view_spec.key]
         view_flags = []
         if view_spec.supports_native_scheduling:
             view_flags.append("LOOM_LOW_DESCRIPTOR_SET_FLAG_NATIVE_SCHEDULING")
-        if _has_positive_effect_separations(compiled, view):
+        if _has_positive_effect_separations(view):
             view_flags.append("LOOM_LOW_DESCRIPTOR_SET_FLAG_POSITIVE_EFFECT_SEPARATIONS")
         if view_spec.requires_structured_control_flow:
             view_flags.append("LOOM_LOW_DESCRIPTOR_SET_FLAG_REQUIRES_STRUCTURED_CONTROL_FLOW")
@@ -1150,15 +1318,21 @@ def emit_source_for_views(
             f"    .key_string_ref = {pool.ref(_metadata_string_label(spec, view_spec, 'set_key'))},",
             f"    .target_key_string_ref = {c_spelling.optional_string_expr(pool, _metadata_string_label(spec, view_spec, 'target_key') if view_spec.target_key is not None else None)},",
             f"    .feature_key_string_ref = {c_spelling.optional_string_expr(pool, _metadata_string_label(spec, view_spec, 'feature_key') if view_spec.feature_key is not None else None)},",
-            "    .string_pool =",
-            "        {",
-            f"            .data = k{spec.c_table_prefix}StringData,",
-            f"            .data_length = sizeof(k{spec.c_table_prefix}StringData) - 1,",
-            "        },",
             f"    .descriptors = {descriptor_table_symbol},",
+            f"    .descriptor_layouts = {descriptor_layout_table_symbol},",
+            f"    .descriptor_layout_count = {len(descriptor_layout_rows)},",
             f"    .descriptor_views = {descriptor_view_table_symbol},",
+            *(
+                [
+                    f"    .descriptor_membership_words = {descriptor_membership_table_symbols[view_spec.key]},",
+                ]
+                if view.descriptor_membership_words
+                else []
+            ),
             f"    .descriptor_count = {view.descriptor_count},",
-            f"    .resource_calendar_slot_count = {compiled.resource_calendar_slot_count},",
+            f"    .descriptor_ordinal_count = {view.descriptor_ordinal_count},",
+            f"    .resource_calendar_slot_count = {schedule_model.resource_calendar_slot_count},",
+            f"    .resource_calendar_lookback_cycles = {schedule_model.resource_calendar_lookback_cycles},",
             f"    .physical_register_unit_count = {max(compiled.physical_register_atomic_units, default=-1) + 1},",
             f"    .maximum_descriptor_operand_count = {max((len(descriptor.operands) for descriptor in compiled.descriptors), default=0)},",
             f"    .descriptor_refs = {descriptor_ref_table_symbol},",
@@ -1169,6 +1343,7 @@ def emit_source_for_views(
             view_lines.append(f"    .schedule_alternatives = {schedule_alternative_table_symbol},")
             view_lines.append(f"    .schedule_alternative_count = {len(view.schedule_alternative_rows)},")
 
+        append_optional_table("operand_indices", "OperandIndices", compiled.operand_indices, view_lines)
         append_optional_table("operands", "Operands", compiled.operands, view_lines)
         append_optional_table("immediates", "Immediates", compiled.immediates, view_lines)
         append_optional_table(
@@ -1239,20 +1414,35 @@ def emit_source_for_views(
         )
         append_optional_table("register_parts", "RegisterParts", compiled.register_parts, view_lines)
         append_optional_table("reg_class_alts", "RegClassAlts", compiled.reg_class_alts, view_lines)
-        append_optional_table("schedule_classes", "ScheduleClasses", compiled.schedule_classes, view_lines)
-        append_optional_table("timing_events", "TimingEvents", compiled.timing_events, view_lines)
-        append_optional_table("event_separations", "EventSeparations", compiled.event_separations, view_lines)
-        append_optional_table("issue_uses", "IssueUses", compiled.issue_uses, view_lines)
-        append_optional_table("resources", "Resources", compiled.resources, view_lines)
-        append_optional_table("hazards", "Hazards", compiled.hazards, view_lines)
-        append_optional_table("pressure_deltas", "PressureDeltas", compiled.pressure_deltas, view_lines)
+        view_lines.append(f"    .schedule_classes = {schedule_class_table_symbol},")
+        view_lines.append(f"    .schedule_class_count = {compiled.schedule_class_table.canonical_count},")
+        view_lines.append(f"    .schedule_class_row_count = IREE_ARRAYSIZE({schedule_class_table_symbol}),")
+        if view.schedule_class_row_ids:
+            view_lines.append(f"    .schedule_class_row_ids = {schedule_class_row_id_symbols[view_spec.key]},")
+        for field_name, rows in (
+            ("timing_events", schedule_model.timing_events),
+            ("event_separations", schedule_model.event_separations),
+            ("issue_uses", schedule_model.issue_uses),
+            ("resources", schedule_model.resources),
+            ("hazards", schedule_model.hazards),
+            ("pressure_deltas", schedule_model.pressure_deltas),
+        ):
+            if rows:
+                view_lines.append(f"    .{field_name} = {view_schedule_table_symbols[field_name]},")
+                view_lines.append(f"    .{table_count_fields[field_name]} = IREE_ARRAYSIZE({view_schedule_table_symbols[field_name]}),")
         if view.asm_forms:
             view_lines.append(f"    .asm_forms = {asm_form_table_symbol},")
             view_lines.append(f"    .asm_form_count = IREE_ARRAYSIZE({asm_form_table_symbol}),")
             append_optional_table(
-                "asm_operand_indices",
-                "AsmOperandIndices",
-                asm_table_storage.operand_indices,
+                "asm_layouts",
+                "AsmLayouts",
+                asm_table_storage.layouts,
+                view_lines,
+            )
+            append_optional_table(
+                "asm_tied_results",
+                "AsmTiedResults",
+                asm_table_storage.tied_results,
                 view_lines,
             )
             append_optional_table(
@@ -1262,9 +1452,9 @@ def emit_source_for_views(
                 view_lines,
             )
             append_optional_table(
-                "asm_result_value_types",
-                "AsmResultValueTypes",
-                asm_table_storage.result_value_types,
+                "asm_result_types",
+                "AsmResultTypes",
+                asm_table_storage.result_types,
                 view_lines,
             )
             append_optional_table(
@@ -1303,6 +1493,7 @@ def emit_source_for_views(
         if compiled.feature_mask_words:
             view_lines.append(f"    .feature_mask_words = k{spec.c_table_prefix}FeatureMaskWords,")
             view_lines.append(f"    .feature_mask_word_count = IREE_ARRAYSIZE(k{spec.c_table_prefix}FeatureMaskWords),")
+        view_lines.append(f"    .string_pool = {string_layout.initializer(f'k{spec.c_table_prefix}StringData')},")
         view_lines.append("};")
         view_lines.append("")
         view_lines.append(f"const loom_low_descriptor_set_t* {view_spec.function_name}(void) {{")
@@ -1313,16 +1504,21 @@ def emit_source_for_views(
     return "\n".join(lines) + "\n"
 
 
-def emit_source(compiled: CompiledDescriptorSet) -> str:
+def emit_source(compiled: CompiledDescriptorSet, shared_strings: CStringBank | None = None) -> str:
     return emit_source_for_views(
         compiled,
+        shared_strings=shared_strings,
         views=[
             DescriptorSetView(
                 spec=compiled.spec,
                 reg_classes=tuple(compiled.reg_classes),
                 descriptors=tuple(compiled.descriptors),
                 instruction_classes=tuple(compiled.instruction_classes),
-                descriptor_ordinals=tuple(range(len(compiled.descriptors))),
+                schedule_model=compiled.schedule_model,
+                schedule_class_row_ids=(),
+                storage_descriptor_ordinals=tuple(range(len(compiled.descriptors))),
+                descriptor_ordinal_count=len(compiled.descriptors),
+                descriptor_membership_words=(),
                 descriptor_refs=compiled.descriptor_refs,
                 schedule_alternative_rows=compiled.schedule_alternative_rows,
                 descriptor_rows=compiled.descriptor_rows,
@@ -1331,6 +1527,7 @@ def emit_source(compiled: CompiledDescriptorSet) -> str:
                 operand_forms=compiled.operand_forms,
                 uses_storage_descriptor_tables=True,
                 uses_storage_descriptor_view_tables=True,
+                uses_storage_descriptor_ref_tables=True,
                 uses_storage_asm_form_tables=True,
                 uses_storage_operand_form_tables=True,
                 uses_storage_schedule_alternative_tables=True,

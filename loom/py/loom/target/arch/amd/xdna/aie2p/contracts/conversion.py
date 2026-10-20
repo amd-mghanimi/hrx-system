@@ -321,32 +321,44 @@ def _bf16_to_f32_rule() -> DescriptorRule:
     )
 
 
-def _f32_to_bf16_rule() -> DescriptorRule:
+def _f32_to_bf16_rule(
+    *, exact_finite_values: bool = False, preserve_nan: bool = True
+) -> DescriptorRule:
     """Rounds binary32 to bfloat16 while preserving every NaN as a NaN."""
 
     program = ScalarProgram()
     input_value = ValueRef.operand("input")
     shift = program.constant("shift", -16)
-    upper = program.binary("upper", "lshl.i32", input_value, shift)
-    one = program.constant("one", 1)
-    upper_lsb = program.binary("upper_lsb", "and.i32", upper, one)
-    round_bias = program.constant("round_bias", 0x7FFF)
-    bias = program.binary("bias", "add.i32", round_bias, upper_lsb)
-    rounded = program.binary("rounded", "add.i32", input_value, bias)
-    finite_result = program.binary("finite_result", "lshl.i32", rounded, shift)
-
-    exponent_mask = program.constant("exponent_mask", 0x7F800000)
-    exponent = program.binary("exponent", "and.i32", input_value, exponent_mask)
-    special_exponent = program.binary(
-        "special_exponent", "cmp.eq.i32", exponent, exponent_mask
+    upper = program.binary(
+        None if exact_finite_values and not preserve_nan else "upper",
+        "lshl.i32",
+        input_value,
+        shift,
     )
-    fraction_mask = program.constant("fraction_mask", 0x007FFFFF)
-    fraction = program.binary("fraction", "and.i32", input_value, fraction_mask)
-    nonzero_fraction = program.unary("nonzero_fraction", "cmp.nez.i32", fraction)
-    is_nan = program.binary("is_nan", "and.i32", special_exponent, nonzero_fraction)
-    quiet_nan_bit = program.constant("quiet_nan_bit", 0x0040)
-    nan_result = program.binary("nan_result", "or.i32", upper, quiet_nan_bit)
-    program.select(None, nan_result, finite_result, is_nan)
+    finite_result = upper
+    if not exact_finite_values:
+        one = program.constant("one", 1)
+        upper_lsb = program.binary("upper_lsb", "and.i32", upper, one)
+        round_bias = program.constant("round_bias", 0x7FFF)
+        bias = program.binary("bias", "add.i32", round_bias, upper_lsb)
+        rounded = program.binary("rounded", "add.i32", input_value, bias)
+        finite_result = program.binary(
+            "finite_result" if preserve_nan else None, "lshl.i32", rounded, shift
+        )
+
+    if preserve_nan:
+        exponent_mask = program.constant("exponent_mask", 0x7F800000)
+        exponent = program.binary("exponent", "and.i32", input_value, exponent_mask)
+        special_exponent = program.binary(
+            "special_exponent", "cmp.eq.i32", exponent, exponent_mask
+        )
+        fraction_mask = program.constant("fraction_mask", 0x007FFFFF)
+        fraction = program.binary("fraction", "and.i32", input_value, fraction_mask)
+        nonzero_fraction = program.unary("nonzero_fraction", "cmp.nez.i32", fraction)
+        is_nan = program.binary("is_nan", "and.i32", special_exponent, nonzero_fraction)
+        quiet_nan_bit = program.constant("quiet_nan_bit", 0x0040)
+        nan_result = program.binary("nan_result", "or.i32", upper, quiet_nan_bit)
+        program.select(None, nan_result, finite_result, is_nan)
 
     return DescriptorRule(
         source_op=scalar_conversion.scalar_fptrunc,
@@ -354,9 +366,20 @@ def _f32_to_bf16_rule() -> DescriptorRule:
         guards=(
             Guard.value_type("input", _F32),
             Guard.value_type("result", _BF16),
+            *((Guard.value_not_nan("input"),) if not preserve_nan else ()),
+            *(
+                (Guard.value_float_exactly_representable_as("input", "result"),)
+                if exact_finite_values
+                else ()
+            ),
         ),
         emit=tuple(program.emits),
-        report_key="exact_binary32_to_bfloat16",
+        report_key=(
+            "exactly_representable_binary32_to_bfloat16"
+            + ("_preserve_nan" if preserve_nan else "")
+            if exact_finite_values
+            else "exact_binary32_to_bfloat16"
+        ),
     )
 
 
@@ -1471,31 +1494,31 @@ AIE2P_CONVERSION_RULES = (
         scalar_conversion.scalar_sitofp,
         _I8,
         "amd.xdna.aie2p.extend.signed.i8",
-        "native_signed_i8_to_binary32",
+        "exact_signed_i8_to_binary32",
     ),
     _integer_to_f32_rule(
         scalar_conversion.scalar_sitofp,
         _I16,
         "amd.xdna.aie2p.extend.signed.i16",
-        "native_signed_i16_to_binary32",
+        "exact_signed_i16_to_binary32",
     ),
     _integer_to_f32_rule(
         scalar_conversion.scalar_sitofp,
         _I32,
         None,
-        "native_signed_i32_to_binary32",
+        "exact_signed_i32_to_binary32",
     ),
     _integer_to_f32_rule(
         scalar_conversion.scalar_uitofp,
         _I8,
         "amd.xdna.aie2p.extend.unsigned.i8",
-        "native_unsigned_i8_to_binary32",
+        "exact_unsigned_i8_to_binary32",
     ),
     _integer_to_f32_rule(
         scalar_conversion.scalar_uitofp,
         _I16,
         "amd.xdna.aie2p.extend.unsigned.i16",
-        "native_unsigned_i16_to_binary32",
+        "exact_unsigned_i16_to_binary32",
     ),
     _unsigned_i32_to_f32_rule(),
     _integer_to_f16_rule(
@@ -1533,6 +1556,8 @@ AIE2P_CONVERSION_RULES = (
     _f32_to_narrow_unsigned_integer_rule(),
     _f32_to_unsigned_i32_rule(),
     _bf16_to_f32_rule(),
+    _f32_to_bf16_rule(exact_finite_values=True, preserve_nan=False),
+    _f32_to_bf16_rule(exact_finite_values=True),
     _f32_to_bf16_rule(),
     _f16_to_f32_rule(),
     _f32_to_f16_rule(),

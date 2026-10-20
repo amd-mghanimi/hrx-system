@@ -1,0 +1,183 @@
+// RUN: emit source-low target=amdgpu:gfx1151 output=none
+
+// The ordinary compilation pipeline must check the original row bound even
+// after source normalization. g=2336 reaches row 73, beyond the input view.
+kernel.def @reject_nonstrict_row_guard() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %raw: i32) {
+  %base = index.constant 0 : offset
+  %linear = scalar.assume %raw [range(%raw, 0, 2367)] : i32
+  %width = index.constant 16 : index
+  %scale = scalar.constant 32 : i32
+  %capacity = scalar.constant 73 : i32
+  %quotient = scalar.divui %linear, %scale : i32
+  %remainder = scalar.remui %linear, %scale : i32
+  %row = index.cast %quotient : i32 to index
+  %group = index.cast %remainder : i32 to index
+  %column = index.mul %group, %width : index
+  %inputs = buffer.view %input[%base] : buffer -> view<73x512xbf16>
+  %outputs = buffer.view %output[%base] : buffer -> view<73x512xbf16>
+  %condition = scalar.cmpi ule, %quotient, %capacity : i32
+  scf.if %condition {
+    // ERROR@+1: SUBRANGE/011 {op_name="vector.load", view_axis="0"}
+    %value = vector.load %inputs[%row, %column] : view<73x512xbf16> -> vector<16xbf16>
+    // ERROR@+1: SUBRANGE/011 {op_name="vector.store", view_axis="0"}
+    vector.store %value, %outputs[%row, %column] : vector<16xbf16>, view<73x512xbf16>
+  }
+  kernel.return
+}
+
+// ====
+
+// An unrelated condition cannot establish the missing scalar-axis bound.
+kernel.def @reject_unproved_scalar_row() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %row0: index, %external: i1) {
+  %base = index.constant 0 : offset
+  %row = index.assume %row0 [range(%row0, 0, 8)] : index
+  %inputs = buffer.view %input[%base] : buffer -> view<8x16xf32>
+  %outputs = buffer.view %output[%base] : buffer -> view<8x16xf32>
+  scf.if %external {
+    // ERROR@+1: SUBRANGE/024 {op_name="view.load", view_axis="0"}
+    %value = view.load %inputs[%row, 0] : view<8x16xf32> -> f32
+    // ERROR@+1: SUBRANGE/024 {op_name="view.store", view_axis="0"}
+    view.store %value, %outputs[%row, 0] : f32, view<8x16xf32>
+  }
+  kernel.return
+}
+
+// ====
+
+// RUN: emit source-low target=amdgpu:gfx1151 output=low
+
+// The strict bound still permits the optimized vector transfer.
+kernel.def @guarded_row_transfer() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %raw: i32) {
+  %base = index.constant 0 : offset
+  %linear = scalar.assume %raw [range(%raw, 0, 2367)] : i32
+  %width = index.constant 16 : index
+  %scale = scalar.constant 32 : i32
+  %capacity = scalar.constant 73 : i32
+  %quotient = scalar.divui %linear, %scale : i32
+  %remainder = scalar.remui %linear, %scale : i32
+  %row = index.cast %quotient : i32 to index
+  %group = index.cast %remainder : i32 to index
+  %column = index.mul %group, %width : index
+  %inputs = buffer.view %input[%base] : buffer -> view<73x512xbf16>
+  %outputs = buffer.view %output[%base] : buffer -> view<73x512xbf16>
+  %condition = scalar.cmpi ult, %quotient, %capacity : i32
+  scf.if %condition {
+    %value = vector.load %inputs[%row, %column] : view<73x512xbf16> -> vector<16xbf16>
+    vector.store %value, %outputs[%row, %column] : vector<16xbf16>, view<73x512xbf16>
+  }
+  kernel.return
+}
+
+// ----
+low.kernel.def target<amdgpu.rdna3_5.core> abi_layout({constant_count = 1, direct_arg_count = 1, direct_arg_names = {arg0 = "raw"}, direct_arg_offsets = [16], direct_arg_parameter_indices = [2], direct_arg_sizes = [4], parameter_count = 3, resource_count = 2, resource_offsets = [0, 8], resource_parameter_indices = [0, 1], uses_kernarg_segment_ptr = true}) workgroup_size(1, 1, 1) workgroup_count(1, 1, 1) @guarded_row_transfer(%linear: reg<amdgpu.sgpr>) asm {
+  %inputs = resource<hal_binding> {extent = 74752, index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %outputs = resource<hal_binding> {extent = 74752, index = 1, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %capacity = s_mov_b32 73
+  %36 = s_mov_b32 5
+  %row = s_lshr_b32 %linear, %36
+  %group = s_and_b32_rhs_inline %linear, 31
+  %39 = s_mov_b32 4
+  %column = s_lshl_b32 %group, %39
+  %condition = s_cmp_lt_u32 %row, %capacity
+  low.cond_br %condition, ^_bb1, ^_bb2 : reg<amdgpu.scc>
+^_bb1:
+  %42 = s_mov_b32 512
+  %43 = s_mul_i32 %row, %42
+  %44 = s_add_u32 %43, %column
+  %45 = v_mov_b32 0
+  %46 = s_lshl_b32_rhs_inline %44, 1
+  %47 = slice %inputs[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %48 = slice %inputs[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %49 = s_mov_b32 0
+  %50, %51 = s_add_co_u32 %47, %46
+  %52, %53 = s_addc_u32 %48, %49, %51
+  %54 = concat(%50, %52) : (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) -> reg<amdgpu.sgpr x2>
+  %55 = global_load_b128_saddr %45, %54
+  %57 = s_lshl_b32_rhs_inline %44, 1
+  %61, %62 = s_add_co_u32 %47, %57
+  %63, %64 = s_addc_u32 %48, %49, %62
+  %65 = concat(%61, %63) : (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) -> reg<amdgpu.sgpr x2>
+  %66 = global_load_b128_saddr %45, %65 {offset = 16}
+  %70 = s_lshl_b32_rhs_inline %44, 1
+  %71 = slice %outputs[0] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %72 = slice %outputs[1] : reg<amdgpu.sgpr x2> -> reg<amdgpu.sgpr>
+  %74, %75 = s_add_co_u32 %71, %70
+  %76, %77 = s_addc_u32 %72, %49, %75
+  %78 = concat(%74, %76) : (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) -> reg<amdgpu.sgpr x2>
+  global_store_b128_saddr %45, %55, %78
+  %81 = s_lshl_b32_rhs_inline %44, 1
+  %85, %86 = s_add_co_u32 %71, %81
+  %87, %88 = s_addc_u32 %72, %49, %86
+  %89 = concat(%85, %87) : (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) -> reg<amdgpu.sgpr x2>
+  global_store_b128_saddr %45, %66, %89 {offset = 16}
+  low.br ^_bb2
+^_bb2:
+  return
+}
+
+// ====
+
+// RUN: emit source-low target=amdgpu:gfx1151 output=low
+
+// A partial final workgroup uses a row guard, while the optimized transfer
+// addresses the contiguous vector group directly after radix reconstruction.
+kernel.def @row_guarded_vector_groups() {
+  %unit = index.constant 1 : index
+  %threads = index.constant 64 : index
+  %blocks = index.constant 37 : index
+  kernel.launch.config workgroups(%blocks, %unit, %unit) workgroup_size(%threads, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %threads = index.constant 64 : index
+  %capacity = index.constant 73 : index
+  %groups = index.constant 32 : index
+  %width = index.constant 16 : index
+  %block = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %linear = index.madd %block, %threads, %lane : index
+  %row = index.div %linear, %groups : index
+  %group = index.rem %linear, %groups : index
+  %column = index.mul %group, %width : index
+  %inside = index.cmp ult, %row, %capacity : index
+  %inputs = buffer.view %input[%base] : buffer -> view<73x512xbf16>
+  %outputs = buffer.view %output[%base] : buffer -> view<73x512xbf16>
+  scf.if %inside {
+    %value = vector.load %inputs[%row, %column] : view<73x512xbf16> -> vector<16xbf16>
+    vector.store %value, %outputs[%row, %column] : vector<16xbf16>, view<73x512xbf16>
+  }
+  kernel.return
+}
+
+// ----
+low.kernel.def target<amdgpu.rdna3_5.core> abi_layout({constant_count = 0, direct_arg_count = 0, direct_arg_names = {}, direct_arg_offsets = [], direct_arg_parameter_indices = [], direct_arg_sizes = [], parameter_count = 2, resource_count = 2, resource_offsets = [0, 8], resource_parameter_indices = [0, 1], uses_kernarg_segment_ptr = true}) workgroup_size(64, 1, 1) workgroup_count(37, 1, 1) @row_guarded_vector_groups() asm {
+  %block = live_in<amdgpu.workgroup_id.x> : reg<amdgpu.sgpr>
+  %lane = live_in<amdgpu.workitem_id.x> : reg<amdgpu.vgpr>
+  %inputs = resource<hal_binding> {extent = 74752, index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %outputs = resource<hal_binding> {extent = 74752, index = 1, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
+  %capacity = s_mov_b32 73
+  %linear = v_lshl_add_u32_shift_imm %block, %lane, 6
+  %row = v_lshrrev_b32_src0_inline %linear, 5
+  %inside = v_cmp_lt_u32 %row, %capacity
+  %51, %52 = s_and_saveexec_b64 %inside
+  low.cond_br %52, ^_bb1, ^_bb2 : reg<amdgpu.scc>
+^_bb1:
+  %53 = v_lshlrev_b32_src0_inline %linear, 4
+  %54 = v_lshlrev_b32_src0_inline %53, 1
+  %55 = global_load_b128_saddr %54, %inputs
+  %57 = global_load_b128_saddr %54, %inputs {offset = 16}
+  global_store_b128_saddr %54, %55, %outputs
+  global_store_b128_saddr %54, %57, %outputs {offset = 16}
+  low.br ^_bb2
+^_bb2:
+  s_mov_b64_exec %51
+  return
+}

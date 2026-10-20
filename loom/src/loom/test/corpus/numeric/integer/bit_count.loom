@@ -1,0 +1,434 @@
+// Narrow semantic boundaries plus directed and random wide values cross a
+// callable boundary. Scalar and vector counts share observations; the
+// independent oracle scans individual bits without count instructions.
+
+func.def inline @scan_bits(%value: i64, %width: index) -> (i64, i64, i64) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %c0 = scalar.constant 0 : i64
+  %c1 = scalar.constant 1 : i64
+  %width_value = index.cast %width : index to i64
+  %last = scalar.subi %width_value, %c1 : i64
+  %leading, %trailing, %population = scf.for %position = [%begin to %width step %step](%leading_count = %width_value : i64, %trailing_count = %width_value : i64, %population_count = %c0 : i64) -> (i64, i64, i64) {
+    %shift = index.cast %position : index to i64
+    %shifted = scalar.shrui %value, %shift : i64
+    %bit = scalar.andi %shifted, %c1 : i64
+    %set = scalar.cmpi ne, %bit, %c0 : i64
+    %leading_position = scalar.subi %last, %shift : i64
+    %next_leading = scf.select %set, %leading_position, %leading_count : i64
+    %first = scalar.cmpi eq, %population_count, %c0 : i64
+    %first_set = scalar.andi %first, %set : i1
+    %next_trailing = scf.select %first_set, %shift, %trailing_count : i64
+    %next_population = scalar.addi %population_count, %bit : i64
+    scf.yield %next_leading, %next_trailing, %next_population : i64, i64, i64
+  }
+  func.return %leading, %trailing, %population : i64, i64, i64
+}
+
+func.def @bit_counts_i8(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<32xi8>
+  %results = buffer.view %output[%base] : buffer -> view<192xi8>
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 4 : index
+  %trailing_base = index.constant 32 : index
+  %population_base = index.constant 64 : index
+  %scalar_leading_base = index.constant 96 : index
+  %scalar_trailing_base = index.constant 128 : index
+  %scalar_population_base = index.constant 160 : index
+  scf.for %position = [%begin to %end step %step] {
+    %values = vector.load %source[%position] : view<32xi8> -> vector<4xi8>
+    %leading = vector.ctlzi %values : vector<4xi8>
+    %trailing = vector.cttzi %values : vector<4xi8>
+    %population = vector.ctpopi %values : vector<4xi8>
+    %trailing_position = index.add %position, %trailing_base : index
+    %population_position = index.add %position, %population_base : index
+    vector.store %leading, %results[%position] : vector<4xi8>, view<192xi8>
+    vector.store %trailing, %results[%trailing_position] : vector<4xi8>, view<192xi8>
+    vector.store %population, %results[%population_position] : vector<4xi8>, view<192xi8>
+  }
+  %scalar_step = index.constant 1 : index
+  scf.for %position = [%begin to %end step %scalar_step] {
+    %value = view.load %source[%position] : view<32xi8> -> i8
+    %leading = scalar.ctlzi %value : i8
+    %trailing = scalar.cttzi %value : i8
+    %population = scalar.ctpopi %value : i8
+    %leading_position = index.add %position, %scalar_leading_base : index
+    %trailing_position = index.add %position, %scalar_trailing_base : index
+    %population_position = index.add %position, %scalar_population_base : index
+    view.store %leading, %results[%leading_position] : i8, view<192xi8>
+    view.store %trailing, %results[%trailing_position] : i8, view<192xi8>
+    view.store %population, %results[%population_position] : i8, view<192xi8>
+  }
+  func.return
+}
+
+func.def @bit_counts_i8_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<32xi8>
+  %results = buffer.view %output[%base] : buffer -> view<192xi8>
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %width = index.constant 8 : index
+  %trailing_base = index.constant 32 : index
+  %population_base = index.constant 64 : index
+  %scalar_leading_base = index.constant 96 : index
+  %scalar_trailing_base = index.constant 128 : index
+  %scalar_population_base = index.constant 160 : index
+  scf.for %position = [%begin to %end step %step] {
+    %value = view.load %source[%position] : view<32xi8> -> i8
+    %word = scalar.extui %value : i8 to i64
+    %leading_word, %trailing_word, %population_word = func.call @scan_bits(%word, %width) : (i64, index) -> (i64, i64, i64)
+    %leading = scalar.trunci %leading_word : i64 to i8
+    %trailing = scalar.trunci %trailing_word : i64 to i8
+    %population = scalar.trunci %population_word : i64 to i8
+    %trailing_position = index.add %position, %trailing_base : index
+    %population_position = index.add %position, %population_base : index
+    %scalar_leading_position = index.add %position, %scalar_leading_base : index
+    %scalar_trailing_position = index.add %position, %scalar_trailing_base : index
+    %scalar_population_position = index.add %position, %scalar_population_base : index
+    view.store %leading, %results[%position] : i8, view<192xi8>
+    view.store %trailing, %results[%trailing_position] : i8, view<192xi8>
+    view.store %population, %results[%population_position] : i8, view<192xi8>
+    view.store %leading, %results[%scalar_leading_position] : i8, view<192xi8>
+    view.store %trailing, %results[%scalar_trailing_position] : i8, view<192xi8>
+    view.store %population, %results[%scalar_population_position] : i8, view<192xi8>
+  }
+  func.return
+}
+
+check.scenario @bit_counts_i8_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-16) step(1) : tensor<32xi8>
+    %output = check.generate.fill value(-1) : tensor<192xi8>
+    check.compare<@bit_counts_i8, @bit_counts_i8_oracle>(%input, %output) : (tensor<32xi8>, tensor<192xi8>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi8>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(17) period(16) : tensor<32xi8>
+    %output = check.generate.fill value(-1) : tensor<192xi8>
+    check.compare<@bit_counts_i8, @bit_counts_i8_oracle>(%input, %output) : (tensor<32xi8>, tensor<192xi8>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi8>
+    }
+  }
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-128 to 127) : tensor<32xi8>
+    %output = check.generate.fill value(-1) : tensor<192xi8>
+    check.compare<@bit_counts_i8, @bit_counts_i8_oracle>(%input, %output) : (tensor<32xi8>, tensor<192xi8>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi8>
+    }
+  }
+  check.return
+}
+
+func.def @bit_counts_i16(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<32xi16>
+  %results = buffer.view %output[%base] : buffer -> view<192xi16>
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 4 : index
+  %trailing_base = index.constant 32 : index
+  %population_base = index.constant 64 : index
+  %scalar_leading_base = index.constant 96 : index
+  %scalar_trailing_base = index.constant 128 : index
+  %scalar_population_base = index.constant 160 : index
+  scf.for %position = [%begin to %end step %step] {
+    %values = vector.load %source[%position] : view<32xi16> -> vector<4xi16>
+    %leading = vector.ctlzi %values : vector<4xi16>
+    %trailing = vector.cttzi %values : vector<4xi16>
+    %population = vector.ctpopi %values : vector<4xi16>
+    %trailing_position = index.add %position, %trailing_base : index
+    %population_position = index.add %position, %population_base : index
+    vector.store %leading, %results[%position] : vector<4xi16>, view<192xi16>
+    vector.store %trailing, %results[%trailing_position] : vector<4xi16>, view<192xi16>
+    vector.store %population, %results[%population_position] : vector<4xi16>, view<192xi16>
+  }
+  %scalar_step = index.constant 1 : index
+  scf.for %position = [%begin to %end step %scalar_step] {
+    %value = view.load %source[%position] : view<32xi16> -> i16
+    %leading = scalar.ctlzi %value : i16
+    %trailing = scalar.cttzi %value : i16
+    %population = scalar.ctpopi %value : i16
+    %leading_position = index.add %position, %scalar_leading_base : index
+    %trailing_position = index.add %position, %scalar_trailing_base : index
+    %population_position = index.add %position, %scalar_population_base : index
+    view.store %leading, %results[%leading_position] : i16, view<192xi16>
+    view.store %trailing, %results[%trailing_position] : i16, view<192xi16>
+    view.store %population, %results[%population_position] : i16, view<192xi16>
+  }
+  func.return
+}
+
+func.def @bit_counts_i16_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<32xi16>
+  %results = buffer.view %output[%base] : buffer -> view<192xi16>
+  %begin = index.constant 0 : index
+  %end = index.constant 32 : index
+  %step = index.constant 1 : index
+  %width = index.constant 16 : index
+  %trailing_base = index.constant 32 : index
+  %population_base = index.constant 64 : index
+  %scalar_leading_base = index.constant 96 : index
+  %scalar_trailing_base = index.constant 128 : index
+  %scalar_population_base = index.constant 160 : index
+  scf.for %position = [%begin to %end step %step] {
+    %value = view.load %source[%position] : view<32xi16> -> i16
+    %word = scalar.extui %value : i16 to i64
+    %leading_word, %trailing_word, %population_word = func.call @scan_bits(%word, %width) : (i64, index) -> (i64, i64, i64)
+    %leading = scalar.trunci %leading_word : i64 to i16
+    %trailing = scalar.trunci %trailing_word : i64 to i16
+    %population = scalar.trunci %population_word : i64 to i16
+    %trailing_position = index.add %position, %trailing_base : index
+    %population_position = index.add %position, %population_base : index
+    %scalar_leading_position = index.add %position, %scalar_leading_base : index
+    %scalar_trailing_position = index.add %position, %scalar_trailing_base : index
+    %scalar_population_position = index.add %position, %scalar_population_base : index
+    view.store %leading, %results[%position] : i16, view<192xi16>
+    view.store %trailing, %results[%trailing_position] : i16, view<192xi16>
+    view.store %population, %results[%population_position] : i16, view<192xi16>
+    view.store %leading, %results[%scalar_leading_position] : i16, view<192xi16>
+    view.store %trailing, %results[%scalar_trailing_position] : i16, view<192xi16>
+    view.store %population, %results[%scalar_population_position] : i16, view<192xi16>
+  }
+  func.return
+}
+
+check.scenario @bit_counts_i16_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-16) step(1) : tensor<32xi16>
+    %output = check.generate.fill value(-1) : tensor<192xi16>
+    check.compare<@bit_counts_i16, @bit_counts_i16_oracle>(%input, %output) : (tensor<32xi16>, tensor<192xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi16>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-32768) step(4369) period(16) : tensor<32xi16>
+    %output = check.generate.fill value(-1) : tensor<192xi16>
+    check.compare<@bit_counts_i16, @bit_counts_i16_oracle>(%input, %output) : (tensor<32xi16>, tensor<192xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi16>
+    }
+  }
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32768 to 32767) : tensor<32xi16>
+    %output = check.generate.fill value(-1) : tensor<192xi16>
+    check.compare<@bit_counts_i16, @bit_counts_i16_oracle>(%input, %output) : (tensor<32xi16>, tensor<192xi16>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<192xi16>
+    }
+  }
+  check.return
+}
+
+func.def @predicate_counts(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<4xi8>
+  %false_byte = view.load %source[0] : view<4xi8> -> i8
+  %true_byte = view.load %source[1] : view<4xi8> -> i8
+  %c0 = scalar.constant 0 : i8
+  %false_value = scalar.cmpi ne, %false_byte, %c0 : i8
+  %true_value = scalar.cmpi ne, %true_byte, %c0 : i8
+  %false_leading = scalar.ctlzi %false_value : i1
+  %true_leading = scalar.ctlzi %true_value : i1
+  %false_trailing = scalar.cttzi %false_value : i1
+  %true_trailing = scalar.cttzi %true_value : i1
+  %false_population = scalar.ctpopi %false_value : i1
+  %true_population = scalar.ctpopi %true_value : i1
+  %false_leading_word = scalar.extui %false_leading : i1 to i32
+  %true_leading_word = scalar.extui %true_leading : i1 to i32
+  %false_trailing_word = scalar.extui %false_trailing : i1 to i32
+  %true_trailing_word = scalar.extui %true_trailing : i1 to i32
+  %false_population_word = scalar.extui %false_population : i1 to i32
+  %true_population_word = scalar.extui %true_population : i1 to i32
+  %scalar_leading_words = vector.from_elements %false_leading_word, %true_leading_word : vector<2xi32>
+  %scalar_trailing_words = vector.from_elements %false_trailing_word, %true_trailing_word : vector<2xi32>
+  %scalar_population_words = vector.from_elements %false_population_word, %true_population_word : vector<2xi32>
+  %lanes = vector.from_elements %false_value, %true_value : vector<2xi1>
+  %leading_lanes = vector.ctlzi %lanes : vector<2xi1>
+  %trailing_lanes = vector.cttzi %lanes : vector<2xi1>
+  %population_lanes = vector.ctpopi %lanes : vector<2xi1>
+  %leading_words = vector.extui %leading_lanes : vector<2xi1> to vector<2xi32>
+  %trailing_words = vector.extui %trailing_lanes : vector<2xi1> to vector<2xi32>
+  %population_words = vector.extui %population_lanes : vector<2xi1> to vector<2xi32>
+  %results = buffer.view %output[%base] : buffer -> view<12xi32>
+  vector.store %scalar_leading_words, %results[0] : vector<2xi32>, view<12xi32>
+  vector.store %scalar_trailing_words, %results[2] : vector<2xi32>, view<12xi32>
+  vector.store %scalar_population_words, %results[4] : vector<2xi32>, view<12xi32>
+  vector.store %leading_words, %results[6] : vector<2xi32>, view<12xi32>
+  vector.store %trailing_words, %results[8] : vector<2xi32>, view<12xi32>
+  vector.store %population_words, %results[10] : vector<2xi32>, view<12xi32>
+  func.return
+}
+
+// One runtime buffer carries the complete predicate domain. Integer arithmetic
+// supplies the independent zero-count complement and population-count identity.
+func.def @predicate_counts_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<4xi8>
+  %false_byte = view.load %source[0] : view<4xi8> -> i8
+  %true_byte = view.load %source[1] : view<4xi8> -> i8
+  %false_word = scalar.extui %false_byte : i8 to i32
+  %true_word = scalar.extui %true_byte : i8 to i32
+  %c1 = scalar.constant 1 : i32
+  %false_complement = scalar.subi %c1, %false_word : i32
+  %true_complement = scalar.subi %c1, %true_word : i32
+  %values = vector.from_elements %false_word, %true_word : vector<2xi32>
+  %complements = vector.from_elements %false_complement, %true_complement : vector<2xi32>
+  %results = buffer.view %output[%base] : buffer -> view<12xi32>
+  vector.store %complements, %results[0] : vector<2xi32>, view<12xi32>
+  vector.store %complements, %results[2] : vector<2xi32>, view<12xi32>
+  vector.store %values, %results[4] : vector<2xi32>, view<12xi32>
+  vector.store %complements, %results[6] : vector<2xi32>, view<12xi32>
+  vector.store %complements, %results[8] : vector<2xi32>, view<12xi32>
+  vector.store %values, %results[10] : vector<2xi32>, view<12xi32>
+  func.return
+}
+
+check.scenario @bit_counts_i1_all_bits {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(0) step(1) period(2) : tensor<4xi8>
+    %output = check.generate.fill value(-1) : tensor<12xi32>
+    check.compare<@predicate_counts, @predicate_counts_oracle>(%input, %output) : (tensor<4xi8>, tensor<12xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<12xi32>
+    }
+  }
+  check.return
+}
+
+func.def @wide_counts(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<30xi64>
+  %values = vector.load %source[0] : view<4xi64> -> vector<4xi64>
+  %words = vector.trunci %values : vector<4xi64> to vector<4xi32>
+  %leading = vector.ctlzi %values : vector<4xi64>
+  %trailing = vector.cttzi %values : vector<4xi64>
+  %population = vector.ctpopi %values : vector<4xi64>
+  %word_leading = vector.ctlzi %words : vector<4xi32>
+  %word_trailing = vector.cttzi %words : vector<4xi32>
+  %word_population = vector.ctpopi %words : vector<4xi32>
+  %wide_word_leading = vector.extui %word_leading : vector<4xi32> to vector<4xi64>
+  %wide_word_trailing = vector.extui %word_trailing : vector<4xi32> to vector<4xi64>
+  %wide_word_population = vector.extui %word_population : vector<4xi32> to vector<4xi64>
+  vector.store %leading, %results[0] : vector<4xi64>, view<30xi64>
+  vector.store %trailing, %results[4] : vector<4xi64>, view<30xi64>
+  vector.store %population, %results[8] : vector<4xi64>, view<30xi64>
+  vector.store %wide_word_leading, %results[12] : vector<4xi64>, view<30xi64>
+  vector.store %wide_word_trailing, %results[16] : vector<4xi64>, view<30xi64>
+  vector.store %wide_word_population, %results[20] : vector<4xi64>, view<30xi64>
+  %first = view.load %source[0] : view<4xi64> -> i64
+  %word = scalar.trunci %first : i64 to i32
+  %scalar_leading = scalar.ctlzi %first : i64
+  %scalar_trailing = scalar.cttzi %first : i64
+  %scalar_population = scalar.ctpopi %first : i64
+  %scalar_word_leading = scalar.ctlzi %word : i32
+  %scalar_word_trailing = scalar.cttzi %word : i32
+  %scalar_word_population = scalar.ctpopi %word : i32
+  %observed_word_leading = scalar.extui %scalar_word_leading : i32 to i64
+  %observed_word_trailing = scalar.extui %scalar_word_trailing : i32 to i64
+  %observed_word_population = scalar.extui %scalar_word_population : i32 to i64
+  view.store %scalar_leading, %results[24] : i64, view<30xi64>
+  view.store %scalar_trailing, %results[25] : i64, view<30xi64>
+  view.store %scalar_population, %results[26] : i64, view<30xi64>
+  view.store %observed_word_leading, %results[27] : i64, view<30xi64>
+  view.store %observed_word_trailing, %results[28] : i64, view<30xi64>
+  view.store %observed_word_population, %results[29] : i64, view<30xi64>
+  func.return
+}
+
+func.def @wide_counts_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<4xi64>
+  %results = buffer.view %output[%base] : buffer -> view<30xi64>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %end = index.constant 4 : index
+  %width = index.constant 64 : index
+  %word_width = index.constant 32 : index
+  %trailing_base = index.constant 4 : index
+  %population_base = index.constant 8 : index
+  %word_leading_base = index.constant 12 : index
+  %word_trailing_base = index.constant 16 : index
+  %word_population_base = index.constant 20 : index
+  scf.for %position = [%begin to %end step %step] {
+    %value = view.load %source[%position] : view<4xi64> -> i64
+    %word = scalar.trunci %value : i64 to i32
+    %wide_word = scalar.extui %word : i32 to i64
+    %leading, %trailing, %population = func.call @scan_bits(%value, %width) : (i64, index) -> (i64, i64, i64)
+    %word_leading, %word_trailing, %word_population = func.call @scan_bits(%wide_word, %word_width) : (i64, index) -> (i64, i64, i64)
+    %trailing_position = index.add %position, %trailing_base : index
+    %population_position = index.add %position, %population_base : index
+    %word_leading_position = index.add %position, %word_leading_base : index
+    %word_trailing_position = index.add %position, %word_trailing_base : index
+    %word_population_position = index.add %position, %word_population_base : index
+    view.store %leading, %results[%position] : i64, view<30xi64>
+    view.store %trailing, %results[%trailing_position] : i64, view<30xi64>
+    view.store %population, %results[%population_position] : i64, view<30xi64>
+    view.store %word_leading, %results[%word_leading_position] : i64, view<30xi64>
+    view.store %word_trailing, %results[%word_trailing_position] : i64, view<30xi64>
+    view.store %word_population, %results[%word_population_position] : i64, view<30xi64>
+    %is_first = index.cmp eq, %position, %begin : index
+    scf.if %is_first {
+      view.store %leading, %results[24] : i64, view<30xi64>
+      view.store %trailing, %results[25] : i64, view<30xi64>
+      view.store %population, %results[26] : i64, view<30xi64>
+      view.store %word_leading, %results[27] : i64, view<30xi64>
+      view.store %word_trailing, %results[28] : i64, view<30xi64>
+      view.store %word_population, %results[29] : i64, view<30xi64>
+    }
+  }
+  func.return
+}
+
+func.def @generate_wide_count_inputs(%ordinal: index, %input: buffer) {
+  %pair_width = index.constant 2 : index
+  %byte_width = index.constant 8 : index
+  %upper_edge = index.constant 7 : index
+  %byte = index.div %ordinal, %pair_width : index
+  %edge = index.rem %ordinal, %pair_width : index
+  %byte_base = index.mul %byte, %byte_width : index
+  %edge_offset = index.mul %edge, %upper_edge : index
+  %raw_position = index.add %byte_base, %edge_offset : index
+  %position = index.assume %raw_position [range(%raw_position, 0, 63)] : index
+  %shift = index.cast %position : index to i64
+  %c1 = scalar.constant 1 : i64
+  %all_bits = scalar.constant -1 : i64
+  %power = scalar.shli %c1, %shift : i64
+  %below = scalar.subi %power, %c1 : i64
+  %above = scalar.addi %power, %c1 : i64
+  %complement = scalar.xori %power, %all_bits : i64
+  %base = index.constant 0 : offset
+  %values = buffer.view %input[%base] : buffer -> view<4xi64>
+  view.store %below, %values[0] : i64, view<4xi64>
+  view.store %power, %values[1] : i64, view<4xi64>
+  view.store %above, %values[2] : i64, view<4xi64>
+  view.store %complement, %values[3] : i64, view<4xi64>
+  func.return
+}
+
+check.scenario @bit_counts_wide_values {
+  // Both sides of every byte edge are runtime data, including the 32-bit word
+  // boundary. Zero appears at position zero; position 63 sets the sign.
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.fill value(0) : tensor<4xi64>
+    check.generate<@generate_wide_count_inputs>(%trial, %input) : (index, tensor<4xi64>) -> ()
+    %output = check.generate.fill value(-1) : tensor<30xi64>
+    check.compare<@wide_counts, @wide_counts_oracle>(%input, %output) : (tensor<4xi64>, tensor<30xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<30xi64>
+    }
+  }
+  check.trial[8](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[0] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to 9223372036854775807) : tensor<4xi64>
+    %output = check.generate.fill value(-1) : tensor<30xi64>
+    check.compare<@wide_counts, @wide_counts_oracle>(%input, %output) : (tensor<4xi64>, tensor<30xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<30xi64>
+    }
+  }
+  check.return
+}

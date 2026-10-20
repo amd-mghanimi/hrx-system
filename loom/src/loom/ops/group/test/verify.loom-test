@@ -1,7 +1,7 @@
 // RUN: verify
 
 func.def @valid_group(%lanes: index) {
-  %workers = group.create %lanes : index -> group
+  %workers = group.create %lanes : index -> group<[%lanes]>
   func.return
 }
 

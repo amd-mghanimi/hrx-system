@@ -55,8 +55,11 @@ class NativePair {
  public:
   NativePair(iree_async_region_t* first, iree_async_region_t* second,
              const char* backend, uint32_t service_batch_size,
+             iree_net_rdma_completion_queue_mode_t completion_mode,
              uint32_t source_offset)
-      : regions_{first, second}, source_offset_(source_offset) {
+      : regions_{first, second},
+        source_offset_(source_offset),
+        completion_mode_(completion_mode) {
     for (auto* region : regions_) {
       iree_async_region_retain(region);
     }
@@ -79,9 +82,10 @@ class NativePair {
     iree_net_rdma_completion_queue_options_t queue_options = {};
     queue_options.capacity = 32;
     queue_options.service_batch_size = service_batch_size;
+    queue_options.mode = completion_mode;
     service_batch_size_ = service_batch_size;
     for (uint32_t side = 0; side < 2; ++side) {
-      IREE_CHECK_OK(iree_net_rdma_completion_queue_create(
+      IREE_CHECK_OK(iree_net_rdma_completion_queue_allocate(
           iree_net_rdma_region_context(regions_[side]), proactor_,
           queue_options,
           {+[](void* user_data, iree_host_size_t count,
@@ -98,6 +102,10 @@ class NativePair {
            +[](void*, iree_status_t status) { iree_status_abort(status); },
            this},
           iree_allocator_system(), &completion_queues_[side]));
+      EXPECT_EQ(
+          iree_net_rdma_completion_queue_handle(completion_queues_[side])
+                  ->channel != nullptr,
+          completion_mode == IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS);
     }
 
     uint8_t port = iree_net_rdma_context_port_number(context_);
@@ -216,11 +224,13 @@ class NativePair {
     for (auto* completion_queue : completion_queues_) {
       bool joined = false;
       iree_net_rdma_completion_queue_deactivate(
-          completion_queue,
-          {+[](void* user_data) { *static_cast<bool*>(user_data) = true; },
-           &joined});
+          completion_queue, {+[](void* user_data, iree_status_t status) {
+                               IREE_CHECK_OK(status);
+                               *static_cast<bool*>(user_data) = true;
+                             },
+                             &joined});
       PollUntil(proactor_, [&] { return joined; });
-      iree_net_rdma_completion_queue_destroy(completion_queue);
+      iree_net_rdma_completion_queue_free(completion_queue);
     }
     EXPECT_EQ(proactor_->progress_list, nullptr);
     iree_async_proactor_release(proactor_);
@@ -271,7 +281,9 @@ class NativePair {
     } else {
       IREE_ASSERT_OK(status);
     }
-    EXPECT_EQ(proactor_->progress_list, nullptr);
+    EXPECT_EQ(
+        proactor_->progress_list != nullptr,
+        completion_mode_ == IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL);
   }
 
   void TransferBatch(uint32_t target_offset) {
@@ -378,10 +390,13 @@ class NativePair {
   std::array<ibv_wc, 16> completed_ = {};
   // Initialized completion entries, without assuming delivery order.
   uint32_t completed_count_ = 0;
+  // Expected idle CQ service contract.
+  iree_net_rdma_completion_queue_mode_t completion_mode_;
 };
 
 class CompletionQueueTest
-    : public ::testing::TestWithParam<std::tuple<const char*, uint32_t>> {
+    : public ::testing::TestWithParam<std::tuple<
+          const char*, uint32_t, iree_net_rdma_completion_queue_mode_t>> {
  protected:
   void SetUp() override {
     const char* device_name = std::getenv("IREE_NET_RDMA_TEST_DEVICE");
@@ -449,12 +464,12 @@ class CompletionQueueTest
 
 TEST_P(CompletionQueueTest,
        SharedRegistrationSurvivesConnectionAndProactorRetirement) {
-  auto first = std::make_unique<NativePair>(regions_[0], regions_[1],
-                                            std::get<0>(GetParam()),
-                                            std::get<1>(GetParam()), 0);
-  auto second = std::make_unique<NativePair>(regions_[0], regions_[1],
-                                             std::get<0>(GetParam()),
-                                             std::get<1>(GetParam()), 512);
+  auto first = std::make_unique<NativePair>(
+      regions_[0], regions_[1], std::get<0>(GetParam()),
+      std::get<1>(GetParam()), std::get<2>(GetParam()), 0);
+  auto second = std::make_unique<NativePair>(
+      regions_[0], regions_[1], std::get<0>(GetParam()),
+      std::get<1>(GetParam()), std::get<2>(GetParam()), 512);
   for (auto*& context : contexts_) {
     iree_net_rdma_context_release(context);
     context = nullptr;
@@ -491,7 +506,7 @@ TEST_P(CompletionQueueTest, DestructionDiscardsUnreadNativeNotification) {
         options, iree_allocator_system(), &proactor));
   }
   iree_net_rdma_completion_queue_t* completions = nullptr;
-  IREE_ASSERT_OK(iree_net_rdma_completion_queue_create(
+  IREE_ASSERT_OK(iree_net_rdma_completion_queue_allocate(
       contexts_[0], proactor, {32, std::get<1>(GetParam()), 0},
       {+[](void*, iree_host_size_t, const ibv_wc*) {
          ADD_FAILURE() << "The retired CQ must not dispatch unread work.";
@@ -534,11 +549,13 @@ TEST_P(CompletionQueueTest, DestructionDiscardsUnreadNativeNotification) {
   CheckNative(library->ibv_destroy_qp(queue));
   bool joined = false;
   iree_net_rdma_completion_queue_deactivate(
-      completions,
-      {+[](void* user_data) { *static_cast<bool*>(user_data) = true; },
-       &joined});
+      completions, {+[](void* user_data, iree_status_t status) {
+                      IREE_CHECK_OK(status);
+                      *static_cast<bool*>(user_data) = true;
+                    },
+                    &joined});
   PollUntil(proactor, [&] { return joined; });
-  iree_net_rdma_completion_queue_destroy(completions);
+  iree_net_rdma_completion_queue_free(completions);
   iree_async_proactor_release(proactor);
 }
 
@@ -554,7 +571,7 @@ TEST_P(CompletionQueueTest,
           &rejected));
   EXPECT_EQ(rejected, nullptr);
   NativePair pair(regions_[0], regions_[1], std::get<0>(GetParam()),
-                  std::get<1>(GetParam()), 0);
+                  std::get<1>(GetParam()), std::get<2>(GetParam()), 0);
   ASSERT_NO_FATAL_FAILURE(CheckRoundTrip(pair, 4096, 71));
 }
 
@@ -567,13 +584,13 @@ TEST_P(CompletionQueueTest, FailedContextSelectionPreservesLiveRegistrations) {
                             options, iree_allocator_system(), &rejected));
   EXPECT_EQ(rejected, nullptr);
   NativePair pair(regions_[0], regions_[1], std::get<0>(GetParam()),
-                  std::get<1>(GetParam()), 0);
+                  std::get<1>(GetParam()), std::get<2>(GetParam()), 0);
   ASSERT_NO_FATAL_FAILURE(CheckRoundTrip(pair, 4096, 91));
 }
 
-TEST_P(CompletionQueueTest, BoundedBatchesAndIsolatedTailBecomeIdle) {
+TEST_P(CompletionQueueTest, BoundedBatchesAndIsolatedTailPreserveProgressMode) {
   NativePair pair(regions_[0], regions_[1], std::get<0>(GetParam()),
-                  std::get<1>(GetParam()), 0);
+                  std::get<1>(GetParam()), std::get<2>(GetParam()), 0);
   auto* source = static_cast<uint8_t*>(regions_[0]->base_ptr);
   auto* target = static_cast<uint8_t*>(regions_[1]->base_ptr);
   for (uint32_t round = 0; round < 16; ++round) {
@@ -592,7 +609,7 @@ TEST_P(CompletionQueueTest, BoundedBatchesAndIsolatedTailBecomeIdle) {
 
 TEST_P(CompletionQueueTest, FullSendAndReceiveWindowsFlushByIdentity) {
   NativePair pair(regions_[0], regions_[1], std::get<0>(GetParam()),
-                  std::get<1>(GetParam()), 0);
+                  std::get<1>(GetParam()), std::get<2>(GetParam()), 0);
   ASSERT_NO_FATAL_FAILURE(CheckRoundTrip(pair, 4096, 98));
   ASSERT_NO_FATAL_FAILURE(pair.FlushFullWindow());
   ASSERT_NO_FATAL_FAILURE(pair.CheckIdleProgress());
@@ -605,10 +622,12 @@ TEST_P(CompletionQueueTest, FullSendAndReceiveWindowsFlushByIdentity) {
   }
 }
 
-INSTANTIATE_TEST_SUITE_P(Backends, CompletionQueueTest,
-                         ::testing::Combine(::testing::Values("io_uring",
-                                                              "posix"),
-                                            ::testing::Values(1u, 8u)));
+INSTANTIATE_TEST_SUITE_P(
+    Backends, CompletionQueueTest,
+    ::testing::Combine(
+        ::testing::Values("io_uring", "posix"), ::testing::Values(1u, 8u),
+        ::testing::Values(IREE_NET_RDMA_COMPLETION_QUEUE_MODE_READINESS,
+                          IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL)));
 
 }  // namespace
 }  // namespace iree::net::rdma

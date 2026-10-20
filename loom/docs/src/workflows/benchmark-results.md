@@ -210,6 +210,18 @@ jq 'select(.row == "comparison") |
      candidate_p50_spread_ppm}' comparison.jsonl
 ```
 
+Scenario repetition rows additionally identify the concrete trial selected by
+`--sample`:
+
+```shell
+jq 'select(.row == "benchmark.repetition" and has("trial_ordinal")) |
+    {candidate_id,
+     benchmark_sample_index,
+     configuration_ordinal,
+     trial_index,
+     trial_ordinal}' comparison.jsonl
+```
+
 ## Follow retained artifacts
 
 `--artifact-bundle-dir=DIR` collects the result, `manifest.json`, file outputs,
@@ -265,7 +277,7 @@ specific compiler question.
 
 `check.file.read.npy` paths resolve relative to the input module.
 `check.file.write.npy` paths are relative and resolve under
-`--file-output-dir`, whose default is a source-specific directory below the
+`--file-output-root`, whose default is a source-specific directory below the
 platform temporary directory's `iree-loom-benchmark` root.
 `--profile-artifacts-dir=DIR` retains raw HAL profile bundles when counters,
 device metrics, executable traces, or later decoding are part of the evidence.

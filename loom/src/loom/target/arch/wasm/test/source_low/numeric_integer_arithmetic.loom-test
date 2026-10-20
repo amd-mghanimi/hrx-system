@@ -1,0 +1,123 @@
+// RUN: emit source-low target=wasm:simd128 output=low
+
+func.def @native_i16(%lhs: vector<8xi16>, %rhs: vector<8xi16>, %addend: vector<8xi16>) -> (vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>) {
+  %add = vector.addi %lhs, %rhs : vector<8xi16>
+  %sub = vector.subi %lhs, %rhs : vector<8xi16>
+  %mul = vector.muli %lhs, %rhs : vector<8xi16>
+  %neg = vector.negi %lhs : vector<8xi16>
+  %abs = vector.absi %lhs : vector<8xi16>
+  %min_signed = vector.minsi %lhs, %rhs : vector<8xi16>
+  %max_signed = vector.maxsi %lhs, %rhs : vector<8xi16>
+  %min_unsigned = vector.minui %lhs, %rhs : vector<8xi16>
+  %max_unsigned = vector.maxui %lhs, %rhs : vector<8xi16>
+  %fma = vector.fmai %lhs, %rhs, %addend : vector<8xi16>
+  func.return %add, %sub, %mul, %neg, %abs, %min_signed, %max_signed, %min_unsigned, %max_unsigned, %fma : vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>, vector<8xi16>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @native_i16(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>, %addend: reg<wasm.v128>) -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %add = i16x8.add %lhs, %rhs
+  %sub = i16x8.sub %lhs, %rhs
+  %mul = i16x8.mul %lhs, %rhs
+  %neg = i16x8.neg %lhs
+  %abs = i16x8.abs %lhs
+  %min_signed = i16x8.min_s %lhs, %rhs
+  %max_signed = i16x8.max_s %lhs, %rhs
+  %min_unsigned = i16x8.min_u %lhs, %rhs
+  %max_unsigned = i16x8.max_u %lhs, %rhs
+  %fma = i16x8.add %mul, %addend
+  return %add, %sub, %mul, %neg, %abs, %min_signed, %max_signed, %min_unsigned, %max_unsigned, %fma
+}
+
+// ====
+
+func.def @composed_i8_multiply(%lhs: vector<16xi8>, %rhs: vector<16xi8>, %addend: vector<16xi8>) -> (vector<16xi8>, vector<16xi8>) {
+  %mul = vector.muli %lhs, %rhs : vector<16xi8>
+  %fma = vector.fmai %lhs, %rhs, %addend : vector<16xi8>
+  func.return %mul, %fma : vector<16xi8>, vector<16xi8>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @composed_i8_multiply(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>, %addend: reg<wasm.v128>) -> (reg<wasm.v128>, reg<wasm.v128>) asm {
+  %12 = i16x8.extmul_low_i8x16_u %lhs, %rhs
+  %13 = i16x8.extmul_high_i8x16_u %lhs, %rhs
+  %mul = i8x16.shuffle %12, %13, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30
+  %fma = i8x16.add %mul, %addend
+  return %mul, %fma
+}
+
+// ====
+
+func.def @composed_i64_extrema(%lhs: vector<2xi64>, %rhs: vector<2xi64>) -> (vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>) {
+  %min_signed = vector.minsi %lhs, %rhs : vector<2xi64>
+  %max_signed = vector.maxsi %lhs, %rhs : vector<2xi64>
+  %min_unsigned = vector.minui %lhs, %rhs : vector<2xi64>
+  %max_unsigned = vector.maxui %lhs, %rhs : vector<2xi64>
+  func.return %min_signed, %max_signed, %min_unsigned, %max_unsigned : vector<2xi64>, vector<2xi64>, vector<2xi64>, vector<2xi64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @composed_i64_extrema(%lhs: reg<wasm.v128>, %rhs: reg<wasm.v128>) -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %16 = i64x2.lt_s %lhs, %rhs
+  %min_signed = v128.bitselect %lhs, %rhs, %16
+  %max_signed = v128.bitselect %rhs, %lhs, %16
+  %20 = v128.const -9223372036854775808, -9223372036854775808
+  %21 = v128.xor %lhs, %20
+  %22 = v128.xor %rhs, %20
+  %23 = i64x2.lt_s %21, %22
+  %min_unsigned = v128.bitselect %lhs, %rhs, %23
+  %max_unsigned = v128.bitselect %rhs, %lhs, %23
+  return %min_signed, %max_signed, %min_unsigned, %max_unsigned
+}
+
+// ====
+
+func.def @partial_i16(%lhs_buffer: buffer, %rhs_buffer: buffer, %output_buffer: buffer) {
+  %base = index.constant 0 : offset
+  %lhs_view = buffer.view %lhs_buffer[%base] : buffer -> view<3xi16>
+  %rhs_view = buffer.view %rhs_buffer[%base] : buffer -> view<3xi16>
+  %output_view = buffer.view %output_buffer[%base] : buffer -> view<3xi16>
+  %lhs = vector.load %lhs_view[0] : view<3xi16> -> vector<3xi16>
+  %rhs = vector.load %rhs_view[0] : view<3xi16> -> vector<3xi16>
+  %result = vector.addi %lhs, %rhs : vector<3xi16>
+  vector.store %result, %output_view[0] : vector<3xi16>, view<3xi16>
+  func.return
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @partial_i16(%lhs_buffer: reg<wasm.i32>, %rhs_buffer: reg<wasm.i32>, %output_buffer: reg<wasm.i32>) asm {
+  %46 = i32.load %lhs_buffer
+  %47 = i32x4.splat %46
+  %48 = i32.load16_u %lhs_buffer {offset = 4}
+  %49 = i16x8.splat %48
+  %lhs = i8x16.shuffle %47, %49, 0, 1, 2, 3, 16, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  %51 = i32.load %rhs_buffer
+  %52 = i32x4.splat %51
+  %53 = i32.load16_u %rhs_buffer {offset = 4}
+  %54 = i16x8.splat %53
+  %rhs = i8x16.shuffle %52, %54, 0, 1, 2, 3, 16, 17, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  %result = i16x8.add %lhs, %rhs
+  %57 = i32x4.extract_lane %result, 0
+  i32.store %output_buffer, %57
+  %58 = i16x8.extract_lane_u %result, 2
+  i32.store16 %output_buffer, %58 {offset = 4}
+  return
+}
+
+// ====
+
+func.def @wide_i32(%lhs0: vector<4xi32>, %lhs1: vector<4xi32>, %rhs0: vector<4xi32>, %rhs1: vector<4xi32>) -> (vector<4xi32>, vector<4xi32>) {
+  %lhs = vector.concat<0> %lhs0, %lhs1 : vector<4xi32>, vector<4xi32> -> vector<8xi32>
+  %rhs = vector.concat<0> %rhs0, %rhs1 : vector<4xi32>, vector<4xi32> -> vector<8xi32>
+  %sum = vector.addi %lhs, %rhs : vector<8xi32>
+  %sum0 = vector.slice %sum[0] : vector<8xi32> -> vector<4xi32>
+  %sum1 = vector.slice %sum[4] : vector<8xi32> -> vector<4xi32>
+  func.return %sum0, %sum1 : vector<4xi32>, vector<4xi32>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @wide_i32(%lhs0: reg<wasm.v128>, %lhs1: reg<wasm.v128>, %rhs0: reg<wasm.v128>, %rhs1: reg<wasm.v128>) -> (reg<wasm.v128>, reg<wasm.v128>) asm {
+  %20 = i32x4.add %lhs0, %rhs0
+  %21 = i32x4.add %lhs1, %rhs1
+  return %20, %21
+}

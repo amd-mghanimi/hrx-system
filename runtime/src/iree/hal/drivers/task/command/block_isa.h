@@ -26,6 +26,7 @@
 #include "iree/base/alignment.h"
 #include "iree/base/api.h"
 #include "iree/hal/atomic.h"
+#include "iree/hal/command_buffer.h"
 #include "iree/hal/drivers/task/executable/library/abi.h"
 
 typedef struct iree_hal_task_executable_t iree_hal_task_executable_t;
@@ -50,6 +51,8 @@ typedef enum iree_hal_cmd_opcode_e {
   IREE_HAL_CMD_ATOMIC_WAIT = 7,   // Wait on an atomic buffer location.
   IREE_HAL_CMD_ATOMIC_STORE = 8,  // Atomically store to a buffer location.
   IREE_HAL_CMD_ATOMIC_RMW = 9,    // Atomically update a buffer location.
+  IREE_HAL_CMD_FENCE = 10,        // Apply CPU memory ordering.
+  IREE_HAL_CMD_CACHE = 11,        // Execute a prepared CPU cache recipe.
 } iree_hal_cmd_opcode_t;
 
 typedef uint8_t iree_hal_cmd_flags_t;
@@ -62,6 +65,10 @@ enum iree_hal_cmd_flag_bits_e {
   IREE_HAL_CMD_FLAG_PREDICATED = 1u << 1,
   // Adjacent tiles share data (sequential dependency within the dispatch).
   IREE_HAL_CMD_FLAG_SEQUENTIAL = 1u << 2,
+  // Dispatch inputs require gradual floating-point underflow.
+  IREE_HAL_CMD_FLAG_PRESERVE_SUBNORMAL_INPUTS = 1u << 3,
+  // Dispatch results require gradual floating-point underflow.
+  IREE_HAL_CMD_FLAG_PRESERVE_SUBNORMAL_RESULTS = 1u << 4,
 };
 
 // Target byte length for each transfer tile. This is large enough to amortize
@@ -362,8 +369,8 @@ static inline uint8_t iree_hal_cmd_region_width_bucket_from_tile_count(
 // At execution, the processor builds iree_hal_executable_dispatch_state_v0_t
 // on the stack per-dispatch with direct pointer assignments:
 //   dispatch_state.constants = {
-//       (const uint8_t*)cmd->constants,
-//       cmd->constant_count * sizeof(uint32_t),
+//       cmd->constants,
+//       cmd->constant_byte_length,
 //   };
 //   dispatch_state.binding_ptrs =
 //       (void* const*)&state->binding_ptrs[cmd->binding_data_base];
@@ -373,12 +380,14 @@ static inline uint8_t iree_hal_cmd_region_width_bucket_from_tile_count(
 //           : NULL;
 // No IREE_STRUCT_LAYOUT computation, no translation, no memcpy.
 typedef struct iree_hal_cmd_dispatch_t {
-  iree_hal_cmd_header_t header;  // opcode=DISPATCH
+  // Command header with opcode DISPATCH.
+  iree_hal_cmd_header_t header;
 
-  // Packing: fills the 4-byte gap between the 4-byte header and the 8-byte-
-  // aligned executable pointer.
-  uint8_t constant_count;
+  // Reserved padding before the aligned executable pointer.
+  uint8_t reserved;
+  // Number of bound buffer spans supplied to the entry.
   uint8_t binding_count;
+  // First binding slot in the block's mutable data region.
   uint16_t binding_data_base;
 
   // Executable and export ordinal. Always set at recording time. Used by
@@ -395,8 +404,9 @@ typedef struct iree_hal_cmd_dispatch_t {
   // Export ordinal within the executable.
   uint16_t export_ordinal;
 
-  // Reserved for future dispatch command fields.
-  uint16_t reserved;
+  // Exact byte length of the inline constant payload, including the full
+  // 256-byte dispatch limit. No word alignment or trailing padding is implied.
+  uint16_t constant_byte_length;
 
   // Profiling sideband data.
   struct {
@@ -438,8 +448,8 @@ typedef struct iree_hal_cmd_dispatch_t {
   // from dispatch_attrs.local_memory_pages * PAGE_SIZE + dynamic_local_memory.
   uint32_t local_memory_size;
 
-  // Push constants, inline in .text. Accessed as cmd->constants[i].
-  uint32_t constants[];
+  // Byte-addressed constants inline in .text. Entry metadata owns their layout.
+  uint8_t constants[];
 } iree_hal_cmd_dispatch_t;
 
 static_assert(offsetof(iree_hal_cmd_dispatch_t, constants) == 68,
@@ -577,6 +587,30 @@ typedef struct iree_hal_cmd_atomic_rmw_t {
 
 static_assert(sizeof(iree_hal_cmd_atomic_rmw_t) == 24,
               "atomic RMW command is 3 qwords");
+
+// FENCE: applies acquire/release ordering in the coherent CPU memory domain.
+// Recorders isolate this one-tile command in its own region so all preceding
+// work completes before the fence and all following work begins afterward.
+typedef struct iree_hal_cmd_fence_t {
+  iree_hal_cmd_header_t header;  // opcode=FENCE
+  // IREE_HAL_ATOMIC_FLAG_ACQUIRE/RELEASE mask.
+  iree_hal_atomic_flags_t atomic_flags;
+} iree_hal_cmd_fence_t;
+
+static_assert(sizeof(iree_hal_cmd_fence_t) == 8, "fence command is 1 qword");
+
+// CACHE: one selected host maintenance operation. The recorder isolates each
+// operation so recipes keep their native ordering even with multiple workers.
+typedef struct iree_hal_cmd_cache_t {
+  // Command header with opcode CACHE.
+  iree_hal_cmd_header_t header;
+  // Resolved CPU pointer slot used by HOST_DIRECT recipes.
+  uint16_t target_binding;
+  // Exact native operation copied at recording time.
+  iree_hal_memory_transition_recipe_info_t recipe;
+  // Native buffer owner and range for HOST_API; length also bounds HOST_DIRECT.
+  iree_hal_buffer_ref_t buffer_ref;
+} iree_hal_cmd_cache_t;
 
 //===----------------------------------------------------------------------===//
 // BARRIER, BRANCH, RETURN commands

@@ -21,6 +21,7 @@
 #include "loom/ops/op_defs.h"
 #include "loom/pass/types.h"
 #include "loom/pass/value_facts.h"
+#include "loom/rewrite/remap.h"
 #include "loom/rewrite/rewriter.h"
 #include "loom/target/function_version.h"
 #include "loom/transforms/boundary/projection_rule.h"
@@ -109,6 +110,8 @@ typedef struct loom_boundary_projection_block_t {
 } loom_boundary_projection_block_t;
 
 typedef struct loom_boundary_projection_loop_t loom_boundary_projection_loop_t;
+typedef struct loom_boundary_projection_branch_t
+    loom_boundary_projection_branch_t;
 
 struct loom_boundary_projection_function_t {
   // Original function-like operation.
@@ -179,12 +182,22 @@ struct loom_boundary_projection_function_t {
   loom_boundary_projection_block_t* blocks;
   // Number of rewritten blocks.
   iree_host_size_t block_count;
-  // LoopLike recurrence plans in operation postorder.
+  // Original definition to current definition correspondence maintained while
+  // applying the retained plan. Source recipes resolve logical value IDs
+  // through this map after an earlier boundary rebuild replaces their defs.
+  loom_ir_remap_t value_correspondence;
+  // LoopLike recurrence plans in dominance preorder.
   loom_boundary_projection_loop_t* loops;
   // Number of populated loop plans.
   iree_host_size_t loop_count;
   // Allocated loop plan capacity.
   iree_host_size_t loop_capacity;
+  // Original structured branch plans in dominance preorder.
+  loom_boundary_projection_branch_t* branches;
+  // Number of retained structured branches.
+  iree_host_size_t branch_count;
+  // Allocated structured branch capacity.
+  iree_host_size_t branch_capacity;
   // Whether this function participates in the rewrite batch.
   bool selected;
   // Whether at least one signature slot is projected.
@@ -247,6 +260,23 @@ iree_status_t loom_boundary_projection_plan_prepare(
 
 // Finds a function-local projection candidate by semantic value identity.
 iree_host_size_t loom_boundary_projection_slot_index(
+    const loom_boundary_projection_function_t* function,
+    loom_value_id_t value_id);
+
+// Records one definition replacement in the application correspondence.
+// Resolution follows chains when a replacement is itself replaced later.
+iree_status_t loom_boundary_projection_record_value_replacement(
+    loom_boundary_projection_function_t* function, loom_value_id_t original,
+    loom_value_id_t replacement);
+
+// Records and applies one definition replacement while preserving its name.
+iree_status_t loom_boundary_projection_replace_definition(
+    loom_boundary_projection_plan_t* plan,
+    loom_boundary_projection_function_t* function, loom_value_id_t source,
+    loom_value_id_t target);
+
+// Resolves an original planned value to its current live definition.
+loom_value_id_t loom_boundary_projection_resolve_value(
     const loom_boundary_projection_function_t* function,
     loom_value_id_t value_id);
 

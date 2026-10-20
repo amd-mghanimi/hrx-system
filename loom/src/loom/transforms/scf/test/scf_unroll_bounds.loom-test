@@ -27,7 +27,7 @@ func.def @dynamic_interleaved_tile_indices_remain_in_bounds(%payload: buffer, %b
   %38 = index.cmp slt, %36, %16 : index
   cfg.cond_br %38, ^_bb2, ^_bb3
 ^_bb2:
-  %37 = index.assume %36 [range(%36, 0, 28), mul(%36, 4), lt(%36, %16)] : index
+  %37 = index.assume %36 [range(%36, 0, 28), multiple_of(%36, 4), lt(%36, %16)] : index
   %19 = index.constant 1 : index
   %20 = index.add %37, %19 : index
   %21 = index.constant 2 : index
@@ -87,7 +87,7 @@ func.def @ranged_lower_full_span_vector_origins(%payload: buffer, %base: offset,
   %25 = index.cmp slt, %23, %channel_end : index
   cfg.cond_br %25, ^_bb2, ^_bb4
 ^_bb2:
-  %channel = index.assume %23 [range(%23, 0, 1660), mul(%23, 4), ge(%23, %channel_start)] : index
+  %channel = index.assume %23 [range(%23, 0, 1660), multiple_of(%23, 4), ge(%23, %channel_start)] : index
   %13 = index.constant 128 : index
   %channel_128 = index.add %channel, %13 : index
   %15 = index.constant 256 : index
@@ -158,7 +158,7 @@ func.def @dynamic_recurrence_nonunit_step(%payload: buffer, %base: offset, %end0
   %62 = index.cmp slt, %59, %26 : index
   cfg.cond_br %62, ^_bb2, ^_bb3
 ^_bb2:
-  %61 = index.assume %59 [range(%59, 0, 12), mul(%59, 6), lt(%59, %26)] : index
+  %61 = index.assume %59 [range(%59, 0, 12), multiple_of(%59, 6), lt(%59, %26)] : index
   %31 = index.constant 3 : index
   %32 = index.add %61, %31 : index
   %i$33, %i_3 = index.assume %61, %32 [lt(%61, %end), lt(%32, %end)] : index, index
@@ -183,7 +183,7 @@ func.def @dynamic_recurrence_nonunit_step(%payload: buffer, %base: offset, %end0
   %54 = index.cmp slt, %51, %end : index
   cfg.cond_br %54, ^_bb6, ^_bb9
 ^_bb6:
-  %i$53 = index.assume %51 [range(%51, 0, 16), mul(%51, 3), ge(%51, %26), lt(%51, %end)] : index
+  %i$53 = index.assume %51 [range(%51, 0, 15), multiple_of(%51, 3), ge(%51, %26), lt(%51, %end)] : index
   %packet$45 = vector.load %view[%i$53, %c0] : view<17x4xi32> -> vector<4xi32>
   %value$46 = view.load %view[%i$53, %c0] : view<17x4xi32> -> i32
   test.use %packet$45 : vector<4xi32>
@@ -200,5 +200,71 @@ func.def @dynamic_recurrence_nonunit_step(%payload: buffer, %base: offset, %end0
   cfg.br ^_bb10(%sum$52: i32)
 ^_bb10(%total: i32):
   test.use %total : i32
+  func.return
+}
+
+// ====
+// RUN: pass unroll-scf-for,canonicalize
+
+// A structured true edge proves the complete tile without duplicating its
+// guard as an index.assume inside the branch.
+func.def @guarded_full_tile_unroll(%remaining: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %tile_size = index.constant 8 : index
+  %has_full_tile = index.cmp sge, %remaining, %tile_size : index
+  scf.if %has_full_tile {
+    %tile_end = index.min %remaining, %tile_size : index
+    scf.for %i = [%begin to %tile_end step %step] unroll {
+      test.use %i : index
+    }
+  }
+  func.return
+}
+
+// ----
+func.def @guarded_full_tile_unroll(%remaining: index) {
+  %tile_size = index.constant 8 : index
+  %has_full_tile = index.cmp sge, %remaining, %tile_size : index
+  scf.if %has_full_tile {
+    %i_0 = index.constant 0 : index
+    test.use %i_0 : index
+    %i_1 = index.constant 1 : index
+    test.use %i_1 : index
+    %i_2 = index.constant 2 : index
+    test.use %i_2 : index
+    %i_3 = index.constant 3 : index
+    test.use %i_3 : index
+    %i_4 = index.constant 4 : index
+    test.use %i_4 : index
+    %i_5 = index.constant 5 : index
+    test.use %i_5 : index
+    %i_6 = index.constant 6 : index
+    test.use %i_6 : index
+    %i_7 = index.constant 7 : index
+    test.use %i_7 : index
+  }
+  func.return
+}
+
+// ====
+// RUN: pass unroll-scf-for
+
+// The complementary edge only bounds the tail; its trip count remains
+// dynamic and cannot satisfy bare unroll.
+func.def @partial_tile_unroll_remains_dynamic(%remaining: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %tile_size = index.constant 8 : index
+  %has_full_tile = index.cmp sge, %remaining, %tile_size : index
+  scf.if %has_full_tile {
+    test.use %remaining : index
+  } else {
+    %tile_end = index.min %remaining, %tile_size : index
+    // ERROR@+1: STRUCTURE/014 {attr_name="unroll", expected_constraint="exact static trip count"}
+    scf.for %i = [%begin to %tile_end step %step] unroll {
+      test.use %i : index
+    }
+  }
   func.return
 }

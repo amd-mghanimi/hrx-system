@@ -97,12 +97,12 @@ func.def @helper(%x: i32) -> (i32) {
   const loom_op_t* entry_return = live_call->next_op;
   ASSERT_TRUE(loom_func_return_isa(entry_return));
 
-  const loom_module_size_hints_t hints = {
-      /*.value_count=*/0,
-      /*.string_count=*/source->strings.count,
-      /*.type_count=*/source->types.count,
-      /*.encoding_count=*/source->encodings.count,
-      /*.symbol_count=*/source->symbols.count,
+  loom_module_size_hints_t hints = {
+      .string_count = source->strings.count,
+      .type_count = source->types.count,
+      .encoding_count = source->encodings.count,
+      .source_count = source->sources.count,
+      .symbol_count = source->symbols.count,
   };
   loom_module_t* target = nullptr;
   IREE_ASSERT_OK(loom_module_allocate(
@@ -124,8 +124,8 @@ func.def @helper(%x: i32) -> (i32) {
         loom_module_add_symbol(target, target_name_id, &target_symbol_id));
     target->symbols.entries[target_symbol_id].flags = source_symbol->flags;
     target_symbols[source_symbol_id] = {
-        /*.module_id=*/0,
-        /*.symbol_id=*/target_symbol_id,
+        .module_id = 0,
+        .symbol_id = target_symbol_id,
     };
   }
 
@@ -134,8 +134,8 @@ func.def @helper(%x: i32) -> (i32) {
       source, target, target_symbols.data(), target_symbols.size(),
       &projection));
   loom_ir_remap_op_projection_t operation_projection[] = {
-      {/*.source_op=*/live_call, /*.target_op=*/nullptr},
-      {/*.source_op=*/entry_return, /*.target_op=*/nullptr},
+      {.source_op = live_call, .target_op = nullptr},
+      {.source_op = entry_return, .target_op = nullptr},
   };
   IREE_ASSERT_OK(loom_ir_module_projection_track_operations(
       &projection, operation_projection, IREE_ARRAYSIZE(operation_projection)));

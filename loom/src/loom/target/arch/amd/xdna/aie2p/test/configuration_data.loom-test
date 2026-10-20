@@ -1,0 +1,253 @@
+// RUN: emit aie2p-xdna output=sections
+
+// One compiled worker links at two placements with different resident data.
+// Declarations after program.load still participate in storage admission.
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @retained_weights() asm {
+  %columns = constant 2 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  %first_column = constant 0 : reg<aie2p.config.scalar : i64>
+  %second_column = constant 1 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %origin = constant 0 : reg<aie2p.config.scalar : i64>
+  %channels = constant 32776 : reg<aie2p.config.scalar : i64>
+  %large_channels = constant 65472 : reg<aie2p.config.scalar : i64>
+  program.load %first_column, %row, @reduce
+  program.load %second_column, %row, @reduce
+  data.reserve %first_column, %row, %origin, %channels
+  data.reserve %second_column, %row, %origin, %large_channels
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core) abi(object_function) @reduce() asm {
+  %scratch = storage {byte_alignment = 64, byte_length = 64} : low.storage<private>
+  %address = storage_address %scratch : low.storage<private> -> reg<aie2p.ep>
+  %identity = mov.short 0
+  st %identity, %address, 0
+  return
+}
+
+// ----
+.text.reduce: address=0x00000000 bytes=22 initialized
+  6401200000054480c080070098110408000000000000
+.text.reduce: address=0x00000000 bytes=22 initialized
+  6401200000054480dff0070098110408000000000000
+.storage.reduce.private: address=0x00078040 bytes=64 reserved
+.storage.reduce.private: address=0x0007ffc0 bytes=64 reserved
+
+// ====
+// RUN: emit aie2p-xdna
+
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @exhausted_data() asm {
+  %columns = constant 1 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  %column = constant 0 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %origin = constant 0 : reg<aie2p.config.scalar : i64>
+  %channels = constant 65504 : reg<aie2p.config.scalar : i64>
+  data.reserve %column, %row, %origin, %channels
+  // ERROR@+1: XDNA/049 {column="0", row="3", required="65568", capacity="65536"}
+  program.load %column, %row, @reduce
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core) abi(object_function) @reduce() asm {
+  %scratch = storage {byte_alignment = 32, byte_length = 64} : low.storage<private>
+  %address = storage_address %scratch : low.storage<private> -> reg<aie2p.ep>
+  %identity = mov.short 0
+  st %identity, %address, 0
+  return
+}
+
+// ----
+
+// ====
+// RUN: emit aie2p-xdna
+
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @bad_extent() asm {
+  %columns = constant 1 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  %column = constant 0 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %offset = constant 65520 : reg<aie2p.config.scalar : i64>
+  %length = constant 32 : reg<aie2p.config.scalar : i64>
+  // ERROR@+1: XDNA/041 {operand_name="data extent", value="65552", minimum="0", maximum="65536"}
+  data.reserve %column, %row, %offset, %length
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  return
+}
+
+// ----
+
+// ====
+// RUN: verify
+
+// Invocation may reuse the memory, but allocation ownership belongs to setup.
+aie2p.target<configuration> @configuration
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @bad_phase() asm {
+  %columns = constant 1 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  %column = constant 0 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %offset = constant 0 : reg<aie2p.config.scalar : i64>
+  %length = constant 64 : reg<aie2p.config.scalar : i64>
+  // ERROR@+1: XDNA/038 {function_name="invoke", phase="invocation", command="amd.xdna.aie2p.configuration.data.reserve"}
+  data.reserve %column, %row, %offset, %length
+  return
+}
+
+// ====
+// RUN: emit aie2p-xdna output=sections
+
+// Constant-bank separation survives native detachment and two placements.
+global.rodata.def @first = align(32) conflicts([@second]) bytes("1122334455667788")
+
+global.rodata.def @second = align(32) conflicts([@first]) bytes("99aabbccddeeff00")
+
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @banked_constants() asm {
+  %columns = constant 2 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  %first_column = constant 0 : reg<aie2p.config.scalar : i64>
+  %second_column = constant 1 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %origin = constant 0 : reg<aie2p.config.scalar : i64>
+  %bank_bytes = constant 16384 : reg<aie2p.config.scalar : i64>
+  data.reserve %first_column, %row, %origin, %bank_bytes
+  program.load %first_column, %row, @read_constants
+  program.load %second_column, %row, @read_constants
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core) abi(object_function) @read_constants() asm {
+  %scratch = storage {byte_alignment = 32, byte_length = 64} : low.storage<private>
+  %destination = storage_address %scratch : low.storage<private> -> reg<aie2p.ep>
+  %first_address = mov.local-address @first
+  %second_address = mov.local-address @second
+  %first_value = lda %first_address, 0
+  %second_value = lda %second_address, 0
+  st %first_value, %destination, 0
+  st %second_value, %destination, 4
+  return
+}
+
+// ----
+.text.read_constants: address=0x00000000 bytes=52 initialized
+  4480c0400700ba100030e00100d08200ba100030d00100d086000000000000000000180028109811040898311408000000000000
+.text.read_constants: address=0x00000000 bytes=52 initialized
+  4480c0000700ba100030d00100d08200ba100030c00100d086000000000000000000180028109811040898311408000000000000
+.rodata.first: address=0x00074040 bytes=8 initialized
+  1122334455667788
+.rodata.second: address=0x00078000 bytes=8 initialized
+  99aabbccddeeff00
+.storage.read_constants.private: address=0x00074000 bytes=64 reserved
+.rodata.first: address=0x00070040 bytes=8 initialized
+  1122334455667788
+.rodata.second: address=0x00074000 bytes=8 initialized
+  99aabbccddeeff00
+.storage.read_constants.private: address=0x00070000 bytes=64 reserved
+
+// ====
+// RUN: emit aie2p-xdna output=sections
+
+// Every function data domain shares the remaining SRAM after channel storage.
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @all_domains() asm {
+  %columns = constant 1 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  %column = constant 0 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %origin = constant 0 : reg<aie2p.config.scalar : i64>
+  %channels = constant 32776 : reg<aie2p.config.scalar : i64>
+  data.reserve %column, %row, %origin, %channels
+  program.load %column, %row, @worker
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core) abi(object_function) @worker() asm {
+  %stack = storage {byte_alignment = 32, byte_length = 32} : low.storage<stack>
+  %scratch = storage {byte_alignment = 32, byte_length = 32} : low.storage<scratch>
+  %private = storage {byte_alignment = 64, byte_length = 64} : low.storage<private>
+  %shared = storage {byte_alignment = 256, byte_length = 256} : low.storage<workgroup>
+  %stack_address = storage_address %stack : low.storage<stack> -> reg<aie2p.ep>
+  %scratch_address = storage_address %scratch : low.storage<scratch> -> reg<aie2p.ep>
+  %private_address = storage_address %private : low.storage<private> -> reg<aie2p.ep>
+  %shared_address = storage_address %shared : low.storage<workgroup> -> reg<aie2p.ep>
+  %identity = mov.short 0
+  st %identity, %stack_address, 0
+  st %identity, %scratch_address, 0
+  st %identity, %private_address, 0
+  st %identity, %shared_address, 0
+  return
+}
+
+// ----
+.text.worker: address=0x00000000 bytes=56 initialized
+  b80010184440c08007003a112030e001003082003a114030e001003082003a118030e001003082005c005030820000000000000000000000
+.storage.worker.stack: address=0x00078020 bytes=32 reserved
+.storage.worker.scratch: address=0x00078040 bytes=32 reserved
+.storage.worker.private: address=0x00078080 bytes=64 reserved
+.storage.worker.workgroup: address=0x00078100 bytes=256 reserved

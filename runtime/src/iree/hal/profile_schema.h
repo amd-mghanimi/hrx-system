@@ -765,6 +765,9 @@ enum iree_hal_profile_queue_event_type_e {
 
   // Atomic read-modify-write submitted through a queue operation.
   IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_ATOMIC_RMW = 14u,
+
+  // Batched virtual address mapping submitted through a queue operation.
+  IREE_HAL_PROFILE_QUEUE_EVENT_TYPE_MAP = 15u,
 };
 
 // Bitfield specifying properties of one queue event record.
@@ -1219,8 +1222,9 @@ enum iree_hal_profile_memory_event_flag_bits_t {
 //
 // Memory events describe allocations, reservations, and queue-visible
 // allocation operations. The timestamp is in IREE host monotonic time, not a
-// device clock domain. |allocation_id| is a producer-defined session-local
-// lifecycle identifier and is the primary join key for memory events. |pool_id|
+// device clock domain. |allocation_id| is the primary join key for memory
+// events. HAL buffer allocation identifiers are process-wide and remain stable
+// when allocation and release use different devices or captures. |pool_id|
 // and |backing_id| are producer-defined implementation identifiers used for
 // drilldown; they may be raw addresses, provider handles, or driver objects and
 // must not be treated as allocation lifecycle identities. Pool-stat snapshots,
@@ -1239,13 +1243,14 @@ typedef struct iree_hal_profile_memory_event_t {
   uint64_t event_id;
   // IREE monotonic host timestamp in nanoseconds.
   int64_t host_time_ns;
-  // Producer-defined session-local allocation lifecycle identifier.
+  // Allocation lifecycle identifier, shared across participating devices.
   uint64_t allocation_id;
   // Producer-defined pool or provider implementation identifier.
   uint64_t pool_id;
   // Producer-defined backing allocation, address, or slab identifier.
   uint64_t backing_id;
-  // Queue submission epoch associated with this event, or 0 when not queued.
+  // Queue submission epoch associated with this event, or 0 before native
+  // submission or for memory operations outside a queue.
   uint64_t submission_id;
   // Session-local physical device ordinal associated with this event.
   uint32_t physical_device_ordinal;

@@ -17,7 +17,6 @@ from loom.target.contracts import (
     DescriptorRule,
     EmitDescriptorOp,
     Guard,
-    GuardDiagnostic,
     ValueAliasRule,
     ValueRef,
     Vector,
@@ -30,14 +29,8 @@ PACKED_I8_TYPE = Vector(
     minimum_lanes=1,
     maximum_lanes="LOOM_AMDGPU_MAX_PACKED_I8_LANES",
 )
-PACKED_I8_TYPE_DIAGNOSTIC = GuardDiagnostic(
-    subject_role="type",
-    subject_name="vector<i8>",
-    constraint_key="amdgpu.arithmetic.vector_i8_packed",
-)
 _TYPE_GUARDS = tuple(
-    Guard.value_type(field, PACKED_I8_TYPE, diagnostic=PACKED_I8_TYPE_DIAGNOSTIC)
-    for field in ("lhs", "rhs", "result")
+    Guard.value_type(field, PACKED_I8_TYPE) for field in ("lhs", "rhs", "result")
 )
 _PACKED_I8_LOW7_MASK = 0x7F7F7F7F
 _PACKED_I8_SIGN_MASK = 0x80808080

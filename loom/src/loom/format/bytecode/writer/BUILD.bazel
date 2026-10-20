@@ -124,6 +124,7 @@ loom_cc_library(
     visibility = ["//loom/src/loom/format/bytecode:__pkg__"],
     deps = [
         ":catalog",
+        "//loom/src/loom/format:block_order",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//runtime/src/iree/base",

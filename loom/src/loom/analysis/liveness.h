@@ -67,21 +67,31 @@ typedef struct loom_liveness_interval_t {
   uint32_t start_point;
   // One-past-last program point where the value is live.
   uint32_t end_point;
+  // Number of top-level blocks containing nonempty live segments. Contiguous
+  // segments may span several blocks; dead definitions have zero live blocks.
+  uint16_t block_count;
   // Pressure class used for grouped summaries.
   loom_liveness_value_class_t value_class;
   // Number of units contributed to |value_class| when live.
   uint32_t unit_count;
+  // Exact definition program point, or UINT32_MAX for a value defined outside
+  // the analyzed region tree. Live-through uses may precede this point.
+  uint32_t definition_point;
 } loom_liveness_interval_t;
 
-// Contiguous half-open range where one value is live within one CFG block.
+static_assert(sizeof(loom_liveness_interval_t) <= 40,
+              "liveness intervals must remain compact per-value records");
+
+// Maximal contiguous half-open range where one value is live.
 //
-// A value may have multiple segments when its uses span mutually exclusive
-// blocks. Segments for each value are non-empty, ordered by increasing program
-// point and never overlap.
+// Neighboring block-local ranges that touch form one segment. Real gaps remain
+// distinct even when an enclosing interval covers them. Segments for each
+// value are nonempty, ordered by increasing program point, and never touch or
+// overlap. Intervals retain live-block counts independently of segmentation.
 typedef struct loom_liveness_segment_t {
-  // First program point where the value is live in the block.
+  // First program point where the value is live in this segment.
   uint32_t start_point;
-  // One-past-last program point where the value is live in the block.
+  // One-past-last program point where the value is live in this segment.
   uint32_t end_point;
 } loom_liveness_segment_t;
 
@@ -120,8 +130,16 @@ typedef struct loom_liveness_operation_point_t {
 static_assert(sizeof(loom_liveness_operation_point_t) <= 32,
               "liveness operation rows must remain compact");
 
-typedef struct loom_liveness_operation_use_table_t
-    loom_liveness_operation_use_table_t;
+// Borrowed consecutive operation rows with the analysis's result lifetime.
+typedef struct loom_liveness_operation_span_t {
+  // First row in accepted program-point order.
+  const loom_liveness_operation_point_t* rows;
+  // Number of initialized rows in this bounded storage segment.
+  uint8_t count;
+} loom_liveness_operation_span_t;
+
+// Stable operation rows and their semantic-use ordinals, owned by the analysis.
+typedef struct loom_liveness_operation_table_t loom_liveness_operation_table_t;
 
 // Liveness for one block in the analyzed region.
 typedef struct loom_liveness_block_info_t {
@@ -252,7 +270,7 @@ typedef struct loom_liveness_analysis_t {
   const loom_liveness_block_info_t* blocks;
   // Number of records in |blocks|.
   iree_host_size_t block_count;
-  // Live intervals for values touched by the region.
+  // Live intervals for participating values touched by the region.
   const loom_liveness_interval_t* intervals;
   // Number of records in |intervals|.
   iree_host_size_t interval_count;
@@ -267,20 +285,19 @@ typedef struct loom_liveness_analysis_t {
   const loom_liveness_pressure_summary_t* pressure_summaries;
   // Number of records in |pressure_summaries|.
   iree_host_size_t pressure_summary_count;
-  // Sparse block-local live segments grouped by value ordinal.
+  // Maximal contiguous live segments grouped by value ordinal.
   const loom_liveness_segment_t* segments;
   // Number of entries in |segments|.
   iree_host_size_t segment_count;
   // Segment ranges indexed by local value ordinal. The table has
   // |value_count| entries.
   const loom_liveness_segment_range_t* value_segment_ranges;
-  // Operations in accepted program-point order.
-  const loom_liveness_operation_point_t* operation_points;
-  // Number of records in |operation_points|.
+  // Operations in accepted program-point order and participating semantic uses.
+  // Rows retain stable addresses for the complete analysis lifetime.
+  const loom_liveness_operation_table_t* operations;
+  // Number of operation records in |operations|.
   iree_host_size_t operation_count;
-  // Segmented local value ordinals read by |operation_points|.
-  const loom_liveness_operation_use_table_t* operation_uses;
-  // Number of local value ordinals in |operation_uses|.
+  // Number of semantic-use local value ordinals in |operations|.
   iree_host_size_t operation_use_count;
 } loom_liveness_analysis_t;
 
@@ -318,7 +335,9 @@ iree_status_t loom_liveness_analyze_local_value_domain(
 // the result: block live-in/live-out lists are borrowed. |order| may reorder
 // operations within each block without changing SSA or CFG semantics. This
 // entry point consumes the retained flow instead of collecting and solving it
-// again for every source or scheduled operation order.
+// again for every source or scheduled operation order. Intervals, segments,
+// operation uses, and pressure follow the dataflow's value selection; excluded
+// values keep their local ordinals but have no interval or segments.
 iree_status_t loom_liveness_analyze_local_value_domain_with_dataflow(
     const loom_local_value_domain_t* value_domain,
     const loom_liveness_dataflow_t* dataflow, loom_liveness_order_t order,
@@ -334,8 +353,33 @@ iree_status_t loom_liveness_analyze_region_with_order(
     loom_liveness_order_t order, iree_arena_allocator_t* arena,
     loom_liveness_analysis_t* out_analysis);
 
+// Returns the operation row at its accepted-order index. The index belongs to
+// the analysis's operation domain; the returned row outlives construction
+// scratch and remains valid until the result arena is reset.
+const loom_liveness_operation_point_t* loom_liveness_operation_at(
+    const loom_liveness_analysis_t* analysis, uint32_t operation_index);
+
+// Returns the nonempty contiguous prefix of [operation_index, operation_end).
+// Both bounds belong to the analysis's operation domain, with the exclusive
+// end greater than the start. The span stops at the next storage boundary;
+// callers advance their existing index by its count to traverse the range.
+loom_liveness_operation_span_t loom_liveness_operation_span(
+    const loom_liveness_analysis_t* analysis, uint32_t operation_index,
+    uint32_t operation_end);
+
 // Returns the local value ordinal for one retained semantic operation use.
 loom_value_ordinal_t loom_liveness_operation_use_ordinal(
+    const loom_liveness_analysis_t* analysis, uint32_t use_index);
+
+// Returns the contiguous live segment containing one retained semantic
+// operation use. The returned index addresses |analysis->segments| directly.
+uint32_t loom_liveness_operation_use_segment_index(
+    const loom_liveness_analysis_t* analysis, uint32_t use_index);
+
+// Returns true when the retained direct use includes an SSA reference embedded
+// in an operand or result type. Direct operation-use ranges remain distinct by
+// value; this preserves additional read provenance without duplicating rows.
+bool loom_liveness_operation_use_has_type_reference(
     const loom_liveness_analysis_t* analysis, uint32_t use_index);
 
 // Returns the interval for |value_id|, or NULL when the value is not touched by
@@ -374,6 +418,13 @@ bool loom_liveness_segment_ranges_overlap(
 // the analyzed region.
 const loom_liveness_block_info_t* loom_liveness_block_info_for_block(
     const loom_liveness_analysis_t* analysis, const loom_block_t* block);
+
+// Returns the analyzed-region block containing |point|. The point must belong
+// to this analysis, including points inside nested regions when REGION_TREE
+// is enabled. Lookup is logarithmic in the number of analyzed blocks and uses
+// their retained, disjoint program-point ranges.
+uint16_t loom_liveness_block_index_at_point(
+    const loom_liveness_analysis_t* analysis, uint32_t point);
 
 // Collects all pressure summaries that exceed |budgets|. Missing value classes
 // do not violate a budget because no value in that class was live in the

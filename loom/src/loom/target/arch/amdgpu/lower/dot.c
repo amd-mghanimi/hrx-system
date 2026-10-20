@@ -129,7 +129,11 @@ iree_status_t loom_amdgpu_select_vector_dotf_plan(
   out_plan->init_kind = init_kind;
   out_plan->tied_accumulate_descriptor_ref = tied_accumulate_descriptor_ref;
   *out_selected = true;
-  return iree_ok_status();
+  return loom_low_lower_plan_value_type(
+      context, result,
+      loom_low_register_type(
+          loom_low_lower_context_descriptor_set(context)->stable_id,
+          LOOM_AMDGPU_REG_CLASS_ID_VGPR, 1));
 }
 
 static iree_status_t loom_amdgpu_dotf_emit_lane_op(
@@ -210,7 +214,8 @@ static iree_status_t loom_amdgpu_dotf_materialize_init(
                                       LOOM_AMDGPU_DESCRIPTOR_REF_V_MOV_B32, 0,
                                       lane_type, out_low_init);
   }
-  return loom_low_lower_lookup_value(context, plan->init, out_low_init);
+  *out_low_init = loom_low_lower_lookup_value(context, plan->init);
+  return iree_ok_status();
 }
 
 static iree_status_t loom_amdgpu_dotf_emit_tied_accumulator_diagnostic(
@@ -426,12 +431,8 @@ static iree_status_t loom_amdgpu_dotf_emit_relaxed_forest(
 iree_status_t loom_amdgpu_lower_vector_dotf(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_dotf_plan_t* plan) {
-  loom_value_id_t low_lhs = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_low_lower_lookup_value(context, plan->lhs, &low_lhs));
-  loom_value_id_t low_rhs = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_low_lower_lookup_value(context, plan->rhs, &low_rhs));
+  loom_value_id_t low_lhs = loom_low_lower_lookup_value(context, plan->lhs);
+  loom_value_id_t low_rhs = loom_low_lower_lookup_value(context, plan->rhs);
 
   loom_type_t lane_type = loom_type_none();
   IREE_RETURN_IF_ERROR(loom_amdgpu_make_vgpr_type(context, &lane_type));
@@ -440,8 +441,8 @@ iree_status_t loom_amdgpu_lower_vector_dotf(
       context, source_op, plan, lane_type, &low_init));
 
   loom_value_id_t sources[] = {low_lhs, low_rhs, low_init};
-  IREE_RETURN_IF_ERROR(
-      loom_amdgpu_legalize_vop3_scalar_sources(context, source_op, sources));
+  IREE_RETURN_IF_ERROR(loom_amdgpu_legalize_vop3_scalar_sources(
+      context, source_op, sources, IREE_ARRAYSIZE(sources)));
   low_lhs = sources[0];
   low_rhs = sources[1];
   low_init = sources[2];

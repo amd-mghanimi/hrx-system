@@ -34,9 +34,10 @@ python dev.py cmake fix
 ```
 
 `fix` applies staged hygiene repairs and stages files owned by those fixers.
-Bazel-to-CMake receives only selected BUILD/CMake inputs and may stage their
-same-directory generated output. Converter-wide inputs are checked without
-writing. Loom artifact maintenance updates only families whose owned outputs
+Bazel-to-CMake may stage same-directory generated output for selected BUILD/CMake
+inputs. Changed Starlark files and converter-wide inputs trigger a repository-wide
+read-only check: their loaded data and rules can affect other packages. Loom
+artifact maintenance updates only families whose owned outputs
 were selected; the read-only retry detects source changes that require an
 explicit regeneration. `precommit` checks the current local change set, with
 autofix enabled for staged and explicit-path test-bearing runs. `presubmit` is
@@ -333,9 +334,18 @@ Semgrep's current high-core-count OCaml-domain failure mode while keeping the
 local/CI default comfortably fast for this repository size.
 
 Semgrep and clang-tidy select C/C++ files under `runtime/src/iree/`,
-`loom/src/loom/`, `libamdf/`, and `libhrx/`. Each Semgrep rule further scopes
-its applicable paths and languages. The no-goto rule covers libamdf C sources;
-IREE status-ownership rules apply to IREE consumers.
+`loom/src/loom/`, `libamdf/`, and `libhrx/`. Semgrep also selects the AMD hardware
+reference under `docs/reference/amd/`, library guides under `libamdf/docs/`,
+and `libamdf/README.md`. Its documentation rules keep the reference independent
+of libamdf APIs, CTS, and local implementation links, and library guides
+independent of CTS documentation.
+Each rule further scopes its applicable paths and languages. The no-goto rule
+covers libamdf C sources; IREE status-ownership rules apply to IREE consumers.
+
+Changes to the documentation rules run a regression through the real Semgrep
+engine, including its path filters. The cases exercise the reference's vocabulary
+and link rules, library-guide separation, valid external primary-source links,
+and exclusion of other documentation.
 
 In the Bazel lane, clang-tidy maps selected files to their nearest package and
 invokes the checked-in clang-tidy aspect. File-based and explicit-target analysis
@@ -349,6 +359,12 @@ enablement:
 ```bash
 python dev.py bazel precommit --profile paranoid runtime/src/iree/base/status.c
 ```
+
+Bazel clang-tidy inherits the normal Bazel concurrency policy, including remote
+execution capacity configured by the developer. `IREE_CLANG_TIDY_JOBS` selects
+an explicit positive job count for clang-tidy in either lane. Without that
+override, the CMake lane uses half the local logical CPUs, rounded up and
+capped at 96; the Bazel lane does not impose a client-CPU-derived limit.
 
 Header and shared build-infrastructure changes can expand the analysis to all
 tracked C/C++ files. Changes under `build_tools/clang_tidy/` also run the plugin

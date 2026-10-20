@@ -313,6 +313,7 @@ sanitizer_assert_value = Op(
             "predicates",
             "predicate_list",
             doc="Predicate constraints that must hold at runtime.",
+            executable_predicates=True,
         ),
     ],
     constraints=[VariadicValuesMatch("values", "results")],
@@ -327,7 +328,7 @@ sanitizer_assert_value = Op(
         TypesOf("results"),
     ],
     examples=[
-        "%n_checked = sanitizer.assert.value %n [range(%n, 0, 4096), mul(%n, 16)] : index",
+        "%n_checked = sanitizer.assert.value %n [range(%n, 0, 4096), multiple_of(%n, 16)] : index",
         "%x_checked, %y_checked = sanitizer.assert.value %x, %y [lt(%x, %y)] : i32, i32",
     ],
 )
@@ -360,6 +361,7 @@ sanitizer_assert_op = Op(
             "predicates",
             "predicate_list",
             doc="Predicate constraints that must hold at runtime.",
+            executable_predicates=True,
         ),
     ],
     traits=[UNKNOWN_EFFECTS],

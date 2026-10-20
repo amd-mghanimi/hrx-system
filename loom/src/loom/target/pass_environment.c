@@ -9,6 +9,7 @@
 #include "loom/analysis/symbol_facts.h"
 #include "loom/ops/func_symbol_facts.h"
 #include "loom/ops/op_defs.h"
+#include "loom/ops/target/facts.h"
 #include "loom/target/function_contract.h"
 #include "loom/target/pass_requirements.h"
 
@@ -145,10 +146,20 @@ iree_status_t loom_target_pass_resolve_function_facts(
     return iree_ok_status();
   }
 
+  const loom_symbol_facts_base_t* target_base_facts = NULL;
+  IREE_RETURN_IF_ERROR(loom_symbol_fact_table_lookup_ref(
+      &fact_table, module, func_facts->target_symbol, &target_base_facts));
+  const loom_target_symbol_facts_t* target =
+      loom_target_symbol_facts_cast(target_base_facts);
+  if (target == NULL) {
+    return iree_ok_status();
+  }
+
   bool contract_valid = false;
-  IREE_RETURN_IF_ERROR(loom_target_function_contract_resolve_facts(
-      module, &fact_table, func_facts, pass->diagnostic_emitter,
-      pass->instance_arena, &contract_valid, out_facts));
+  IREE_RETURN_IF_ERROR(loom_target_function_contract_refine_facts(
+      module, func_facts, target->name, target->projection,
+      pass->diagnostic_emitter, pass->instance_arena, &contract_valid,
+      out_facts));
   if (!contract_valid) {
     return iree_ok_status();
   }

@@ -126,11 +126,24 @@ predictions. When the compiler cannot prove a complete subgroup, uniform
 dynamic base, uniform control, or packet width, the missing proof and its reason
 remain visible instead of manufacturing geometry.
 
+Resident pipelines have a physical inventory under **Pipeline**. It separates
+distinct compiled images from their loaded worker copies, and shows each
+worker's placement and program-memory capacity. AIE2P configuration reports
+include tile memory with no worker, such as SRAM holding retained records.
+Each memory row distinguishes reserved bytes, program data, occupied bytes,
+and the address extent. Occupancy counts overlapping reservations once; the
+extent includes alignment gaps and unused space before the final allocation.
+These facts are available when compiling source or resuming from configuration
+IR. Logical channel counts are shown only when their ownership evidence is
+available; an unavailable count does not mean zero channels.
+
 Explicit loop pipeline policies appear under **Source loop pipelines**. Each
 policy records its compiled function, loop ordinal, applied depth, queue shape,
 and ordinary read count. Detailed reports include each source operation's
-producer or consumer stage and its lookahead in original iterations. Depth one
-records the author's serial policy. Unannotated loops produce no pipeline rows.
+producer or consumer stage and its lookahead in original iterations. A guarded
+conditional partition appears at one source position with separate producer
+and consumer rows. Depth one records the author's serial policy. Unannotated
+loops produce no pipeline rows.
 Loop ordinals distinguish applied policies within a function; they are not
 source locations or stable identifiers across arbitrary source edits.
 
@@ -178,6 +191,186 @@ loom-compile-report show kernel.report.json --format=json \
 
 The view is smaller and more stable for dashboards and agents than the complete
 compiler report.
+
+## Spot expensive math and scalar fallback
+
+`show` and `suggest` prominently flag a source operation that creates more than
+five operations during math legalization, target legalization, or selection to
+Low. The same check covers scalar math, vector math, conversions, and other
+source operations on every target using those stages. A scalar software recipe
+can be expensive without scalarizing a vector; fast-math flags do not prove
+that a compact implementation was selected.
+
+A strict math operation may expand even when the selected target has a native
+form under a relaxed floating-point contract. When target policy proves that an
+explicit source permission selects that form, `loom-compile-report suggest`
+aggregates repeated operations, names the exact flag to try, and asks the
+author to validate numerical error and measured runtime. Detailed reports carry
+the proof as `native_required_fastmath_flags`; its absence does not invite the
+tool to infer ISA support from a target name or operation mnemonic.
+Summary reports retain the number of such operations and direct the author to
+details without guessing which permissions apply.
+
+For example, a long scalar multiply recipe appears as:
+
+```text
+WARNING: multiply scalar.mulf: up to 163 Low operations per source operation via exact_binary32
+```
+
+The five-operation threshold is an investigation heuristic, not a compilation
+limit. Summary reports retain the **largest single expansion**, so many cheap
+operations cannot average away one expensive occurrence. Detailed reports name
+the source function, operation, selected recipe or legalizer, and evidence row.
+Summary legalization alarms request details when the source identity was not
+retained. Explicit **Scalar lane expansion** feedback remains separate: even a
+short scalarization can replace a useful vector path. Retained source warnings
+remain available if compilation subsequently fails.
+
+These counts describe operations emitted at one compiler stage, not final
+hardware instructions or elapsed time. A source operation can appear at several
+stages; adding those rows would double-count work. They also do not reconstruct
+the cumulative cost of earlier rewrites or expansion inside a target driver.
+Missing per-operation evidence is unavailable, not proof of cheap code. A
+warning identifies a lowering to investigate for a compact, semantics-preserving
+implementation; final instruction counts, registers, spills, and workload
+measurements establish its actual cost. Changing numerical requirements is a
+separate author decision, not an automatic response to the warning.
+
+## Diagnose LDS bank conflicts
+
+For an AMDGPU kernel using workgroup memory, capture a `details` report and run
+`loom-compile-report show kernel.report.json`. The **Bank service** view connects
+source loads and stores to the selected LDS instruction and its lane-service
+model. Here, a report "packet" is one selected load/store instruction, such as
+`ds_write_b128`. Static totals count each instruction site once, regardless
+of how often its enclosing loop executes. Coverage divides those instructions
+into three categories:
+
+- **Exact** instructions have proven addresses and active lanes under a named
+  model.
+- **Unknown** instructions have a model, but an address, alignment, or
+  participation proof is missing. Each source group names the missing proof.
+- **Unmodeled** instructions have no model for the selected target, access width,
+  and wave size. A missing model is not evidence of conflict-free access.
+
+Model selection respects the function's execution width. Silicon-calibrated
+models cover `ds_read_u16`, `ds_write_b16`, and b32/b64/b128 reads and writes on
+gfx1100/gfx1151 in wave32 and wave64, and gfx942 in wave64. The gfx1100/gfx1151
+models also cover the partial-register `ds_load_u16_d16` and
+`ds_load_u16_d16_hi` reads in both wave sizes. Documented CDNA3 b128 wave64
+models cover gfx940/gfx941. The gfx1250 wave32 model is explicitly an
+unvalidated vendor software model. Other gfx11 processors, gfx1200/gfx1201,
+unsupported wave modes, and other access widths report unmodeled coverage. A
+shared bank count alone does not establish shared service rules.
+
+Reads and writes can have different lane-service groups, and repeated reads
+can broadcast. AMD's [LDS bank-conflict explanation](https://rocm.blogs.amd.com/software-tools-optimization/lds-bank-conflict/README.html)
+describes the CDNA3 b128 groups; the
+[ROCm programming guide](https://rocm-handbook.amd.com/_/downloads/amd-rocm-programming-guide/en/docs-7.2.3/pdf/)
+describes identical-address broadcast. Wide-access analysis requires proven
+alignment and an exact active-lane set. Fragment accesses use their compiled
+lane/register layout, including repeated lane addresses.
+
+A branch such as `lane / 16 == 1` can select sixteen lanes of a wave64
+subgroup. When every entry into the memory operation comes from that branch,
+and the branch itself executes with a full subgroup, the report evaluates its
+complete comparison for every lane and wave. It also accounts for the false
+branch's complementary mask. A b64 access by one quarter-wave occupies one
+sixteen-lane service phase on gfx1100/gfx1151; inactive phases contribute zero
+rounds. Substituting a full wave would count four occupied phases instead.
+
+The active set must be nonempty and identical across waves for this proof.
+Opaque predicates, additional varying guards, and loop entries with multiple
+incoming edges retain unknown participation unless a separate uniform-execution
+proof applies. Knowing only that `lane < 16` follows from a larger condition
+is insufficient: an additional predicate may select fewer lanes. This affects
+report coverage, not the generated kernel or its supported control flow.
+
+Source accesses can combine workitem coordinates, subgroup-lane coordinates,
+and subgroup-uniform offsets. The analysis uses native X-fastest workitem order,
+resets `kernel.subgroup.lane.id` for each wave, and checks every wave in the
+workgroup. A lane number is distinct from X when a wave spans multiple rows.
+For example, on gfx1100/gfx1151, a b128 store at
+`16*x + 512*y` is conflict-free for a `32×2` wave32 workgroup. Changing the shape
+to `4×8` puts two rows in each write-service phase and doubles the required
+rounds. A `12×8`
+shape has different profiles across waves and reports
+`address-wave-profiles-differ`; no single wave's profile represents it exactly.
+
+Constant division, remainder, shift, and mask can also describe tiled
+workitem or subgroup-lane coordinates. For example, the b128 store address
+`144*(x/8) + 16*(x%8)` is conflict-free across a 128-thread wave32 workgroup
+on gfx1100/gfx1151. Replacing `x` with `x+1` inside both digits doubles the
+required rounds. An offset inside division changes lane grouping; it is not
+just a common translation of the final addresses. These proofs require
+nonnegative, nonwrapping arithmetic and constant divisors. Unproved varying
+terms, runtime coordinate strides, and relationships lost across control-flow
+arguments remain unknown.
+
+The b64 models use contiguous 16-lane service groups on the qualified devices.
+For example, a wave32 b64 access at `8*lane` needs two uncontended rounds.
+Changing the lane stride to 128 bytes maps all sixteen lanes in each group to
+the same two banks, requiring 32 rounds: 30 extra rounds per instruction.
+Repeated reads of the same address still need only the uncontended rounds.
+
+Halfword and word accesses use contiguous 32-lane service groups.
+Halfword reads to either half of a bank word share a request; writes to disjoint
+halves also combine. Distinct words mapping to the same bank still conflict.
+The model reports `packet_bytes` separately from `bank_word_bytes` so a two-byte
+access retains its subword identity.
+
+Packed fragment loads can fill a register with separate low- and high-half
+reads. Each instruction gets its own model and address proof. For example,
+halfword reads at `2*(lane%16)` repeat eight bank words and need only two
+uncontended rounds per instruction in wave64. Filling the other register half
+does not change which LDS banks serve the read.
+
+Subword placement matters even with a fixed lane layout. For example, two
+16-halfword spans separated by 96 bytes are conflict-free at a four-byte-aligned
+base. Moving the base by two bytes makes the spans touch distinct words of bank
+zero. The report retains static offsets and dynamic divisibility, evaluates
+compatible byte-base residues, and reports `address-base-residue-unproven` when
+the possible placements have different phase profiles. Full-word translations
+only rotate bank indices and need no enumeration.
+
+Required and extra **service rounds** describe proven static instructions under
+the reported model. They are not measured cycles, wall-clock time, or a predicted
+speedup. Dynamic totals include only instructions with proven execution counts;
+unresolved loop counts remain unknown. The model's provenance is separate from
+the address proof: `exact` under an unvalidated model is still experimental.
+
+Use `loom-compile-report suggest kernel.report.json` to find proven conflicting
+groups, ordered by extra static service rounds. A finding names the source
+buffer and instruction, compares required and uncontended service, and gives
+the current bytes per lane. This order prioritizes structural layout
+experiments; a rarely executed tail can rank above a frequently executed loop.
+Runtime frequency and measured time determine which experiment matters most.
+
+Findings also identify unknown and unmodeled accesses to the same buffer,
+including other load and store forms. When the compiler records an LDS growth
+limit, the finding states how much padding fits before the next modeled
+residency drop, holding the launch and other resource counts fixed. Missing
+growth limits remain unavailable. Unvalidated-model suggestions require
+`--include-experimental`.
+
+For example, 32 wide reads might require 2,048 service rounds versus 256
+uncontended: an eightfold structural service requirement, with 1,792 extra
+rounds. If the report also records 27,904 bytes of LDS and a residency drop at
+32,769 bytes, there are 4,864 bytes of growth before that cliff. This supports
+trying a padded row pitch while preserving the 16-byte instruction width and
+updating both producer and consumer views. It does not establish a particular
+pitch: the physical layout, every access direction, and alignment still need
+qualification. Saving space in another staging buffer can also make room for
+padding, so compare the combined footprint as well as each individual change.
+
+Compare an authored pitch, padding, or lane-mapping change with
+`loom-compile-report diff baseline.report.json candidate.report.json`. The diff
+reports service changes and proof loss independently. A lower conflict count
+accompanied by more unknown or unmodeled instructions does not demonstrate an
+improvement. Evaluate both producer stores and consumer loads, then check
+register pressure, LDS footprint, residency, and native execution time before
+selecting the layout. Instruction scheduling can overlap service with other
+work; it cannot remove a conflict within one LDS instruction.
 
 ## Diff one controlled change
 
@@ -243,6 +436,11 @@ fields directly; recipe-key spelling is reported as a separate selection
 change. If an edit shifts or removes the source row, the evidence appears as
 removed and added instead of being paired heuristically with another operation.
 
+Wait-reason diffs compare counter/reason groups independently of the aggregate
+entry totals. A schedule change can therefore keep the same number of wait
+actions while replacing full drains with partial waits or moving a dependency
+between ordinary, loop-entry, and loop-carried reasons.
+
 ## Compare target specialization
 
 Target comparison deliberately relaxes only the selected target specialization
@@ -270,9 +468,27 @@ loom-compile-report suggest kernel.report.json
 ```
 
 Each finding names an action and cites the exact evidence paths and values that
-motivated it. The output is a prioritized experiment queue, not an assertion
-that a transformation will improve performance. Recompile, retest, and measure
-each accepted experiment.
+motivated it. Finding order and confidence describe static compiler evidence;
+they do not rank runtime cost or optimization value. `status: available` means
+the relevant interpreter is available. An empty finding list cannot establish
+that the current execution shape is competitive.
+
+Optimization requires a known-good oracle's native instruction mix, controlled
+performance on the intended machine, and data reuse policy before acting on
+these findings. Paneling, tile and batch sizes, prefill chunks, resident
+operands, buffering, sharing, and complete-request traffic determine whether
+the schedule is worth tuning. Each experiment also needs an absolute target,
+the measured end-to-end gap, a bound on recoverable cost, and a rejection
+condition. An unexplained large oracle gap stops local tuning; repeated small
+wins over an inefficient baseline cannot qualify that architecture. The
+[agent authoring workflow](agent-driven-kernel-development.md#establish-the-oracle-and-data-reuse-policy)
+owns this evidence and admission gate.
+
+The tool receives no external oracle measurement or reuse policy, so it cannot
+admit an optimization on the author's behalf. Its `guidance` field makes this
+interpretation explicit in JSON and before findings in text, including results
+with no findings or an unavailable provider. Once the experiment passes the
+opportunity gate, recompile, retest, and measure it.
 
 For an explicitly pipelined loop, `scf.compare_pipeline_depth` suggests comparing
 a smaller depth while holding the unroll factor and workload fixed. It cites
@@ -282,6 +498,20 @@ counts SSA values, which can occupy several physical registers or share storage;
 it is not a physical register count. A single report establishes pipeline use
 and final resource consumption. A matched compilation and runtime comparison
 establishes the change in cost and performance.
+
+On AIE2P, `aie2p.code_headroom`, `aie2p.bank_pressure`, and
+`aie2p.local_memory_pressure` identify nearly full instruction memory, data
+banks, and local memory extents. The evidence names the worker or physical
+memory owner. Shared storage is counted once, including SRAM with no resident
+worker. These findings guide packing and lifetime experiments; they do not
+predict FIFO stalls or DMA overlap from static occupancy.
+
+On AMDGPU, `amdgpu.pipeline_copy_waits` identifies full global-load waits whose
+native consumers are materialized branch-payload copies. Its cited
+`outstanding_before` values count packets in each scheduled block rather than
+the whole hardware counter. A zero local count can still represent a required
+residual counter-epoch or control-flow hazard; it does not establish that the
+wait is redundant.
 
 Rejected vector-bank projections produce source experiments only when the
 reason identifies a concrete rewrite:
@@ -301,12 +531,14 @@ experiment; it does not establish a gain. Expected whole-value fragments,
 untouched banks, very large decompositions, peer rejection, and generic
 transport rejection remain visible in `show` without speculative advice.
 
-Nested `scf.if` and `scf.for` appear as intact operations in the reported
-producer/consumer schedule. The read count includes static load operations
-inside their regions, including alternative branches; it is not a count of
-dynamic memory transactions. Independently pipelined inner loops have their
-own policy rows. Their transformed bodies then participate in the enclosing
-loop's schedule.
+Nested `scf.if` and `scf.for` normally appear as intact operations in the
+reported producer/consumer schedule. A retained guarded partition instead
+reports the same `scf.if` source position twice with `partition=guarded`, once
+for its read closure and once for its ordered remainder. The read count includes
+static load operations inside scheduled regions; it is not a count of dynamic
+memory transactions. Independently pipelined inner loops have their own policy
+rows. Their transformed bodies then participate in the enclosing loop's
+schedule.
 
 This source advice works across target families. When target-specific advice is
 unavailable, the result retains its reason in `target_unavailable_reason` while
@@ -345,7 +577,8 @@ loom-compile-report suggest kernel.report.json \
 ```
 
 The output preserves the confidence class and evidence for every finding, so
-automation can keep high-confidence and exploratory searches distinct.
+automation can distinguish established static findings from exploratory ones.
+High confidence does not imply a large or even positive runtime benefit.
 
 ## Follow one finding into details
 

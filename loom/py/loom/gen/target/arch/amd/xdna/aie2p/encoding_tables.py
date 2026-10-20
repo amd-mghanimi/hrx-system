@@ -21,6 +21,7 @@ from loom.gen.target.low.compiler import compile_descriptor_set
 from loom.gen.target.low.low_descriptors import generate_descriptor_set
 from loom.target.arch.amd.xdna.aie.encoding import (
     BundleFieldEncoding,
+    EncodingTable,
     InstructionEncoding,
     InstructionFieldEncoding,
     encode_witness,
@@ -29,6 +30,9 @@ from loom.target.arch.amd.xdna.aie.encoding import (
 )
 from loom.target.arch.amd.xdna.aie2p.array_descriptors import (
     AIE2P_ARRAY_DESCRIPTOR_SET,
+)
+from loom.target.arch.amd.xdna.aie2p.configuration_descriptors import (
+    AIE2P_CONFIGURATION_DESCRIPTOR_SET,
 )
 from loom.target.arch.amd.xdna.aie2p.core_descriptors import (
     AIE2P_CORE_DESCRIPTOR_SET,
@@ -108,8 +112,19 @@ def _build_name_table(names: Sequence[str], table_name: str) -> tuple[dict[str, 
     return rows, lines
 
 
+def _validate_singleton_bundle_formats(table: EncodingTable) -> None:
+    """Proves that native packet placement can issue every instruction alone."""
+    singleton_slots = {bundle_format.fields[0].slot for bundle_format in table.bundle_formats if len(bundle_format.fields) == 1}
+    # AIE2P's exact slot signatures are not downward closed. Membership in a
+    # larger format does not let an instruction start an otherwise empty packet.
+    for slot in sorted({instruction.slot for instruction in table.instructions}):
+        if slot not in singleton_slots:
+            raise ValueError(f"AIE2P instruction slot '{slot}' has no exact singleton bundle format")
+
+
 def _emit_encoding_tables() -> str:
     validate_encoding_table(CORE_ENCODING_TABLE, SLOT_BIT_COUNTS)
+    _validate_singleton_bundle_formats(CORE_ENCODING_TABLE)
     for witness in CORE_ENCODING_WITNESSES:
         actual_bytes = encode_witness(CORE_ENCODING_TABLE, witness)
         if actual_bytes != witness.expected_bytes:
@@ -492,6 +507,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="Validate generation inputs without writing an output file.",
     )
+    parser.add_argument("--configuration-descriptor-header-output", type=Path)
+    parser.add_argument("--configuration-descriptor-source-output", type=Path)
     args = parser.parse_args(argv)
     output_paths = (
         args.encoding_output,
@@ -501,6 +518,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.descriptor_source_output,
         args.array_descriptor_header_output,
         args.array_descriptor_source_output,
+        args.configuration_descriptor_header_output,
+        args.configuration_descriptor_source_output,
     )
     if args.check and any(path is not None for path in output_paths):
         parser.error("--check cannot be combined with output paths")
@@ -514,6 +533,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     generated_descriptors = generate_descriptor_set(AIE2P_CORE_DESCRIPTOR_SET)
     generated_array_descriptors = generate_descriptor_set(AIE2P_ARRAY_DESCRIPTOR_SET)
+    generated_configuration_descriptors = generate_descriptor_set(AIE2P_CONFIGURATION_DESCRIPTOR_SET)
     register_contents = _emit_register_tables()
     if args.encoding_output is not None:
         write_text_file(args.encoding_output, encoding_contents)
@@ -529,6 +549,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.array_descriptor_source_output,
             generated_array_descriptors.source,
         )
+        write_text_file(args.configuration_descriptor_header_output, generated_configuration_descriptors.header)
+        write_text_file(args.configuration_descriptor_source_output, generated_configuration_descriptors.source)
     return 0
 
 

@@ -7,8 +7,8 @@
 #include "loom/target/arch/amdgpu/check/bank_service.h"
 
 #include "loom/target/reporting/report.h"
+#include "loom/tools/loom-check/compile.h"
 #include "loom/tools/loom-check/diagnostics.h"
-#include "loom/tools/loom-check/source_low.h"
 
 static bool loom_amdgpu_bank_service_check_emit_provider_matches(
     const loom_check_emit_provider_t* provider,
@@ -31,15 +31,24 @@ static iree_status_t loom_amdgpu_bank_service_check_append_row(
       loom_amdgpu_bank_service_check_non_empty(row->source_root_name);
   IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
       builder,
-      "bank-service function=%.*s source-op=%.*s root=%.*s packet=%.*s "
-      "model=%.*s proof=%.*s lane-address=%.*s active-lanes=%.*s "
-      "base-residue=%.*s",
+      "bank-service function=%.*s source-op=%.*s root=%.*s packet=%.*s",
       (int)row->function_name.size, row->function_name.data,
       (int)row->source_op_name.size, row->source_op_name.data,
       (int)source_root.size, source_root.data, (int)row->packet_key.size,
-      row->packet_key.data, (int)bank_service->model_key.size,
-      bank_service->model_key.data, (int)bank_service->proof.size,
-      bank_service->proof.data, (int)bank_service->lane_address_proof.size,
+      row->packet_key.data));
+  if (iree_string_view_is_empty(bank_service->model_key)) {
+    return iree_string_builder_append_format(
+        builder, " proof=unmodeled wave-size=%u unknown-reason=%.*s\n",
+        bank_service->wave_size, (int)bank_service->unknown_reason.size,
+        bank_service->unknown_reason.data);
+  }
+  IREE_RETURN_IF_ERROR(iree_string_builder_append_format(
+      builder,
+      " model=%.*s proof=%.*s lane-address=%.*s active-lanes=%.*s "
+      "base-residue=%.*s",
+      (int)bank_service->model_key.size, bank_service->model_key.data,
+      (int)bank_service->proof.size, bank_service->proof.data,
+      (int)bank_service->lane_address_proof.size,
       bank_service->lane_address_proof.data,
       (int)bank_service->active_lane_proof.size,
       bank_service->active_lane_proof.data,
@@ -60,6 +69,36 @@ static iree_status_t loom_amdgpu_bank_service_check_append_row(
       bank_service->unknown_reason.data);
 }
 
+typedef struct loom_amdgpu_bank_service_check_consumer_t {
+  // Provider invocation receiving comparable output.
+  const loom_check_emit_provider_request_t* request;
+  // Compile report populated before the consumer runs.
+  const loom_target_compile_report_t* report;
+} loom_amdgpu_bank_service_check_consumer_t;
+
+static iree_status_t loom_amdgpu_bank_service_check_consume(
+    void* user_data, const loom_check_compile_source_low_view_t* view) {
+  (void)view;
+  const loom_amdgpu_bank_service_check_consumer_t* consumer =
+      (const loom_amdgpu_bank_service_check_consumer_t*)user_data;
+  const loom_target_compile_report_t* report = consumer->report;
+  for (const loom_target_compile_report_vec_t* vec =
+           report->source_low_memory_rows.head;
+       vec != NULL; vec = vec->next) {
+    const loom_target_compile_report_source_low_memory_row_t* rows =
+        (const loom_target_compile_report_source_low_memory_row_t*)
+            loom_target_compile_report_vec_const_rows(vec);
+    for (iree_host_size_t i = 0; i < vec->count; ++i) {
+      if (iree_string_view_is_empty(rows[i].bank_service.proof)) {
+        continue;
+      }
+      IREE_RETURN_IF_ERROR(loom_amdgpu_bank_service_check_append_row(
+          &rows[i], &consumer->request->result->actual_output));
+    }
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t loom_amdgpu_bank_service_check_emit_provider_execute(
     const loom_check_emit_provider_t* provider,
     const loom_check_emit_provider_request_t* request) {
@@ -76,35 +115,19 @@ static iree_status_t loom_amdgpu_bank_service_check_emit_provider_execute(
   report.requested_detail_flags =
       LOOM_TARGET_COMPILE_REPORT_DETAIL_SOURCE_LOW_ROWS;
 
-  loom_check_prepare_source_low_options_t prepare_options = {0};
-  loom_check_prepare_source_low_options_initialize(&prepare_options);
-  prepare_options.report = &report;
-  loom_compile_pipeline_result_t pipeline_result = {0};
-  iree_status_t status = loom_check_prepare_source_low_module(
-      request->module, &prepare_options, request->low_registry,
-      request->environment, request->source_resolver,
-      request->diagnostic_collector, request->block_pool, &pipeline_result);
-  loom_compile_pipeline_result_deinitialize(&pipeline_result);
-  IREE_RETURN_IF_ERROR(status);
-  if (request->diagnostic_collector->count != 0) {
-    return iree_ok_status();
-  }
-
-  for (const loom_target_compile_report_vec_t* vec =
-           report.source_low_memory_rows.head;
-       vec != NULL; vec = vec->next) {
-    const loom_target_compile_report_source_low_memory_row_t* rows =
-        (const loom_target_compile_report_source_low_memory_row_t*)
-            loom_target_compile_report_vec_const_rows(vec);
-    for (iree_host_size_t i = 0; i < vec->count; ++i) {
-      if (iree_string_view_is_empty(rows[i].bank_service.model_key)) {
-        continue;
-      }
-      IREE_RETURN_IF_ERROR(loom_amdgpu_bank_service_check_append_row(
-          &rows[i], &request->result->actual_output));
-    }
-  }
-  return iree_ok_status();
+  const loom_check_compile_source_low_options_t compile_options = {
+      .pipeline = LOOM_CHECK_COMPILE_SOURCE_LOW_PIPELINE_DEFAULT,
+      .report = &report,
+  };
+  const loom_amdgpu_bank_service_check_consumer_t consumer = {
+      .request = request,
+      .report = &report,
+  };
+  iree_status_t status = loom_check_compile_source_low(
+      request, &compile_options, loom_amdgpu_bank_service_check_consume,
+      (void*)&consumer);
+  loom_target_compile_report_deinitialize(&report);
+  return status;
 }
 
 static iree_status_t loom_amdgpu_bank_service_check_emit_provider_append_names(

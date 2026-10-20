@@ -11,16 +11,6 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
-    pass_requirements
-  HDRS
-    "pass_requirements.h"
-  DEPS
-
-  PUBLIC
-)
-
-loom_cc_library(
-  NAME
     legalizer_registry
   HDRS
     "legalizer_registry.h"
@@ -30,6 +20,10 @@ loom_cc_library(
     iree::base
     loom::target::legalization
     loom::transforms::buffer::target_legalization
+    loom::transforms::conversion::target_legalization
+    loom::transforms::index::target_legalization
+    loom::transforms::kernel::target_legalization
+    loom::transforms::math::legalize
     loom::transforms::scalar::target_legalization
     loom::transforms::vector::target_legalization
     loom::transforms::view::target_legalization
@@ -47,6 +41,8 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::ops::buffer
+    loom::ops::index
+    loom::ops::kernel
     loom::ops::scalar
     loom::ops::vector
     loom::ops::view
@@ -60,11 +56,13 @@ loom_cc_library(
   SRCS
     "pass_environment.c"
   DEPS
-    ::pass_requirements
     iree::base
     loom::codegen::low::descriptors
+    loom::codegen::low::lower
+    loom::ir
     loom::pass::environment
     loom::pass::types
+    loom::target::facts
   PUBLIC
 )
 

@@ -19,6 +19,10 @@ from typing import Protocol
 
 from loom.dialect.cache import CacheScope, CacheTemporal
 from loom.target.arch.amdgpu.lds_bank_service import (
+    AMDGPU_LDS_BANK_SERVICE_MODELS_CDNA3,
+    AMDGPU_LDS_BANK_SERVICE_MODELS_GFX942,
+    AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1100,
+    AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1151,
     AMDGPU_LDS_BANK_SERVICE_MODELS_WAVE32_B128_QUAD_PHASES,
     amdgpu_lds_bank_service_model_info_by_key,
     validate_amdgpu_lds_bank_service_model_selection,
@@ -218,6 +222,7 @@ AMDGPU_BUFFER_RESOURCE_RECORD_ENCODINGS = (
 
 AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_NONE = "none"
 AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX11_GLC_SLC_DLC = "gfx11_glc_slc_dlc"
+AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_CDNA2_GLC_SLC = "cdna2_glc_slc"
 AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX12_NV_SCOPE_TH = "gfx12_nv_scope_th"
 AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX950_NT_SC0_SC1 = "gfx950_nt_sc0_sc1"
 AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODINGS = (
@@ -225,6 +230,7 @@ AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODINGS = (
     AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX11_GLC_SLC_DLC,
     AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX12_NV_SCOPE_TH,
     AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX950_NT_SC0_SC1,
+    AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_CDNA2_GLC_SLC,
 )
 
 AMDGPU_MEMORY_ORDERING_MODEL_NONE = "none"
@@ -232,12 +238,14 @@ AMDGPU_MEMORY_ORDERING_MODEL_GFX11 = "gfx11"
 AMDGPU_MEMORY_ORDERING_MODEL_GFX12 = "gfx12"
 AMDGPU_MEMORY_ORDERING_MODEL_GFX125 = "gfx125"
 AMDGPU_MEMORY_ORDERING_MODEL_CDNA = "cdna"
+AMDGPU_MEMORY_ORDERING_MODEL_CDNA2 = "cdna2"
 AMDGPU_MEMORY_ORDERING_MODELS = (
     AMDGPU_MEMORY_ORDERING_MODEL_NONE,
     AMDGPU_MEMORY_ORDERING_MODEL_GFX11,
     AMDGPU_MEMORY_ORDERING_MODEL_GFX12,
     AMDGPU_MEMORY_ORDERING_MODEL_GFX125,
     AMDGPU_MEMORY_ORDERING_MODEL_CDNA,
+    AMDGPU_MEMORY_ORDERING_MODEL_CDNA2,
 )
 
 AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ATTR_SCOPE = "scope"
@@ -257,6 +265,11 @@ AMDGPU_PROCESSOR_SCHEDULING_VALU_SGPR_READ_DEPCTR = 1 << 4
 AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU = 1 << 5
 AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER = 1 << 6
 AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER = 1 << 7
+AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN = 1 << 8
+AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR = 1 << 9
+AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES = 1 << 10
+AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK = 1 << 11
+AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES = 1 << 12
 AMDGPU_PROCESSOR_SCHEDULING_KNOWN_BITS = (
     AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR
     | AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_WAIT_STATES
@@ -266,9 +279,16 @@ AMDGPU_PROCESSOR_SCHEDULING_KNOWN_BITS = (
     | AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU
     | AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER
     | AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER
+    | AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN
+    | AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR
+    | AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES
+    | AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK
+    | AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES
 )
 AMDGPU_PROCESSOR_SCHEDULING_CDNA_FIXED_WAIT_STATES = (
-    AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_WAIT_STATES
+    AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES
+    | AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES
+    | AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_WAIT_STATES
     | AMDGPU_PROCESSOR_SCHEDULING_VALU_SGPR_READ_WAIT_STATES
     | AMDGPU_PROCESSOR_SCHEDULING_DESTINATION_SELECTION_WAIT_STATES
     | AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER
@@ -290,12 +310,18 @@ AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_ARITHMETIC = 1 << 6
 AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_CONVERSION = 1 << 7
 AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_COMPARE = 1 << 8
 AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE = 1 << 9
-AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA = 1 << 10
+AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA = 1 << 10
 AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY = 1 << 11
 AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY = 1 << 12
 AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS = 1 << 13
 # CDNA wide VMEM payloads remain readable for a short issue window.
 AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES = 1 << 14
+# Ordinary system-scope stores must first drain prior asynchronous memory work.
+AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES = 1 << 15
+# Memory packets retain source operands in independently drained XCNT groups.
+AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION = 1 << 16
+# Equal-parity SRC0/SRC1 reads can lose the VOPD destination-buffer interlock.
+AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD = 1 << 17
 AMDGPU_DESCRIPTOR_SET_INFO_KNOWN_FLAGS = (
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_DESCRIPTOR_PACKET_ENCODING
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_PACKETIZATION
@@ -307,11 +333,14 @@ AMDGPU_DESCRIPTOR_SET_INFO_KNOWN_FLAGS = (
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_CONVERSION
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_COMPARE
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE
-    | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA
+    | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
     | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES
+    | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES
+    | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION
+    | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD
 )
 AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA = (
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_DESCRIPTOR_PACKET_ENCODING
@@ -346,12 +375,14 @@ AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_GFX10_SGPR_ENCODING = 1 << 1
 AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_ACCUM_OFFSET = 1 << 2
 AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_DX10_CLAMP_AND_IEEE_MODE = 1 << 3
 AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID = 1 << 4
+AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT = 1 << 5
 AMDGPU_KERNEL_DESCRIPTOR_ABI_KNOWN_FLAGS = (
     AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_ARCHITECTED_FLAT_SCRATCH
     | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_GFX10_SGPR_ENCODING
     | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_ACCUM_OFFSET
     | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_DX10_CLAMP_AND_IEEE_MODE
     | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID
+    | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT
 )
 AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAGS_CDNA_GFX9 = (
     AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_ARCHITECTED_FLAT_SCRATCH
@@ -485,6 +516,13 @@ class AmdgpuDescriptorSetInfo:
     )
 
 
+AMDGPU_DESCRIPTOR_SET_ISA_CDNA2 = AmdgpuDescriptorSetIsaInfo(
+    isa_xml_key="cdna2",
+    isa_architecture_name="AMD CDNA 2",
+    isa_architecture_id=1,
+    sopp_opcodes=AMDGPU_SOPP_OPCODE_INFO_CDNA,
+)
+
 AMDGPU_DESCRIPTOR_SET_ISA_CDNA3 = AmdgpuDescriptorSetIsaInfo(
     isa_xml_key="cdna3",
     isa_architecture_name="AMD CDNA 3",
@@ -528,6 +566,7 @@ AMDGPU_DESCRIPTOR_SET_ISA_RDNA4 = AmdgpuDescriptorSetIsaInfo(
 # standard fields.
 AMDGPU_STANDARD_KERNEL_METADATA_KEYS = frozenset(
     (
+        ".agpr_count",
         ".args",
         ".cluster_dims",
         ".group_segment_fixed_size",
@@ -779,6 +818,16 @@ AMDGPU_PROCESSOR_INSTRUCTION_INFO_NONE = AmdgpuProcessorInstructionInfo()
 AMDGPU_KERNEL_DESCRIPTOR_INFO_PACKED_WORKITEM_ID = AmdgpuProcessorKernelDescriptorInfo(
     flags=AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID,
 )
+AMDGPU_KERNEL_DESCRIPTOR_INFO_CDNA2 = AmdgpuProcessorKernelDescriptorInfo(
+    profile=AMDGPU_KERNEL_DESCRIPTOR_PROFILE_GFX9,
+    flags=(
+        AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT
+        | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_ACCUM_OFFSET
+        | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_DX10_CLAMP_AND_IEEE_MODE
+        | AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID
+    ),
+    vgpr_granules=AmdgpuKernelDescriptorVgprGranules(wave32=8, wave64=8),
+)
 AMDGPU_KERNEL_DESCRIPTOR_INFO_CDNA_GFX9 = AmdgpuProcessorKernelDescriptorInfo(
     profile=AMDGPU_KERNEL_DESCRIPTOR_PROFILE_GFX9,
     flags=AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAGS_CDNA_GFX9,
@@ -965,6 +1014,12 @@ AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_INFOS: tuple[
     AmdgpuVectorMemoryCachePolicyEncodingInfo, ...
 ] = (
     AmdgpuVectorMemoryCachePolicyEncodingInfo(
+        encoding=AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_CDNA2_GLC_SLC,
+        selected_key="memory_cache_policy.cdna2_glc_slc",
+        cache_scopes=("device",),
+        cache_temporals=("regular",),
+    ),
+    AmdgpuVectorMemoryCachePolicyEncodingInfo(
         encoding=AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX11_GLC_SLC_DLC,
         selected_key="memory_cache_policy.gfx11_glc_slc_dlc",
         cache_scopes=("device",),
@@ -1000,6 +1055,26 @@ AMDGPU_VECTOR_MEMORY_CACHE_POLICY_TEMPORAL_TH: tuple[tuple[str, int], ...] = (
     ("non_temporal_high_temporal", 6),
     ("non_temporal_writeback", 7),
     ("bypass", 3),
+)
+
+
+# LLVM native assembly names for the encoded RDNA4 temporal hints. Load and
+# store encoding three uses the final BYPASS entry at system scope. Encoding
+# zero omits the default hint; other empty entries are reserved. Returning
+# atomics only use odd encodings.
+AMDGPU_MEMORY_CACHE_NATIVE_TEMPORAL_SUFFIXES = (
+    ("load", ("", "NT", "HT", "LU", "NT_RT", "RT_NT", "NT_HT", "", "BYPASS")),
+    ("store", ("", "NT", "HT", "WB", "NT_RT", "RT_NT", "NT_HT", "NT_WB", "BYPASS")),
+    (
+        "atomic",
+        ("", "RETURN", "NT", "NT_RETURN", "CASCADE_RT", "", "CASCADE_NT", "", ""),
+    ),
+)
+AMDGPU_MEMORY_CACHE_NATIVE_SCOPE_NAMES = (
+    "SCOPE_CU",
+    "SCOPE_SE",
+    "SCOPE_DEV",
+    "SCOPE_SYS",
 )
 
 
@@ -1114,6 +1189,7 @@ def rdna3_processor_info(
     elf_generic_version: int = 0,
     scheduling_bits: int = 0,
     occupancy: AmdgpuProcessorOccupancyInfo = AMDGPU_OCCUPANCY_RDNA_1024,
+    lds_bank_service_models: tuple[str, ...] = (),
 ) -> AmdgpuProcessorInfo:
     return processor_info(
         processor=processor,
@@ -1127,11 +1203,13 @@ def rdna3_processor_info(
         matrix_feature_profile=AMDGPU_MATRIX_FEATURE_PROFILE_WMMA_GFX11,
         scheduling_bits=(
             scheduling_bits
+            | AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR
             | AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU
             | AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER
             | AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER
         ),
         occupancy=occupancy,
+        lds_bank_service_models=lds_bank_service_models,
     )
 
 
@@ -1141,6 +1219,7 @@ def cdna3_processor_info(
     *,
     flags: int = AMDGPU_PROCESSOR_INFO_FLAG_HSACO_EMISSION,
     matrix_feature_profile: str = AMDGPU_MATRIX_FEATURE_PROFILE_MFMA_GFX940,
+    lds_bank_service_models: tuple[str, ...] = AMDGPU_LDS_BANK_SERVICE_MODELS_CDNA3,
 ) -> AmdgpuProcessorInfo:
     return processor_info(
         processor,
@@ -1153,6 +1232,7 @@ def cdna3_processor_info(
         scheduling_bits=AMDGPU_PROCESSOR_SCHEDULING_CDNA_FIXED_WAIT_STATES,
         max_workgroup_storage_bytes=AMDGPU_DEFAULT_MAX_WORKGROUP_STORAGE_BYTES,
         occupancy=AMDGPU_OCCUPANCY_CDNA3,
+        lds_bank_service_models=lds_bank_service_models,
     )
 
 
@@ -1161,6 +1241,7 @@ def gfx115x_processor_info(
     elf_machine_flags: int,
     *,
     occupancy: AmdgpuProcessorOccupancyInfo = AMDGPU_OCCUPANCY_RDNA_1024,
+    lds_bank_service_models: tuple[str, ...] = (),
 ) -> AmdgpuProcessorInfo:
     return processor_info(
         processor=processor,
@@ -1172,11 +1253,13 @@ def gfx115x_processor_info(
         matrix_feature_profile=AMDGPU_MATRIX_FEATURE_PROFILE_WMMA_GFX11,
         scheduling_bits=(
             AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR
+            | AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR
             | AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU
             | AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER
             | AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER
         ),
         occupancy=occupancy,
+        lds_bank_service_models=lds_bank_service_models,
     )
 
 
@@ -1193,7 +1276,8 @@ def rdna4m_processor_info(
         kernel_descriptor=AMDGPU_KERNEL_DESCRIPTOR_INFO_RDNA3_GFX11,
         matrix_feature_profile=AMDGPU_MATRIX_FEATURE_PROFILE_WMMA_GFX12,
         scheduling_bits=(
-            AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU
+            AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR
+            | AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU
             | AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER
         ),
         occupancy=AMDGPU_OCCUPANCY_RDNA_1024,
@@ -1266,6 +1350,7 @@ def gfx125x_processor_info(
         scheduling_bits=(
             AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU
             | AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER
+            | AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN
         ),
         max_workgroup_storage_bytes=AMDGPU_GFX125X_MAX_WORKGROUP_STORAGE_BYTES,
         occupancy=AMDGPU_OCCUPANCY_GFX125X,
@@ -1274,11 +1359,26 @@ def gfx125x_processor_info(
 
 # Floating memory capability provenance: AMD GPU atomics operation support
 # (rocm.docs.amd.com/en/latest/reference/gpu-atomics-operation.html), RDNA4 ISA
-# chapter 13, and LLVM AgentScopeFineGrainedRemoteMemoryAtomics /
-# EmulatedSystemScopeAtomics. GFX11.7's newer VALU does not upgrade its memory
-# atomics. CDNA F32 LDS number-extrema semantics do not establish numeric
-# preference for signaling NaNs, so that guarantee is absent.
+# chapter 13, and qualified hardware execution. GFX11.7's newer VALU does not
+# upgrade its memory atomics. CDNA3 F32 subnormal preservation is qualified on
+# gfx942; CDNA4 remains conservative until the same contract is qualified on
+# gfx950. CDNA LDS number-extrema semantics do not establish numeric preference
+# for signaling NaNs, so that guarantee is absent.
 AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
+    AmdgpuDescriptorSetInfo(
+        generator_target="cdna2",
+        key="amdgpu.cdna2.core",
+        isa_infos=(AMDGPU_DESCRIPTOR_SET_ISA_CDNA2,),
+        flags=(
+            AMDGPU_DESCRIPTOR_SET_INFO_FLAG_DESCRIPTOR_PACKET_ENCODING
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES
+        ),
+        buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE48_LEGACY,
+        vector_memory=AmdgpuDescriptorSetVectorMemoryInfo(
+            cache_policy_encoding=AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_CDNA2_GLC_SLC,
+            ordering_model=AMDGPU_MEMORY_ORDERING_MODEL_CDNA2,
+        ),
+    ),
     AmdgpuDescriptorSetInfo(
         generator_target="cdna3",
         key="amdgpu.cdna3.core",
@@ -1303,8 +1403,9 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
             AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA4_VOPD_PACKED_BF16
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION
         ),
         storage_generator_target="rdna4_gfx125x",
         buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE57,
@@ -1321,8 +1422,9 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
             AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA4_VOPD_PACKED_BF16
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION
         ),
         buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE57,
         vector_memory=AmdgpuDescriptorSetVectorMemoryInfo(
@@ -1338,8 +1440,9 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
             AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA4_VOPD_PACKED_BF16
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION
         ),
         storage_generator_target="rdna4_gfx125x",
         buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE57,
@@ -1352,7 +1455,8 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
         generator_target="rdna3",
         key="amdgpu.rdna3.core",
         isa_infos=(AMDGPU_DESCRIPTOR_SET_ISA_RDNA3,),
-        flags=AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA_VOPD,
+        flags=AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA_VOPD
+        | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD,
         buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE48_UNIFIED,
         vector_memory=AmdgpuDescriptorSetVectorMemoryInfo(
             cache_policy_encoding=AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX11_GLC_SLC_DLC,
@@ -1363,7 +1467,8 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
         generator_target="rdna3_5",
         key="amdgpu.rdna3_5.core",
         isa_infos=(AMDGPU_DESCRIPTOR_SET_ISA_RDNA3_5,),
-        flags=AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA_SCALAR_FLOAT,
+        flags=AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA_SCALAR_FLOAT
+        | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD,
         buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE48_UNIFIED,
         vector_memory=AmdgpuDescriptorSetVectorMemoryInfo(
             cache_policy_encoding=AMDGPU_VECTOR_MEMORY_CACHE_POLICY_ENCODING_GFX11_GLC_SLC_DLC,
@@ -1389,7 +1494,8 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
             AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA4_VOPD_NONCANONICAL_FP8
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES
         ),
         buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE48_UNIFIED,
         vector_memory=AmdgpuDescriptorSetVectorMemoryInfo(
@@ -1404,7 +1510,6 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
         flags=(
             AMDGPU_DESCRIPTOR_SET_INFO_FLAG_DESCRIPTOR_PACKET_ENCODING
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES
         ),
         buffer_resource=AmdgpuDescriptorSetBufferResourceInfo(
@@ -1426,7 +1531,6 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
         flags=(
             AMDGPU_DESCRIPTOR_SET_INFO_FLAG_DESCRIPTOR_PACKET_ENCODING
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES
         ),
         storage_generator_target="cdna3",
@@ -1444,7 +1548,8 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
             AMDGPU_DESCRIPTOR_SET_ISA_RDNA3,
             AMDGPU_DESCRIPTOR_SET_ISA_RDNA3_5,
         ),
-        flags=AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA_VOPD,
+        flags=AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA_VOPD
+        | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD,
         storage_generator_target="rdna3",
         member_generator_targets=("rdna3", "rdna3_5"),
         buffer_resource=AMDGPU_BUFFER_RESOURCE_INFO_BASE48_UNIFIED,
@@ -1461,7 +1566,8 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
             AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA4_VOPD_NONCANONICAL_FP8
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES
         ),
         storage_generator_target="rdna4",
         member_generator_targets=("rdna4",),
@@ -1479,8 +1585,9 @@ AMDGPU_DESCRIPTOR_SET_INFOS: tuple[AmdgpuDescriptorSetInfo, ...] = (
             AMDGPU_DESCRIPTOR_SET_INFO_FLAGS_RDNA4_VOPD_PACKED_BF16
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
-            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA
             | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY
+            | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION
         ),
         storage_generator_target="rdna4_gfx125x",
         member_generator_targets=("rdna4_gfx1251", "rdna4_gfx125x"),
@@ -1515,19 +1622,30 @@ AMDGPU_PROCESSOR_INFOS: tuple[AmdgpuProcessorInfo, ...] = (
     gfx9_10_processor_info(
         "gfx909", 0x031, elf_feature_flags=AMDGPU_ELF_FEATURE_XNACK_ANY_V4
     ),
-    gfx9_10_processor_info(
+    processor_info(
         "gfx90a",
         0x03F,
+        flags=AMDGPU_PROCESSOR_INFO_FLAG_HSACO_EMISSION,
+        descriptor_set_key="amdgpu.cdna2.core",
         elf_feature_flags=AMDGPU_ELF_FEATURE_XNACK_SRAMECC_ANY_V4,
         matrix_feature_profile=AMDGPU_MATRIX_FEATURE_PROFILE_MFMA_GFX90A,
-        kernel_descriptor=AMDGPU_KERNEL_DESCRIPTOR_INFO_PACKED_WORKITEM_ID,
+        kernel_descriptor=AMDGPU_KERNEL_DESCRIPTOR_INFO_CDNA2,
+        scheduling_bits=(
+            AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES
+            | AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER
+            | AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK
+            | AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES
+        ),
+        occupancy=AMDGPU_OCCUPANCY_CDNA3,
     ),
     gfx9_10_processor_info(
         "gfx90c", 0x032, elf_feature_flags=AMDGPU_ELF_FEATURE_XNACK_ANY_V4
     ),
     cdna3_processor_info("gfx940", 0x040),
     cdna3_processor_info("gfx941", 0x04B),
-    cdna3_processor_info("gfx942", 0x04C),
+    cdna3_processor_info(
+        "gfx942", 0x04C, lds_bank_service_models=AMDGPU_LDS_BANK_SERVICE_MODELS_GFX942
+    ),
     processor_info(
         "gfx950",
         0x04F,
@@ -1576,6 +1694,7 @@ AMDGPU_PROCESSOR_INFOS: tuple[AmdgpuProcessorInfo, ...] = (
         elf_machine_flags=0x041,
         scheduling_bits=AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR,
         occupancy=AMDGPU_OCCUPANCY_RDNA_1536,
+        lds_bank_service_models=AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1100,
     ),
     rdna3_processor_info(
         processor="gfx1101",
@@ -1594,7 +1713,12 @@ AMDGPU_PROCESSOR_INFOS: tuple[AmdgpuProcessorInfo, ...] = (
         scheduling_bits=AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR,
     ),
     gfx115x_processor_info("gfx1150", 0x043),
-    gfx115x_processor_info("gfx1151", 0x04A, occupancy=AMDGPU_OCCUPANCY_RDNA_1536),
+    gfx115x_processor_info(
+        "gfx1151",
+        0x04A,
+        occupancy=AMDGPU_OCCUPANCY_RDNA_1536,
+        lds_bank_service_models=AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1151,
+    ),
     gfx115x_processor_info("gfx1152", 0x055),
     gfx115x_processor_info("gfx1153", 0x058),
     rdna4m_processor_info("gfx1170", 0x05D),
@@ -1861,6 +1985,13 @@ AMDGPU_TARGET_INFOS: tuple[AmdgpuTargetInfo, ...] = (
             ),
             kernel_metadata_extensions=((".gfx1250_revision", "A0"),),
         ),
+    ),
+    AmdgpuTargetInfo(
+        target="gfx90a",
+        processor="gfx90a",
+        enum_value=25,
+        doc="CDNA 2 gfx90a target row.",
+        default_for_descriptor_set=True,
     ),
 )
 
@@ -2661,6 +2792,15 @@ def validate_amdgpu_generic_contracts(
         _validate_amdgpu_generic_descriptor_contract(
             descriptor_set, exact_member_descriptor_sets
         )
+
+        portable_descriptor_flags = exact_member_descriptor_sets[0].flags
+        for member_descriptor_set in exact_member_descriptor_sets[1:]:
+            portable_descriptor_flags &= member_descriptor_set.flags
+        if descriptor_set.flags != portable_descriptor_flags:
+            raise ValueError(
+                f"AMDGPU generic descriptor set {descriptor_set.key} flags "
+                "do not match the member intersection"
+            )
 
         portable_flags = exact_members[0].flags
         for member in exact_members[1:]:

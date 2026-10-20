@@ -13,6 +13,7 @@ loom_check_test_suite(
   NAME
     test
   SRCS
+    "callable_effect_contracts.loom-test"
     "catalog_order.loom-test"
     "scoped_type_interop.loom-test"
     "type_bindings.loom-test"
@@ -52,6 +53,7 @@ loom_cc_library(
     iree::base
     loom::error::diagnostic
     loom::error::error_defs
+    loom::error::parameter
   PUBLIC
 )
 
@@ -188,6 +190,23 @@ loom_cc_library(
 
 loom_cc_test(
   NAME
+    cfg_roundtrip_test
+  SRCS
+    "cfg_roundtrip_test.cc"
+  DEPS
+    ::reader
+    ::writer
+    iree::base::internal::arena
+    iree::io::stream
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::cfg
+    loom::ops::test
+)
+
+loom_cc_test(
+  NAME
     reader_test
   SRCS
     "function_projection_reader_test.cc"
@@ -229,12 +248,12 @@ loom_cc_test(
     loom::codegen::low::repr
     loom::codegen::low::text_asm
     loom::error::diagnostic
+    loom::format::testdata::golden_text_corpus
     loom::format::text::parser
     loom::format::text::printer
     loom::ir
     loom::ops::op_defs
     loom::target::low_descriptor_registry_core_test
-    loom::test::corpus::text::golden_text_corpus
     loom::testing::context
 )
 
@@ -275,7 +294,10 @@ loom_cc_test(
     iree::io::stream
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::format::bytecode::writer::body
+    loom::format::bytecode::writer::encoder
     loom::ir
+    loom::ops::func
     loom::ops::global
     loom::ops::test
 )

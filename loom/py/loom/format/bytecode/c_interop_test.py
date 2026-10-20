@@ -53,6 +53,7 @@ from loom.ir import (
     RegisterType,
     ShapedType,
     SignedEnumSetAttr,
+    StringArrayAttr,
     SymbolName,
     SymbolNameArray,
     SymbolNameSet,
@@ -119,6 +120,9 @@ def _interop_module() -> tuple[Module, RegisterType]:
         "#test.feature_set<[low, -middle, high]>] "
         "using [#test.tile<width = 4>]\n"
         "  test.signed_enum_set_attrs [low, -middle, high] using []\n"
+        '  test.string_array_attrs ["gfx12-generic", "gfx1250", '
+        '"gfx12-generic"] using [] '
+        '{fallbacks = ["gfx11-generic", "gfx12-generic"]}\n'
         "  test.yield\n"
         "}\n"
         "test.record @parameterized_record "
@@ -176,6 +180,8 @@ def _predicate_capture_module() -> Module:
         parser.register_ops(operations)
     module = parser.parse(
         "func.decl @first(%extent: index) where [ge(%extent, 1)]\n"
+        "func.decl @unsigned(%lhs: i32, %rhs: i32) "
+        "where [ule(%lhs, %rhs)]\n"
         "func.def @capture(%condition: i1, %extent: index) "
         "where [ge(%extent, 2)] {\n"
         "  scf.if %condition {\n"
@@ -186,15 +192,19 @@ def _predicate_capture_module() -> Module:
         "  func.return\n"
         "}\n"
     )
-    nested = module.body.ops[1].regions[0].blocks[0].ops[0].regions[0].blocks[0]
+    nested = module.body.ops[2].regions[0].blocks[0].ops[0].regions[0].blocks[0]
     # Changing a display name leaves the resolved outer and inner IDs intact.
     module.values[nested.ops[0].results[0]].name = "extent"
     return module
 
 
 def _assert_predicate_identities(module: Module) -> None:
-    first, capture = module.body.ops
+    first, unsigned, capture = module.body.ops
     assert first.attributes["predicates"][0].args[0].value == first.operands[0]
+    unsigned_predicate = unsigned.attributes["predicates"][0]
+    assert unsigned_predicate.kind == "ule"
+    assert unsigned_predicate.args[0].value == unsigned.operands[0]
+    assert unsigned_predicate.args[1].value == unsigned.operands[1]
     body = capture.regions[0].blocks[0]
     extent = body.arg_ids[1]
     assert capture.attributes["predicates"][0].args[0].value == extent
@@ -329,6 +339,20 @@ def _assert_parameterized_arrays(entry_block: Block) -> None:
         raise AssertionError("signed enum set did not survive C bytecode")
     if signed_set_op.attributes["optional_features"] != SignedEnumSetAttr():
         raise AssertionError("present empty signed enum set changed")
+
+    string_array_op = next(
+        op for op in entry_block.ops if op.name == "test.string_array_attrs"
+    )
+    if string_array_op.attributes["required_values"] != StringArrayAttr(
+        ["gfx12-generic", "gfx1250", "gfx12-generic"]
+    ):
+        raise AssertionError("string array lost order or duplicate values")
+    if string_array_op.attributes["optional_values"] != StringArrayAttr():
+        raise AssertionError("present empty string array changed")
+    if string_array_op.attributes["dict"]["fallbacks"] != StringArrayAttr(
+        ["gfx11-generic", "gfx12-generic"]
+    ):
+        raise AssertionError("generic dict string array changed")
 
 
 def _assert_symbol_payloads(module: Module) -> None:

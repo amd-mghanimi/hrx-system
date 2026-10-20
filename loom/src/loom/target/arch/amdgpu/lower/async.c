@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "loom/analysis/view_regions.h"
 #include "loom/codegen/low/builder.h"
 #include "loom/ir/facts.h"
 #include "loom/ops/kernel/ops.h"
@@ -17,6 +18,8 @@
 #include "loom/target/arch/amdgpu/lower/emit.h"
 #include "loom/target/arch/amdgpu/lower/legality.h"
 #include "loom/target/arch/amdgpu/lower/memory.h"
+#include "loom/target/arch/amdgpu/lower/memory_packet.h"
+#include "loom/target/arch/amdgpu/lower/source_alloca_layout.h"
 #include "loom/target/arch/amdgpu/lower/topology.h"
 #include "loom/target/arch/amdgpu/lower/types.h"
 #include "loom/target/arch/amdgpu/planning/wait_packets.h"
@@ -72,6 +75,8 @@ typedef struct loom_amdgpu_async_wait_diagnostic_t {
 typedef struct loom_amdgpu_async_gather_selection_t {
   // Source global-like view access transferred into LDS.
   loom_low_source_memory_access_plan_t source;
+  // Destination LDS view access, including target-assigned alloca layout.
+  loom_low_source_memory_access_plan_t dest;
   // Target operand path selected for each source dynamic address term.
   loom_amdgpu_memory_dynamic_index_kind_t
       source_dynamic_term_kinds[LOOM_LOW_SOURCE_MEMORY_DYNAMIC_TERM_CAPACITY];
@@ -79,8 +84,8 @@ typedef struct loom_amdgpu_async_gather_selection_t {
   loom_value_id_t source_view;
   // Destination LDS view value passed to kernel.async.gather.
   loom_value_id_t dest_view;
-  // Static LDS byte offset materialized into M0.
-  uint32_t dest_byte_offset;
+  // Static LDS byte contribution materialized into M0.
+  uint32_t dest_static_byte_offset;
   // Number of bytes moved by the selected async packet.
   uint32_t packet_byte_count;
   // Implicit byte stride between subgroup-lane destinations of the packet.
@@ -122,6 +127,10 @@ typedef struct loom_amdgpu_cluster_gather_diagnostic_t {
 } loom_amdgpu_cluster_gather_diagnostic_t;
 
 typedef struct loom_amdgpu_cluster_gather_selection_t {
+  // Canonical global source access borrowed by source_address.
+  loom_low_source_memory_access_plan_t source;
+  // Canonical workgroup destination access borrowed by dest_address.
+  loom_low_source_memory_access_plan_t dest;
   // Exact global byte address consumed by the packet VADDR operand.
   loom_amdgpu_memory_access_t source_address;
   // Exact workgroup-relative LDS byte address consumed by the packet VDST.
@@ -234,10 +243,9 @@ static bool loom_amdgpu_async_gather_select_source(
     return false;
   }
 
-  loom_amdgpu_memory_access_t access = {
-      .source = selection->source,
-      .address_form = LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR,
-  };
+  loom_amdgpu_memory_access_t access =
+      loom_amdgpu_memory_access_from_source(&selection->source);
+  access.address_form = LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR;
   if (!loom_amdgpu_memory_access_select_vaddr_dynamic_terms(
           module, &access, &diagnostic->memory_diagnostic)) {
     diagnostic->rejection_bits |=
@@ -271,6 +279,7 @@ static bool loom_amdgpu_async_gather_select_source(
 
 static bool loom_amdgpu_async_gather_select_dest(
     const loom_module_t* module, const loom_target_bundle_t* bundle,
+    const loom_value_fact_table_t* fact_table,
     const loom_view_region_table_t* view_regions,
     const loom_amdgpu_source_alloca_layout_t* alloca_layout,
     loom_value_id_t dest_view, loom_amdgpu_async_gather_selection_t* selection,
@@ -283,21 +292,21 @@ static bool loom_amdgpu_async_gather_select_dest(
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_LANE_COUNT;
     return false;
   }
-  loom_low_source_memory_access_plan_t dest = {0};
   if (!loom_low_source_memory_access_plan_build_view(
           view_regions, LOOM_LOW_SOURCE_MEMORY_OPERATION_STORE, dest_view,
-          (loom_vector_memory_cache_policy_t){0}, &dest,
+          (loom_vector_memory_cache_policy_t){0}, &selection->dest,
           &diagnostic->dest_diagnostic)) {
     diagnostic->rejection_bits |= LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_PLAN;
     return false;
   }
-  if (dest.memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP) {
+  if (selection->dest.memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP) {
     diagnostic->rejection_bits |=
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_MEMORY_SPACE;
     return false;
   }
   const uint64_t dest_byte_count =
-      (uint64_t)dest.element_byte_count * dest.vector_lane_count;
+      (uint64_t)selection->dest.element_byte_count *
+      selection->dest.vector_lane_count;
   if (dest_byte_count !=
       (uint64_t)subgroup_size * selection->dest_lane_byte_stride) {
     diagnostic->rejection_bits |=
@@ -305,33 +314,54 @@ static bool loom_amdgpu_async_gather_select_dest(
     return false;
   }
   uint64_t lds_root_byte_offset = 0;
-  if (!loom_amdgpu_source_alloca_layout_lookup_root(
+  if (!loom_amdgpu_source_alloca_layout_lookup_byte_offset(
           alloca_layout, LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP,
-          dest.root_value_id, &lds_root_byte_offset)) {
+          selection->dest.root_value_id, &lds_root_byte_offset)) {
     diagnostic->rejection_bits |=
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_SLOT_BASE;
     return false;
   }
+  if (!loom_low_source_memory_access_plan_include_root_byte_offset(
+          &selection->dest, lds_root_byte_offset)) {
+    diagnostic->rejection_bits |=
+        LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_OFFSET;
+    return false;
+  }
 
-  if (dest.dynamic_term_count != 0 || dest.static_byte_offset < 0) {
+  for (uint8_t i = 0; i < selection->dest.dynamic_term_count; ++i) {
+    const loom_low_source_memory_dynamic_term_t* term =
+        &selection->dest.dynamic_terms[i];
+    if (!loom_value_facts_is_subgroup_uniform(
+            loom_value_fact_table_lookup(fact_table, term->index))) {
+      diagnostic->rejection_bits |=
+          LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_OFFSET;
+      return false;
+    }
+    for (uint8_t j = 0; j < term->stride_value_count; ++j) {
+      if (!loom_value_facts_is_subgroup_uniform(loom_value_fact_table_lookup(
+              fact_table, term->stride_values[j]))) {
+        diagnostic->rejection_bits |=
+            LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_OFFSET;
+        return false;
+      }
+    }
+  }
+  if (!loom_amdgpu_source_memory_offset_fits_u32(
+          &selection->dest, selection->dest.static_byte_offset)) {
     diagnostic->rejection_bits |=
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_OFFSET;
     return false;
   }
-  const uint64_t view_byte_offset = (uint64_t)dest.static_byte_offset;
-  if (lds_root_byte_offset > UINT32_MAX ||
-      view_byte_offset > UINT32_MAX - lds_root_byte_offset) {
-    diagnostic->rejection_bits |=
-        LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DEST_OFFSET;
-    return false;
-  }
-  selection->dest_byte_offset =
-      (uint32_t)(lds_root_byte_offset + view_byte_offset);
+  // Dynamic terms are emitted with low-word modular arithmetic. The complete
+  // address proof above makes the same representation exact after summation.
+  selection->dest_static_byte_offset =
+      (uint32_t)selection->dest.static_byte_offset;
   return true;
 }
 
 static bool loom_amdgpu_async_gather_select(
     const loom_module_t* module, const loom_target_bundle_t* bundle,
+    const loom_value_fact_table_t* fact_table,
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_view_region_table_t* view_regions,
     const loom_amdgpu_source_alloca_layout_t* alloca_layout,
@@ -359,8 +389,20 @@ static bool loom_amdgpu_async_gather_select(
           module, descriptor_set, view_regions, out_selection->source_view,
           cache_policy, out_selection, out_diagnostic) ||
       !loom_amdgpu_async_gather_select_dest(
-          module, bundle, view_regions, alloca_layout, out_selection->dest_view,
-          out_selection, out_diagnostic)) {
+          module, bundle, fact_table, view_regions, alloca_layout,
+          out_selection->dest_view, out_selection, out_diagnostic)) {
+    return false;
+  }
+
+  if (out_selection->dest.dynamic_term_count != 0 &&
+      (loom_amdgpu_descriptor_ref_ordinal(
+           descriptor_set, LOOM_AMDGPU_DESCRIPTOR_REF_S_MOV_B32_M0) ==
+           LOOM_LOW_DESCRIPTOR_ORDINAL_NONE ||
+       loom_amdgpu_descriptor_ref_ordinal(
+           descriptor_set, LOOM_AMDGPU_DESCRIPTOR_REF_V_READFIRSTLANE_B32) ==
+           LOOM_LOW_DESCRIPTOR_ORDINAL_NONE)) {
+    out_diagnostic->rejection_bits |=
+        LOOM_AMDGPU_ASYNC_GATHER_REJECTION_DESCRIPTOR_MISSING;
     return false;
   }
 
@@ -372,11 +414,10 @@ static bool loom_amdgpu_async_gather_select(
         LOOM_AMDGPU_ASYNC_GATHER_REJECTION_SOURCE_ADDRESS;
     return false;
   }
-  loom_amdgpu_memory_access_t access = {
-      .source = out_selection->source,
-      .address_form = LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR,
-      .packet_byte_count = out_selection->packet_byte_count,
-  };
+  loom_amdgpu_memory_access_t access =
+      loom_amdgpu_memory_access_from_source(&out_selection->source);
+  access.address_form = LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR;
+  access.packet_byte_count = out_selection->packet_byte_count;
   for (iree_host_size_t i = 0; i < LOOM_LOW_SOURCE_MEMORY_DYNAMIC_TERM_CAPACITY;
        ++i) {
     access.dynamic_term_kinds[i] = out_selection->source_dynamic_term_kinds[i];
@@ -395,14 +436,27 @@ static iree_status_t loom_amdgpu_async_gather_resolve_selection(
     loom_amdgpu_async_gather_plan_t* out_plan) {
   *out_plan = (loom_amdgpu_async_gather_plan_t){
       .source = selection->source,
-      .dest_byte_offset = selection->dest_byte_offset,
+      .dest_dynamic_term_count = selection->dest.dynamic_term_count,
+      .dest_static_byte_offset = selection->dest_static_byte_offset,
       .packet_byte_count = selection->packet_byte_count,
   };
+  if (selection->dest.dynamic_term_count != 0) {
+    loom_low_source_memory_dynamic_term_t* dest_dynamic_terms = NULL;
+    IREE_RETURN_IF_ERROR(loom_low_lower_allocate_plan_data(
+        context,
+        selection->dest.dynamic_term_count * sizeof(*dest_dynamic_terms),
+        (void**)&dest_dynamic_terms));
+    memcpy(dest_dynamic_terms, selection->dest.dynamic_terms,
+           selection->dest.dynamic_term_count * sizeof(*dest_dynamic_terms));
+    out_plan->dest_dynamic_terms = dest_dynamic_terms;
+  }
   for (iree_host_size_t i = 0; i < LOOM_LOW_SOURCE_MEMORY_DYNAMIC_TERM_CAPACITY;
        ++i) {
     out_plan->source_dynamic_term_kinds[i] =
         selection->source_dynamic_term_kinds[i];
   }
+  IREE_RETURN_IF_ERROR(loom_amdgpu_plan_memory_dynamic_terms(
+      context, &out_plan->source, &out_plan->dynamic_term_plans));
   return loom_amdgpu_resolve_descriptor_ref(context, selection->descriptor_ref,
                                             &out_plan->descriptor);
 }
@@ -423,6 +477,7 @@ iree_status_t loom_amdgpu_select_kernel_async_gather_plan(
   if (!loom_amdgpu_async_gather_select(
           loom_low_lower_context_module(context),
           loom_low_lower_context_bundle(context),
+          loom_low_lower_context_fact_table(context),
           loom_low_lower_context_descriptor_set(context), view_regions,
           alloca_layout, source_op, &selection, &diagnostic)) {
     return iree_ok_status();
@@ -485,24 +540,24 @@ static bool loom_amdgpu_cluster_gather_select(
     return false;
   }
 
-  loom_low_source_memory_access_plan_t source = {0};
   if (!loom_low_source_memory_access_plan_build_view(
           view_regions, LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD,
           loom_kernel_async_cluster_gather_source(source_op), cache_policy,
-          &source, &out_diagnostic->source_diagnostic)) {
+          &out_selection->source, &out_diagnostic->source_diagnostic)) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_SOURCE_PLAN;
     return false;
   }
   if (!loom_amdgpu_async_gather_source_memory_space_is_global_like(
-          source.memory_space)) {
+          out_selection->source.memory_space)) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_SOURCE_MEMORY_SPACE;
     return false;
   }
 
   const uint64_t source_byte_count =
-      (uint64_t)source.element_byte_count * (uint64_t)source.vector_lane_count;
+      (uint64_t)out_selection->source.element_byte_count *
+      (uint64_t)out_selection->source.vector_lane_count;
   if (source_byte_count > UINT32_MAX) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_PACKET_WIDTH;
@@ -510,23 +565,24 @@ static bool loom_amdgpu_cluster_gather_select(
   }
   out_selection->packet_byte_count = (uint32_t)source_byte_count;
 
-  loom_low_source_memory_access_plan_t dest = {0};
   const loom_vector_memory_cache_policy_t no_cache_policy = {0};
   if (!loom_low_source_memory_access_plan_build_view(
           view_regions, LOOM_LOW_SOURCE_MEMORY_OPERATION_STORE,
           loom_kernel_async_cluster_gather_dest(source_op), no_cache_policy,
-          &dest, &out_diagnostic->dest_diagnostic)) {
+          &out_selection->dest, &out_diagnostic->dest_diagnostic)) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_DEST_PLAN;
     return false;
   }
-  if (dest.memory_space != LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP) {
+  if (out_selection->dest.memory_space !=
+      LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_DEST_MEMORY_SPACE;
     return false;
   }
   const uint64_t dest_byte_count =
-      (uint64_t)dest.element_byte_count * (uint64_t)dest.vector_lane_count;
+      (uint64_t)out_selection->dest.element_byte_count *
+      (uint64_t)out_selection->dest.vector_lane_count;
   if (dest_byte_count != source_byte_count) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_PACKET_WIDTH;
@@ -534,7 +590,8 @@ static bool loom_amdgpu_cluster_gather_select(
   }
 
   if (!loom_amdgpu_memory_access_select_u32_vaddr_byte_offset(
-          module, alloca_layout, &source, &out_selection->source_address,
+          module, alloca_layout, &out_selection->source,
+          &out_selection->source_address,
           &out_diagnostic->source_address_diagnostic)) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_SOURCE_ADDRESS;
@@ -546,7 +603,8 @@ static bool loom_amdgpu_cluster_gather_select(
       out_selection->packet_byte_count;
 
   if (!loom_amdgpu_memory_access_select_u32_vaddr_byte_offset(
-          module, alloca_layout, &dest, &out_selection->dest_address,
+          module, alloca_layout, &out_selection->dest,
+          &out_selection->dest_address,
           &out_diagnostic->dest_address_diagnostic)) {
     out_diagnostic->rejection_bits |=
         LOOM_AMDGPU_CLUSTER_GATHER_REJECTION_DEST_ADDRESS;
@@ -617,8 +675,22 @@ iree_status_t loom_amdgpu_select_kernel_async_cluster_gather_plan(
           alloca_layout, source_op, &selection, &diagnostic)) {
     return iree_ok_status();
   }
+  loom_low_source_memory_access_plan_t* retained_source = NULL;
+  IREE_RETURN_IF_ERROR(loom_low_lower_allocate_plan_data(
+      context, sizeof(*retained_source), (void**)&retained_source));
+  *retained_source = selection.source;
+  loom_low_source_memory_access_plan_t* retained_dest = NULL;
+  IREE_RETURN_IF_ERROR(loom_low_lower_allocate_plan_data(
+      context, sizeof(*retained_dest), (void**)&retained_dest));
+  *retained_dest = selection.dest;
   out_plan->source_address = selection.source_address;
+  out_plan->source_address.source = retained_source;
   out_plan->dest_address = selection.dest_address;
+  out_plan->dest_address.source = retained_dest;
+  IREE_RETURN_IF_ERROR(loom_amdgpu_plan_memory_dynamic_terms(
+      context, retained_source, &out_plan->source_address.dynamic_term_plans));
+  IREE_RETURN_IF_ERROR(loom_amdgpu_plan_memory_dynamic_terms(
+      context, retained_dest, &out_plan->dest_address.dynamic_term_plans));
   out_plan->participant_mask = selection.participant_mask;
   out_plan->packet_byte_count = selection.packet_byte_count;
   IREE_RETURN_IF_ERROR(loom_amdgpu_resolve_descriptor_ref(
@@ -719,13 +791,12 @@ static bool loom_amdgpu_tensor_load_select(
         LOOM_AMDGPU_TENSOR_LOAD_REJECTION_CACHE_POLICY;
     return false;
   }
-  const loom_amdgpu_memory_access_t cache_access = {
-      .source =
-          {
-              .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL,
-              .cache_policy = out_selection->cache_policy,
-          },
+  const loom_low_source_memory_access_plan_t cache_source = {
+      .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL,
+      .cache_policy = out_selection->cache_policy,
   };
+  const loom_amdgpu_memory_access_t cache_access =
+      loom_amdgpu_memory_access_from_source(&cache_source);
   if (!loom_amdgpu_memory_cache_policy_can_lower(descriptor_set,
                                                  &cache_access)) {
     out_diagnostic->rejection_bits |=
@@ -733,6 +804,53 @@ static bool loom_amdgpu_tensor_load_select(
     return false;
   }
   return true;
+}
+
+// Tensor endpoints declare whole-transfer effects independently of the opaque
+// hardware dgroups. Capture the canonical view envelopes, not a per-lane packet
+// width. Participant-varying origins cannot be canceled between accesses.
+static iree_status_t loom_amdgpu_plan_tensor_memory_effect(
+    loom_low_lower_context_t* context, const loom_view_region_t* region,
+    const loom_low_memory_relative_interval_t** out_interval) {
+  *out_interval = NULL;
+  if (region == NULL || region->root_value_id == LOOM_VALUE_ID_INVALID) {
+    return iree_ok_status();
+  }
+  const loom_value_facts_t root_facts = loom_value_fact_table_lookup(
+      loom_low_lower_context_fact_table(context), region->root_value_id);
+  const bool workgroup_allocation =
+      region->origin.kind == LOOM_VALUE_FACT_REFERENCE_ORIGIN_ALLOCATION &&
+      region->memory_space == LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP;
+  if (!workgroup_allocation &&
+      !loom_value_facts_is_workgroup_uniform(root_facts)) {
+    return iree_ok_status();
+  }
+  loom_low_memory_relative_interval_t relative = {
+      .scope = loom_low_lower_context_source_function(context).op,
+      .storage_id = region->root_value_id,
+      .disjoint_storage_ordinal =
+          region->alias_scope_id != LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE
+              ? region->alias_scope_id + 1u
+              : 0,
+  };
+  if (loom_symbolic_expr_is_constant(&region->begin_byte_offset) ||
+      loom_value_facts_is_workgroup_uniform(region->begin_byte_offset.facts)) {
+    relative.origin = region->begin_byte_offset;
+    relative.upper = region->byte_length.facts.range_hi;
+  } else {
+    loom_symbolic_expr_constant(0, &relative.origin);
+    relative.lower = region->begin_byte_offset.facts.range_lo;
+    relative.upper = region->end_byte_offset.facts.range_hi;
+  }
+  loom_low_memory_relative_interval_t* retained = NULL;
+  IREE_RETURN_IF_ERROR(loom_low_lower_allocate_plan_data(
+      context, sizeof(*retained), (void**)&retained));
+  *retained = relative;
+  IREE_RETURN_IF_ERROR(loom_symbolic_expr_clone(
+      &relative.origin, loom_low_lower_context_function_arena(context),
+      &retained->origin));
+  *out_interval = retained;
+  return iree_ok_status();
 }
 
 iree_status_t loom_amdgpu_select_kernel_async_tensor_load_plan(
@@ -754,6 +872,21 @@ iree_status_t loom_amdgpu_select_kernel_async_tensor_load_plan(
   IREE_RETURN_IF_ERROR(loom_amdgpu_resolve_descriptor_ref(
       context, LOOM_AMDGPU_DESCRIPTOR_REF_V_READFIRSTLANE_B32,
       &out_plan->readfirstlane_descriptor));
+  const loom_view_region_table_t* view_regions = NULL;
+  IREE_RETURN_IF_ERROR(
+      loom_low_lower_context_view_regions(context, &view_regions));
+  const loom_view_region_t* source_region = NULL;
+  loom_view_region_table_try_lookup(
+      view_regions, loom_kernel_async_tensor_load_to_lds_source(source_op),
+      &source_region);
+  IREE_RETURN_IF_ERROR(loom_amdgpu_plan_tensor_memory_effect(
+      context, source_region, &out_plan->source_interval));
+  const loom_view_region_t* dest_region = NULL;
+  loom_view_region_table_try_lookup(
+      view_regions, loom_kernel_async_tensor_load_to_lds_dest(source_op),
+      &dest_region);
+  IREE_RETURN_IF_ERROR(loom_amdgpu_plan_tensor_memory_effect(
+      context, dest_region, &out_plan->dest_interval));
   out_plan->dgroup_count = selection.dgroup_count;
   out_plan->cache_policy = selection.cache_policy;
   for (uint8_t i = 0; i < selection.dgroup_count; ++i) {
@@ -980,19 +1113,52 @@ iree_status_t loom_amdgpu_select_kernel_async_wait_plan(
   return iree_ok_status();
 }
 
+static iree_status_t loom_amdgpu_async_gather_emit_dest_m0(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_amdgpu_async_gather_plan_t* plan, loom_value_id_t* out_low_m0) {
+  *out_low_m0 = LOOM_VALUE_ID_INVALID;
+  if (plan->dest_dynamic_term_count == 0) {
+    return loom_amdgpu_emit_m0_u32(context, source_op, &plan->descriptor,
+                                   plan->dest_static_byte_offset, out_low_m0);
+  }
+
+  loom_type_t sgpr_type = loom_type_none();
+  IREE_RETURN_IF_ERROR(loom_amdgpu_make_sgpr_type(context, &sgpr_type));
+  loom_value_id_t low_offset = LOOM_VALUE_ID_INVALID;
+  for (uint8_t i = 0; i < plan->dest_dynamic_term_count; ++i) {
+    loom_value_id_t low_term = LOOM_VALUE_ID_INVALID;
+    IREE_RETURN_IF_ERROR(loom_amdgpu_emit_uniform_sgpr_byte_offset_term(
+        context, source_op, &plan->dest_dynamic_terms[i], &low_term));
+    if (low_offset == LOOM_VALUE_ID_INVALID) {
+      low_offset = low_term;
+    } else {
+      IREE_RETURN_IF_ERROR(loom_amdgpu_emit_binary(
+          context, source_op, LOOM_AMDGPU_DESCRIPTOR_REF_S_ADD_U32, low_offset,
+          low_term, sgpr_type, &low_offset));
+    }
+  }
+  if (plan->dest_static_byte_offset != 0) {
+    IREE_RETURN_IF_ERROR(loom_amdgpu_emit_sgpr_binary_immediate(
+        context, source_op, LOOM_AMDGPU_DESCRIPTOR_REF_S_ADD_U32, low_offset,
+        plan->dest_static_byte_offset, sgpr_type, &low_offset));
+  }
+  return loom_amdgpu_emit_m0_sgpr(context, source_op, &plan->descriptor,
+                                  low_offset, out_low_m0);
+}
+
 iree_status_t loom_amdgpu_lower_kernel_async_gather(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_async_gather_plan_t* plan) {
   // The packet immediate shifts both the global and LDS addresses. Materialize
   // the source-only offset in SADDR so M0 remains the exact destination base.
-  loom_amdgpu_memory_access_t access = {
-      .source = plan->source,
-      .address_form = LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR,
-      .scalar_base_byte_offset = (uint64_t)plan->source.static_byte_offset,
-      .scalar_offset_placement =
-          LOOM_AMDGPU_MEMORY_SCALAR_OFFSET_PLACEMENT_BASE,
-      .packet_byte_count = plan->packet_byte_count,
-  };
+  loom_amdgpu_memory_access_t access =
+      loom_amdgpu_memory_access_from_source(&plan->source);
+  access.dynamic_term_plans = plan->dynamic_term_plans;
+  access.address_form = LOOM_AMDGPU_MEMORY_ADDRESS_FORM_GLOBAL_SADDR;
+  access.scalar_base_byte_offset = (uint64_t)plan->source.static_byte_offset;
+  access.scalar_offset_placement =
+      LOOM_AMDGPU_MEMORY_SCALAR_OFFSET_PLACEMENT_BASE;
+  access.packet_byte_count = plan->packet_byte_count;
   for (iree_host_size_t i = 0; i < LOOM_LOW_SOURCE_MEMORY_DYNAMIC_TERM_CAPACITY;
        ++i) {
     access.dynamic_term_kinds[i] = plan->source_dynamic_term_kinds[i];
@@ -1005,16 +1171,15 @@ iree_status_t loom_amdgpu_lower_kernel_async_gather(
       loom_amdgpu_emit_memory_vaddr(context, source_op, &access, &sequence,
                                     LOOM_VALUE_ID_INVALID, &low_vaddr));
 
-  loom_value_id_t low_resource = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_low_lower_lookup_value(
-      context, plan->source.root_value_id, &low_resource));
+  loom_value_id_t low_resource =
+      loom_low_lower_lookup_value(context, plan->source.root_value_id);
   loom_value_id_t low_saddr = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(loom_amdgpu_emit_memory_saddr(
       context, source_op, &access, &sequence, low_resource, &low_saddr));
 
   loom_value_id_t low_m0 = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_amdgpu_emit_m0_u32(
-      context, source_op, &plan->descriptor, plan->dest_byte_offset, &low_m0));
+  IREE_RETURN_IF_ERROR(
+      loom_amdgpu_async_gather_emit_dest_m0(context, source_op, plan, &low_m0));
 
   loom_named_attr_t attrs[5] = {0};
   iree_host_size_t attr_count = 0;
@@ -1027,8 +1192,9 @@ iree_status_t loom_amdgpu_lower_kernel_async_gather(
       loom_make_named_attr_slice(attrs, attr_count),
       /*result_types=*/NULL, /*result_count=*/0, /*tied_results=*/NULL,
       /*tied_result_count=*/0, source_op->location, &low_op));
-  return loom_low_lower_elide_value(context,
-                                    loom_kernel_async_gather_token(source_op));
+  loom_low_lower_elide_value(context,
+                             loom_kernel_async_gather_token(source_op));
+  return iree_ok_status();
 }
 
 iree_status_t loom_amdgpu_lower_kernel_async_cluster_gather(
@@ -1050,9 +1216,8 @@ iree_status_t loom_amdgpu_lower_kernel_async_cluster_gather(
       context, source_op, &plan->source_address, &source_sequence,
       LOOM_VALUE_ID_INVALID, &low_source_addr));
 
-  loom_value_id_t low_resource = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(loom_low_lower_lookup_value(
-      context, plan->source_address.source.root_value_id, &low_resource));
+  loom_value_id_t low_resource = loom_low_lower_lookup_value(
+      context, plan->source_address.source->root_value_id);
   loom_value_id_t low_saddr = LOOM_VALUE_ID_INVALID;
   IREE_RETURN_IF_ERROR(loom_amdgpu_emit_memory_saddr(
       context, source_op, &plan->source_address, &source_sequence, low_resource,
@@ -1079,8 +1244,9 @@ iree_status_t loom_amdgpu_lower_kernel_async_cluster_gather(
       loom_make_named_attr_slice(attrs, attr_count),
       /*result_types=*/NULL, /*result_count=*/0, /*tied_results=*/NULL,
       /*tied_result_count=*/0, source_op->location, &low_op));
-  return loom_low_lower_elide_value(
-      context, loom_kernel_async_cluster_gather_token(source_op));
+  loom_low_lower_elide_value(context,
+                             loom_kernel_async_cluster_gather_token(source_op));
+  return iree_ok_status();
 }
 
 static iree_status_t loom_amdgpu_tensor_load_materialize_dgroup(
@@ -1089,9 +1255,7 @@ static iree_status_t loom_amdgpu_tensor_load_materialize_dgroup(
     loom_value_id_t source, uint32_t expected_register_count,
     loom_value_id_t* out_dgroup) {
   *out_dgroup = LOOM_VALUE_ID_INVALID;
-  loom_value_id_t low_source = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_low_lower_lookup_value(context, source, &low_source));
+  loom_value_id_t low_source = loom_low_lower_lookup_value(context, source);
 
   const loom_module_t* module = loom_low_lower_context_module(context);
   const loom_type_t low_source_type =
@@ -1135,6 +1299,21 @@ static iree_status_t loom_amdgpu_tensor_load_materialize_dgroup(
                                               sgpr_range_type, out_dgroup);
 }
 
+static iree_status_t loom_amdgpu_record_tensor_memory_effect(
+    loom_low_lower_context_t* context, const loom_op_t* low_op,
+    uint16_t effect_ordinal, loom_low_memory_space_t memory_space,
+    const loom_low_memory_relative_interval_t* interval) {
+  if (interval == NULL) {
+    return iree_ok_status();
+  }
+  const loom_low_memory_access_summary_t summary = {
+      .memory_space = memory_space,
+      .relative_interval = interval,
+  };
+  return loom_low_lower_record_memory_effect(context, low_op, effect_ordinal,
+                                             &summary);
+}
+
 iree_status_t loom_amdgpu_lower_kernel_async_tensor_load(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_tensor_load_plan_t* plan) {
@@ -1149,13 +1328,12 @@ iree_status_t loom_amdgpu_lower_kernel_async_tensor_load(
         kDgroupRegisterCounts[i], &low_dgroups[i]));
   }
 
-  const loom_amdgpu_memory_access_t cache_access = {
-      .source =
-          {
-              .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL,
-              .cache_policy = plan->cache_policy,
-          },
+  const loom_low_source_memory_access_plan_t cache_source = {
+      .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL,
+      .cache_policy = plan->cache_policy,
   };
+  const loom_amdgpu_memory_access_t cache_access =
+      loom_amdgpu_memory_access_from_source(&cache_source);
   loom_named_attr_t attrs[3] = {0};
   iree_host_size_t attr_count = 0;
   IREE_RETURN_IF_ERROR(loom_amdgpu_make_memory_cache_attrs(
@@ -1166,8 +1344,16 @@ iree_status_t loom_amdgpu_lower_kernel_async_tensor_load(
       loom_make_named_attr_slice(attrs, attr_count),
       /*result_types=*/NULL, /*result_count=*/0, /*tied_results=*/NULL,
       /*tied_result_count=*/0, source_op->location, &low_op));
-  return loom_low_lower_elide_value(
+  // Both descriptor forms bind effect 0 to the global source and effect 1 to
+  // the LDS destination. Their ordering is part of the descriptor contract.
+  IREE_RETURN_IF_ERROR(loom_amdgpu_record_tensor_memory_effect(
+      context, low_op, 0, LOOM_LOW_MEMORY_SPACE_GLOBAL, plan->source_interval));
+  IREE_RETURN_IF_ERROR(loom_amdgpu_record_tensor_memory_effect(
+      context, low_op, 1, LOOM_LOW_MEMORY_SPACE_WORKGROUP,
+      plan->dest_interval));
+  loom_low_lower_elide_value(
       context, loom_kernel_async_tensor_load_to_lds_token(source_op));
+  return iree_ok_status();
 }
 
 void loom_amdgpu_mark_async_gather_plan_storage_demands(
@@ -1176,6 +1362,8 @@ void loom_amdgpu_mark_async_gather_plan_storage_demands(
   (void)source_op;
   loom_amdgpu_mark_source_memory_plan_root_storage_demands(context,
                                                            &plan->source);
+  loom_amdgpu_mark_source_memory_dynamic_terms_storage_demands(
+      context, plan->dest_dynamic_terms, plan->dest_dynamic_term_count);
 }
 
 void loom_amdgpu_mark_cluster_gather_plan_storage_demands(
@@ -1183,9 +1371,9 @@ void loom_amdgpu_mark_cluster_gather_plan_storage_demands(
     const loom_amdgpu_cluster_gather_plan_t* plan) {
   (void)source_op;
   loom_amdgpu_mark_source_memory_plan_root_storage_demands(
-      context, &plan->source_address.source);
+      context, plan->source_address.source);
   loom_amdgpu_mark_source_memory_plan_dynamic_storage_demands(
-      context, &plan->dest_address.source);
+      context, plan->dest_address.source);
 }
 
 void loom_amdgpu_mark_tensor_load_plan_storage_demands(
@@ -1400,6 +1588,7 @@ static iree_status_t loom_amdgpu_low_legality_verify_kernel_async_gather(
   if (loom_amdgpu_async_gather_select(
           loom_target_low_legality_module(context),
           loom_target_low_legality_bundle(context),
+          loom_target_low_legality_fact_table(context),
           loom_target_low_legality_descriptor_set(context), view_regions,
           alloca_layout, op, &selection, &diagnostic)) {
     return iree_ok_status();

@@ -1,0 +1,1152 @@
+// Copyright 2026 The IREE Authors
+//
+// Licensed under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+#include "loom/tooling/execution/hal/scenario_profile.h"
+
+#include <string.h>
+
+#include "loom/error/diagnostic.h"
+#include "loom/error/error_catalog.h"
+#include "loom/error/source.h"
+#include "loom/ir/value_replacement.h"
+#include "loom/ops/buffer/ops.h"
+#include "loom/ops/func/ops.h"
+#include "loom/ops/index/ops.h"
+#include "loom/ops/kernel/ops.h"
+#include "loom/ops/op_defs.h"
+#include "loom/ops/scalar/ops.h"
+#include "loom/ops/view/ops.h"
+#include "loom/tooling/execution/hal/benchmark.h"
+#include "loom/tooling/execution/hal/testbench_staging.h"
+#include "loomc/interop.h"
+#include "loomc/iree.h"
+
+typedef struct loom_run_hal_testbench_scenario_product_t {
+  // Host allocator owning this product.
+  iree_allocator_t host_allocator;
+  // Authored scenario subject accepted by this product.
+  const loom_testbench_invocation_plan_t* subject;
+  // Target-only module clone containing a generated function adapter.
+  loomc_module_t* adapted_module;
+  // Synthetic kernel invocation owned with |adapted_module|.
+  loom_testbench_invocation_plan_t adapted_invocation;
+  // Eagerly compiled HAL dispatch product.
+  loom_run_hal_testbench_actual_provider_t provider;
+} loom_run_hal_testbench_scenario_product_t;
+
+// Scalar results occupy naturally aligned slots without imposing one scalar
+// width on the device stores. The largest source scalar occupies eight bytes.
+enum { LOOM_RUN_HAL_SCENARIO_RESULT_SLOT_SIZE = 8 };
+
+typedef struct loom_run_hal_testbench_scenario_results_t {
+  // Pooled host storage for reusable or independently batched result records.
+  iree_hal_buffer_t* buffer;
+  // Reusable adapted arguments borrowing the caller's values and |buffer|.
+  loom_testbench_value_t* arguments;
+  // Byte length of each call's result record.
+  iree_device_size_t stride;
+} loom_run_hal_testbench_scenario_results_t;
+
+typedef struct loom_run_hal_testbench_scenario_call_ring_t {
+  // Host allocator owning all ring arrays.
+  iree_allocator_t host_allocator;
+  // Per-call retained binding lists.
+  loom_run_hal_binding_list_t* binding_lists;
+  // Number of initialized entries in |binding_lists|.
+  iree_host_size_t initialized_binding_list_count;
+  // Per-call executable function, geometry, and constant payload.
+  loom_run_hal_invocation_options_t* invocation_options;
+  // Flat binding byte lengths in call and ABI order.
+  iree_device_size_t* binding_lengths;
+  // Flat staged binding table in call and ABI order.
+  iree_hal_buffer_binding_t* binding_table;
+  // Maximum number of entries in the flat binding arrays.
+  iree_host_size_t binding_capacity;
+  // Number of populated entries in |binding_table|.
+  iree_host_size_t binding_count;
+  // Number of bindings materialized for each call.
+  iree_host_size_t binding_count_per_call;
+  // Sum of logical binding bytes in the first call.
+  uint64_t binding_set_bytes;
+  // Sum of logical binding bytes across the complete ring.
+  uint64_t binding_ring_bytes;
+  // Number of disjoint reachable binding ranges in the first call.
+  iree_host_size_t binding_range_count_per_call;
+  // Sum of reachable binding ranges in the first call.
+  uint64_t binding_range_set_bytes;
+  // Sum of reachable binding ranges across the complete ring.
+  uint64_t binding_range_ring_bytes;
+  // Number of unique logical input allocations in the first call.
+  iree_host_size_t materialized_storage_count_per_call;
+  // Sum of unique logical input-allocation bytes in the first call.
+  uint64_t materialized_storage_set_bytes;
+  // Sum of unique logical input-allocation bytes across the complete ring.
+  uint64_t materialized_storage_ring_bytes;
+  // Alias-preserving host-to-device staging for the flat binding table.
+  loom_run_hal_testbench_staging_t staging;
+  // Scalar result storage retained across every timed replay of the batch.
+  loom_run_hal_testbench_scenario_results_t results;
+} loom_run_hal_testbench_scenario_call_ring_t;
+
+typedef uint32_t loom_run_hal_scenario_ring_flags_t;
+enum loom_run_hal_scenario_ring_flag_bits_e {
+  LOOM_RUN_HAL_SCENARIO_RING_FLAG_NONE = 0u,
+  LOOM_RUN_HAL_SCENARIO_RING_FLAG_STAGE_BINDINGS = 1u << 0,
+  LOOM_RUN_HAL_SCENARIO_RING_FLAG_REQUIRE_UNIFORM_FOOTPRINT = 1u << 1,
+};
+
+static iree_status_t loom_run_hal_testbench_scenario_emit_unsupported_results(
+    const loom_run_hal_testbench_scenario_profile_t* profile,
+    const loom_testbench_invocation_plan_t* invocation) {
+  const loom_diagnostic_param_t params[] = {
+      loom_param_string(profile->name),
+      loom_param_u32((uint32_t)invocation->result_count),
+  };
+  loom_source_range_t source_location = {
+      .provenance = LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE,
+  };
+  if (profile->source_table != NULL && invocation->op != NULL) {
+    loom_source_resolve(
+        (loom_source_resolver_t){
+            .fn = loom_source_table_resolve,
+            .user_data = (void*)profile->source_table,
+        },
+        invocation->module, invocation->op->location, &source_location);
+  }
+  const loom_diagnostic_t diagnostic = {
+      .severity = LOOM_DIAGNOSTIC_ERROR,
+      .error = LOOM_ERR_TARGET_093,
+      .params = params,
+      .param_count = IREE_ARRAYSIZE(params),
+      .emitter = LOOM_EMITTER_BUILDER,
+      .origin = source_location,
+      .source_location = source_location,
+  };
+  IREE_RETURN_IF_ERROR(
+      loom_diagnostic_emit(&profile->diagnostic_sink, &diagnostic));
+  return iree_make_status(
+      IREE_STATUS_FAILED_PRECONDITION,
+      "HAL scenario profile cannot transport invocation results");
+}
+
+static void loom_run_hal_testbench_scenario_results_deinitialize(
+    loom_run_hal_testbench_scenario_results_t* results,
+    iree_allocator_t host_allocator) {
+  iree_hal_buffer_release(results->buffer);
+  // Argument payloads are borrowed, not retained by this scratch array.
+  iree_allocator_free(host_allocator, results->arguments);
+  *results = (loom_run_hal_testbench_scenario_results_t){0};
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_results_initialize(
+    const loom_run_hal_testbench_scenario_product_t* product,
+    iree_host_size_t call_count,
+    loom_run_hal_testbench_scenario_results_t* out_results) {
+  *out_results = (loom_run_hal_testbench_scenario_results_t){0};
+  if (product->subject->result_count == 0) {
+    return iree_ok_status();
+  }
+  out_results->stride =
+      product->subject->result_count * LOOM_RUN_HAL_SCENARIO_RESULT_SLOT_SIZE;
+  iree_host_size_t byte_length = 0;
+  if (!iree_host_size_checked_mul(call_count, out_results->stride,
+                                  &byte_length)) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "HAL scenario result storage size overflowed");
+  }
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc_array(
+      product->host_allocator, product->provider.invocation->input_count,
+      sizeof(*out_results->arguments), (void**)&out_results->arguments));
+  return iree_hal_pool_allocate_buffer(
+      product->provider.context->runtime.staging_pool,
+      iree_hal_make_pool_reservation_request(
+          byte_length, LOOM_RUN_HAL_SCENARIO_RESULT_SLOT_SIZE),
+      iree_infinite_timeout(), &out_results->buffer);
+}
+
+static const loom_testbench_value_t*
+loom_run_hal_testbench_scenario_result_arguments(
+    const loom_run_hal_testbench_scenario_product_t* product,
+    loom_run_hal_testbench_scenario_results_t* results,
+    iree_host_size_t call_index, const loom_testbench_value_t* arguments) {
+  if (product->subject->result_count == 0) {
+    return arguments;
+  }
+  const iree_host_size_t input_count = product->subject->input_count;
+  if (input_count != 0) {
+    memcpy(results->arguments, arguments,
+           input_count * sizeof(*results->arguments));
+  }
+  results->arguments[input_count] = (loom_testbench_value_t){
+      .kind = LOOM_TESTBENCH_VALUE_KIND_BUFFER,
+      .buffer =
+          {
+              .kind = IREE_TOOLING_BUFFER_BINDING_KIND_STORAGE_BUFFER,
+              .buffer = results->buffer,
+              .byte_offset = call_index * results->stride,
+              .byte_length = results->stride,
+          },
+  };
+  return results->arguments;
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_results_read(
+    const loom_run_hal_testbench_scenario_product_t* product,
+    const loom_run_hal_testbench_scenario_results_t* results,
+    iree_host_size_t call_index, loom_testbench_value_t* out_values) {
+  const loom_testbench_invocation_plan_t* invocation = product->subject;
+  if (invocation->result_count == 0) {
+    return iree_ok_status();
+  }
+  iree_hal_buffer_mapping_t mapping = {0};
+  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
+      results->buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+      IREE_HAL_MEMORY_ACCESS_READ, IREE_HAL_BUFFER_MAP_FLAG_NONE,
+      call_index * results->stride, results->stride, &mapping));
+  iree_status_t status = iree_ok_status();
+  if (!iree_all_bits_set(iree_hal_buffer_memory_type(results->buffer),
+                         IREE_HAL_MEMORY_TYPE_HOST_COHERENT)) {
+    status =
+        iree_hal_buffer_mapping_invalidate_range(&mapping, 0, results->stride);
+  }
+  for (iree_host_size_t i = 0;
+       iree_status_is_ok(status) && i < invocation->result_count; ++i) {
+    const loom_scalar_type_t type =
+        loom_type_element_type(loom_module_value_type(
+            invocation->module, invocation->result_value_ids[i]));
+    const uint8_t* data =
+        mapping.contents.data + i * LOOM_RUN_HAL_SCENARIO_RESULT_SLOT_SIZE;
+    loom_testbench_value_t* value = &out_values[i];
+    *value = (loom_testbench_value_t){
+        .kind = LOOM_TESTBENCH_VALUE_KIND_SCALAR,
+    };
+    switch (type) {
+      case LOOM_SCALAR_TYPE_I1:
+      case LOOM_SCALAR_TYPE_I8:
+      case LOOM_SCALAR_TYPE_I16:
+      case LOOM_SCALAR_TYPE_I32:
+        value->scalar.kind = IREE_TOOLING_VALUE_KIND_I32;
+        value->scalar.storage.i32 = (int32_t)iree_unaligned_load_le_u32(data);
+        break;
+      case LOOM_SCALAR_TYPE_INDEX:
+      case LOOM_SCALAR_TYPE_OFFSET:
+      case LOOM_SCALAR_TYPE_I64:
+        value->scalar.kind = IREE_TOOLING_VALUE_KIND_I64;
+        value->scalar.storage.i64 = (int64_t)iree_unaligned_load_le_u64(data);
+        break;
+      case LOOM_SCALAR_TYPE_F8E4M3:
+      case LOOM_SCALAR_TYPE_F8E5M2:
+        value->scalar.kind = IREE_TOOLING_VALUE_KIND_RAW_U32;
+        value->scalar.storage.u32 = data[0];
+        break;
+      case LOOM_SCALAR_TYPE_F16:
+      case LOOM_SCALAR_TYPE_BF16:
+        value->scalar.kind = IREE_TOOLING_VALUE_KIND_RAW_U32;
+        value->scalar.storage.u32 = iree_unaligned_load_le_u16(data);
+        break;
+      case LOOM_SCALAR_TYPE_F32:
+        value->scalar.kind = IREE_TOOLING_VALUE_KIND_F32;
+        value->scalar.storage.f32 = iree_unaligned_load_le_f32(data);
+        break;
+      case LOOM_SCALAR_TYPE_F64:
+        value->scalar.kind = IREE_TOOLING_VALUE_KIND_F64;
+        value->scalar.storage.f64 = iree_unaligned_load_le_f64(data);
+        break;
+      default:
+        IREE_ASSERT_UNREACHABLE("function adapter admits only scalar results");
+        break;
+    }
+  }
+  return iree_status_join(status, iree_hal_buffer_unmap_range(&mapping));
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_call_ring_deinitialize(
+    loom_run_hal_testbench_scenario_call_ring_t* ring) {
+  iree_status_t status =
+      loom_run_hal_testbench_staging_deinitialize(&ring->staging);
+  for (iree_host_size_t i = ring->initialized_binding_list_count; i > 0; --i) {
+    loom_run_hal_binding_list_deinitialize(&ring->binding_lists[i - 1]);
+  }
+  iree_allocator_free(ring->host_allocator, ring->binding_table);
+  iree_allocator_free(ring->host_allocator, ring->binding_lengths);
+  iree_allocator_free(ring->host_allocator, ring->invocation_options);
+  iree_allocator_free(ring->host_allocator, ring->binding_lists);
+  loom_run_hal_testbench_scenario_results_deinitialize(&ring->results,
+                                                       ring->host_allocator);
+  *ring = (loom_run_hal_testbench_scenario_call_ring_t){0};
+  return status;
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_allocate_array(
+    iree_allocator_t allocator, iree_host_size_t count,
+    iree_host_size_t element_size, void** out_ptr) {
+  *out_ptr = NULL;
+  if (count == 0) {
+    return iree_ok_status();
+  }
+  IREE_RETURN_IF_ERROR(
+      iree_allocator_malloc_array(allocator, count, element_size, out_ptr));
+  memset(*out_ptr, 0, count * element_size);
+  return iree_ok_status();
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_call_ring_initialize(
+    iree_host_size_t call_count, iree_host_size_t input_count,
+    iree_allocator_t host_allocator,
+    loom_run_hal_testbench_scenario_call_ring_t* out_ring) {
+  *out_ring = (loom_run_hal_testbench_scenario_call_ring_t){
+      .host_allocator = host_allocator,
+  };
+  if (!iree_host_size_checked_mul(call_count, input_count,
+                                  &out_ring->binding_capacity)) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "HAL scenario ring binding capacity overflowed");
+  }
+
+  iree_status_t status = loom_run_hal_testbench_scenario_allocate_array(
+      host_allocator, call_count, sizeof(*out_ring->binding_lists),
+      (void**)&out_ring->binding_lists);
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_scenario_allocate_array(
+        host_allocator, call_count, sizeof(*out_ring->invocation_options),
+        (void**)&out_ring->invocation_options);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_scenario_allocate_array(
+        host_allocator, out_ring->binding_capacity,
+        sizeof(*out_ring->binding_lengths), (void**)&out_ring->binding_lengths);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_scenario_allocate_array(
+        host_allocator, out_ring->binding_capacity,
+        sizeof(*out_ring->binding_table), (void**)&out_ring->binding_table);
+  }
+  if (!iree_status_is_ok(status)) {
+    status = iree_status_join(
+        status,
+        loom_run_hal_testbench_scenario_call_ring_deinitialize(out_ring));
+  }
+  return status;
+}
+
+static void loom_run_hal_testbench_scenario_product_destroy(void* user_data) {
+  loom_run_hal_testbench_scenario_product_t* product =
+      (loom_run_hal_testbench_scenario_product_t*)user_data;
+  const iree_allocator_t host_allocator = product->host_allocator;
+  loom_run_hal_testbench_actual_provider_deinitialize(&product->provider);
+  loomc_module_release(product->adapted_module);
+  iree_allocator_free(host_allocator, product);
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_call_ring_prepare(
+    loom_run_hal_testbench_scenario_product_t* product,
+    iree_host_size_t call_count, loom_testbench_product_call_t* calls,
+    loom_run_hal_scenario_ring_flags_t flags,
+    loom_run_hal_testbench_scenario_call_ring_t* out_ring) {
+  loom_run_hal_testbench_actual_provider_t* provider = &product->provider;
+  const loom_testbench_invocation_plan_t* invocation = provider->invocation;
+  iree_status_t status = loom_run_hal_testbench_scenario_call_ring_initialize(
+      call_count, invocation->input_count, product->host_allocator, out_ring);
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_scenario_results_initialize(
+        product, call_count, &out_ring->results);
+  }
+  iree_host_size_t binding_count = 0;
+  for (iree_host_size_t call_index = 0;
+       iree_status_is_ok(status) && call_index < call_count; ++call_index) {
+    loom_testbench_product_call_t* call = &calls[call_index];
+    loom_run_hal_binding_list_t* bindings =
+        &out_ring->binding_lists[call_index];
+    out_ring->initialized_binding_list_count = call_index + 1;
+    status = loom_run_hal_testbench_actual_provider_materialize_invocation(
+        provider, invocation->workload_count, call->call_parameters,
+        invocation->input_count,
+        loom_run_hal_testbench_scenario_result_arguments(
+            product, &out_ring->results, call_index, call->arguments),
+        &out_ring->invocation_options[call_index], bindings);
+    if (!iree_status_is_ok(status)) {
+      status = iree_status_annotate_f(
+          status,
+          "materializing HAL scenario trial configuration %zu domain %zu "
+          "ordinal %zu",
+          call->identity->configuration_ordinal, call->identity->trial_index,
+          call->identity->trial_ordinal);
+      break;
+    }
+    if (call_index == 0) {
+      out_ring->binding_count_per_call = bindings->count;
+    } else if (bindings->count != out_ring->binding_count_per_call) {
+      status = iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "HAL scenario call %" PRIhsz " materialized %" PRIhsz
+          " bindings; call 0 materialized %" PRIhsz,
+          call_index, bindings->count, out_ring->binding_count_per_call);
+      break;
+    }
+    uint64_t call_binding_range_bytes =
+        call->input_footprint.binding_range_byte_length;
+    if (UINT64_MAX - call_binding_range_bytes < out_ring->results.stride) {
+      status = iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "HAL scenario reachable binding byte accounting overflowed");
+      break;
+    }
+    call_binding_range_bytes += out_ring->results.stride;
+    if (call_index == 0) {
+      out_ring->binding_range_count_per_call =
+          call->input_footprint.binding_range_count +
+          (out_ring->results.stride == 0 ? 0 : 1);
+      out_ring->binding_range_set_bytes = call_binding_range_bytes;
+      out_ring->materialized_storage_count_per_call =
+          call->input_footprint.storage_allocation_count;
+      out_ring->materialized_storage_set_bytes =
+          call->input_footprint.storage_byte_length;
+    } else if (iree_all_bits_set(
+                   flags,
+                   LOOM_RUN_HAL_SCENARIO_RING_FLAG_REQUIRE_UNIFORM_FOOTPRINT) &&
+               !loom_testbench_buffer_footprint_equal(
+                   &call->input_footprint, &calls[0].input_footprint)) {
+      status =
+          iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                           "HAL scenario call %" PRIhsz
+                           " materialized a different input buffer footprint",
+                           call_index);
+      break;
+    }
+    if (UINT64_MAX - out_ring->binding_range_ring_bytes <
+            call_binding_range_bytes ||
+        UINT64_MAX - out_ring->materialized_storage_ring_bytes <
+            call->input_footprint.storage_byte_length) {
+      status = iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "HAL scenario input footprint byte accounting overflowed");
+      break;
+    }
+    out_ring->binding_range_ring_bytes += call_binding_range_bytes;
+    out_ring->materialized_storage_ring_bytes +=
+        call->input_footprint.storage_byte_length;
+    IREE_ASSERT(binding_count + bindings->count <= out_ring->binding_capacity);
+    uint64_t call_bytes = 0;
+    for (iree_host_size_t binding_index = 0; binding_index < bindings->count;
+         ++binding_index) {
+      const iree_tooling_buffer_binding_t* binding =
+          &bindings->values[binding_index];
+      if (UINT64_MAX - call_bytes < binding->byte_length ||
+          UINT64_MAX - out_ring->binding_ring_bytes < binding->byte_length) {
+        status =
+            iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                             "HAL scenario binding byte accounting overflowed");
+        break;
+      }
+      call_bytes += binding->byte_length;
+      out_ring->binding_ring_bytes += binding->byte_length;
+      out_ring->binding_lengths[binding_count] = binding->byte_length;
+      out_ring->binding_table[binding_count] = (iree_hal_buffer_binding_t){
+          .buffer = binding->buffer,
+          .offset = binding->byte_offset,
+          .length = binding->byte_length,
+      };
+      ++binding_count;
+    }
+    if (call_index == 0) {
+      out_ring->binding_set_bytes = call_bytes;
+    }
+  }
+
+  if (iree_status_is_ok(status) &&
+      iree_all_bits_set(flags,
+                        LOOM_RUN_HAL_SCENARIO_RING_FLAG_STAGE_BINDINGS)) {
+    status = loom_run_hal_testbench_staging_initialize(
+        &provider->context->runtime, binding_count, out_ring->binding_table,
+        product->host_allocator, &out_ring->staging);
+  }
+  if (iree_status_is_ok(status)) {
+    out_ring->binding_count = binding_count;
+  }
+  return status;
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_call_ring_execute(
+    loom_run_hal_testbench_scenario_product_t* product,
+    const loom_run_hal_testbench_scenario_call_ring_t* ring,
+    iree_host_size_t call_count) {
+  loom_run_hal_dispatch_sequence_step_t* steps = NULL;
+  iree_status_t status = iree_allocator_malloc_array(
+      product->host_allocator, call_count, sizeof(*steps), (void**)&steps);
+  for (iree_host_size_t call_index = 0;
+       iree_status_is_ok(status) && call_index < call_count; ++call_index) {
+    steps[call_index] = (loom_run_hal_dispatch_sequence_step_t){
+        .candidate = &product->provider.prepared_candidate,
+        .representation = product->provider.sequence_representation,
+        .execution_epoch = 0,
+        .options = ring->invocation_options[call_index],
+        .binding_lengths =
+            ring->binding_count_per_call == 0
+                ? NULL
+                : &ring->binding_lengths[call_index *
+                                         ring->binding_count_per_call],
+        .binding_count = ring->binding_count_per_call,
+    };
+  }
+  loom_run_hal_dispatch_sequence_t sequence = {0};
+  loom_run_hal_dispatch_sequence_options_t sequence_options;
+  loom_run_hal_dispatch_sequence_options_initialize(&sequence_options);
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_dispatch_sequence_prepare(
+        &product->provider.context->runtime, call_count, steps,
+        &sequence_options, product->host_allocator, &sequence);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_dispatch_sequence_execute(
+        &product->provider.context->runtime, &sequence,
+        (iree_hal_buffer_binding_table_t){
+            .count = ring->binding_count,
+            .bindings = ring->binding_table,
+        });
+  }
+  loom_run_hal_dispatch_sequence_deinitialize(&sequence);
+  iree_allocator_free(product->host_allocator, steps);
+  return status;
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_product_execute(
+    void* user_data, const loom_testbench_invocation_plan_t* invocation,
+    iree_host_size_t call_count, loom_testbench_product_call_t* calls) {
+  loom_run_hal_testbench_scenario_product_t* product =
+      (loom_run_hal_testbench_scenario_product_t*)user_data;
+  (void)invocation;
+  if (call_count == 0) {
+    return iree_ok_status();
+  }
+
+  loom_run_hal_testbench_scenario_call_ring_t ring = {0};
+  iree_status_t status = loom_run_hal_testbench_scenario_call_ring_prepare(
+      product, call_count, calls,
+      LOOM_RUN_HAL_SCENARIO_RING_FLAG_STAGE_BINDINGS, &ring);
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_scenario_call_ring_execute(product, &ring,
+                                                               call_count);
+  }
+  if (iree_status_is_ok(status)) {
+    status = loom_run_hal_testbench_staging_readback(
+        &product->provider.context->runtime, &ring.staging);
+  }
+  for (iree_host_size_t i = 0; iree_status_is_ok(status) && i < call_count;
+       ++i) {
+    status = loom_run_hal_testbench_scenario_results_read(
+        product, &ring.results, i, calls[i].results);
+  }
+  status = iree_status_join(
+      status, loom_run_hal_testbench_scenario_call_ring_deinitialize(&ring));
+  return status;
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_benchmark_calls(
+    loom_run_hal_testbench_scenario_product_t* product,
+    iree_host_size_t call_count, loom_testbench_product_call_t* calls,
+    const loom_run_hal_benchmark_options_t* options,
+    iree_allocator_t host_allocator,
+    loom_run_hal_testbench_scenario_benchmark_result_t* out_result) {
+  *out_result = (loom_run_hal_testbench_scenario_benchmark_result_t){0};
+  if (call_count == 0) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL scenario benchmark requires a physical call "
+                            "ring");
+  }
+
+  loom_run_hal_testbench_scenario_call_ring_t ring = {0};
+  iree_status_t status = loom_run_hal_testbench_scenario_call_ring_prepare(
+      product, call_count, calls,
+      LOOM_RUN_HAL_SCENARIO_RING_FLAG_STAGE_BINDINGS |
+          LOOM_RUN_HAL_SCENARIO_RING_FLAG_REQUIRE_UNIFORM_FOOTPRINT,
+      &ring);
+  if (iree_status_is_ok(status)) {
+    const loom_run_hal_dispatch_binding_table_ring_t benchmark_ring = {
+        .candidate = &product->provider.prepared_candidate,
+        .representation = product->provider.sequence_representation,
+        .invocation_options = ring.invocation_options,
+        .binding_lengths = ring.binding_lengths,
+        .binding_table = ring.binding_table,
+        .ring_count = call_count,
+        .binding_count = ring.binding_count_per_call,
+    };
+    status = loom_run_hal_benchmark_dispatch_binding_table_ring(
+        &product->provider.context->runtime, &benchmark_ring, options,
+        host_allocator, &out_result->benchmark);
+  }
+  if (iree_status_is_ok(status)) {
+    out_result->binding_count_per_call = ring.binding_count_per_call;
+    out_result->binding_set_bytes = ring.binding_set_bytes;
+    out_result->binding_ring_bytes = ring.binding_ring_bytes;
+    out_result->binding_range_count_per_call =
+        ring.binding_range_count_per_call;
+    out_result->binding_range_set_bytes = ring.binding_range_set_bytes;
+    out_result->binding_range_ring_bytes = ring.binding_range_ring_bytes;
+    out_result->materialized_storage_count_per_call =
+        ring.materialized_storage_count_per_call;
+    out_result->materialized_storage_set_bytes =
+        ring.materialized_storage_set_bytes;
+    out_result->materialized_storage_ring_bytes =
+        ring.materialized_storage_ring_bytes;
+  }
+  status = iree_status_join(
+      status, loom_run_hal_testbench_scenario_call_ring_deinitialize(&ring));
+  if (!iree_status_is_ok(status)) {
+    *out_result = (loom_run_hal_testbench_scenario_benchmark_result_t){0};
+  }
+  return status;
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_product_benchmark(
+    void* user_data, const loom_testbench_invocation_plan_t* invocation,
+    iree_host_size_t call_count, loom_testbench_product_call_t* calls,
+    const loom_run_benchmark_options_t* options,
+    iree_allocator_t host_allocator, loom_run_benchmark_result_t* out_result) {
+  loom_run_benchmark_result_initialize(out_result);
+  loom_run_hal_testbench_scenario_product_t* product =
+      (loom_run_hal_testbench_scenario_product_t*)user_data;
+  (void)invocation;
+  loom_run_hal_benchmark_options_t hal_options;
+  loom_run_hal_benchmark_options_initialize(&hal_options);
+  hal_options.timing = *options;
+  hal_options.dispatch_batch.dispatch_count = options->batch_size;
+  loom_run_hal_testbench_scenario_benchmark_result_t result;
+  iree_status_t status = loom_run_hal_testbench_scenario_benchmark_calls(
+      product, call_count, calls, &hal_options, host_allocator, &result);
+  if (iree_status_is_ok(status)) {
+    *out_result = result.benchmark.timing;
+  }
+  return status;
+}
+
+static const loom_testbench_product_vtable_t
+    loom_run_hal_testbench_scenario_product_vtable = {
+        .execute = loom_run_hal_testbench_scenario_product_execute,
+        .benchmark = loom_run_hal_testbench_scenario_product_benchmark,
+};
+
+const loom_run_hal_testbench_actual_provider_t*
+loom_run_hal_testbench_scenario_product_provider(
+    const loom_testbench_prepared_product_t* prepared_product) {
+  if (prepared_product == NULL ||
+      prepared_product->vtable !=
+          &loom_run_hal_testbench_scenario_product_vtable ||
+      prepared_product->user_data == NULL) {
+    return NULL;
+  }
+  const loom_run_hal_testbench_scenario_product_t* product =
+      (const loom_run_hal_testbench_scenario_product_t*)
+          prepared_product->user_data;
+  return &product->provider;
+}
+
+iree_status_t loom_run_hal_testbench_benchmark_scenario_product(
+    const loom_testbench_prepared_product_t* prepared_product,
+    const loom_testbench_invocation_plan_t* invocation,
+    iree_host_size_t call_count, loom_testbench_product_call_t* calls,
+    const loom_run_hal_benchmark_options_t* options,
+    iree_allocator_t host_allocator,
+    loom_run_hal_testbench_scenario_benchmark_result_t* out_result) {
+  if (loom_run_hal_testbench_scenario_product_provider(prepared_product) ==
+      NULL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "prepared scenario product is not a HAL product");
+  }
+  if (invocation != prepared_product->invocation) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "HAL scenario benchmark invocation does not match prepared product");
+  }
+  loom_run_hal_testbench_scenario_product_t* product =
+      (loom_run_hal_testbench_scenario_product_t*)prepared_product->user_data;
+  return loom_run_hal_testbench_scenario_benchmark_calls(
+      product, call_count, calls, options, host_allocator, out_result);
+}
+
+iree_status_t loom_run_hal_testbench_query_scenario_product_input_layout(
+    const loom_testbench_prepared_product_t* prepared_product,
+    const loom_testbench_invocation_plan_t* invocation,
+    loom_testbench_product_call_t* call,
+    loom_run_hal_testbench_scenario_input_layout_t* out_layout) {
+  *out_layout = (loom_run_hal_testbench_scenario_input_layout_t){0};
+  if (loom_run_hal_testbench_scenario_product_provider(prepared_product) ==
+      NULL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "prepared scenario product is not a HAL product");
+  }
+  if (invocation != prepared_product->invocation) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "HAL scenario layout invocation does not match prepared product");
+  }
+  loom_run_hal_testbench_scenario_product_t* product =
+      (loom_run_hal_testbench_scenario_product_t*)prepared_product->user_data;
+  loom_run_hal_testbench_scenario_call_ring_t ring = {0};
+  iree_status_t status = loom_run_hal_testbench_scenario_call_ring_prepare(
+      product, /*call_count=*/1, call, LOOM_RUN_HAL_SCENARIO_RING_FLAG_NONE,
+      &ring);
+  if (iree_status_is_ok(status)) {
+    out_layout->binding_count = ring.binding_count_per_call;
+    out_layout->binding_set_bytes = ring.binding_set_bytes;
+    out_layout->binding_range_count = ring.binding_range_count_per_call;
+    out_layout->binding_range_set_bytes = ring.binding_range_set_bytes;
+    out_layout->materialized_storage_count =
+        ring.materialized_storage_count_per_call;
+    out_layout->materialized_storage_set_bytes =
+        ring.materialized_storage_set_bytes;
+  }
+  status = iree_status_join(
+      status, loom_run_hal_testbench_scenario_call_ring_deinitialize(&ring));
+  if (!iree_status_is_ok(status)) {
+    *out_layout = (loom_run_hal_testbench_scenario_input_layout_t){0};
+  }
+  return status;
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_symbol_name_from_ref(
+    const loom_module_t* module, loom_symbol_ref_t ref,
+    iree_string_view_t* out_name) {
+  *out_name = iree_string_view_empty();
+  if (!loom_symbol_ref_is_valid(ref) || ref.module_id != 0 ||
+      ref.symbol_id >= module->symbols.count) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "scenario subject has an invalid symbol ref");
+  }
+  const loom_symbol_t* symbol = &module->symbols.entries[ref.symbol_id];
+  if (symbol->name_id >= module->strings.count) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "scenario subject has an invalid symbol name");
+  }
+  *out_name = loom_string_table_get(&module->strings, symbol->name_id);
+  return iree_ok_status();
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_find_function(
+    loom_module_t* module, iree_string_view_t name, loom_symbol_ref_t* out_ref,
+    loom_func_like_t* out_function) {
+  *out_ref = loom_symbol_ref_null();
+  *out_function = (loom_func_like_t){0};
+  const loom_string_id_t name_id = loom_module_lookup_string(module, name);
+  if (name_id == LOOM_STRING_ID_INVALID) {
+    return iree_make_status(IREE_STATUS_NOT_FOUND,
+                            "scenario function '@%.*s' was not cloned",
+                            (int)name.size, name.data);
+  }
+  const loom_symbol_id_t symbol_id = loom_module_find_symbol(module, name_id);
+  if (symbol_id == LOOM_SYMBOL_ID_INVALID ||
+      symbol_id >= module->symbols.count) {
+    return iree_make_status(IREE_STATUS_NOT_FOUND,
+                            "scenario function '@%.*s' was not cloned",
+                            (int)name.size, name.data);
+  }
+  const loom_symbol_t* symbol = &module->symbols.entries[symbol_id];
+  if (!loom_func_def_isa(symbol->defining_op)) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "HAL scenario function '@%.*s' must be an ordinary func.def",
+        (int)name.size, name.data);
+  }
+  *out_ref = (loom_symbol_ref_t){.module_id = 0, .symbol_id = symbol_id};
+  *out_function = loom_func_like_cast(module, symbol->defining_op);
+  return iree_ok_status();
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_add_adapter_symbol(
+    loom_module_t* module, loom_symbol_ref_t* out_ref) {
+  *out_ref = loom_symbol_ref_null();
+  for (iree_host_size_t ordinal = module->symbols.count;; ++ordinal) {
+    char name_buffer[64];
+    const int name_length =
+        iree_snprintf(name_buffer, sizeof(name_buffer),
+                      "__loom_scenario_adapter_%zu", ordinal);
+    if (name_length < 0 ||
+        (iree_host_size_t)name_length >= sizeof(name_buffer)) {
+      return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                              "scenario adapter symbol name is too long");
+    }
+    loom_string_id_t name_id = LOOM_STRING_ID_INVALID;
+    IREE_RETURN_IF_ERROR(loom_module_intern_string(
+        module,
+        iree_make_string_view(name_buffer, (iree_host_size_t)name_length),
+        &name_id));
+    if (loom_module_find_symbol(module, name_id) != LOOM_SYMBOL_ID_INVALID) {
+      continue;
+    }
+    loom_symbol_id_t symbol_id = LOOM_SYMBOL_ID_INVALID;
+    IREE_RETURN_IF_ERROR(loom_module_add_symbol(module, name_id, &symbol_id));
+    *out_ref = (loom_symbol_ref_t){.module_id = 0, .symbol_id = symbol_id};
+    return iree_ok_status();
+  }
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_remap_predicates(
+    loom_module_t* module, const loom_value_id_t* source_arguments,
+    const loom_value_id_t* adapter_arguments, uint16_t argument_count,
+    loom_func_like_t adapter) {
+  if (adapter.vtable->predicates_attr_index == LOOM_ATTR_INDEX_NONE) {
+    return iree_ok_status();
+  }
+  const uint8_t attribute_index = adapter.vtable->predicates_attr_index;
+  for (uint16_t i = 0; i < argument_count; ++i) {
+    loom_attribute_t remapped =
+        loom_op_const_attrs(adapter.op)[attribute_index];
+    bool changed = false;
+    IREE_RETURN_IF_ERROR(loom_module_replace_attribute_value_references(
+        module, remapped, source_arguments[i], adapter_arguments[i], &remapped,
+        &changed));
+    if (changed) {
+      IREE_RETURN_IF_ERROR(
+          loom_op_set_attr(module, adapter.op, attribute_index, remapped));
+    }
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_store_result(
+    loom_builder_t* builder, loom_value_id_t buffer, uint16_t ordinal,
+    loom_value_id_t value, loom_location_id_t location) {
+  loom_type_t type = loom_module_value_type(builder->module, value);
+  const loom_scalar_type_t scalar_type = loom_type_element_type(type);
+  loom_op_t* cast = NULL;
+  switch (scalar_type) {
+    case LOOM_SCALAR_TYPE_I1: {
+      IREE_RETURN_IF_ERROR(loom_scalar_extui_build(
+          builder, value, type, loom_type_scalar(LOOM_SCALAR_TYPE_I32),
+          location, &cast));
+      break;
+    }
+    case LOOM_SCALAR_TYPE_I8:
+    case LOOM_SCALAR_TYPE_I16: {
+      IREE_RETURN_IF_ERROR(loom_scalar_extsi_build(
+          builder, value, type, loom_type_scalar(LOOM_SCALAR_TYPE_I32),
+          location, &cast));
+      break;
+    }
+    case LOOM_SCALAR_TYPE_INDEX:
+    case LOOM_SCALAR_TYPE_OFFSET: {
+      IREE_RETURN_IF_ERROR(loom_index_cast_build(
+          builder, value, type, loom_type_scalar(LOOM_SCALAR_TYPE_I64),
+          location, &cast));
+      break;
+    }
+    default:
+      break;
+  }
+  if (cast != NULL) {
+    value = loom_op_results(cast)[0];
+    type = loom_module_value_type(builder->module, value);
+  }
+  const loom_type_t offset_type = loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET);
+  loom_op_t* offset_op = NULL;
+  IREE_RETURN_IF_ERROR(loom_index_constant_build(
+      builder, loom_attr_i64(ordinal * LOOM_RUN_HAL_SCENARIO_RESULT_SLOT_SIZE),
+      offset_type, location, &offset_op));
+  loom_type_t view_type =
+      loom_type_shaped_1d(LOOM_TYPE_VIEW, loom_type_element_type(type), 1, 0);
+  IREE_RETURN_IF_ERROR(
+      loom_module_intern_type(builder->module, view_type, &view_type));
+  loom_op_t* view_op = NULL;
+  IREE_RETURN_IF_ERROR(loom_buffer_view_build(
+      builder, buffer, loom_index_constant_result(offset_op), view_type,
+      location, &view_op));
+  const int64_t index = 0;
+  loom_op_t* store_op = NULL;
+  return loom_view_store_build(
+      builder, /*build_flags=*/0, /*access=*/0, value,
+      loom_buffer_view_result(view_op), /*dynamic_indices=*/NULL,
+      /*dynamic_indices_count=*/0, &index, /*static_indices_count=*/1,
+      /*cache=*/0, /*eviction=*/0, location, &store_op);
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_build_function_adapter(
+    loom_run_hal_testbench_scenario_product_t* product,
+    const loom_run_hal_testbench_actual_provider_options_t* provider_options,
+    const loom_testbench_invocation_plan_t* invocation) {
+  if (invocation->workload_count != 0) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "HAL scenario function subject cannot have call parameters");
+  }
+
+  iree_string_view_t function_name = iree_string_view_empty();
+  IREE_RETURN_IF_ERROR(loom_run_hal_testbench_scenario_symbol_name_from_ref(
+      provider_options->native_module, invocation->callee_ref, &function_name));
+  IREE_RETURN_IF_ERROR(iree_status_from_loomc(loomc_module_clone(
+      provider_options->module, provider_options->compilation->workspace,
+      loomc_allocator_from_iree(product->host_allocator),
+      &product->adapted_module)));
+  const loomc_module_mutable_interop_view_t mutable_view =
+      loomc_module_get_mutable_interop_view(product->adapted_module);
+  if (mutable_view.module == NULL) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "scenario adapter module does not contain exact-version native IR");
+  }
+  loom_module_t* module = mutable_view.module;
+
+  loom_symbol_ref_t function_ref = loom_symbol_ref_null();
+  loom_func_like_t function = {0};
+  IREE_RETURN_IF_ERROR(loom_run_hal_testbench_scenario_find_function(
+      module, function_name, &function_ref, &function));
+  uint16_t argument_count = 0;
+  const loom_value_id_t* function_arguments =
+      loom_func_like_arg_ids(function, &argument_count);
+  if (argument_count != invocation->input_count) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "HAL scenario function '@%.*s' has %u arguments for %zu inputs",
+        (int)function_name.size, function_name.data, (unsigned)argument_count,
+        invocation->input_count);
+  }
+  const uint16_t result_count = function.op->result_count;
+  if (result_count != 0 && argument_count == UINT16_MAX) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "HAL scenario function has no argument slot for "
+                            "result storage");
+  }
+  const uint16_t adapted_argument_count =
+      argument_count + (result_count != 0 ? 1 : 0);
+
+  loom_type_t* argument_types = NULL;
+  if (adapted_argument_count != 0) {
+    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+        &module->arena, adapted_argument_count, sizeof(*argument_types),
+        (void**)&argument_types));
+  }
+  for (uint16_t i = 0; i < argument_count; ++i) {
+    const loom_type_t type =
+        loom_module_value_type(module, function_arguments[i]);
+    if (!loom_type_is_scalar(type) && !loom_type_is_buffer(type)) {
+      return iree_make_status(
+          IREE_STATUS_UNIMPLEMENTED,
+          "HAL scenario function '@%.*s' argument %u must be scalar or buffer",
+          (int)function_name.size, function_name.data, (unsigned)i);
+    }
+    argument_types[i] = type;
+  }
+  loom_type_t* result_types = NULL;
+  if (result_count != 0) {
+    argument_types[argument_count] = loom_type_buffer();
+    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(&module->arena, result_count,
+                                                   sizeof(*result_types),
+                                                   (void**)&result_types));
+    for (uint16_t i = 0; i < result_count; ++i) {
+      result_types[i] =
+          loom_module_value_type(module, loom_op_results(function.op)[i]);
+    }
+  }
+
+  loom_symbol_ref_t adapter_ref = loom_symbol_ref_null();
+  IREE_RETURN_IF_ERROR(
+      loom_run_hal_testbench_scenario_add_adapter_symbol(module, &adapter_ref));
+  uint16_t predicate_count = 0;
+  const loom_predicate_t* predicates =
+      loom_func_like_predicates(function, &predicate_count);
+  const loom_symbol_ref_t target = loom_func_like_target(function);
+  loom_kernel_def_build_flags_t build_flags = 0;
+  if (loom_symbol_ref_is_valid(target)) {
+    build_flags |= LOOM_KERNEL_DEF_BUILD_FLAG_HAS_TARGET;
+  }
+  if (predicate_count != 0) {
+    build_flags |= LOOM_KERNEL_DEF_BUILD_FLAG_HAS_PREDICATES;
+  }
+
+  loom_builder_t builder;
+  loom_builder_initialize(module, &module->arena, loom_module_block(module),
+                          &builder);
+  loom_op_t* adapter_op = NULL;
+  IREE_RETURN_IF_ERROR(loom_kernel_def_build(
+      &builder, build_flags, /*linkage=*/0, /*retain=*/0, target,
+      LOOM_STRING_ID_INVALID,
+      /*export_linkage=*/0, adapter_ref, /*config_arg_types=*/NULL,
+      /*config_arg_types_count=*/0, argument_types, adapted_argument_count,
+      predicates, predicate_count, function.op->location, &adapter_op));
+  module->symbols.entries[adapter_ref.symbol_id].flags |=
+      LOOM_SYMBOL_FLAG_PUBLIC;
+
+  const loom_func_like_t adapter = loom_func_like_cast(module, adapter_op);
+  uint16_t adapter_argument_count = 0;
+  const loom_value_id_t* adapter_arguments =
+      loom_func_like_arg_ids(adapter, &adapter_argument_count);
+  if (adapter_argument_count != adapted_argument_count) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "generated HAL scenario adapter argument count is inconsistent");
+  }
+  IREE_RETURN_IF_ERROR(loom_run_hal_testbench_scenario_remap_predicates(
+      module, function_arguments, adapter_arguments, argument_count, adapter));
+
+  loom_builder_ip_t module_ip = loom_builder_enter_region(
+      &builder, adapter_op, loom_kernel_def_config(adapter_op));
+  loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  IREE_RETURN_IF_ERROR(
+      loom_module_intern_type(module, index_type, &index_type));
+  loom_op_t* unit_op = NULL;
+  IREE_RETURN_IF_ERROR(loom_index_constant_build(
+      &builder, loom_attr_i64(1), index_type, function.op->location, &unit_op));
+  const loom_value_id_t unit = loom_index_constant_result(unit_op);
+  loom_op_t* launch_config_op = NULL;
+  IREE_RETURN_IF_ERROR(loom_kernel_launch_config_build(
+      &builder, /*build_flags=*/0, unit, unit, unit, unit, unit, unit,
+      LOOM_VALUE_ID_INVALID, LOOM_VALUE_ID_INVALID, LOOM_VALUE_ID_INVALID,
+      function.op->location, &launch_config_op));
+  loom_builder_restore(&builder, module_ip);
+
+  module_ip = loom_builder_enter_region(&builder, adapter_op,
+                                        loom_kernel_def_body(adapter_op));
+  loom_op_t* call_op = NULL;
+  IREE_RETURN_IF_ERROR(loom_func_call_build(
+      &builder, /*build_flags=*/0, /*effect_contract=*/0, /*temperature=*/0,
+      /*inline_policy=*/0, function_ref, adapter_arguments, argument_count,
+      result_types, result_count, /*tied_results=*/NULL,
+      /*tied_result_count=*/0, function.op->location, &call_op));
+  iree_status_t status = iree_ok_status();
+  for (uint16_t i = 0; iree_status_is_ok(status) && i < result_count; ++i) {
+    status = loom_run_hal_testbench_scenario_store_result(
+        &builder, adapter_arguments[argument_count], i,
+        loom_op_results(call_op)[i], function.op->location);
+  }
+  IREE_RETURN_IF_ERROR(status);
+  loom_op_t* return_op = NULL;
+  IREE_RETURN_IF_ERROR(
+      loom_kernel_return_build(&builder, function.op->location, &return_op));
+  loom_builder_restore(&builder, module_ip);
+
+  product->adapted_invocation = (loom_testbench_invocation_plan_t){
+      .kind = LOOM_TESTBENCH_INVOCATION_KERNEL_LAUNCH,
+      .module = module,
+      .op = adapter_op,
+      .callee_ref = adapter_ref,
+      .provider_id = LOOM_STRING_ID_INVALID,
+      .provider = iree_string_view_empty(),
+      .attrs = loom_named_attr_slice_empty(),
+      .execution_epoch = 0,
+      .launch_schedule_depth = 0,
+      .workload_value_ids = NULL,
+      .workload_count = 0,
+      .input_value_ids = adapter_arguments,
+      .input_count = adapter_argument_count,
+      .result_value_ids = NULL,
+      .result_count = 0,
+  };
+  return iree_ok_status();
+}
+
+static iree_status_t loom_run_hal_testbench_scenario_product_prepare(
+    void* user_data, const loom_testbench_invocation_plan_t* invocation,
+    const loom_testbench_value_table_t* configuration,
+    iree_allocator_t host_allocator,
+    loom_testbench_prepared_product_t* out_product) {
+  (void)configuration;
+  *out_product = (loom_testbench_prepared_product_t){0};
+  loom_run_hal_testbench_scenario_profile_t* profile =
+      (loom_run_hal_testbench_scenario_profile_t*)user_data;
+  if (invocation->kind != LOOM_TESTBENCH_INVOCATION_KERNEL_LAUNCH &&
+      invocation->kind != LOOM_TESTBENCH_INVOCATION_FUNCTION_CALL &&
+      invocation->kind != LOOM_TESTBENCH_INVOCATION_PIPELINE) {
+    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                            "HAL scenario profile requires a kernel, function, "
+                            "or finite pipeline subject");
+  }
+  if (invocation->kind == LOOM_TESTBENCH_INVOCATION_PIPELINE &&
+      invocation->workload_count != 0) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "HAL pipeline specialization arguments are not implemented");
+  }
+  if (invocation->result_count != 0 &&
+      invocation->kind != LOOM_TESTBENCH_INVOCATION_FUNCTION_CALL) {
+    return loom_run_hal_testbench_scenario_emit_unsupported_results(profile,
+                                                                    invocation);
+  }
+  for (iree_host_size_t i = 0; i < invocation->result_count; ++i) {
+    if (!loom_type_is_scalar(loom_module_value_type(
+            invocation->module, invocation->result_value_ids[i]))) {
+      return loom_run_hal_testbench_scenario_emit_unsupported_results(
+          profile, invocation);
+    }
+  }
+
+  if (profile->provider_options.native_module == NULL ||
+      profile->provider_options.native_module != invocation->module) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "HAL scenario profile is not bound to the invocation module");
+  }
+
+  loom_run_hal_testbench_scenario_product_t* product = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(host_allocator, sizeof(*product),
+                                             (void**)&product));
+  *product = (loom_run_hal_testbench_scenario_product_t){
+      .host_allocator = host_allocator,
+      .subject = invocation,
+  };
+  loom_run_hal_testbench_actual_provider_options_t provider_options =
+      profile->provider_options;
+  iree_status_t status = iree_ok_status();
+  if (invocation->kind == LOOM_TESTBENCH_INVOCATION_FUNCTION_CALL) {
+    status = loom_run_hal_testbench_scenario_build_function_adapter(
+        product, &provider_options, invocation);
+    if (iree_status_is_ok(status)) {
+      provider_options.module = product->adapted_module;
+      provider_options.native_module = product->adapted_invocation.module;
+      provider_options.invocation = &product->adapted_invocation;
+    }
+  } else {
+    provider_options.invocation = invocation;
+  }
+  if (!iree_status_is_ok(status)) {
+    loom_run_hal_testbench_scenario_product_destroy(product);
+    return status;
+  }
+  loom_run_hal_testbench_actual_provider_initialize(&provider_options,
+                                                    &product->provider);
+  status = loom_run_hal_testbench_actual_provider_compile(&product->provider);
+  if (iree_status_is_ok(status) && product->provider.compile_rejected) {
+    status = iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "HAL scenario product compilation rejected at '%.*s' with '%.*s'",
+        (int)product->provider.compile_failure_stage.size,
+        product->provider.compile_failure_stage.data,
+        (int)product->provider.compile_failure_kind.size,
+        product->provider.compile_failure_kind.data);
+  }
+  if (iree_status_is_ok(status)) {
+    *out_product = (loom_testbench_prepared_product_t){
+        .vtable = &loom_run_hal_testbench_scenario_product_vtable,
+        .destroy = loom_run_hal_testbench_scenario_product_destroy,
+        .user_data = product,
+    };
+  } else {
+    loom_run_hal_testbench_scenario_product_destroy(product);
+  }
+  return status;
+}
+
+void loom_run_hal_testbench_scenario_profile_initialize(
+    iree_string_view_t name,
+    const loom_run_hal_testbench_actual_provider_options_t* provider_options,
+    const loom_source_table_resolver_t* source_table,
+    loom_diagnostic_sink_t diagnostic_sink,
+    loom_run_hal_testbench_scenario_profile_t* out_profile) {
+  *out_profile = (loom_run_hal_testbench_scenario_profile_t){
+      .name = name,
+      .provider_options = *provider_options,
+      .source_table = source_table,
+      .diagnostic_sink = diagnostic_sink,
+  };
+  out_profile->provider_options.invocation = NULL;
+}
+
+loom_testbench_execution_profile_t
+loom_run_hal_testbench_scenario_execution_profile(
+    loom_run_hal_testbench_scenario_profile_t* profile) {
+  return (loom_testbench_execution_profile_t){
+      .name = profile->name,
+      .prepare = loom_run_hal_testbench_scenario_product_prepare,
+      .user_data = profile,
+  };
+}

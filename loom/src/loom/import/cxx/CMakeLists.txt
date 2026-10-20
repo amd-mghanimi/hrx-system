@@ -19,9 +19,14 @@ loom_cc_test(
     ::cxx
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::codegen::low::text_asm
+    loom::error::error_defs
     loom::format::text::printer
     loom::import::cxx::source::catalog
+    loom::import::cxx::source::preamble
+    loom::ops::func
     loom::ops::op_registry
+    loom::target::test::descriptors
   LABELS
     "iree-build-requirement=loom.import.cxx"
 )
@@ -48,25 +53,38 @@ loom_cc_library(
     iree::base
     iree::base::internal::arena
     iree::third_party::cxx_parser
+    loom::analysis::callable_effect_inference
     loom::error::diagnostic
     loom::error::error_defs
+    loom::error::source
     loom::import::cxx::binding::assumptions
     loom::import::cxx::binding::check
     loom::import::cxx::binding::config
+    loom::import::cxx::binding::constexpr
+    loom::import::cxx::binding::fastmath
+    loom::import::cxx::binding::function_contracts
+    loom::import::cxx::binding::index_values
     loom::import::cxx::binding::intrinsics
     loom::import::cxx::binding::launch
     loom::import::cxx::binding::loop_schedule
+    loom::import::cxx::binding::numeric_conversion
     loom::import::cxx::binding::parameter_contracts
+    loom::import::cxx::binding::target_definitions
+    loom::import::cxx::binding::template_definitions
     loom::import::cxx::control::analysis
     loom::import::cxx::source
     loom::import::cxx::source::attributes
     loom::import::cxx::source::catalog
     loom::import::cxx::source::constants
     loom::import::cxx::source::error
+    loom::import::cxx::source::expressions
     loom::import::cxx::source::locations
     loom::import::cxx::source::options
+    loom::import::cxx::source::preamble
     loom::import::cxx::symbol::functions
     loom::import::cxx::value::bitcast
+    loom::import::cxx::value::initialization
+    loom::import::cxx::value::objects
     loom::import::cxx::value::representation
     loom::import::cxx::value::scalar
     loom::import::cxx::value::signature
@@ -81,6 +99,7 @@ loom_cc_library(
     loom::ops::op_defs
     loom::ops::scalar
     loom::ops::scf
+    loom::ops::template
     loom::ops::vector
     loom::verify
   PUBLIC

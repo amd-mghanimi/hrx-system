@@ -17,15 +17,19 @@
 extern "C" {
 #endif
 
-// Materializes an address operand in a two-unit carrier of |register_class_id|
-// (SGPR or VGPR), preserving the source numeric value. A one-unit signed
-// source is sign-extended unless retained facts prove it nonnegative; offsets
-// are unsigned. Two-unit inputs retain both words. Scalar materialization
-// requires a uniform source operand.
-iree_status_t loom_amdgpu_lookup_or_materialize_address_i64_operand(
+// Selects the numeric transport from source facts. |minimum_unit_count| is one
+// for consumers accepting a compact unsigned word or two for pair consumers.
+loom_amdgpu_integer_operand_form_t loom_amdgpu_select_integer_operand_form(
+    loom_value_facts_t facts, uint8_t minimum_unit_count);
+
+// Materializes the selected integer operand in |register_class_id| (SGPR or
+// VGPR). Pair forms preserve a complete existing pair or extend a single word;
+// an unsigned-word form extracts the proven u32 payload. Emission consumes no
+// source facts. Scalar materialization requires selected uniformity.
+iree_status_t loom_amdgpu_lookup_or_materialize_integer_operand(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_value_id_t source_value, uint32_t register_class_id,
-    loom_value_id_t* out_low_value);
+    loom_amdgpu_integer_operand_form_t form, loom_value_id_t* out_low_value);
 
 // Sign-extends a one-unit SGPR or VGPR value into a two-unit carrier in the
 // same register class. The low word is retained and the high word replicates
@@ -44,8 +48,34 @@ iree_status_t loom_amdgpu_emit_sgpr64_binary_carry(
     loom_amdgpu_descriptor_ref_t high_descriptor_ref, loom_value_id_t low_lhs,
     loom_value_id_t low_rhs, loom_value_id_t* out_low_result);
 
-// Emits the low 64 bits of a product. Both inputs use the same two-unit SGPR
-// or VGPR carrier, which is also the result carrier.
+// Adds two SGPR pairs and returns both the low 64-bit sum and a normalized
+// one-word overflow value. |out_overflow| is zero when the mathematical sum is
+// representable in 64 bits and one otherwise.
+iree_status_t loom_amdgpu_emit_sgpr64_add_checked(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    loom_value_id_t low_lhs, loom_value_id_t low_rhs,
+    loom_value_id_t* out_low_sum, loom_value_id_t* out_overflow);
+
+// Multiplies two SGPR pairs and returns both the low 64-bit product and a
+// one-word overflow indicator. |out_overflow| is zero when the mathematical
+// product is representable in 64 bits and nonzero otherwise.
+iree_status_t loom_amdgpu_emit_sgpr64_mul_checked(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    loom_value_id_t low_lhs, loom_value_id_t low_rhs,
+    loom_value_id_t* out_low_product, loom_value_id_t* out_overflow);
+
+// Compares two unsigned SGPR pairs and returns SCC true when |low_lhs| is less
+// than or equal to |low_rhs|.
+iree_status_t loom_amdgpu_emit_sgpr64_ule_scc(loom_low_lower_context_t* context,
+                                              const loom_op_t* source_op,
+                                              loom_value_id_t low_lhs,
+                                              loom_value_id_t low_rhs,
+                                              loom_value_id_t* out_low_scc);
+
+// Emits the low 64 bits of a product from one- or two-unit operands in the same
+// SGPR or VGPR class. One-unit inputs are unsigned words with an implicit zero
+// high word. The result always has two units; absent cross products are
+// omitted.
 iree_status_t loom_amdgpu_emit_i64_mul_lo(loom_low_lower_context_t* context,
                                           const loom_op_t* source_op,
                                           loom_value_id_t low_lhs,
@@ -56,6 +86,11 @@ iree_status_t loom_amdgpu_emit_i64_mul_lo(loom_low_lower_context_t* context,
 iree_status_t loom_amdgpu_select_index_cast_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_amdgpu_index_cast_plan_t* out_plan, bool* out_selected);
+
+// Publishes the cast's selected width in its actual source or conversion bank.
+iree_status_t loom_amdgpu_finalize_index_cast_plan(
+    loom_low_lower_context_t* context,
+    const loom_amdgpu_index_cast_plan_t* plan);
 
 // Lowers an AMDGPU index.cast plan.
 iree_status_t loom_amdgpu_lower_index_cast(
@@ -138,12 +173,6 @@ iree_status_t loom_amdgpu_low_legality_verify_scalar_i64_alu(
 
 // Verifies AMDGPU low legality for scalar i64 population count.
 iree_status_t loom_amdgpu_low_legality_verify_scalar_i64_ctpop(
-    const loom_target_low_legality_provider_t* provider,
-    loom_target_low_legality_context_t* context, const loom_op_t* op,
-    bool* out_handled);
-
-// Verifies AMDGPU low legality for unsupported scalar i64 signed remainder.
-iree_status_t loom_amdgpu_low_legality_verify_scalar_remsi_i64(
     const loom_target_low_legality_provider_t* provider,
     loom_target_low_legality_context_t* context, const loom_op_t* op,
     bool* out_handled);

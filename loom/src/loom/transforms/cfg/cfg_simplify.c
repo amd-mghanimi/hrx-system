@@ -145,27 +145,13 @@ static iree_status_t loom_cfg_simplify_push_child_regions(
   return iree_ok_status();
 }
 
-static bool loom_cfg_simplify_region_is_cfg_shaped(loom_region_t* region) {
-  if (!region) {
-    return false;
-  }
-  if (region->block_count > 1) {
-    return true;
-  }
-  loom_block_t* block = NULL;
-  loom_region_for_each_block(region, block) {
-    loom_op_t* op = NULL;
-    loom_block_for_each_op(block, op) {
-      if (op->successor_count > 0) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-static iree_status_t loom_cfg_simplify_mark_cfg_regions(
-    loom_region_t* root_region, iree_arena_allocator_t* arena) {
+// Marks CFG-shaped regions and retains the definition-ID prefix discovered by
+// the same body-tree walk. The prefix reserves fact storage for this body,
+// independent of unrelated values appended elsewhere in the module.
+static iree_status_t loom_cfg_simplify_prepare_regions(
+    loom_region_t* root_region, iree_arena_allocator_t* arena,
+    uint32_t* out_value_capacity) {
+  *out_value_capacity = 0;
   if (!root_region) {
     return iree_ok_status();
   }
@@ -180,16 +166,21 @@ static iree_status_t loom_cfg_simplify_mark_cfg_regions(
 
   while (stack_count > 0) {
     loom_region_t* region = stack[--stack_count];
-    if (loom_cfg_simplify_region_is_cfg_shaped(region)) {
-      region->flags |= LOOM_REGION_INSTANCE_FLAG_CFG;
-    } else {
-      region->flags &= ~LOOM_REGION_INSTANCE_FLAG_CFG;
-    }
+    bool is_cfg_shaped = region->block_count > 1;
 
     loom_block_t* block = NULL;
     loom_region_for_each_block(region, block) {
+      for (uint16_t i = 0; i < block->arg_count; ++i) {
+        *out_value_capacity =
+            iree_max(*out_value_capacity, loom_block_arg_id(block, i) + 1);
+      }
       loom_op_t* op = NULL;
       loom_block_for_each_op(block, op) {
+        is_cfg_shaped |= op->successor_count > 0;
+        const loom_value_id_t* results = loom_op_results(op);
+        for (uint16_t i = 0; i < op->result_count; ++i) {
+          *out_value_capacity = iree_max(*out_value_capacity, results[i] + 1);
+        }
         loom_region_t** regions = loom_op_regions(op);
         for (uint8_t region_index = 0; region_index < op->region_count;
              ++region_index) {
@@ -204,6 +195,11 @@ static iree_status_t loom_cfg_simplify_mark_cfg_regions(
           stack[stack_count++] = regions[region_index];
         }
       }
+    }
+    if (is_cfg_shaped) {
+      region->flags |= LOOM_REGION_INSTANCE_FLAG_CFG;
+    } else {
+      region->flags &= ~LOOM_REGION_INSTANCE_FLAG_CFG;
     }
   }
   return iree_ok_status();
@@ -304,8 +300,8 @@ static iree_status_t loom_cfg_simplify_remove_unreachable_blocks(
   }
 
   uint16_t removed_count = 0;
-  IREE_RETURN_IF_ERROR(loom_region_remove_blocks(
-      state->module, (loom_region_t*)graph->region, remove_blocks,
+  IREE_RETURN_IF_ERROR(loom_rewriter_remove_blocks(
+      state->rewriter, (loom_region_t*)graph->region, remove_blocks,
       graph->block_count, state->analysis_arena, &removed_count));
   state->statistics->blocks_removed += removed_count;
   state->rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
@@ -1192,8 +1188,8 @@ static iree_status_t loom_cfg_simplify_merge_equivalent_blocks(
   }
   if (iree_status_is_ok(status)) {
     uint16_t removed_count = 0;
-    status = loom_region_remove_blocks(
-        state->module, (loom_region_t*)graph->region, remove_blocks,
+    status = loom_rewriter_remove_blocks(
+        state->rewriter, (loom_region_t*)graph->region, remove_blocks,
         graph->block_count, state->analysis_arena, &removed_count);
     if (iree_status_is_ok(status)) {
       state->statistics->duplicate_blocks_merged += removed_count;
@@ -1391,6 +1387,46 @@ static iree_status_t loom_cfg_simplify_rebuild_br_for_block_args(
                                              retained_count);
 }
 
+static iree_status_t loom_cfg_simplify_materialize_constant_arg(
+    loom_cfg_simplify_state_t* state, const loom_block_t* block,
+    uint16_t arg_index, loom_value_id_t* out_replacement) {
+  *out_replacement = LOOM_VALUE_ID_INVALID;
+  const loom_value_id_t argument = loom_block_arg_id(block, arg_index);
+  if (!loom_module_value_has_uses(state->module, argument)) {
+    return iree_ok_status();
+  }
+  const loom_type_t type = loom_module_value_type(state->module, argument);
+  const loom_value_facts_t facts =
+      loom_value_fact_table_lookup(state->fact_table, argument);
+  if (!loom_value_facts_can_materialize_constant(facts, type)) {
+    return iree_ok_status();
+  }
+
+  // A dependent argument type binds incoming SSA identities, not just their
+  // numeric values. Keep that binder until type normalization removes it.
+  loom_type_use_iterator_t users;
+  loom_module_value_type_users(state->module, argument, &users);
+  for (loom_value_id_t carrier = loom_type_users_next(&users);
+       carrier != LOOM_VALUE_ID_INVALID;
+       carrier = loom_type_users_next(&users)) {
+    const loom_value_t* value = loom_module_value(state->module, carrier);
+    if (loom_value_is_block_arg(value) &&
+        loom_value_def_block(value) == block) {
+      return iree_ok_status();
+    }
+  }
+
+  // The literal is available on every path, including uses in nested types.
+  loom_builder_t* builder = &state->rewriter->builder;
+  const loom_builder_ip_t saved_ip = loom_builder_save(builder);
+  loom_builder_set_before(
+      builder, loom_region_entry_block(block->parent_region)->first_op);
+  const iree_status_t status = loom_constant_build(
+      builder, facts, type, block->first_op->location, out_replacement);
+  loom_builder_restore(builder, saved_ip);
+  return status;
+}
+
 static bool loom_cfg_simplify_block_arg_has_no_direct_uses(
     const loom_cfg_simplify_state_t* state, const loom_block_t* block,
     uint16_t arg_index) {
@@ -1560,7 +1596,11 @@ static iree_status_t loom_cfg_simplify_remove_redundant_block_args_from_block(
     if (!loom_cfg_simplify_find_forwarded_arg_replacement(
             state, block, pred_branches, predecessors.count, arg_index,
             &replacement)) {
-      continue;
+      IREE_RETURN_IF_ERROR(loom_cfg_simplify_materialize_constant_arg(
+          state, block, arg_index, &replacement));
+      if (replacement == LOOM_VALUE_ID_INVALID) {
+        continue;
+      }
     }
     const loom_value_id_t old_arg = loom_block_arg_id(block, arg_index);
     const loom_value_id_t resolved = loom_cfg_simplify_resolve_arg_replacement(
@@ -1596,8 +1636,8 @@ static iree_status_t loom_cfg_simplify_remove_redundant_block_args_from_block(
     }
   }
   IREE_ASSERT_EQ((uint16_t)(retained_count + removed_count), initial_arg_count);
-  const uint16_t actual_removed_count = loom_block_remove_args(
-      state->module, block, remove_args, initial_arg_count);
+  const uint16_t actual_removed_count = loom_rewriter_remove_block_args(
+      state->rewriter, block, remove_args, initial_arg_count);
   IREE_ASSERT_EQ(actual_removed_count, removed_count);
   state->statistics->block_args_removed += removed_count;
   state->rewriter->flags |= LOOM_REWRITER_FLAG_CHANGED;
@@ -1612,8 +1652,9 @@ static iree_status_t loom_cfg_simplify_remove_redundant_block_args_from_block(
 }
 
 static iree_status_t loom_cfg_simplify_remove_redundant_block_args(
-    loom_cfg_simplify_state_t* state, const loom_cfg_graph_t* graph,
-    bool* out_changed) {
+    loom_cfg_simplify_state_t* state,
+    const loom_value_fact_cfg_region_t* structure, bool* out_changed) {
+  const loom_cfg_graph_t* graph = &structure->graph;
   if (graph->malformed) {
     return iree_ok_status();
   }
@@ -1621,9 +1662,13 @@ static iree_status_t loom_cfg_simplify_remove_redundant_block_args(
   iree_arena_allocator_t scratch_arena;
   iree_arena_initialize(state->analysis_arena->block_pool, &scratch_arena);
   iree_status_t status = iree_ok_status();
-  for (uint16_t block_index = 1;
-       iree_status_is_ok(status) && block_index < graph->block_count;
-       ++block_index) {
+  // Consume identities before editing their dominating representatives. The
+  // retained identity table is immutable during this walk; replacing a
+  // representative later updates every use introduced in its descendants.
+  const loom_cfg_block_index_span_t order = structure->dominance.preorder;
+  for (iree_host_size_t position = order.count;
+       iree_status_is_ok(status) && position > 1; --position) {
+    const uint16_t block_index = order.values[position - 1];
     iree_arena_reset(&scratch_arena);
     bool block_changed = false;
     status = loom_cfg_simplify_remove_redundant_block_args_from_block(
@@ -1652,33 +1697,8 @@ static iree_status_t loom_cfg_simplify_process_cfg_region(
   if (*out_changed) {
     return iree_ok_status();
   }
-  IREE_RETURN_IF_ERROR(loom_cfg_value_identity_table_update(
-      &state->value_identities, structure, state->dominance,
-      state->analysis_arena));
-  loom_cfg_condition_relation_table_t path_fact_table = {0};
-  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_table_compute(
-      state->module, graph, state->fact_table, state->dominance,
-      &state->value_domain, &state->value_identities, state->analysis_arena,
-      &path_fact_table));
-  IREE_RETURN_IF_ERROR(loom_cfg_simplify_thread_fact_known_branches(
-      state, graph, &path_fact_table, out_changed));
-  if (*out_changed) {
-    return iree_ok_status();
-  }
-  uint16_t branches_folded = 0;
-  IREE_RETURN_IF_ERROR(loom_cfg_fold_path_sensitive_branches(
-      state->rewriter, graph, &path_fact_table, &state->condition_query,
-      state->analysis_arena, &branches_folded));
-  if (branches_folded != 0) {
-    state->statistics->branches_folded += branches_folded;
-    *out_changed = true;
-    return iree_ok_status();
-  }
-  IREE_RETURN_IF_ERROR(loom_cfg_simplify_fold_path_sensitive_i1_ops(
-      state, graph, &path_fact_table, out_changed));
-  if (*out_changed) {
-    return iree_ok_status();
-  }
+  // Collapse structural forwarding before computing path relations that would
+  // be invalidated by those same edits.
   uint16_t fused_count = 0;
   IREE_RETURN_IF_ERROR(loom_cfg_fuse_single_predecessor_blocks(
       state->rewriter, graph, state->dominance, state->analysis_arena,
@@ -1699,12 +1719,39 @@ static iree_status_t loom_cfg_simplify_process_cfg_region(
     return iree_ok_status();
   }
 
+  IREE_RETURN_IF_ERROR(loom_cfg_value_identity_table_update(
+      &state->value_identities, structure, state->dominance,
+      state->analysis_arena));
+  loom_cfg_condition_relation_table_t path_fact_table = {0};
+  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_table_compute(
+      state->module, graph, state->fact_table, state->dominance,
+      &state->value_domain, &state->value_identities,
+      /*anchor_provider=*/NULL, state->analysis_arena, &path_fact_table));
+  IREE_RETURN_IF_ERROR(loom_cfg_simplify_thread_fact_known_branches(
+      state, graph, &path_fact_table, out_changed));
+  if (*out_changed) {
+    return iree_ok_status();
+  }
+  uint16_t branches_folded = 0;
+  IREE_RETURN_IF_ERROR(loom_cfg_fold_path_sensitive_branches(
+      state->rewriter, graph, &path_fact_table, &state->condition_query,
+      state->analysis_arena, &branches_folded));
+  if (branches_folded != 0) {
+    state->statistics->branches_folded += branches_folded;
+    *out_changed = true;
+    return iree_ok_status();
+  }
+  IREE_RETURN_IF_ERROR(loom_cfg_simplify_fold_path_sensitive_i1_ops(
+      state, graph, &path_fact_table, out_changed));
+  if (*out_changed) {
+    return iree_ok_status();
+  }
   IREE_RETURN_IF_ERROR(
       loom_cfg_simplify_merge_equivalent_blocks(state, graph, out_changed));
   if (*out_changed) {
     return iree_ok_status();
   }
-  return loom_cfg_simplify_remove_redundant_block_args(state, graph,
+  return loom_cfg_simplify_remove_redundant_block_args(state, structure,
                                                        out_changed);
 }
 
@@ -1732,22 +1779,33 @@ static iree_status_t loom_cfg_simplify_process_function_once(
     if (branches_folded != 0) {
       state->statistics->branches_folded += branches_folded;
       *out_changed = true;
-      return loom_rewriter_refresh_cfg_facts(state->rewriter, region);
+      IREE_RETURN_IF_ERROR(
+          loom_rewriter_refresh_cfg_facts(state->rewriter, region));
+      continue;
     }
 
+    if (iree_any_bit_set(region->flags, LOOM_REGION_INSTANCE_FLAG_CFG)) {
+      bool region_changed = false;
+      IREE_RETURN_IF_ERROR(
+          loom_cfg_simplify_process_cfg_region(state, region, &region_changed));
+      if (region_changed) {
+        *out_changed = true;
+        IREE_RETURN_IF_ERROR(
+            loom_rewriter_refresh_cfg_facts(state->rewriter, region));
+        continue;
+      }
+    }
+
+    // Only unchanged ancestors publish children into this round. A CFG edit
+    // can delete nested regions or invalidate their ancestor dominance, so
+    // those descendants wait for the next analysis snapshot. Pending siblings
+    // retain their structure, and operation folding stays deferred until the
+    // next round's worklist drain.
     loom_block_t* block = NULL;
     loom_region_for_each_block(region, block) {
       loom_op_t* op = NULL;
       loom_block_for_each_op(block, op) {
         IREE_RETURN_IF_ERROR(loom_cfg_simplify_push_child_regions(state, op));
-      }
-    }
-
-    if (iree_any_bit_set(region->flags, LOOM_REGION_INSTANCE_FLAG_CFG)) {
-      IREE_RETURN_IF_ERROR(
-          loom_cfg_simplify_process_cfg_region(state, region, out_changed));
-      if (*out_changed) {
-        return loom_rewriter_refresh_cfg_facts(state->rewriter, region);
       }
     }
   }
@@ -1778,17 +1836,18 @@ iree_status_t loom_cfg_simplify_run(loom_pass_t* pass, loom_module_t* module,
 
   iree_status_t status = loom_cfg_simplify_region_stack_initialize(
       pass->arena, &state.region_stack);
+  loom_pass_value_fact_scope_t fact_scope =
+      loom_pass_value_fact_scope_function_for_target(
+          function,
+          loom_target_function_version_target_facts(pass->function_version));
   if (iree_status_is_ok(status)) {
-    status = loom_cfg_simplify_mark_cfg_regions(body, &analysis_arena);
+    status = loom_cfg_simplify_prepare_regions(
+        body, &analysis_arena, &fact_scope.minimum_value_capacity);
   }
   loom_value_fact_table_t* fact_table = NULL;
   if (iree_status_is_ok(status)) {
-    status = loom_pass_value_facts_acquire(
-        pass, module,
-        loom_pass_value_fact_scope_function_for_target(
-            function,
-            loom_target_function_version_target_facts(pass->function_version)),
-        &fact_table);
+    status =
+        loom_pass_value_facts_acquire(pass, module, fact_scope, &fact_table);
   }
   loom_rewriter_attach_value_facts(&rewriter, fact_table);
   bool changed = true;
@@ -1802,14 +1861,20 @@ iree_status_t loom_cfg_simplify_run(loom_pass_t* pass, loom_module_t* module,
     loom_op_t* pending_op = NULL;
     while (iree_status_is_ok(status) &&
            (pending_op = loom_rewriter_pop(&rewriter)) != NULL) {
+      bool erased = false;
+      status = loom_rewriter_erase_if_dead(&rewriter, pending_op, &erased);
       bool folded = false;
-      status = loom_rewriter_try_fold(&rewriter, pending_op, &folded);
+      if (iree_status_is_ok(status) && !erased) {
+        status = loom_rewriter_try_fold(&rewriter, pending_op, &folded);
+      }
+      any_changed |= erased || folded;
     }
     if (!iree_status_is_ok(status)) {
       break;
     }
 
-    status = loom_cfg_simplify_mark_cfg_regions(body, &analysis_arena);
+    status = loom_cfg_simplify_prepare_regions(
+        body, &analysis_arena, &fact_scope.minimum_value_capacity);
     if (!iree_status_is_ok(status)) {
       break;
     }
@@ -1847,7 +1912,9 @@ iree_status_t loom_cfg_simplify_run(loom_pass_t* pass, loom_module_t* module,
     loom_pass_mark_changed(pass);
   }
   loom_rewriter_deinitialize(&rewriter);
-  loom_pass_value_fact_owner_invalidate(pass->value_facts);
+  if (any_changed || !iree_status_is_ok(status)) {
+    loom_pass_value_fact_owner_invalidate(pass->value_facts);
+  }
   loom_local_value_domain_release(&state.value_domain);
   iree_arena_deinitialize(&analysis_arena);
   return status;

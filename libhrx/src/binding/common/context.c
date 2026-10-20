@@ -4,13 +4,17 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include "common/context.h"
+
 #include <string.h>
 
+#include "common/device.h"
 #include "common/graph.h"
-#include "common/internal.h"
+#include "common/init.h"
+#include "common/memory.h"
 #include "common/stream.h"
 #include "common/stream_value.h"
-#include "iree/base/internal/math.h"
+#include "libhrx/src/libhrx/mem_pool_backing.h"
 
 //===----------------------------------------------------------------------===//
 // Global state
@@ -50,48 +54,6 @@ static void iree_hal_streaming_context_destroy(
 static iree_status_t iree_hal_streaming_context_synchronize_streams(
     iree_hal_streaming_context_t* context, bool include_non_blocking_streams,
     bool flush_before_wait);
-
-iree_hal_streaming_timestamp_domain_t iree_hal_streaming_query_timestamp_domain(
-    const iree_hal_device_spec_t* spec) {
-  const iree_hal_streaming_timestamp_domain_t none = {0};
-  if (!spec) {
-    return none;
-  }
-  const iree_hal_device_timing_spec_t* timing =
-      iree_hal_device_spec_timing(spec);
-  if (!iree_all_bits_set(timing->flags,
-                         IREE_HAL_DEVICE_TIMING_SPEC_FLAG_DEVICE_TIMESTAMPS)) {
-    return none;
-  }
-  const iree_hal_device_queue_spec_t* queues =
-      iree_hal_device_spec_queues(spec);
-  if (queues->family_count != 1) {
-    return none;
-  }
-  const iree_hal_queue_family_spec_t* family = &queues->families[0];
-  // Exactly one physical device: the header guarantees a single comparable
-  // domain only for one family covering one physical device.
-  if (iree_math_count_ones_u64(family->physical_device_affinity) != 1) {
-    return none;
-  }
-  // The flag comes from the device-scope summary and the numbers from the
-  // family, which is sound only while the two describe the same domain. On a
-  // single-family device they must, so facets that disagree contradict the
-  // device's own facts and name no domain to convert with.
-  if (timing->timestamp_frequency_hz != family->timestamp_frequency_hz ||
-      timing->timestamp_valid_bits != family->timestamp_valid_bits) {
-    return none;
-  }
-  if (family->timestamp_frequency_hz == 0 ||
-      family->timestamp_valid_bits == 0 || family->timestamp_valid_bits > 64) {
-    return none;
-  }
-  const iree_hal_streaming_timestamp_domain_t domain = {
-      .frequency_hz = family->timestamp_frequency_hz,
-      .valid_bits = family->timestamp_valid_bits,
-  };
-  return domain;
-}
 
 iree_status_t iree_hal_streaming_context_create(
     iree_hal_streaming_device_t* device_entry,
@@ -173,12 +135,19 @@ iree_status_t iree_hal_streaming_context_create(
   // Initialize buffer mapping table.
   hrx_buffer_table_initialize(&context->buffer_table);
 
-  // Initialize the device timestamp slot pool.
+  // Initialize the device timestamp slot pool from a coherent host source.
+  iree_hal_pool_t* timestamp_memory_pool = NULL;
+  iree_status_t status = hrx_mem_pool_backing_retain_allocation_source(
+      device_entry->hrx_device, HRX_MEMORY_TYPE_HOST_LOCAL,
+      HRX_BUFFER_USAGE_DEFAULT, &timestamp_memory_pool);
   iree_hal_streaming_event_timestamp_pool_initialize(
-      context->device_allocator, host_allocator, &context->timestamp_pool);
+      timestamp_memory_pool, host_allocator, &context->timestamp_pool);
+  iree_hal_pool_release(timestamp_memory_pool);
 
-  iree_status_t status = iree_hal_streaming_device_select_primary_queue(
-      device_entry, &context->queue);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_streaming_device_select_primary_queue(device_entry,
+                                                            &context->queue);
+  }
 
   // Create the context-wide event record timeline. Resource-partitioned
   // binding contexts share this timeline so primary-context synchronization

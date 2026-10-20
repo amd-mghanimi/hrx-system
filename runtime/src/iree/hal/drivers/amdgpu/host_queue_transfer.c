@@ -56,6 +56,9 @@ struct iree_hal_amdgpu_transfer_transaction_t {
   iree_host_size_t remaining_child_count;
   // Cloned signal list published after every child completes.
   iree_hal_semaphore_list_t signal_semaphore_list;
+
+  // Visibility after all native and host I/O accesses, before terminal signals.
+  iree_hal_amdgpu_queue_barrier_t after_barrier;
   // Owned aggregate of child and queue failures.
   iree_status_t failure_status;
   // Owned status passed from the wait barrier to |start_post_drain|.
@@ -115,6 +118,12 @@ static const iree_hal_resource_vtable_t
 static iree_status_t iree_hal_amdgpu_transfer_validate_buffer(
     iree_hal_amdgpu_host_queue_t* queue, iree_hal_buffer_t* buffer,
     iree_hal_semaphore_list_t wait_semaphore_list) {
+  if (buffer->memory.contract) {
+    // The public queue boundary qualified this family's native access. The
+    // allocating backend publishes its table before the transfer's waits
+    // complete; capture must not read bindings from an uncommitted allocation.
+    return iree_ok_status();
+  }
   const iree_hal_buffer_placement_t placement =
       iree_hal_buffer_allocation_placement(buffer);
   if (!iree_hal_buffer_placement_is_undefined(placement) &&
@@ -337,21 +346,36 @@ static void iree_hal_amdgpu_transfer_publish_signals(
   iree_status_t status = transaction->failure_status;
   transaction->failure_status = iree_ok_status();
   if (!iree_status_is_ok(status)) {
+    iree_hal_resource_set_free(transaction->resource_set);
+    transaction->resource_set = NULL;
+    // A failed wait can terminate the transaction before staging starts.
+    for (iree_host_size_t i = 0; i < transaction->operation_count; ++i) {
+      iree_hal_amdgpu_staging_transfer_release(
+          transaction->children[i].staging_transfer);
+      transaction->children[i].staging_transfer = NULL;
+    }
     iree_hal_amdgpu_transfer_fail_signals(transaction, status);
     return;
   }
-  if (iree_hal_semaphore_list_is_empty(transaction->signal_semaphore_list)) {
+  if (iree_hal_semaphore_list_is_empty(transaction->signal_semaphore_list) &&
+      !(transaction->after_barrier.acquire |
+        transaction->after_barrier.release)) {
+    iree_hal_resource_set_free(transaction->resource_set);
+    transaction->resource_set = NULL;
     return;
   }
 
   status = iree_hal_amdgpu_host_queue_clone_error_status(transaction->queue);
   if (!iree_status_is_ok(status)) {
+    iree_hal_resource_set_free(transaction->resource_set);
+    transaction->resource_set = NULL;
     iree_hal_amdgpu_transfer_fail_signals(transaction, status);
     return;
   }
 
   iree_hal_amdgpu_wait_resolution_t resolution;
   memset(&resolution, 0, sizeof(resolution));
+  resolution.payload_barriers.after = transaction->after_barrier;
   iree_slim_mutex_lock(&transaction->queue->locks.submission_mutex);
   bool ready = false;
   status = iree_hal_amdgpu_host_queue_try_submit_barrier(
@@ -360,9 +384,13 @@ static void iree_hal_amdgpu_transfer_publish_signals(
       /*operation_resources=*/NULL, /*operation_resource_count=*/0,
       /*profile_event_info=*/NULL,
       iree_hal_amdgpu_host_queue_post_commit_callback_null(),
-      /*resource_set=*/NULL,
+      transaction->resource_set,
       IREE_HAL_AMDGPU_HOST_QUEUE_SUBMISSION_FLAG_RETAIN_RESOURCES, &ready,
       /*out_submission_id=*/NULL);
+  if (iree_status_is_ok(status) && ready) {
+    // Reclaim owns the captured buffers until exit visibility has completed.
+    transaction->resource_set = NULL;
+  }
   if (iree_status_is_ok(status) && !ready) {
     iree_hal_resource_retain(&transaction->resource);
     iree_hal_amdgpu_host_queue_enqueue_post_drain_action(
@@ -371,6 +399,8 @@ static void iree_hal_amdgpu_transfer_publish_signals(
   }
   iree_slim_mutex_unlock(&transaction->queue->locks.submission_mutex);
   if (!iree_status_is_ok(status)) {
+    iree_hal_resource_set_free(transaction->resource_set);
+    transaction->resource_set = NULL;
     iree_hal_amdgpu_transfer_fail_signals(transaction, status);
   }
 }
@@ -627,7 +657,10 @@ iree_status_t iree_hal_amdgpu_host_queue_enqueue_transfer(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_host_size_t operation_count,
-    const iree_hal_transfer_operation_t* operations) {
+    const iree_hal_transfer_operation_t* operations,
+    const iree_hal_queue_barriers_t* barriers) {
+  const iree_hal_amdgpu_queue_barriers_t resolved_barriers =
+      iree_hal_amdgpu_queue_barriers_resolve(barriers);
   iree_host_size_t active_operation_count = 0;
   for (iree_host_size_t i = 0; i < operation_count; ++i) {
     active_operation_count +=
@@ -635,7 +668,7 @@ iree_status_t iree_hal_amdgpu_host_queue_enqueue_transfer(
   }
   if (active_operation_count == 0) {
     return iree_hal_queue_barrier(&queue->base, wait_semaphore_list,
-                                  signal_semaphore_list,
+                                  signal_semaphore_list, barriers,
                                   IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
   }
 
@@ -643,8 +676,10 @@ iree_status_t iree_hal_amdgpu_host_queue_enqueue_transfer(
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_transfer_transaction_create(
       queue, wait_semaphore_list, signal_semaphore_list, operation_count,
       operations, &transaction));
+  transaction->after_barrier = resolved_barriers.after;
 
-  if (wait_semaphore_list.count == 0) {
+  if (wait_semaphore_list.count == 0 &&
+      !(resolved_barriers.before.acquire | resolved_barriers.before.release)) {
     iree_status_t status = iree_hal_amdgpu_transfer_start(transaction);
     iree_hal_resource_release(&transaction->resource);
     return status;
@@ -657,7 +692,7 @@ iree_status_t iree_hal_amdgpu_host_queue_enqueue_transfer(
           .fn = iree_hal_amdgpu_transfer_waits_complete,
           .user_data = transaction,
       },
-      resources, IREE_ARRAYSIZE(resources));
+      resources, IREE_ARRAYSIZE(resources), resolved_barriers.before);
   iree_hal_resource_release(&transaction->resource);
   return status;
 }

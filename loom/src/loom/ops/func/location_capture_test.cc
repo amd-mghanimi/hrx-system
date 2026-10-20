@@ -34,9 +34,10 @@ class LocationCaptureTest : public ::testing::Test {
     IREE_ASSERT_OK(loom_context_finalize(&context_));
     const auto* data = loom_location_capture_test_data_create();
     std::string text(reinterpret_cast<const char*>(data[0].data), data[0].size);
-    loom_input_request_t request = {};
-    request.source = iree_make_string_view(text.data(), text.size());
-    request.path = IREE_SV("source.loom");
+    loom_input_request_t request = {
+        .source = iree_make_string_view(text.data(), text.size()),
+        .path = IREE_SV("source.loom"),
+    };
     IREE_ASSERT_OK(loom_input_module_load(&loom_input_text_provider, &request,
                                           &context_, &pool_,
                                           iree_allocator_system(), &input_));
@@ -64,7 +65,7 @@ class LocationCaptureTest : public ::testing::Test {
         &scratch_, &nodes));
     // Captured payloads are independent of both scratch and admitted sources.
     iree_arena_reset(&scratch_);
-    loom_tooling_source_storage_deinitialize(&input_.sources);
+    loom_source_storage_deinitialize(&input_.sources);
     iree_const_byte_span_t bytes;
     IREE_CHECK_OK(
         loom_func_location_encode(input_.module, nodes, &scratch_, &bytes));
@@ -186,8 +187,7 @@ TEST_F(LocationCaptureTest, SharedGraphRetainsOpaqueTaggedAndUnavailableData) {
                                   file, payload, sizeof(payload));
   tag.flags = LOOM_LOCATION_FLAG_SYNTHETIC;
   IREE_ASSERT_OK(loom_module_add_location(module, tag, &tagged));
-  loom_location_entry_t opaque = {};
-  opaque.kind = LOOM_LOCATION_OPAQUE;
+  loom_location_entry_t opaque = {.kind = LOOM_LOCATION_OPAQUE};
   opaque.opaque.source_id = source;
   opaque.opaque.data = payload;
   opaque.opaque.data_length = sizeof(payload);
@@ -195,8 +195,7 @@ TEST_F(LocationCaptureTest, SharedGraphRetainsOpaqueTaggedAndUnavailableData) {
   IREE_ASSERT_OK(loom_module_add_location(module, opaque, &external));
   loom_location_id_t children[] = {tagged, external, file, tagged,
                                    LOOM_LOCATION_UNKNOWN};
-  loom_location_entry_t fused = {};
-  fused.kind = LOOM_LOCATION_FUSED;
+  loom_location_entry_t fused = {.kind = LOOM_LOCATION_FUSED};
   fused.fused.count = IREE_ARRAYSIZE(children);
   fused.fused.children = children;
   loom_location_id_t root;
@@ -226,6 +225,47 @@ TEST_F(LocationCaptureTest, SharedGraphRetainsOpaqueTaggedAndUnavailableData) {
   ASSERT_EQ(captured_external.data.data_length, sizeof(payload));
   EXPECT_EQ(captured_external.data.data[2], 3u);
   EXPECT_EQ(loom_location_value_kind(value, 3), LOOM_LOCATION_VALUE_UNKNOWN);
+}
+
+TEST_F(LocationCaptureTest, WideCoordinatesAndFieldsSurviveCapture) {
+  auto* module = input_.module;
+  loom_source_id_t source;
+  IREE_ASSERT_OK(
+      loom_module_register_source(module, IREE_SV("generated.loom"), &source));
+  loom_location_id_t location;
+  IREE_ASSERT_OK(loom_module_add_location(
+      module, loom_location_file_range(source, 70001, 80002, 90003, 100004),
+      &location));
+  const loom_location_field_span_t spans[] = {{
+      .kind = LOOM_LOCATION_FIELD_OPERAND,
+      .index = 7,
+      .start_line = 70005,
+      .start_col = 80006,
+      .end_line = 90007,
+      .end_col = 100008,
+  }};
+  IREE_ASSERT_OK(loom_module_attach_location_field_spans(
+      module, location,
+      loom_location_field_span_array_wide(spans, IREE_ARRAYSIZE(spans))));
+
+  const auto bytes = Capture(location);
+  loom_location_value_t value;
+  IREE_ASSERT_OK(
+      loom_location_value_parse({bytes.data(), bytes.size()}, &value));
+  const auto file = loom_location_value_file(value, 0);
+  EXPECT_EQ(String(file.source), "generated.loom");
+  EXPECT_EQ(file.range.start_line, 70001u);
+  EXPECT_EQ(file.range.start_column, 80002u);
+  EXPECT_EQ(file.range.end_line, 90003u);
+  EXPECT_EQ(file.range.end_column, 100004u);
+  ASSERT_EQ(file.field_count, 1u);
+  const auto field = loom_location_value_field(value, 0, 0);
+  EXPECT_EQ(field.kind, LOOM_LOCATION_FIELD_OPERAND);
+  EXPECT_EQ(field.index, 7u);
+  EXPECT_EQ(field.range.start_line, 70005u);
+  EXPECT_EQ(field.range.start_column, 80006u);
+  EXPECT_EQ(field.range.end_line, 90007u);
+  EXPECT_EQ(field.range.end_column, 100008u);
 }
 
 TEST_F(LocationCaptureTest, DeepGraphUsesNoCallStack) {
@@ -280,7 +320,7 @@ TEST_F(LocationCaptureTest, PresentEmptySourceIsDistinctFromUnavailableText) {
   loom_source_id_t source_id;
   IREE_ASSERT_OK(loom_module_register_source(
       input_.module, IREE_SV("empty.loom"), &source_id));
-  IREE_ASSERT_OK(loom_tooling_source_storage_insert(
+  IREE_ASSERT_OK(loom_source_storage_insert(
       &input_.sources, source_id, IREE_SV("empty.loom"), IREE_SV("")));
   loom_location_id_t location;
   IREE_ASSERT_OK(loom_module_add_location(

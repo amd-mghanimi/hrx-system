@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/buffer_selection.loom-test
 // RUN: emit source-low target=x86:scalar output=low
 
 // A selected reference retains the ordinary buffer result ABI.
@@ -8,7 +7,7 @@ func.def @choose_buffer(%first: buffer, %second: buffer, %choose_first: i1) -> (
 }
 
 // ----
-low.func.def target<x86.scalar.core> abi(object_function) @choose_buffer(%first: reg<x86.gpr64>, %second: reg<x86.gpr64>, %choose_first: reg<x86.gpr32>) -> (reg<x86.gpr64>) asm {
+low.func.def target<x86.scalar.core> abi(object_function) abi_layout({signature = (buffer, buffer, i1) -> (buffer)}) @choose_buffer(%first: reg<x86.gpr64>, %second: reg<x86.gpr64>, %choose_first: reg<x86.gpr32>) -> (reg<x86.gpr64>) asm {
   %9 = copy %second : reg<x86.gpr64> -> reg<x86.gpr64>
   %selected = select.gpr64 %choose_first, %first, %9
   return %selected
@@ -26,7 +25,7 @@ func.def @exchange_selected_byte(%first: buffer, %second: buffer, %choose_first:
 }
 
 // ----
-low.func.def target<x86.scalar.core> abi(object_function) @exchange_selected_byte(%first: reg<x86.gpr64>, %second: reg<x86.gpr64>, %choose_first: reg<x86.gpr32>, %position: reg<x86.gpr64>, %replacement: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.scalar.core> abi(object_function) abi_layout({signature = (buffer, buffer, i1, offset, i32) -> (i32)}) @exchange_selected_byte(%first: reg<x86.gpr64>, %second: reg<x86.gpr64>, %choose_first: reg<x86.gpr32>, %position: reg<x86.gpr64>, %replacement: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   %15 = copy %second : reg<x86.gpr64> -> reg<x86.gpr64>
   %selected = select.gpr64 %choose_first, %first, %15
   %previous = movzx.load.indexed.u8.gpr32 %selected, %position {disp32 = 0, scale = 1}
@@ -51,7 +50,7 @@ func.def @selected_buffer_coordinate(%first: buffer, %second: buffer, %first_ori
 }
 
 // ----
-low.func.def target<x86.scalar.core> abi(object_function) @selected_buffer_coordinate(%first: reg<x86.gpr64>, %second: reg<x86.gpr64>, %first_origin: reg<x86.gpr64>, %second_origin: reg<x86.gpr64>, %choose_first: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.scalar.core> abi(object_function) abi_layout({signature = (buffer, buffer, offset, offset, i1) -> (i32)}) @selected_buffer_coordinate(%first: reg<x86.gpr64>, %second: reg<x86.gpr64>, %first_origin: reg<x86.gpr64>, %second_origin: reg<x86.gpr64>, %choose_first: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   %19 = copy %second : reg<x86.gpr64> -> reg<x86.gpr64>
   %selected = select.gpr64 %choose_first, %first, %19
   %21 = copy %second_origin : reg<x86.gpr64> -> reg<x86.gpr64>
@@ -80,11 +79,10 @@ low.func.def target<x86.scalar.core> abi(object_function) @rotate_buffer_coordin
   %begin = mov.imm64 0
   low.br ^_bb1(%begin: reg<x86.gpr64>, %first: reg<x86.gpr64>, %first_origin: reg<x86.gpr64>, %second: reg<x86.gpr64>, %second_origin: reg<x86.gpr64>)
 ^_bb1(%i: reg<x86.gpr64>, %current: reg<x86.gpr64>, %current_origin: reg<x86.gpr64>, %other: reg<x86.gpr64>, %other_origin: reg<x86.gpr64>):
-  %44 = cmp.slt.gpr64 %i, %count
-  low.cond_br %44, ^_bb2, ^_bb3 : reg<x86.gpr32>
+  low.op.cond_br<x86.scalar.cmp.branch.gpr64>(%i, %count) {predicate = 12}, ^_bb2, ^_bb3 : (reg<x86.gpr64>, reg<x86.gpr64>)
 ^_bb2:
-  %45 = lea.disp %i {disp32 = 1}
-  low.br ^_bb1(%45: reg<x86.gpr64>, %other: reg<x86.gpr64>, %other_origin: reg<x86.gpr64>, %current: reg<x86.gpr64>, %current_origin: reg<x86.gpr64>)
+  %44 = lea.disp %i {disp32 = 1}
+  low.br ^_bb1(%44: reg<x86.gpr64>, %other: reg<x86.gpr64>, %other_origin: reg<x86.gpr64>, %current: reg<x86.gpr64>, %current_origin: reg<x86.gpr64>)
 ^_bb3:
   %value = movzx.load.indexed.u8.gpr32 %current, %current_origin {disp32 = 0, scale = 1}
   return %value

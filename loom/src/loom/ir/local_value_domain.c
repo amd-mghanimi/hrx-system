@@ -6,6 +6,8 @@
 
 #include "loom/ir/local_value_domain.h"
 
+#include <string.h>
+
 #include "loom/ir/ancestry.h"
 
 typedef iree_status_t (*loom_local_value_domain_value_fn_t)(
@@ -28,8 +30,8 @@ loom_local_value_domain_value_callback_make(
 }
 
 static iree_status_t loom_local_value_domain_append_value_id(
-    loom_local_value_domain_t* domain, iree_arena_allocator_t* arena,
-    loom_value_id_t value_id, loom_value_ordinal_t* out_ordinal) {
+    loom_local_value_domain_t* domain, loom_value_id_t value_id,
+    loom_value_ordinal_t* out_ordinal) {
   if (domain->value_count >= LOOM_VALUE_ORDINAL_INVALID) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                             "local value domain exceeds value ordinal range");
@@ -38,7 +40,7 @@ static iree_status_t loom_local_value_domain_append_value_id(
       (iree_host_size_t)domain->value_count + 1;
   if (minimum_capacity > domain->value_capacity) {
     IREE_RETURN_IF_ERROR(iree_arena_grow_array(
-        arena, domain->value_count, minimum_capacity,
+        domain->arena, domain->value_count, minimum_capacity,
         sizeof(*domain->value_ids), &domain->value_capacity,
         (void**)&domain->value_ids));
   }
@@ -51,8 +53,8 @@ static iree_status_t loom_local_value_domain_append_value_id(
 }
 
 iree_status_t loom_local_value_domain_register_value(
-    loom_local_value_domain_t* domain, iree_arena_allocator_t* arena,
-    loom_value_id_t value_id, loom_value_ordinal_t* out_ordinal) {
+    loom_local_value_domain_t* domain, loom_value_id_t value_id,
+    loom_value_ordinal_t* out_ordinal) {
   IREE_ASSERT(
       iree_any_bit_set(domain->flags, LOOM_LOCAL_VALUE_DOMAIN_FLAG_ACQUIRED));
   if (value_id >= domain->module->values.count) {
@@ -66,25 +68,16 @@ iree_status_t loom_local_value_domain_register_value(
     *out_ordinal = existing_ordinal;
     return iree_ok_status();
   }
-  return loom_local_value_domain_append_value_id(domain, arena, value_id,
-                                                 out_ordinal);
+  return loom_local_value_domain_append_value_id(domain, value_id, out_ordinal);
 }
-
-typedef struct loom_local_value_domain_register_state_t {
-  // Domain being populated.
-  loom_local_value_domain_t* domain;
-  // Arena owning domain storage.
-  iree_arena_allocator_t* arena;
-} loom_local_value_domain_register_state_t;
 
 // Acquisition can encounter a definition first as a forward CFG use or a type
 // dependency. Promote it into the definition prefix before publishing ordinals.
 static iree_status_t loom_local_value_domain_register_definition(
-    loom_local_value_domain_t* domain, iree_arena_allocator_t* arena,
-    loom_value_id_t value_id) {
+    loom_local_value_domain_t* domain, loom_value_id_t value_id) {
   loom_value_ordinal_t ordinal = LOOM_VALUE_ORDINAL_INVALID;
-  IREE_RETURN_IF_ERROR(loom_local_value_domain_register_value(
-      domain, arena, value_id, &ordinal));
+  IREE_RETURN_IF_ERROR(
+      loom_local_value_domain_register_value(domain, value_id, &ordinal));
   const loom_value_ordinal_t definition_ordinal = domain->definition_count++;
   if (ordinal != definition_ordinal) {
     const loom_value_id_t capture = domain->value_ids[definition_ordinal];
@@ -100,11 +93,10 @@ static iree_status_t loom_local_value_domain_register_definition(
 
 static iree_status_t loom_local_value_domain_register_value_callback(
     void* user_data, loom_value_id_t value_id) {
-  loom_local_value_domain_register_state_t* state =
-      (loom_local_value_domain_register_state_t*)user_data;
+  loom_local_value_domain_t* domain = (loom_local_value_domain_t*)user_data;
   loom_value_ordinal_t value_ordinal = LOOM_VALUE_ORDINAL_INVALID;
-  return loom_local_value_domain_register_value(state->domain, state->arena,
-                                                value_id, &value_ordinal);
+  return loom_local_value_domain_register_value(domain, value_id,
+                                                &value_ordinal);
 }
 
 static iree_status_t loom_local_value_domain_for_each_value_type_ref(
@@ -116,6 +108,25 @@ static iree_status_t loom_local_value_domain_for_each_value_type_ref(
        provider != LOOM_VALUE_ID_INVALID;
        provider = loom_type_dependencies_next(&dependencies)) {
     IREE_RETURN_IF_ERROR(visitor.fn(visitor.user_data, provider));
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_local_value_domain_for_each_attribute_ref(
+    const loom_module_t* module, const loom_op_t* op,
+    loom_local_value_domain_value_callback_t visitor) {
+  const uint32_t* attribute_owners = loom_op_attribute_owners(op);
+  for (uint8_t i = 0; i < op->attribute_count; ++i) {
+    if (!attribute_owners[i]) {
+      continue;
+    }
+    loom_type_use_iterator_t dependencies;
+    loom_attribute_dependencies_begin(&module->type_uses, op, i, &dependencies);
+    for (loom_value_id_t provider = loom_type_dependencies_next(&dependencies);
+         provider != LOOM_VALUE_ID_INVALID;
+         provider = loom_type_dependencies_next(&dependencies)) {
+      IREE_RETURN_IF_ERROR(visitor.fn(visitor.user_data, provider));
+    }
   }
   return iree_ok_status();
 }
@@ -172,6 +183,10 @@ static iree_status_t loom_local_value_domain_for_each_region_external_use(
             loom_local_value_domain_value_callback_make(
                 loom_local_value_domain_external_value_callback, state)));
       }
+      IREE_RETURN_IF_ERROR(loom_local_value_domain_for_each_attribute_ref(
+          state->module, op,
+          loom_local_value_domain_value_callback_make(
+              loom_local_value_domain_external_value_callback, state)));
       loom_region_t* const* regions = loom_op_regions(op);
       for (uint8_t i = 0; i < op->region_count; ++i) {
         IREE_RETURN_IF_ERROR(
@@ -213,33 +228,32 @@ static iree_status_t loom_local_value_domain_for_each_op_use(
     IREE_RETURN_IF_ERROR(loom_local_value_domain_for_each_value_type_ref(
         module, results[i], visitor));
   }
+  IREE_RETURN_IF_ERROR(
+      loom_local_value_domain_for_each_attribute_ref(module, op, visitor));
   return loom_local_value_domain_for_each_nested_external_use(module, op,
                                                               visitor);
 }
 
 static iree_status_t loom_local_value_domain_register_region_values(
-    loom_local_value_domain_t* domain, iree_arena_allocator_t* arena) {
-  loom_local_value_domain_register_state_t state = {
-      .domain = domain,
-      .arena = arena,
-  };
+    loom_local_value_domain_t* domain) {
   loom_local_value_domain_value_callback_t visitor =
       loom_local_value_domain_value_callback_make(
-          loom_local_value_domain_register_value_callback, &state);
+          loom_local_value_domain_register_value_callback, domain);
   const loom_block_t* block = NULL;
   loom_region_for_each_block(domain->region, block) {
     for (uint16_t i = 0; i < block->arg_count; ++i) {
       IREE_RETURN_IF_ERROR(loom_local_value_domain_register_definition(
-          domain, arena, loom_block_arg_id(block, i)));
+          domain, loom_block_arg_id(block, i)));
       IREE_RETURN_IF_ERROR(loom_local_value_domain_for_each_value_type_ref(
           domain->module, loom_block_arg_id(block, i), visitor));
     }
     const loom_op_t* op = NULL;
     loom_block_for_each_op(block, op) {
+      domain->operation_traits |= op->traits;
       const loom_value_id_t* results = loom_op_const_results(op);
       for (uint16_t i = 0; i < op->result_count; ++i) {
-        IREE_RETURN_IF_ERROR(loom_local_value_domain_register_definition(
-            domain, arena, results[i]));
+        IREE_RETURN_IF_ERROR(
+            loom_local_value_domain_register_definition(domain, results[i]));
       }
       IREE_RETURN_IF_ERROR(
           loom_local_value_domain_for_each_op_use(domain->module, op, visitor));
@@ -249,47 +263,45 @@ static iree_status_t loom_local_value_domain_register_region_values(
 }
 
 static iree_status_t loom_local_value_domain_register_region_tree_values(
-    loom_local_value_domain_t* domain, iree_arena_allocator_t* arena,
-    const loom_region_t* region) {
+    loom_local_value_domain_t* domain, const loom_region_t* region) {
   if (region == NULL) {
     return iree_ok_status();
   }
-  loom_local_value_domain_register_state_t state = {
-      .domain = domain,
-      .arena = arena,
-  };
   loom_local_value_domain_value_callback_t visitor =
       loom_local_value_domain_value_callback_make(
-          loom_local_value_domain_register_value_callback, &state);
+          loom_local_value_domain_register_value_callback, domain);
   const loom_block_t* block = NULL;
   loom_region_for_each_block(region, block) {
     for (uint16_t i = 0; i < block->arg_count; ++i) {
       IREE_RETURN_IF_ERROR(loom_local_value_domain_register_definition(
-          domain, arena, loom_block_arg_id(block, i)));
+          domain, loom_block_arg_id(block, i)));
       IREE_RETURN_IF_ERROR(loom_local_value_domain_for_each_value_type_ref(
           domain->module, loom_block_arg_id(block, i), visitor));
     }
     const loom_op_t* op = NULL;
     loom_block_for_each_op(block, op) {
+      domain->operation_traits |= op->traits;
       const loom_value_id_t* operands = loom_op_const_operands(op);
       for (uint16_t i = 0; i < op->operand_count; ++i) {
         loom_value_ordinal_t value_ordinal = LOOM_VALUE_ORDINAL_INVALID;
         IREE_RETURN_IF_ERROR(loom_local_value_domain_register_value(
-            domain, arena, operands[i], &value_ordinal));
+            domain, operands[i], &value_ordinal));
         IREE_RETURN_IF_ERROR(loom_local_value_domain_for_each_value_type_ref(
             domain->module, operands[i], visitor));
       }
       const loom_value_id_t* results = loom_op_const_results(op);
       for (uint16_t i = 0; i < op->result_count; ++i) {
-        IREE_RETURN_IF_ERROR(loom_local_value_domain_register_definition(
-            domain, arena, results[i]));
+        IREE_RETURN_IF_ERROR(
+            loom_local_value_domain_register_definition(domain, results[i]));
         IREE_RETURN_IF_ERROR(loom_local_value_domain_for_each_value_type_ref(
             domain->module, results[i], visitor));
       }
+      IREE_RETURN_IF_ERROR(loom_local_value_domain_for_each_attribute_ref(
+          domain->module, op, visitor));
       loom_region_t* const* regions = loom_op_regions(op);
       for (uint8_t i = 0; i < op->region_count; ++i) {
         IREE_RETURN_IF_ERROR(
-            loom_local_value_domain_register_region_tree_values(domain, arena,
+            loom_local_value_domain_register_region_tree_values(domain,
                                                                 regions[i]));
       }
     }
@@ -304,14 +316,15 @@ static iree_status_t loom_local_value_domain_acquire(
   *out_domain = (loom_local_value_domain_t){
       .module = module,
       .region = region,
+      .arena = arena,
   };
   loom_module_value_ordinal_scratch_acquire(module);
   out_domain->flags |= LOOM_LOCAL_VALUE_DOMAIN_FLAG_ACQUIRED | flags;
   iree_status_t status =
       iree_any_bit_set(flags, LOOM_LOCAL_VALUE_DOMAIN_FLAG_REGION_TREE)
           ? loom_local_value_domain_register_region_tree_values(out_domain,
-                                                                arena, region)
-          : loom_local_value_domain_register_region_values(out_domain, arena);
+                                                                region)
+          : loom_local_value_domain_register_region_values(out_domain);
   if (!iree_status_is_ok(status)) {
     loom_local_value_domain_release(out_domain);
   }
@@ -333,6 +346,21 @@ iree_status_t loom_local_value_domain_acquire_for_region_tree(
       out_domain);
 }
 
+iree_status_t loom_local_value_domain_relocate(
+    loom_local_value_domain_t* domain, iree_arena_allocator_t* arena) {
+  loom_value_id_t* value_ids = NULL;
+  if (domain->value_count != 0) {
+    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+        arena, domain->value_count, sizeof(*value_ids), (void**)&value_ids));
+    memcpy(value_ids, domain->value_ids,
+           domain->value_count * sizeof(*value_ids));
+  }
+  domain->arena = arena;
+  domain->value_ids = value_ids;
+  domain->value_capacity = domain->value_count;
+  return iree_ok_status();
+}
+
 void loom_local_value_domain_release(loom_local_value_domain_t* domain) {
   if (!domain ||
       !iree_any_bit_set(domain->flags, LOOM_LOCAL_VALUE_DOMAIN_FLAG_ACQUIRED)) {
@@ -343,5 +371,14 @@ void loom_local_value_domain_release(loom_local_value_domain_t* domain) {
                                             domain->value_ids[i]);
   }
   loom_module_value_ordinal_scratch_release(domain->module);
-  domain->flags = 0;
+  domain->flags &= ~LOOM_LOCAL_VALUE_DOMAIN_FLAG_ACQUIRED;
+}
+
+void loom_local_value_domain_restore(loom_local_value_domain_t* domain) {
+  loom_module_value_ordinal_scratch_acquire(domain->module);
+  for (loom_value_ordinal_t i = 0; i < domain->value_count; ++i) {
+    loom_module_value_ordinal_scratch_set(domain->module, domain->value_ids[i],
+                                          i);
+  }
+  domain->flags |= LOOM_LOCAL_VALUE_DOMAIN_FLAG_ACQUIRED;
 }

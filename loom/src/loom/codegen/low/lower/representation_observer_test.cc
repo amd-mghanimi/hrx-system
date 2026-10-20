@@ -56,6 +56,15 @@ static constexpr loom_low_lower_representation_boundary_t kBoundaries[] = {
     {LOOM_OP_VECTOR_MULI, kBoundaryVectorMultiply,
      LOOM_LOW_LOWER_REPRESENTATION_BOUNDARY_FLAG_RESULTS},
 };
+// Dense slots between the scalar and vector dialects are intentionally empty.
+static constexpr loom_low_lower_representation_boundary_span_t
+    kBoundarySpans[] = {
+        {0, 2}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0},
+        {0, 0}, {0, 0}, {0, 0}, {0, 0}, {0, 0}, {2, 4},
+};
+static_assert(IREE_ARRAYSIZE(kBoundarySpans) ==
+              LOOM_DIALECT_VECTOR - LOOM_DIALECT_SCALAR + 1);
+static_assert(2 + 4 == IREE_ARRAYSIZE(kBoundaries));
 static_assert(static_cast<loom_op_kind_t>(LOOM_OP_SCALAR_CONSTANT) <
               static_cast<loom_op_kind_t>(LOOM_OP_SCALAR_ASSUME));
 static_assert(static_cast<loom_op_kind_t>(LOOM_OP_SCALAR_ASSUME) <
@@ -119,6 +128,11 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
         loom_module_value_type(module, relation->source_value_id);
     const loom_type_t right_type =
         loom_module_value_type(module, relation->destination_value_id);
+    if (test->reject_vector_add_rhs_relation_ &&
+        source_op->kind == LOOM_OP_VECTOR_ADDI &&
+        relation->source_operand_index == 1) {
+      return false;
+    }
     return loom_type_equal(left_type, right_type) &&
            IsRepresentableType(left_type);
   }
@@ -128,7 +142,7 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
       loom_low_lower_representation_boundary_flags_t flags,
       loom_low_lower_context_t* context, const loom_op_t* source_op,
       loom_low_lower_representation_recorder_t* recorder) {
-    (void)user_data;
+    auto* test = static_cast<LowLowerRepresentationObserverTest*>(user_data);
     (void)context;
     const loom_low_representation_candidate_t* candidates = nullptr;
     iree_host_size_t candidate_count = 0;
@@ -147,6 +161,9 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
         loom_low_lower_representation_record_candidates(
             recorder, source_value_id, kTieCandidates,
             IREE_ARRAYSIZE(kTieCandidates));
+        if (test->claim_vector_extract_operand_) {
+          loom_low_lower_representation_claim_operand(recorder, 0);
+        }
         return;
       }
       case kBoundaryVectorAdd:
@@ -186,6 +203,32 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
     }
   }
 
+  static void ObserveUnclaimedOperand(
+      void* user_data, loom_low_lower_context_t* context,
+      const loom_op_t* source_op, uint16_t source_operand_index,
+      loom_low_lower_representation_recorder_t* recorder) {
+    (void)context;
+    (void)recorder;
+    auto* test = static_cast<LowLowerRepresentationObserverTest*>(user_data);
+    ASSERT_LT(source_operand_index, 64u);
+    switch (source_op->kind) {
+      case LOOM_OP_VECTOR_ADDI:
+        test->unclaimed_vector_add_operand_bits_ |= UINT64_C(1)
+                                                    << source_operand_index;
+        return;
+      case LOOM_OP_VECTOR_EXTRACT:
+        test->unclaimed_vector_extract_operand_bits_ |= UINT64_C(1)
+                                                        << source_operand_index;
+        return;
+      case LOOM_OP_FUNC_RETURN:
+        test->unclaimed_return_operand_bits_ |= UINT64_C(1)
+                                                << source_operand_index;
+        return;
+      default:
+        return;
+    }
+  }
+
   static void ObserveCallableBoundary(
       void* user_data,
       loom_low_lower_representation_callable_boundary_kind_t kind,
@@ -208,9 +251,29 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
     }
   }
 
-  static iree_status_t CaptureRepresentations(
-      void* user_data, loom_low_lower_context_t* context) {
+  static iree_status_t BeginObservation(void* user_data,
+                                        loom_low_lower_context_t* context,
+                                        void** out_observer_state) {
     auto* test = static_cast<LowLowerRepresentationObserverTest*>(user_data);
+    IREE_RETURN_IF_ERROR(loom_low_lower_representation_observer_begin(
+        &test->provider_, context, &test->observer_state_));
+    *out_observer_state = test;
+    return iree_ok_status();
+  }
+
+  static void Observe(void* observer_state, loom_low_lower_context_t* context,
+                      const loom_op_t* source_op) {
+    auto* test =
+        static_cast<LowLowerRepresentationObserverTest*>(observer_state);
+    loom_low_lower_representation_observer_observe(test->observer_state_,
+                                                   context, source_op);
+  }
+
+  static iree_status_t EndObservation(void* user_data,
+                                      loom_low_lower_context_t* context) {
+    auto* test = static_cast<LowLowerRepresentationObserverTest*>(user_data);
+    IREE_RETURN_IF_ERROR(loom_low_lower_representation_observer_end(
+        test->observer_state_, context));
     test->capture_called_ = true;
     loom_target_contract_query_environment_t query_environment = {};
     IREE_RETURN_IF_ERROR(loom_low_lower_source_query_environment_initialize(
@@ -261,25 +324,27 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
     target_facts_.fact_type = &loom_test_target_fact_type;
     target_facts_.storage.bundle = *loom_test_target_bundles.values[1];
 
-    provider_ = (loom_low_lower_representation_provider_t){
-        /*.relation=*/RelatesValues,
-        /*.observe_boundary=*/ObserveBoundary,
-        /*.observe_callable_boundary=*/ObserveCallableBoundary,
-        /*.boundaries=*/kBoundaries,
-        /*.boundary_count=*/IREE_ARRAYSIZE(kBoundaries),
-        /*.relation_mask=*/LOOM_VALUE_RELATION_MASK_ALL,
-        /*.user_data=*/this,
+    provider_ = loom_low_lower_representation_provider_t{
+        .relation = RelatesValues,
+        .observe_boundary = ObserveBoundary,
+        .observe_callable_boundary = ObserveCallableBoundary,
+        .observe_unclaimed_operand = ObserveUnclaimedOperand,
+        .boundaries = kBoundaries,
+        .boundary_spans = kBoundarySpans,
+        .boundary_count = IREE_ARRAYSIZE(kBoundaries),
+        .boundary_dialect_base_id = LOOM_DIALECT_SCALAR,
+        .boundary_dialect_count = IREE_ARRAYSIZE(kBoundarySpans),
+        .relation_mask = LOOM_VALUE_RELATION_MASK_ALL,
+        .user_data = this,
     };
-    source_plan_observer_ = (loom_low_lower_source_plan_observer_t){
-        /*.begin=*/loom_low_lower_representation_observer_begin,
-        /*.observe=*/loom_low_lower_representation_observer_observe,
-        /*.end=*/loom_low_lower_representation_observer_end,
-        /*.user_data=*/&provider_,
+    source_plan_observer_ = loom_low_lower_source_plan_observer_t{
+        .begin = BeginObservation,
+        .observe = Observe,
+        .end = EndObservation,
+        .user_data = this,
     };
     policy_ = *loom_test_low_lower_policy();
     policy_.source_plan_observer = &source_plan_observer_;
-    policy_.emit_preamble.fn = CaptureRepresentations;
-    policy_.emit_preamble.user_data = this;
     options_.target_facts = &target_facts_;
     options_.descriptor_registry = &descriptor_registry_.registry;
     options_.policy = &policy_;
@@ -307,13 +372,14 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
     const loom_symbol_ref_t symbol = {
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
     loom_op_t* function_op = nullptr;
     IREE_CHECK_OK(loom_func_def_build(
-        &module_builder, /*build_flags=*/0, /*visibility=*/0, /*retain=*/0,
-        /*cc=*/0, /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+        &module_builder, /*build_flags=*/0, /*visibility=*/0, /*linkage=*/0,
+        /*retain=*/0,
+        /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
         loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
         LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), symbol,
         argument_types, argument_count, &result_type, 1, nullptr, 0, nullptr, 0,
@@ -342,9 +408,9 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
     IREE_CHECK_OK(loom_builder_intern_string(builder, name, &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    return (loom_symbol_ref_t){
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+    return loom_symbol_ref_t{
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
   }
 
@@ -373,6 +439,8 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
   loom_value_fact_table_t fact_table_ = {};
   loom_low_lower_representation_provider_t provider_ = {};
   loom_low_lower_source_plan_observer_t source_plan_observer_ = {};
+  // Representation observer state borrowed during source planning.
+  void* observer_state_ = nullptr;
   loom_low_lower_policy_t policy_ = {};
   loom_low_lower_options_t options_ = {};
   loom_low_lower_result_t result_ = {};
@@ -382,8 +450,68 @@ class LowLowerRepresentationObserverTest : public ::testing::Test {
   uint32_t source_function_boundary_count_ = 0;
   uint32_t source_call_boundary_count_ = 0;
   uint32_t source_exit_boundary_count_ = 0;
+  uint64_t unclaimed_vector_add_operand_bits_ = 0;
+  uint64_t unclaimed_vector_extract_operand_bits_ = 0;
+  uint64_t unclaimed_return_operand_bits_ = 0;
   bool capture_called_ = false;
+  bool reject_vector_add_rhs_relation_ = false;
+  bool claim_vector_extract_operand_ = false;
 };
+
+TEST_F(LowLowerRepresentationObserverTest,
+       ReportsOnlyOperandUsesWithoutAcceptedRelations) {
+  reject_vector_add_rhs_relation_ = true;
+  const loom_type_t vector_type = loom_type_shaped_1d(
+      LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_I32, loom_dim_pack_static(4), 0);
+  const loom_type_t i32_type = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
+  const loom_type_t argument_types[] = {vector_type, vector_type};
+  loom_builder_t builder =
+      BuildFunction(argument_types, IREE_ARRAYSIZE(argument_types), i32_type);
+  loom_block_t* entry_block = builder.ip.block;
+  loom_op_t* add = nullptr;
+  IREE_ASSERT_OK(loom_vector_addi_build(
+      &builder, /*instance_flags=*/0, loom_block_arg_id(entry_block, 0),
+      loom_block_arg_id(entry_block, 1), vector_type, LOOM_LOCATION_UNKNOWN,
+      &add));
+  const int64_t static_index = 0;
+  loom_op_t* extract = nullptr;
+  IREE_ASSERT_OK(loom_vector_extract_build(
+      &builder, loom_vector_addi_result(add), nullptr, 0, &static_index, 1,
+      i32_type, LOOM_LOCATION_UNKNOWN, &extract));
+  const loom_value_id_t result = loom_vector_extract_result(extract);
+  loom_op_t* return_op = nullptr;
+  IREE_ASSERT_OK(loom_func_return_build(&builder, &result, 1,
+                                        LOOM_LOCATION_UNKNOWN, &return_op));
+
+  IREE_ASSERT_OK(Lower());
+  EXPECT_EQ(unclaimed_vector_add_operand_bits_, UINT64_C(1) << 1);
+  EXPECT_EQ(unclaimed_vector_extract_operand_bits_, UINT64_C(1));
+  EXPECT_EQ(unclaimed_return_operand_bits_, 0u);
+}
+
+TEST_F(LowLowerRepresentationObserverTest,
+       TargetBoundaryCanClaimExactOperandUse) {
+  claim_vector_extract_operand_ = true;
+  const loom_type_t vector_type = loom_type_shaped_1d(
+      LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_I32, loom_dim_pack_static(4), 0);
+  const loom_type_t i32_type = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
+  const loom_type_t argument_types[] = {vector_type};
+  loom_builder_t builder =
+      BuildFunction(argument_types, IREE_ARRAYSIZE(argument_types), i32_type);
+  const int64_t static_index = 0;
+  loom_op_t* extract = nullptr;
+  IREE_ASSERT_OK(loom_vector_extract_build(
+      &builder, loom_block_arg_id(builder.ip.block, 0), nullptr, 0,
+      &static_index, 1, i32_type, LOOM_LOCATION_UNKNOWN, &extract));
+  const loom_value_id_t result = loom_vector_extract_result(extract);
+  loom_op_t* return_op = nullptr;
+  IREE_ASSERT_OK(loom_func_return_build(&builder, &result, 1,
+                                        LOOM_LOCATION_UNKNOWN, &return_op));
+
+  IREE_ASSERT_OK(Lower());
+  EXPECT_EQ(unclaimed_vector_extract_operand_bits_, 0u);
+  EXPECT_EQ(unclaimed_return_operand_bits_, 0u);
+}
 
 TEST_F(LowLowerRepresentationObserverTest,
        AggregatesCostsAcrossRawLoopCarrier) {
@@ -408,9 +536,11 @@ TEST_F(LowLowerRepresentationObserverTest,
                                         rhs, vector_type, LOOM_LOCATION_UNKNOWN,
                                         &add));
   const loom_value_id_t seed = loom_vector_addi_result(add);
-  const loom_tied_result_t tied_result = {/*.result_index=*/0,
-                                          /*.operand_index=*/3,
-                                          /*.has_type_change=*/false};
+  const loom_tied_result_t tied_result = {
+      .result_index = 0,
+      .operand_index = 3,
+      .has_type_change = false,
+  };
   loom_op_t* loop = nullptr;
   IREE_ASSERT_OK(
       loom_scf_for_build(&builder, /*build_flags=*/0, lower_bound, upper_bound,

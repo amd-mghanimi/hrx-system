@@ -26,7 +26,7 @@
 
 #include "iree/base/api.h"
 #include "loom/error/emitter.h"
-#include "loom/error/error_defs.h"
+#include "loom/error/parameter.h"
 #include "loom/error/renderer.h"
 #include "loom/util/stream.h"
 
@@ -59,18 +59,28 @@ static inline const char* loom_source_provenance_name(
   }
 }
 
-// A source range identifying a span of text in a source buffer.
-// Both offsets are byte positions into |source|. The range is
-// [start, end) — end is one past the last byte.
+// A recorded location with optional text. Filename and one-based coordinates
+// remain valid without source bytes; zero coordinates denote unavailable
+// values. Byte offsets are [start, end) within the identified source and may
+// be known even when its contents are unavailable; unknown offsets are zero.
 typedef struct loom_source_range_t {
+  // Whether text is original, printed IR, or unavailable.
   loom_source_provenance_t provenance;
+  // Borrowed identity, independent of source-text availability.
   iree_string_view_t filename;
+  // Optional borrowed source buffer backing the byte offsets.
   iree_string_view_t source;
+  // First byte in the range.
   iree_host_size_t start;
+  // One past the last byte in the range.
   iree_host_size_t end;
+  // One-based starting line, or zero when unknown.
   uint32_t start_line;
+  // One-based starting column, or zero when unknown.
   uint32_t start_column;
+  // One-based ending line, or zero when unknown.
   uint32_t end_line;
+  // One-based ending column, or zero when unknown.
   uint32_t end_column;
 } loom_source_range_t;
 
@@ -136,15 +146,22 @@ typedef struct loom_diagnostic_related_location_t {
 // message. This ensures JSON sinks get structured data and text sinks
 // get consistent formatting without duplicate work.
 typedef struct loom_diagnostic_t {
+  // Severity selected by the error definition.
   loom_diagnostic_severity_t severity;
 
-  // Structured error identity and parameters. Always non-NULL.
+  // Structured error definition. Always non-NULL.
   const loom_error_def_t* error;
+  // Borrowed parameter values in definition order.
   const loom_diagnostic_param_t* params;
+  // Number of values in params.
   iree_host_size_t param_count;
 
   // Which subsystem emitted this diagnostic.
   loom_emitter_t emitter;
+
+  // Module owning type and symbol identities in the parameters, or NULL for
+  // diagnostics without module-backed parameters. Borrowed for the sink call.
+  const loom_module_t* module;
 
   // Where the error was detected (byte range in source text or bytecode).
   // The text sink uses this for caret rendering.

@@ -4,23 +4,62 @@ aie2p.target<array> @array_target
 
 aie2p.target<core> @core_target
 
-// The source stages form a DAG, but coalescing the first and last stages
-// creates a worker cycle. Each resident worker waits for all of its inputs
-// before publishing any output, so this grouping cannot make progress.
-// ERROR@+1: TARGET/087 {worker="1", group="1", lane="0"}
-pipeline.def<kernel> public retain target(@array_target) @cyclic_worker_array() launch(%input: buffer, %output: buffer) {
-  %lane_count = index.constant 1 : index
-  %base = index.constant 0 : offset
-  %outer_workers = group.create %lane_count : index -> group
-  %middle_workers = group.create %lane_count : index -> group
-  %input_view = buffer.view %input[%base] : buffer -> view<16xi32>
-  %output_view = buffer.view %output[%base] : buffer -> view<16xi32>
-  %input_flow = pipeline.read %input_view on %outer_workers : view<16xi32>, group -> pipeline.flow<tile<16xi32>>
-  %first_flow = pipeline.stage @copy_i32x16 on %outer_workers(%input_flow) : (group, pipeline.flow<tile<16xi32>>) -> (pipeline.flow<tile<16xi32>>)
-  %middle_flow = pipeline.stage @copy_i32x16 on %middle_workers(%first_flow) : (group, pipeline.flow<tile<16xi32>>) -> (pipeline.flow<tile<16xi32>>)
-  %output_flow = pipeline.stage @copy_i32x16 on %outer_workers(%middle_flow) : (group, pipeline.flow<tile<16xi32>>) -> (pipeline.flow<tile<16xi32>>)
-  pipeline.write %output_flow to %output_view : pipeline.flow<tile<16xi32>>, view<16xi32>
-  pipeline.return
+func.def target(@core_target) @cyclic_worker_array_worker_0(%input: buffer, %feedback: buffer, %intermediate: buffer, %output: buffer) {
+  %input_aligned, %intermediate_aligned = buffer.assume.alignment %input, %intermediate {minimum_alignment = 64} : buffer, buffer
+  %input_offset = index.constant 0 : offset
+  %input_view = buffer.view %input_aligned[%input_offset] : buffer -> view<16xi32>
+  %intermediate_view = buffer.view %intermediate_aligned[%input_offset] : buffer -> view<16xi32>
+  %input_value = vector.load %input_view[0] : view<16xi32> -> vector<16xi32>
+  vector.store %input_value, %intermediate_view[0] : vector<16xi32>, view<16xi32>
+  %feedback_aligned, %output_aligned = buffer.assume.alignment %feedback, %output {minimum_alignment = 64} : buffer, buffer
+  %output_offset = index.constant 0 : offset
+  %feedback_view = buffer.view %feedback_aligned[%output_offset] : buffer -> view<16xi32>
+  %output_view = buffer.view %output_aligned[%output_offset] : buffer -> view<16xi32>
+  %feedback_value = vector.load %feedback_view[0] : view<16xi32> -> vector<16xi32>
+  vector.store %feedback_value, %output_view[0] : vector<16xi32>, view<16xi32>
+  func.return
+}
+
+// Both worker instances wait for their complete input sets, forming a cycle.
+// ERROR@+1: XDNA/005 {worker="1", group="1", lane="0"}
+low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array_program) abi_layout({binding_count = 2}) @cyclic_worker_array() asm {
+  %outer_worker_count = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %outer_group = group %outer_worker_count
+  %middle_worker_count = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %middle_group = group %middle_worker_count
+  %outer_lane = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %outer_worker = worker %outer_group, %outer_lane, @cyclic_worker_array_worker_0
+  %middle_lane = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %middle_worker = worker %middle_group, %middle_lane, @copy_i32x16
+  %input = binding 0, "read"
+  %output = binding 1, "write"
+  %input_sender = sender %input, 0 : reg<aie2p.array.sender : tile<16xi32>>
+  %outer_input_receiver = receiver %outer_worker, 0 : reg<aie2p.array.receiver : tile<16xi32>>
+  %input_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %input_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %input_channel = channel %input_sender, %outer_input_receiver, %input_capacity, %input_records : reg<aie2p.array.channel : tile<16xi32>>
+  %outer_sender = sender %outer_worker, 2 : reg<aie2p.array.sender : tile<16xi32>>
+  %middle_receiver = receiver %middle_worker, 0 : reg<aie2p.array.receiver : tile<16xi32>>
+  %forward_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %forward_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %forward_channel = channel %outer_sender, %middle_receiver, %forward_capacity, %forward_records : reg<aie2p.array.channel : tile<16xi32>>
+  %middle_sender = sender %middle_worker, 1 : reg<aie2p.array.sender : tile<16xi32>>
+  %outer_feedback_receiver = receiver %outer_worker, 1 : reg<aie2p.array.receiver : tile<16xi32>>
+  %feedback_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %feedback_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %feedback_channel = channel %middle_sender, %outer_feedback_receiver, %feedback_capacity, %feedback_records : reg<aie2p.array.channel : tile<16xi32>>
+  %outer_output_sender = sender %outer_worker, 3 : reg<aie2p.array.sender : tile<16xi32>>
+  %output_receiver = receiver %output, 0 : reg<aie2p.array.receiver : tile<16xi32>>
+  %output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %output_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %output_channel = channel %outer_output_sender, %output_receiver, %output_capacity, %output_records : reg<aie2p.array.channel : tile<16xi32>>
+  %outer_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %outer_row = constant.u32 2 : reg<aie2p.array.scalar : index>
+  constrain.location %outer_worker, %outer_column, %outer_row
+  %middle_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %middle_row = constant.u32 3 : reg<aie2p.array.scalar : index>
+  constrain.location %middle_worker, %middle_column, %middle_row
+  return
 }
 
 func.def target(@core_target) @copy_i32x16(%input: buffer, %output: buffer) {

@@ -1,0 +1,248 @@
+// RUN: emit source-low target=amd.xdna.aie2p:core output=low
+
+func.def @scale_f32_down(%value: f32) -> (f32) {
+  %factor = scalar.constant 0.00390625 : f32
+  %result = scalar.mulf %value, %factor : f32
+  func.return %result : f32
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @scale_f32_down(%value: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %6 = mov.i32 2147483647
+  %7 = and %value, %6
+  %8 = mov.short -23
+  %9 = lshl %7, %8
+  %10 = mov.i32 8388607
+  %11 = and %7, %10
+  %12 = mov.short 1
+  %13 = mov.short 0
+  %14 = mov.i32 8388608
+  %15 = eqz %9
+  %16 = copy %15 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %17 = sel.nez %13, %14, %16
+  %18 = or %11, %17
+  %19 = mov.short 8
+  %20 = copy %15 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %21 = sel.nez %12, %9, %20
+  %22 = ltu %21, %19
+  %23 = copy %22 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %24 = sel.nez %21, %19, %23
+  %25 = add %19, 1
+  %26 = sub %25, %24
+  %27 = mov.short 25
+  %28 = ltu %27, %26
+  %29 = copy %28 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %30 = sel.nez %27, %26, %29
+  %33 = sub %13, %30
+  %34 = lshl %18, %33
+  %35 = and %34, %12
+  %36 = lshl %12, %30
+  %37 = mov.short -1
+  %38 = lshl %36, %37
+  %39 = sub %38, %12
+  %40 = add.rr %39, %35
+  %41 = add.rr %18, %40
+  %42 = lshl %41, %33
+  %43 = mov.short 23
+  %44 = lshl %19, %43
+  %45 = sub %7, %44
+  %46 = lshl %25, %43
+  %47 = geu %7, %46
+  %48 = copy %47 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %49 = sel.nez %45, %42, %48
+  %50 = mov.i32 998244352
+  %51 = xor %value, %50
+  %52 = mov.i32 -2147483648
+  %53 = and %51, %52
+  %54 = or %49, %53
+  %55 = mov.i32 2139095040
+  %56 = ltu %55, %7
+  %57 = mov.i32 4194304
+  %58 = or %value, %57
+  %59 = or %55, %53
+  %60 = copy %56 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %61 = sel.nez %58, %59, %60
+  %62 = geu %7, %55
+  %63 = copy %62 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %result = sel.nez %61, %54, %63
+  return %result
+}
+
+// ====
+
+func.def @scale_f16_down_negative(%value: f16) -> (f16) {
+  %factor = scalar.constant -0.5 : f16
+  %result = scalar.mulf %value, %factor : f16
+  func.return %result : f16
+}
+
+// ----
+low.func.def target<amd.xdna.aie2p.core> abi(object_function) @scale_f16_down_negative(%value: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %6 = mov.i32 32768
+  %7 = mov.i32 32767
+  %8 = mov.short 16
+  %9 = and %value, %6
+  %10 = lshl %9, %8
+  %11 = and %value, %7
+  %12 = clz %11
+  %13 = add %12, -21
+  %14 = mov.short 0
+  %15 = lt %13, %14
+  %16 = copy %15 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %17 = sel.nez %14, %13, %16
+  %18 = lshl %11, %17
+  %19 = mov.short 13
+  %20 = lshl %18, %19
+  %21 = mov.i32 31744
+  %22 = geu %11, %21
+  %23 = mov.short 112
+  %24 = mov.short 224
+  %25 = copy %22 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %26 = sel.nez %24, %23, %25
+  %27 = sub %26, %17
+  %28 = mov.short 23
+  %29 = lshl %27, %28
+  %30 = add.rr %20, %29
+  %31 = copy %11 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %32 = sel.nez %30, %14, %31
+  %33 = or %10, %32
+  %34 = mov.i32 2147483647
+  %35 = and %33, %34
+  %36 = mov.short -23
+  %37 = lshl %35, %36
+  %38 = mov.i32 8388607
+  %39 = and %35, %38
+  %40 = mov.short 1
+  %42 = mov.i32 8388608
+  %43 = eqz %37
+  %44 = copy %43 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %45 = sel.nez %14, %42, %44
+  %46 = or %39, %45
+  %48 = copy %43 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %49 = sel.nez %40, %37, %48
+  %50 = ltu %49, %40
+  %51 = copy %50 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %52 = sel.nez %49, %40, %51
+  %53 = add %40, 1
+  %54 = sub %53, %52
+  %55 = mov.short 25
+  %56 = ltu %55, %54
+  %57 = copy %56 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %58 = sel.nez %55, %54, %57
+  %61 = sub %14, %58
+  %62 = lshl %46, %61
+  %63 = and %62, %40
+  %64 = lshl %40, %58
+  %65 = mov.short -1
+  %66 = lshl %64, %65
+  %67 = sub %66, %40
+  %68 = add.rr %67, %63
+  %69 = add.rr %46, %68
+  %70 = lshl %69, %61
+  %72 = lshl %40, %28
+  %73 = sub %35, %72
+  %74 = lshl %53, %28
+  %75 = geu %35, %74
+  %76 = copy %75 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %77 = sel.nez %73, %70, %76
+  %78 = mov.i32 47104
+  %80 = lshl %78, %8
+  %81 = xor %33, %80
+  %82 = mov.i32 -2147483648
+  %83 = and %81, %82
+  %84 = or %77, %83
+  %85 = mov.i32 2139095040
+  %86 = ltu %85, %35
+  %87 = mov.i32 4194304
+  %88 = or %33, %87
+  %89 = or %85, %83
+  %90 = copy %86 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %91 = sel.nez %88, %89, %90
+  %92 = geu %35, %85
+  %93 = copy %92 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %94 = sel.nez %91, %84, %93
+  %101 = mov.short -13
+  %102 = mov.short -16
+  %104 = and %94, %82
+  %105 = lshl %104, %102
+  %106 = and %94, %34
+  %107 = lshl %106, %36
+  %108 = and %106, %38
+  %109 = mov.i32 939524096
+  %110 = sub %106, %109
+  %111 = lshl %110, %101
+  %112 = and %111, %40
+  %113 = mov.i32 4095
+  %114 = add.rr %113, %112
+  %115 = add.rr %110, %114
+  %116 = lshl %115, %101
+  %117 = mov.short 102
+  %118 = mov.short 113
+  %120 = ltu %107, %117
+  %121 = copy %120 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %122 = sel.nez %117, %107, %121
+  %123 = geu %122, %118
+  %124 = copy %123 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %125 = sel.nez %23, %122, %124
+  %126 = mov.short 126
+  %127 = sub %125, %126
+  %128 = or %108, %42
+  %129 = lshl %128, %127
+  %130 = and %129, %40
+  %131 = mov.short 125
+  %132 = sub %131, %125
+  %133 = lshl %40, %132
+  %134 = sub %133, %40
+  %135 = add.rr %134, %130
+  %136 = add.rr %128, %135
+  %137 = lshl %136, %127
+  %138 = copy %120 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %139 = sel.nez %14, %137, %138
+  %140 = ltu %107, %118
+  %141 = copy %140 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %142 = sel.nez %139, %116, %141
+  %144 = mov.short 143
+  %145 = geu %107, %144
+  %146 = copy %145 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %147 = sel.nez %21, %142, %146
+  %148 = lshl %108, %101
+  %149 = mov.short 512
+  %150 = or %148, %149
+  %151 = or %21, %150
+  %152 = nez %108
+  %153 = copy %152 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %154 = sel.nez %151, %21, %153
+  %155 = mov.short 255
+  %156 = eq %107, %155
+  %157 = copy %156 : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %158 = sel.nez %154, %147, %157
+  %result = or %105, %158
+  return %result
+}
+
+// ====
+// RUN: compile-report target-legalize{mode=final},source-to-low,low-dce
+
+aie2p.target<core> @target
+
+func.def target(@target) @report_scale_selection(%value: vector<32xf32>, %lhs: f32, %rhs: f32) -> (vector<32xf32>, f32) {
+  %factor = vector.constant 0.00390625 : vector<32xf32>
+  %scaled = vector.mulf %value, %factor : vector<32xf32>
+  %general = scalar.mulf %lhs, %rhs : f32
+  func.return %scaled, %general : vector<32xf32>, f32
+}
+
+// ----
+COMPILE-REPORT: summary artifact=none status=OK function=- backend=- bundle=- export=- export_symbol=- config=- lowered=-
+COMPILE-REPORT: source_low selected_ops=9 emitted_ops=462 rows=9 unkeyed_maximum_emitted_ops=0
+COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 maximum_created_ops=7
+COMPILE-REPORT: source_low[0] function=report_scale_selection source_op=vector.constant selection=rule descriptor_key=amd.xdna.aie2p.splat.i32x16 descriptor_semantic_tag=integer.splat.i32x16 emitted_ops=0
+COMPILE-REPORT: source_low[1] function=report_scale_selection source_op=vector.slice selection=rule descriptor_key=amd.xdna.aie2p.move.accumulator512.to.vector512 descriptor_semantic_tag=register.move.accumulator512.to.vector512 emitted_ops=2
+COMPILE-REPORT: source_low[2] function=report_scale_selection source_op=vector.slice selection=rule descriptor_key=amd.xdna.aie2p.move.accumulator512.to.vector512 descriptor_semantic_tag=register.move.accumulator512.to.vector512 emitted_ops=0
+COMPILE-REPORT: source_low[3] function=report_scale_selection source_op=vector.mulf selection=rule plan_key=exact_power_of_two_float_scale descriptor_key=amd.xdna.aie2p.select.i32x16.mask64 descriptor_semantic_tag=integer.select.i32x16.mask64 emitted_ops=146
+COMPILE-REPORT: source_low[4] function=report_scale_selection source_op=vector.slice selection=rule descriptor_key=amd.xdna.aie2p.move.accumulator512.to.vector512 descriptor_semantic_tag=register.move.accumulator512.to.vector512 emitted_ops=2
+COMPILE-REPORT: source_low[5] function=report_scale_selection source_op=vector.slice selection=rule descriptor_key=amd.xdna.aie2p.move.accumulator512.to.vector512 descriptor_semantic_tag=register.move.accumulator512.to.vector512 emitted_ops=0
+COMPILE-REPORT: source_low[6] function=report_scale_selection source_op=vector.mulf selection=rule plan_key=exact_power_of_two_float_scale descriptor_key=amd.xdna.aie2p.select.i32x16.mask64 descriptor_semantic_tag=integer.select.i32x16.mask64 emitted_ops=146
+COMPILE-REPORT: source_low[7] function=report_scale_selection source_op=vector.concat selection=rule descriptor_key=amd.xdna.aie2p.move.vector512.to.accumulator512 descriptor_semantic_tag=register.move.vector512.to.accumulator512 emitted_ops=3
+COMPILE-REPORT: source_low[8] function=report_scale_selection source_op=scalar.mulf selection=rule plan_key=exact_binary32 descriptor_key=amd.xdna.aie2p.select.nonzero.i32 descriptor_semantic_tag=integer.select.nonzero.i32 emitted_ops=163
+COMPILE-REPORT: target_legalization[0] function=report_scale_selection source_op=vector.mulf mode=final policy=prefer-native action=rewritten outcome=target-rewrite contract=unsupported legalizer=vector-packet strategy=target bundle=target config=target scalarized=false source_rejections=0x00000000 source_rejection_detail=0 target_rejections=0x00000000 missing_features=0x00000000 missing_facts=0x00000000 created_ops=7 erased_ops=1

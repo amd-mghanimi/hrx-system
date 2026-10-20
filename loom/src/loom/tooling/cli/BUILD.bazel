@@ -21,3 +21,38 @@ loom_cc_library(
         "//runtime/src/iree/base/tooling:flags",
     ],
 )
+
+loom_cc_library(
+    name = "loomc_options",
+    srcs = ["loomc_options.c"],
+    hdrs = ["loomc_options.h"],
+    deps = [
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/config:text_binding",
+        "//loom/src/loom/sanitizer:options",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "loomc_result",
+    srcs = ["loomc_result.c"],
+    hdrs = ["loomc_result.h"],
+    deps = [
+        "//loom/binding/c:loomc",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "loomc_diagnostic_json",
+    srcs = ["loomc_diagnostic_json.c"],
+    hdrs = ["loomc_diagnostic_json.h"],
+    deps = [
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/util:json",
+        "//loom/src/loom/util:stream",
+        "//runtime/src/iree/base",
+    ],
+)

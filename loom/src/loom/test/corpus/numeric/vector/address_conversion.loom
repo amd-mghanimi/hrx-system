@@ -1,0 +1,242 @@
+// Address conversions preserve signed index values, unsigned offset values,
+// and the low destination bits of every fixed-width integer type.
+func.def @vector_address_conversions(%input: buffer, %address_output: buffer, %byte_output: buffer, %half_output: buffer, %word_output: buffer) {
+  %origin = index.constant 0 : offset
+  %input_view = buffer.view %input[%origin] : buffer -> view<4xi32>
+  %address_results = buffer.view %address_output[%origin] : buffer -> view<56xi64>
+  %byte_results = buffer.view %byte_output[%origin] : buffer -> view<16xi8>
+  %half_results = buffer.view %half_output[%origin] : buffer -> view<8xi16>
+  %word_results = buffer.view %word_output[%origin] : buffer -> view<8xi32>
+
+  %words = vector.load %input_view[0] : view<4xi32> -> vector<4xi32>
+  %c0_i32x4 = vector.constant 0 : vector<4xi32>
+  %predicates = vector.cmpi ne, %words, %c0_i32x4 : vector<4xi32> -> vector<4xi1>
+  %bytes = vector.trunci %words : vector<4xi32> to vector<4xi8>
+  %halves = vector.trunci %words : vector<4xi32> to vector<4xi16>
+  %signed_wide = vector.extsi %words : vector<4xi32> to vector<4xi64>
+  %unsigned_wide = vector.extui %words : vector<4xi32> to vector<4xi64>
+
+  %predicate_index = vector.index_cast %predicates : vector<4xi1> to vector<4xindex>
+  %byte_index = vector.index_cast %bytes : vector<4xi8> to vector<4xindex>
+  %half_index = vector.index_cast %halves : vector<4xi16> to vector<4xindex>
+  %word_index = vector.index_cast %words : vector<4xi32> to vector<4xindex>
+  %wide_index = vector.index_cast %signed_wide : vector<4xi64> to vector<4xindex>
+  %predicate_offset = vector.index_cast %predicates : vector<4xi1> to vector<4xoffset>
+  %byte_offset = vector.index_cast %bytes : vector<4xi8> to vector<4xoffset>
+  %half_offset = vector.index_cast %halves : vector<4xi16> to vector<4xoffset>
+  %word_offset = vector.index_cast %words : vector<4xi32> to vector<4xoffset>
+  %wide_offset = vector.index_cast %unsigned_wide : vector<4xi64> to vector<4xoffset>
+
+  %predicate_index_wide = vector.index_cast %predicate_index : vector<4xindex> to vector<4xi64>
+  %byte_index_wide = vector.index_cast %byte_index : vector<4xindex> to vector<4xi64>
+  %half_index_wide = vector.index_cast %half_index : vector<4xindex> to vector<4xi64>
+  %word_index_wide = vector.index_cast %word_index : vector<4xindex> to vector<4xi64>
+  %wide_index_wide = vector.index_cast %wide_index : vector<4xindex> to vector<4xi64>
+  %predicate_offset_wide = vector.index_cast %predicate_offset : vector<4xoffset> to vector<4xi64>
+  %byte_offset_wide = vector.index_cast %byte_offset : vector<4xoffset> to vector<4xi64>
+  %half_offset_wide = vector.index_cast %half_offset : vector<4xoffset> to vector<4xi64>
+  %word_offset_wide = vector.index_cast %word_offset : vector<4xoffset> to vector<4xi64>
+  %wide_offset_wide = vector.index_cast %wide_offset : vector<4xoffset> to vector<4xi64>
+  vector.store %predicate_index_wide, %address_results[0] : vector<4xi64>, view<56xi64>
+  vector.store %byte_index_wide, %address_results[4] : vector<4xi64>, view<56xi64>
+  vector.store %half_index_wide, %address_results[8] : vector<4xi64>, view<56xi64>
+  vector.store %word_index_wide, %address_results[12] : vector<4xi64>, view<56xi64>
+  vector.store %wide_index_wide, %address_results[16] : vector<4xi64>, view<56xi64>
+  vector.store %predicate_offset_wide, %address_results[20] : vector<4xi64>, view<56xi64>
+  vector.store %byte_offset_wide, %address_results[24] : vector<4xi64>, view<56xi64>
+  vector.store %half_offset_wide, %address_results[28] : vector<4xi64>, view<56xi64>
+  vector.store %word_offset_wide, %address_results[32] : vector<4xi64>, view<56xi64>
+  vector.store %wide_offset_wide, %address_results[36] : vector<4xi64>, view<56xi64>
+
+  %index_predicates = vector.index_cast %word_index : vector<4xindex> to vector<4xi1>
+  %index_bytes = vector.index_cast %word_index : vector<4xindex> to vector<4xi8>
+  %index_halves = vector.index_cast %word_index : vector<4xindex> to vector<4xi16>
+  %index_words = vector.index_cast %word_index : vector<4xindex> to vector<4xi32>
+  %offset_predicates = vector.index_cast %word_offset : vector<4xoffset> to vector<4xi1>
+  %offset_bytes = vector.index_cast %word_offset : vector<4xoffset> to vector<4xi8>
+  %offset_halves = vector.index_cast %word_offset : vector<4xoffset> to vector<4xi16>
+  %offset_words = vector.index_cast %word_offset : vector<4xoffset> to vector<4xi32>
+  %c0_i8x4 = vector.constant 0 : vector<4xi8>
+  %c1_i8x4 = vector.constant 1 : vector<4xi8>
+  %index_predicate_bytes = vector.select %index_predicates, %c1_i8x4, %c0_i8x4 : vector<4xi8>
+  %offset_predicate_bytes = vector.select %offset_predicates, %c1_i8x4, %c0_i8x4 : vector<4xi8>
+  vector.store %index_predicate_bytes, %byte_results[0] : vector<4xi8>, view<16xi8>
+  vector.store %offset_predicate_bytes, %byte_results[4] : vector<4xi8>, view<16xi8>
+  vector.store %index_bytes, %byte_results[8] : vector<4xi8>, view<16xi8>
+  vector.store %offset_bytes, %byte_results[12] : vector<4xi8>, view<16xi8>
+  vector.store %index_halves, %half_results[0] : vector<4xi16>, view<8xi16>
+  vector.store %offset_halves, %half_results[4] : vector<4xi16>, view<8xi16>
+  vector.store %index_words, %word_results[0] : vector<4xi32>, view<8xi32>
+  vector.store %offset_words, %word_results[4] : vector<4xi32>, view<8xi32>
+
+  %same_index = vector.index_cast %word_index : vector<4xindex> to vector<4xindex>
+  %same_offset = vector.index_cast %word_offset : vector<4xoffset> to vector<4xoffset>
+  %cross_offset = vector.index_cast %predicate_index : vector<4xindex> to vector<4xoffset>
+  %cross_index = vector.index_cast %predicate_offset : vector<4xoffset> to vector<4xindex>
+  %same_index_wide = vector.index_cast %same_index : vector<4xindex> to vector<4xi64>
+  %same_offset_wide = vector.index_cast %same_offset : vector<4xoffset> to vector<4xi64>
+  %cross_offset_wide = vector.index_cast %cross_offset : vector<4xoffset> to vector<4xi64>
+  %cross_index_wide = vector.index_cast %cross_index : vector<4xindex> to vector<4xi64>
+  vector.store %same_index_wide, %address_results[40] : vector<4xi64>, view<56xi64>
+  vector.store %same_offset_wide, %address_results[44] : vector<4xi64>, view<56xi64>
+  vector.store %cross_offset_wide, %address_results[48] : vector<4xi64>, view<56xi64>
+  vector.store %cross_index_wide, %address_results[52] : vector<4xi64>, view<56xi64>
+  func.return
+}
+
+// The oracle performs the same address-boundary conversions one scalar lane at
+// a time, independently of vector legalization and packet selection.
+func.def @vector_address_conversions_oracle(%input: buffer, %address_output: buffer, %byte_output: buffer, %half_output: buffer, %word_output: buffer) {
+  %origin = index.constant 0 : offset
+  %input_view = buffer.view %input[%origin] : buffer -> view<4xi32>
+  %address_results = buffer.view %address_output[%origin] : buffer -> view<56xi64>
+  %byte_results = buffer.view %byte_output[%origin] : buffer -> view<16xi8>
+  %half_results = buffer.view %half_output[%origin] : buffer -> view<8xi16>
+  %word_results = buffer.view %word_output[%origin] : buffer -> view<8xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %c12 = index.constant 12 : index
+  %c16 = index.constant 16 : index
+  %c20 = index.constant 20 : index
+  %c24 = index.constant 24 : index
+  %c28 = index.constant 28 : index
+  %c32 = index.constant 32 : index
+  %c36 = index.constant 36 : index
+  %c40 = index.constant 40 : index
+  %c44 = index.constant 44 : index
+  %c48 = index.constant 48 : index
+  %c52 = index.constant 52 : index
+  %c0_i32 = scalar.constant 0 : i32
+  scf.for %i = [%begin to %end step %step] {
+    %word = view.load %input_view[%i] : view<4xi32> -> i32
+    %predicate = scalar.cmpi ne, %word, %c0_i32 : i32
+    %byte = scalar.trunci %word : i32 to i8
+    %half = scalar.trunci %word : i32 to i16
+    %signed_wide = scalar.extsi %word : i32 to i64
+    %unsigned_wide = scalar.extui %word : i32 to i64
+
+    %predicate_index = index.cast %predicate : i1 to index
+    %byte_index = index.cast %byte : i8 to index
+    %half_index = index.cast %half : i16 to index
+    %word_index = index.cast %word : i32 to index
+    %wide_index = index.cast %signed_wide : i64 to index
+    %predicate_offset = index.cast %predicate : i1 to offset
+    %byte_offset = index.cast %byte : i8 to offset
+    %half_offset = index.cast %half : i16 to offset
+    %word_offset = index.cast %word : i32 to offset
+    %wide_offset = index.cast %unsigned_wide : i64 to offset
+    %predicate_index_wide = index.cast %predicate_index : index to i64
+    %byte_index_wide = index.cast %byte_index : index to i64
+    %half_index_wide = index.cast %half_index : index to i64
+    %word_index_wide = index.cast %word_index : index to i64
+    %wide_index_wide = index.cast %wide_index : index to i64
+    %predicate_offset_wide = index.cast %predicate_offset : offset to i64
+    %byte_offset_wide = index.cast %byte_offset : offset to i64
+    %half_offset_wide = index.cast %half_offset : offset to i64
+    %word_offset_wide = index.cast %word_offset : offset to i64
+    %wide_offset_wide = index.cast %wide_offset : offset to i64
+
+    %position4 = index.add %i, %c4 : index
+    %position8 = index.add %i, %c8 : index
+    %position12 = index.add %i, %c12 : index
+    %position16 = index.add %i, %c16 : index
+    %position20 = index.add %i, %c20 : index
+    %position24 = index.add %i, %c24 : index
+    %position28 = index.add %i, %c28 : index
+    %position32 = index.add %i, %c32 : index
+    %position36 = index.add %i, %c36 : index
+    %position40 = index.add %i, %c40 : index
+    %position44 = index.add %i, %c44 : index
+    %position48 = index.add %i, %c48 : index
+    %position52 = index.add %i, %c52 : index
+    view.store %predicate_index_wide, %address_results[%i] : i64, view<56xi64>
+    view.store %byte_index_wide, %address_results[%position4] : i64, view<56xi64>
+    view.store %half_index_wide, %address_results[%position8] : i64, view<56xi64>
+    view.store %word_index_wide, %address_results[%position12] : i64, view<56xi64>
+    view.store %wide_index_wide, %address_results[%position16] : i64, view<56xi64>
+    view.store %predicate_offset_wide, %address_results[%position20] : i64, view<56xi64>
+    view.store %byte_offset_wide, %address_results[%position24] : i64, view<56xi64>
+    view.store %half_offset_wide, %address_results[%position28] : i64, view<56xi64>
+    view.store %word_offset_wide, %address_results[%position32] : i64, view<56xi64>
+    view.store %wide_offset_wide, %address_results[%position36] : i64, view<56xi64>
+
+    %index_predicate = index.cast %word_index : index to i1
+    %offset_predicate = index.cast %word_offset : offset to i1
+    %index_predicate_byte = scalar.extui %index_predicate : i1 to i8
+    %offset_predicate_byte = scalar.extui %offset_predicate : i1 to i8
+    %index_byte = index.cast %word_index : index to i8
+    %offset_byte = index.cast %word_offset : offset to i8
+    %index_half = index.cast %word_index : index to i16
+    %offset_half = index.cast %word_offset : offset to i16
+    %index_word = index.cast %word_index : index to i32
+    %offset_word = index.cast %word_offset : offset to i32
+    view.store %index_predicate_byte, %byte_results[%i] : i8, view<16xi8>
+    view.store %offset_predicate_byte, %byte_results[%position4] : i8, view<16xi8>
+    view.store %index_byte, %byte_results[%position8] : i8, view<16xi8>
+    view.store %offset_byte, %byte_results[%position12] : i8, view<16xi8>
+    view.store %index_half, %half_results[%i] : i16, view<8xi16>
+    view.store %offset_half, %half_results[%position4] : i16, view<8xi16>
+    view.store %index_word, %word_results[%i] : i32, view<8xi32>
+    view.store %offset_word, %word_results[%position4] : i32, view<8xi32>
+
+    %same_index = index.cast %word_index : index to index
+    %same_offset = index.cast %word_offset : offset to offset
+    %cross_offset = index.cast %predicate_index : index to offset
+    %cross_index = index.cast %predicate_offset : offset to index
+    %same_index_wide = index.cast %same_index : index to i64
+    %same_offset_wide = index.cast %same_offset : offset to i64
+    %cross_offset_wide = index.cast %cross_offset : offset to i64
+    %cross_index_wide = index.cast %cross_index : index to i64
+    view.store %same_index_wide, %address_results[%position40] : i64, view<56xi64>
+    view.store %same_offset_wide, %address_results[%position44] : i64, view<56xi64>
+    view.store %cross_offset_wide, %address_results[%position48] : i64, view<56xi64>
+    view.store %cross_index_wide, %address_results[%position52] : i64, view<56xi64>
+  }
+  func.return
+}
+
+check.scenario @vector_address_conversion_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-2147483648) step(1) : tensor<4xi32>
+    %address_output = check.generate.fill value(-123) : tensor<56xi64>
+    %byte_output = check.generate.fill value(-91) : tensor<16xi8>
+    %half_output = check.generate.fill value(-123) : tensor<8xi16>
+    %word_output = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@vector_address_conversions, @vector_address_conversions_oracle>(%input, %address_output, %byte_output, %half_output, %word_output) : (tensor<4xi32>, tensor<56xi64>, tensor<16xi8>, tensor<8xi16>, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%address_output) expected(%address_output) : tensor<56xi64>
+      check.expect.bitwise actual(%byte_output) expected(%byte_output) : tensor<16xi8>
+      check.expect.bitwise actual(%half_output) expected(%half_output) : tensor<8xi16>
+      check.expect.bitwise actual(%word_output) expected(%word_output) : tensor<8xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-2) step(1) : tensor<4xi32>
+    %address_output = check.generate.fill value(-123) : tensor<56xi64>
+    %byte_output = check.generate.fill value(-91) : tensor<16xi8>
+    %half_output = check.generate.fill value(-123) : tensor<8xi16>
+    %word_output = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@vector_address_conversions, @vector_address_conversions_oracle>(%input, %address_output, %byte_output, %half_output, %word_output) : (tensor<4xi32>, tensor<56xi64>, tensor<16xi8>, tensor<8xi16>, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%address_output) expected(%address_output) : tensor<56xi64>
+      check.expect.bitwise actual(%byte_output) expected(%byte_output) : tensor<16xi8>
+      check.expect.bitwise actual(%half_output) expected(%half_output) : tensor<8xi16>
+      check.expect.bitwise actual(%word_output) expected(%word_output) : tensor<8xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(2147483644) step(1) : tensor<4xi32>
+    %address_output = check.generate.fill value(-123) : tensor<56xi64>
+    %byte_output = check.generate.fill value(-91) : tensor<16xi8>
+    %half_output = check.generate.fill value(-123) : tensor<8xi16>
+    %word_output = check.generate.fill value(-123) : tensor<8xi32>
+    check.compare<@vector_address_conversions, @vector_address_conversions_oracle>(%input, %address_output, %byte_output, %half_output, %word_output) : (tensor<4xi32>, tensor<56xi64>, tensor<16xi8>, tensor<8xi16>, tensor<8xi32>) -> () {
+      check.expect.bitwise actual(%address_output) expected(%address_output) : tensor<56xi64>
+      check.expect.bitwise actual(%byte_output) expected(%byte_output) : tensor<16xi8>
+      check.expect.bitwise actual(%half_output) expected(%half_output) : tensor<8xi16>
+      check.expect.bitwise actual(%word_output) expected(%word_output) : tensor<8xi32>
+    }
+  }
+  check.return
+}

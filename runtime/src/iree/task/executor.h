@@ -110,12 +110,18 @@ iree_status_t iree_task_executor_create(iree_task_executor_options_t options,
 void iree_task_executor_retain(iree_task_executor_t* executor);
 
 // Releases the given |executor| from the caller.
+// The final release requests worker shutdown. An external caller joins worker
+// exit before returning. A worker of this executor cannot join itself; in that
+// case the last exiting worker reclaims executor storage after its final
+// access. Pending processes must be quiesced before the final reference is
+// released.
 void iree_task_executor_release(iree_task_executor_t* executor);
 
 // Returns the NUMA node this executor's workers are pinned to, or
-// IREE_TASK_TOPOLOGY_NODE_ID_ANY if the executor was created without a
-// specific NUMA node assignment.
-iree_task_topology_node_id_t iree_task_executor_node_id(
+// IREE_NUMA_NODE_ANY if placement is unknown or spans memory nodes. This is
+// resolved once at creation from worker affinities, not a task placement-domain
+// ordinal. Worker allocation placement is independent.
+iree_numa_node_id_t iree_task_executor_numa_node(
     iree_task_executor_t* executor);
 
 // Trims pools and caches used by the executor and its workers.

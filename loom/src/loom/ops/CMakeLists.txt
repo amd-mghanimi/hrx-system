@@ -16,8 +16,10 @@ loom_cc_library(
     "attribute_accessors.h"
     "builder_macros.h"
     "op_defs.h"
+    "use_list.h"
   SRCS
     "op_defs.c"
+    "use_list.c"
   DEPS
     ::format
     iree::base
@@ -44,6 +46,23 @@ loom_cc_library(
     loom::ir
     loom::util::bstring
   PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    use_list_test
+  SRCS
+    "use_list_test.cc"
+  DEPS
+    ::op_defs
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::low
+    loom::ops::scalar
+    loom::ops::test
+    loom::target::registers
 )
 
 loom_cc_test(
@@ -90,6 +109,7 @@ loom_cc_library(
     iree::base
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::target::condition
     loom::target::projection
@@ -194,6 +214,7 @@ loom_cc_library(
     iree::base
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
   PUBLIC
 )
@@ -221,6 +242,7 @@ loom_cc_library(
     iree::base
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
   PUBLIC
 )
@@ -234,7 +256,19 @@ loom_cc_library(
     "combining.c"
   DEPS
     iree::base
+    loom::ir
   PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    combining_test
+  SRCS
+    "combining_test.cc"
+  DEPS
+    ::combining
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 loom_generated_file_family(
@@ -271,6 +305,7 @@ loom_cc_library(
     loom::ir
     loom::ops::buffer
     loom::ops::cfg
+    loom::ops::channel
     loom::ops::check
     loom::ops::command
     loom::ops::config

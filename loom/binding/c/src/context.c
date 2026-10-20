@@ -18,6 +18,8 @@
 struct loomc_context_t {
   // Atomic reference count for shared immutable ownership.
   iree_atomic_ref_count_t ref_count;
+  // Source-content retention applied to context-owned modules and results.
+  uint8_t source_retention;
   // Allocator used to release the context.
   loomc_allocator_t allocator;
   // Finalized production Loom dialect and encoding context.
@@ -43,37 +45,51 @@ static loomc_status_t loomc_context_validate_options(
     return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
                              "context options structure_size is too small");
   }
+  if (options->source_retention != LOOMC_SOURCE_RETENTION_EXACT &&
+      options->source_retention != LOOMC_SOURCE_RETENTION_METADATA_ONLY) {
+    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                             "context source_retention is invalid");
+  }
   return loomc_ok_status();
 }
 
 static void loomc_context_destroy(loomc_context_t* context) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   loomc_allocator_t allocator = context->allocator;
   loom_cleanup_pattern_registry_storage_deinitialize(
       &context->cleanup_pattern_registry_storage);
   loom_context_deinitialize(&context->context);
   loomc_target_environment_release(context->target_environment);
   loomc_allocator_free(allocator, context);
+  IREE_TRACE_ZONE_END(z0);
 }
 
 loomc_status_t loomc_context_create(const loomc_context_options_t* options,
                                     loomc_allocator_t allocator,
                                     loomc_context_t** out_context) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (out_context == NULL) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "out_context must not be NULL");
+    loomc_status_t return_status = loomc_make_status(
+        LOOMC_STATUS_INVALID_ARGUMENT, "out_context must not be NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
   *out_context = NULL;
-  LOOMC_RETURN_IF_ERROR(loomc_context_validate_options(options));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(z0,
+                                    loomc_context_validate_options(options));
   loomc_target_environment_t* target_environment = NULL;
-  LOOMC_RETURN_IF_ERROR(
-      loomc_context_target_options_resolve(options, &target_environment));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_context_target_options_resolve(options, &target_environment));
 
   loomc_context_t* context = NULL;
-  LOOMC_RETURN_IF_ERROR(
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0,
       loomc_allocator_malloc(allocator, sizeof(*context), (void**)&context));
   memset(context, 0, sizeof(*context));
   iree_atomic_ref_count_init(&context->ref_count);
   context->allocator = allocator;
+  context->source_retention = (uint8_t)(options ? options->source_retention
+                                                : LOOMC_SOURCE_RETENTION_EXACT);
   loom_context_initialize(iree_allocator_from_loomc(allocator),
                           &context->context);
   loomc_status_t status =
@@ -102,6 +118,7 @@ loomc_status_t loomc_context_create(const loomc_context_options_t* options,
     loom_context_deinitialize(&context->context);
     loomc_allocator_free(allocator, context);
   }
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }
 
@@ -123,6 +140,12 @@ void loomc_context_release(loomc_context_t* context) {
 
 loom_context_t* loomc_context_loom_context(loomc_context_t* context) {
   return context ? &context->context : NULL;
+}
+
+loomc_source_retention_t loomc_context_source_retention(
+    const loomc_context_t* context) {
+  return context ? (loomc_source_retention_t)context->source_retention
+                 : LOOMC_SOURCE_RETENTION_EXACT;
 }
 
 loomc_target_environment_t* loomc_context_target_environment(

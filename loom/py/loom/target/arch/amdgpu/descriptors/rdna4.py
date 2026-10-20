@@ -148,6 +148,9 @@ _AMDGPU_RDNA4_CORE_DESCRIPTOR_SET_BASE = _amdgpu_core_descriptor_set(
             # GFX12SpeedModel and GFX125xCommonWriteRes use the same ordinary
             # VALU result latency, independently of their matrix timings.
             valu_latency_cycles=5,
+            # LLVM SISchedule.td models RDNA vector memory at 320 cycles.
+            # This is a variable-latency estimate, not a hardware wait bound.
+            vmem_latency_cycles=320,
             smem_load_hazards=_SMEM_WAIT_HAZARDS,
             smem_store_hazards=_SMEM_WAIT_HAZARDS,
             vmem_load_hazards=_VMEM_LOAD_WAIT_HAZARDS,
@@ -984,7 +987,11 @@ _XDL_ESTIMATED_MATRIX_SCHEDULE_CLASSES = (
 def _gfx125x_reg_classes() -> tuple[RegClass, ...]:
     return (
         *(
-            replace(reg_class, allocatable_count=1024)
+            replace(
+                reg_class,
+                allocatable_count=1024,
+                flags=(*reg_class.flags, RegClassFlag.EVEN_ALIGNED_TUPLES),
+            )
             if reg_class.name == _REG_VGPR
             else reg_class
             for reg_class in _AMDGPU_RDNA4_CORE_DESCRIPTOR_SET_BASE.reg_classes

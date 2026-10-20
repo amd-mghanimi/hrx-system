@@ -1,0 +1,451 @@
+// Duplicate active addresses must return distinct old values. Disabled lanes
+// preserve their passthrough and leave the corresponding guard cells untouched.
+kernel.def @masked_duplicate_atomic() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%flag: i32, %memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %memory : buffer
+  %view = buffer.view %global[%base] : buffer -> view<4xi32>
+  %output_global = buffer.assume.memory_space<global> %output : buffer
+  %results = buffer.view %output_global[%base] : buffer -> view<4xi32>
+  %c0 = scalar.constant 0 : i32
+  %enabled = scalar.cmpi ne, %flag, %c0 : i32
+  %disabled = scalar.constant false : i1
+  %mask = vector.from_elements %enabled, %disabled, %enabled, %disabled : vector<4xi1>
+  %index0 = index.constant 0 : index
+  %index2 = index.constant 2 : index
+  %index3 = index.constant 3 : index
+  %offsets = vector.from_elements %index0, %index2, %index0, %index3 : vector<4xindex>
+  %increment = vector.constant 1 : vector<4xi32>
+  %passthrough = vector.constant -101 : vector<4xi32>
+  %old = vector.atomic.rmw.mask<addi> %increment, %view[0][%offsets], %mask, %passthrough {ordering = relaxed, scope = device} : vector<4xi32>, view<4xi32>, vector<4xindex>, vector<4xi1>, vector<4xi32>
+  %first = vector.extract %old[0] : vector<4xi32> -> i32
+  %second = vector.extract %old[2] : vector<4xi32> -> i32
+  %lower = scalar.minsi %first, %second : i32
+  %upper = scalar.maxsi %first, %second : i32
+  %inactive1 = vector.extract %old[1] : vector<4xi32> -> i32
+  %inactive3 = vector.extract %old[3] : vector<4xi32> -> i32
+  view.store %lower, %results[0] : i32, view<4xi32>
+  view.store %upper, %results[1] : i32, view<4xi32>
+  view.store %inactive1, %results[2] : i32, view<4xi32>
+  view.store %inactive3, %results[3] : i32, view<4xi32>
+  kernel.return
+}
+
+func.def @masked_duplicate_atomic_oracle(%flag: i32, %memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %cells = buffer.view %memory[%base] : buffer -> view<4xi32>
+  %results = buffer.view %output[%base] : buffer -> view<4xi32>
+  %flag_clear = scalar.constant 0 : i32
+  %enabled = scalar.cmpi ne, %flag, %flag_clear : i32
+  %increment = scalar.constant 1 : i32
+  %passthrough = scalar.constant -101 : i32
+  %initial = view.load %cells[0] : view<4xi32> -> i32
+  %successor = scalar.addi %initial, %increment : i32
+  %final = scalar.addi %successor, %increment : i32
+  %lower = scalar.minsi %initial, %successor : i32
+  %upper = scalar.maxsi %initial, %successor : i32
+  %selected_final = scf.select %enabled, %final, %initial : i32
+  %selected_lower = scf.select %enabled, %lower, %passthrough : i32
+  %selected_upper = scf.select %enabled, %upper, %passthrough : i32
+  view.store %selected_final, %cells[0] : i32, view<4xi32>
+  view.store %selected_lower, %results[0] : i32, view<4xi32>
+  view.store %selected_upper, %results[1] : i32, view<4xi32>
+  view.store %passthrough, %results[2] : i32, view<4xi32>
+  view.store %passthrough, %results[3] : i32, view<4xi32>
+  func.return
+}
+
+check.scenario @masked_duplicate_values {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %flag = check.literal value(1) : i32
+    %memory = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<4xi32>
+    %output = check.generate.fill value(0) : tensor<4xi32>
+    check.compare<@masked_duplicate_atomic, @masked_duplicate_atomic_oracle>(%flag, %memory, %output) : (i32, tensor<4xi32>, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<4xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %flag = check.literal value(0) : i32
+    %memory = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<4xi32>
+    %output = check.generate.fill value(0) : tensor<4xi32>
+    check.compare<@masked_duplicate_atomic, @masked_duplicate_atomic_oracle>(%flag, %memory, %output) : (i32, tensor<4xi32>, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<4xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// An inactive offset may lie outside the view and must not become an access.
+kernel.def @masked_outside_view() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %memory : buffer
+  %view = buffer.view %global[%base] : buffer -> view<1xi32>
+  %output_global = buffer.assume.memory_space<global> %output : buffer
+  %results = buffer.view %output_global[%base] : buffer -> view<2xi32>
+  %c0 = index.constant 0 : index
+  %outside = index.constant -100 : index
+  %offsets = vector.from_elements %c0, %outside : vector<2xindex>
+  %enabled = scalar.constant true : i1
+  %disabled = scalar.constant false : i1
+  %mask = vector.from_elements %enabled, %disabled : vector<2xi1>
+  %increment = vector.constant 1 : vector<2xi32>
+  %passthrough = vector.constant -101 : vector<2xi32>
+  %old = vector.atomic.rmw.mask<addi> %increment, %view[0][%offsets], %mask, %passthrough {ordering = relaxed, scope = device} : vector<2xi32>, view<1xi32>, vector<2xindex>, vector<2xi1>, vector<2xi32>
+  vector.store %old, %results[0] : vector<2xi32>, view<2xi32>
+  kernel.return
+}
+
+func.def @masked_outside_view_oracle(%memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %cells = buffer.view %memory[%base] : buffer -> view<1xi32>
+  %results = buffer.view %output[%base] : buffer -> view<2xi32>
+  %increment = scalar.constant 1 : i32
+  %passthrough = scalar.constant -101 : i32
+  %initial = view.load %cells[0] : view<1xi32> -> i32
+  %final = scalar.addi %initial, %increment : i32
+  view.store %final, %cells[0] : i32, view<1xi32>
+  view.store %initial, %results[0] : i32, view<2xi32>
+  view.store %passthrough, %results[1] : i32, view<2xi32>
+  func.return
+}
+
+check.scenario @inactive_offset_outside_view {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %memory = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1xi32>
+    %output = check.generate.fill value(0) : tensor<2xi32>
+    check.compare<@masked_outside_view, @masked_outside_view_oracle>(%memory, %output) : (tensor<1xi32>, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<1xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.return
+}
+
+// NaN payloads in old values and passthrough lanes are transported as bits.
+// The active lane uses the target's scalar floating-point atomic recipe.
+kernel.def @masked_float_old_bits() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%flag: i32, %memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %memory : buffer
+  %view = buffer.view %global[%base] : buffer -> view<2xf32>
+  %output_global = buffer.assume.memory_space<global> %output : buffer
+  %results = buffer.view %output_global[%base] : buffer -> view<2xi32>
+  %c0 = scalar.constant 0 : i32
+  %enabled = scalar.cmpi ne, %flag, %c0 : i32
+  %disabled = scalar.constant false : i1
+  %mask = vector.from_elements %enabled, %disabled : vector<2xi1>
+  %index0 = index.constant 0 : index
+  %index1 = index.constant 1 : index
+  %offsets = vector.iota %index0 step %index1 : vector<2xindex>
+  %value = vector.constant 1.0 : vector<2xf32>
+  %passthrough_bits = vector.constant 2143311480 : vector<2xi32>
+  %passthrough = vector.bitcast %passthrough_bits : vector<2xi32> to vector<2xf32>
+  %old = vector.atomic.rmw.mask<minnumf> %value, %view[0][%offsets], %mask, %passthrough {ordering = relaxed, scope = device} : vector<2xf32>, view<2xf32>, vector<2xindex>, vector<2xi1>, vector<2xf32>
+  %old_bits = vector.bitcast %old : vector<2xf32> to vector<2xi32>
+  vector.store %old_bits, %results[0] : vector<2xi32>, view<2xi32>
+  kernel.return
+}
+
+func.def @masked_float_old_bits_oracle(%flag: i32, %memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %cells = buffer.view %memory[%base] : buffer -> view<2xi32>
+  %results = buffer.view %output[%base] : buffer -> view<2xi32>
+  %flag_clear = scalar.constant 0 : i32
+  %enabled = scalar.cmpi ne, %flag, %flag_clear : i32
+  %first_bits = view.load %cells[0] : view<2xi32> -> i32
+  %first = scalar.bitcast %first_bits : i32 to f32
+  %update = scalar.constant 1.0 : f32
+  %updated = scalar.minnumf %first, %update : f32
+  %updated_bits = scalar.bitcast %updated : f32 to i32
+  %passthrough_bits = scalar.constant 2143311480 : i32
+  %final_bits = scf.select %enabled, %updated_bits, %first_bits : i32
+  %old_bits = scf.select %enabled, %first_bits, %passthrough_bits : i32
+  view.store %final_bits, %cells[0] : i32, view<2xi32>
+  view.store %old_bits, %results[0] : i32, view<2xi32>
+  view.store %passthrough_bits, %results[1] : i32, view<2xi32>
+  func.return
+}
+
+check.scenario @float_old_and_passthrough_nan_payloads {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %flag = check.literal value(1) : i32
+    %memory = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<2xi32>
+    %output = check.generate.fill value(0) : tensor<2xi32>
+    check.compare<@masked_float_old_bits, @masked_float_old_bits_oracle>(%flag, %memory, %output) : (i32, tensor<2xi32>, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %flag = check.literal value(0) : i32
+    %memory = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<2xi32>
+    %output = check.generate.fill value(0) : tensor<2xi32>
+    check.compare<@masked_float_old_bits, @masked_float_old_bits_oracle>(%flag, %memory, %output) : (i32, tensor<2xi32>, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %flag = check.literal value(1) : i32
+    %memory = check.generate.fill value(2143294004) : tensor<2xi32>
+    %output = check.generate.fill value(0) : tensor<2xi32>
+    check.compare<@masked_float_old_bits, @masked_float_old_bits_oracle>(%flag, %memory, %output) : (i32, tensor<2xi32>, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.return
+}
+
+// Reversing destinations makes an early update alias a later input lane.
+// Every update must still consume the snapshot captured by the vector load.
+kernel.def @atomic_input_snapshot() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%memory: buffer) {
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %memory : buffer
+  %view = buffer.view %global[%base] : buffer -> view<2xi32>
+  %captured = vector.load %view[0] : view<2xi32> -> vector<2xi32>
+  %origin = index.constant 1 : index
+  %stride = index.constant -1 : index
+  %offsets = vector.iota %origin step %stride : vector<2xindex>
+  vector.atomic.reduce<addi> %captured, %view[0][%offsets] {ordering = relaxed, scope = device} : vector<2xi32>, view<2xi32>, vector<2xindex>
+  kernel.return
+}
+
+func.def @atomic_input_snapshot_oracle(%memory: buffer) {
+  %base = index.constant 0 : offset
+  %cells = buffer.view %memory[%base] : buffer -> view<2xi32>
+  %first = view.load %cells[0] : view<2xi32> -> i32
+  %second = view.load %cells[1] : view<2xi32> -> i32
+  %sum = scalar.addi %first, %second : i32
+  view.store %sum, %cells[0] : i32, view<2xi32>
+  view.store %sum, %cells[1] : i32, view<2xi32>
+  func.return
+}
+
+check.scenario @vector_atomic_input_snapshot {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %memory = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<2xi32>
+    check.compare<@atomic_input_snapshot, @atomic_input_snapshot_oracle>(%memory) : (tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi32>
+    }
+  }
+  check.return
+}
+
+// Both words of every old value survive reduction, exchange and CAS.
+kernel.def @vector_atomic_i64() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %memory : buffer
+  %view = buffer.view %global[%base] : buffer -> view<2xi64>
+  %results = buffer.view %output[%base] : buffer -> view<4xi64>
+  %origin = index.constant 0 : index
+  %stride = index.constant 1 : index
+  %offsets = vector.iota %origin step %stride : vector<2xindex>
+  %increment = vector.constant 4294967297 : vector<2xi64>
+  vector.atomic.reduce<addi> %increment, %view[0][%offsets] {ordering = relaxed, scope = device} : vector<2xi64>, view<2xi64>, vector<2xindex>
+  %old = vector.atomic.rmw<xchgi> %increment, %view[0][%offsets] {ordering = relaxed, scope = device} : vector<2xi64>, view<2xi64>, vector<2xindex>
+  %observed = vector.atomic.cmpxchg %increment, %old, %view[0][%offsets] {failure_ordering = relaxed, scope = device, success_ordering = relaxed} : vector<2xi64>, view<2xi64>, vector<2xindex> -> vector<2xi64>
+  vector.store %old, %results[0] : vector<2xi64>, view<4xi64>
+  vector.store %observed, %results[2] : vector<2xi64>, view<4xi64>
+  kernel.return
+}
+
+func.def @vector_atomic_i64_oracle(%memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %cells = buffer.view %memory[%base] : buffer -> view<2xi64>
+  %results = buffer.view %output[%base] : buffer -> view<4xi64>
+  %increment = scalar.constant 4294967297 : i64
+  %first = view.load %cells[0] : view<2xi64> -> i64
+  %second = view.load %cells[1] : view<2xi64> -> i64
+  %first_final = scalar.addi %first, %increment : i64
+  %second_final = scalar.addi %second, %increment : i64
+  view.store %first_final, %cells[0] : i64, view<2xi64>
+  view.store %second_final, %cells[1] : i64, view<2xi64>
+  view.store %first_final, %results[0] : i64, view<4xi64>
+  view.store %second_final, %results[1] : i64, view<4xi64>
+  view.store %increment, %results[2] : i64, view<4xi64>
+  view.store %increment, %results[3] : i64, view<4xi64>
+  func.return
+}
+
+check.scenario @vector_atomic_i64_high_words {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %memory = check.generate.random.uniform seed(%seed) range(-9223372036854775808 to 9223372036854775807) : tensor<2xi64>
+    %output = check.generate.fill value(0) : tensor<4xi64>
+    check.compare<@vector_atomic_i64, @vector_atomic_i64_oracle>(%memory, %output) : (tensor<2xi64>, tensor<4xi64>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi64>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi64>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %memory = check.generate.fill value(4294967295) : tensor<2xi64>
+    %output = check.generate.fill value(0) : tensor<4xi64>
+    check.compare<@vector_atomic_i64, @vector_atomic_i64_oracle>(%memory, %output) : (tensor<2xi64>, tensor<4xi64>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi64>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi64>
+    }
+  }
+  check.return
+}
+
+// Compare-exchange compares floating-point encodings, including zero signs and
+// NaNs. Equal NaN payloads succeed; unequal zero signs fail.
+kernel.def @vector_atomic_float_cmpxchg() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %memory : buffer
+  %view = buffer.view %global[%base] : buffer -> view<2xf32>
+  %results = buffer.view %output[%base] : buffer -> view<4xi32>
+  %origin = index.constant 0 : index
+  %stride = index.constant 1 : index
+  %offsets = vector.iota %origin step %stride : vector<2xindex>
+  %mismatch_bits = scalar.constant -2147483648 : i32
+  %match_bits = scalar.constant 0 : i32
+  %expected_bits = vector.from_elements %mismatch_bits, %match_bits : vector<2xi32>
+  %expected = vector.bitcast %expected_bits : vector<2xi32> to vector<2xf32>
+  %nan_bits = vector.constant 2143294004 : vector<2xi32>
+  %nan = vector.bitcast %nan_bits : vector<2xi32> to vector<2xf32>
+  %replacement = vector.constant 1.0 : vector<2xf32>
+  %old = vector.atomic.cmpxchg %expected, %nan, %view[0][%offsets] {failure_ordering = relaxed, scope = device, success_ordering = relaxed} : vector<2xf32>, view<2xf32>, vector<2xindex> -> vector<2xf32>
+  %observed = vector.atomic.cmpxchg %nan, %replacement, %view[0][%offsets] {failure_ordering = relaxed, scope = device, success_ordering = relaxed} : vector<2xf32>, view<2xf32>, vector<2xindex> -> vector<2xf32>
+  %old_bits = vector.bitcast %old : vector<2xf32> to vector<2xi32>
+  %observed_bits = vector.bitcast %observed : vector<2xf32> to vector<2xi32>
+  vector.store %old_bits, %results[0] : vector<2xi32>, view<4xi32>
+  vector.store %observed_bits, %results[2] : vector<2xi32>, view<4xi32>
+  kernel.return
+}
+
+func.def @vector_atomic_float_cmpxchg_oracle(%memory: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %cells = buffer.view %memory[%base] : buffer -> view<2xi32>
+  %results = buffer.view %output[%base] : buffer -> view<4xi32>
+  %first = view.load %cells[0] : view<2xi32> -> i32
+  %second = view.load %cells[1] : view<2xi32> -> i32
+  %expected_first = scalar.constant -2147483648 : i32
+  %expected_second = scalar.constant 0 : i32
+  %nan_bits = scalar.constant 2143294004 : i32
+  %unit_bits = scalar.constant 1065353216 : i32
+  %first_matches = scalar.cmpi eq, %first, %expected_first : i32
+  %second_matches = scalar.cmpi eq, %second, %expected_second : i32
+  %first_observed = scf.select %first_matches, %nan_bits, %first : i32
+  %second_observed = scf.select %second_matches, %nan_bits, %second : i32
+  %first_nan = scalar.cmpi eq, %first_observed, %nan_bits : i32
+  %second_nan = scalar.cmpi eq, %second_observed, %nan_bits : i32
+  %first_final = scf.select %first_nan, %unit_bits, %first_observed : i32
+  %second_final = scf.select %second_nan, %unit_bits, %second_observed : i32
+  view.store %first_final, %cells[0] : i32, view<2xi32>
+  view.store %second_final, %cells[1] : i32, view<2xi32>
+  view.store %first, %results[0] : i32, view<4xi32>
+  view.store %second, %results[1] : i32, view<4xi32>
+  view.store %first_observed, %results[2] : i32, view<4xi32>
+  view.store %second_observed, %results[3] : i32, view<4xi32>
+  func.return
+}
+
+check.scenario @vector_atomic_float_bitwise_comparison {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %memory = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<2xi32>
+    %output = check.generate.fill value(-1) : tensor<4xi32>
+    check.compare<@vector_atomic_float_cmpxchg, @vector_atomic_float_cmpxchg_oracle>(%memory, %output) : (tensor<2xi32>, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %memory = check.generate.fill value(0) : tensor<2xi32>
+    %output = check.generate.fill value(-1) : tensor<4xi32>
+    check.compare<@vector_atomic_float_cmpxchg, @vector_atomic_float_cmpxchg_oracle>(%memory, %output) : (tensor<2xi32>, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %memory = check.generate.fill value(2143294004) : tensor<2xi32>
+    %output = check.generate.fill value(-1) : tensor<4xi32>
+    check.compare<@vector_atomic_float_cmpxchg, @vector_atomic_float_cmpxchg_oracle>(%memory, %output) : (tensor<2xi32>, tensor<4xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<2xi32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<4xi32>
+    }
+  }
+  check.return
+}
+
+// Two updates per workitem contend on the same cell across two workgroups.
+// Returned tickets form 0..255 regardless of lane or workgroup scheduling.
+kernel.def @contended_vector_atomic() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 2 : index
+  %size = index.constant 64 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%size, %unit, %unit) : index
+} launch(%memory: buffer, %old_sum: buffer) {
+  %base = index.constant 0 : offset
+  %global = buffer.assume.memory_space<global> %memory : buffer
+  %view = buffer.view %global[%base] : buffer -> view<1xi32>
+  %sum_global = buffer.assume.memory_space<global> %old_sum : buffer
+  %sum_view = buffer.view %sum_global[%base] : buffer -> view<1xi32>
+  %offsets = vector.constant 0 : vector<2xi32>
+  %increment = vector.constant 1 : vector<2xi32>
+  %old = vector.atomic.rmw<addi> %increment, %view[0][%offsets] {ordering = relaxed, scope = device} : vector<2xi32>, view<1xi32>, vector<2xi32>
+  %first = vector.extract %old[0] : vector<2xi32> -> i32
+  %second = vector.extract %old[1] : vector<2xi32> -> i32
+  %sum = scalar.addi %first, %second : i32
+  view.atomic.reduce<addi> %sum, %sum_view[0] {ordering = relaxed, scope = device} : i32, view<1xi32>
+  kernel.return
+}
+
+func.def @contended_vector_atomic_oracle(%memory: buffer, %old_sum: buffer) {
+  %base = index.constant 0 : offset
+  %cells = buffer.view %memory[%base] : buffer -> view<1xi32>
+  %sum_cell = buffer.view %old_sum[%base] : buffer -> view<1xi32>
+  %ticket_count = scalar.constant 256 : i32
+  %ticket_bias = scalar.constant 32640 : i32
+  %initial = view.load %cells[0] : view<1xi32> -> i32
+  %initial_sum = view.load %sum_cell[0] : view<1xi32> -> i32
+  %final = scalar.addi %initial, %ticket_count : i32
+  %scaled = scalar.muli %initial, %ticket_count : i32
+  %tickets = scalar.addi %scaled, %ticket_bias : i32
+  %final_sum = scalar.addi %initial_sum, %tickets : i32
+  view.store %final, %cells[0] : i32, view<1xi32>
+  view.store %final_sum, %sum_cell[0] : i32, view<1xi32>
+  func.return
+}
+
+check.scenario @vector_atomic_contended_tickets {
+  check.trial[16](%trial: index, %entropy: check.entropy) {
+    %memory_seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %sum_entropy = check.entropy.fork %entropy name("sum") : check.entropy
+    %sum_seed = check.entropy.read %sum_entropy[%trial] : check.entropy -> i64
+    %memory = check.generate.random.uniform seed(%memory_seed) range(-2147483648 to 2147483647) : tensor<1xi32>
+    %old_sum = check.generate.random.uniform seed(%sum_seed) range(-2147483648 to 2147483647) : tensor<1xi32>
+    check.compare<@contended_vector_atomic, @contended_vector_atomic_oracle>(%memory, %old_sum) : (tensor<1xi32>, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%memory) expected(%memory) : tensor<1xi32>
+      check.expect.bitwise actual(%old_sum) expected(%old_sum) : tensor<1xi32>
+    }
+  }
+  check.return
+}

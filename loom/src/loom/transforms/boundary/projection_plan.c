@@ -12,6 +12,7 @@
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/target/pass_environment.h"
+#include "loom/transforms/boundary/projection_branch.h"
 #include "loom/transforms/boundary/projection_loop.h"
 #include "loom/util/fact_cfg.h"
 #include "loom/util/walk.h"
@@ -67,6 +68,26 @@ static bool loom_boundary_projection_supports_loop_slots(
     const loom_boundary_projection_plan_t* plan) {
   return loom_boundary_projection_supports_role(
       plan, LOOM_BOUNDARY_PROJECTION_SLOT_LOOP_STATE);
+}
+
+static bool loom_boundary_projection_supports_function_local_slots(
+    const loom_boundary_projection_plan_t* plan,
+    const loom_boundary_projection_function_t* function) {
+  const loom_boundary_projection_slot_role_bits_t local_role_bits =
+      LOOM_BOUNDARY_PROJECTION_SLOT_ROLE_BIT(
+          LOOM_BOUNDARY_PROJECTION_SLOT_BLOCK_ARGUMENT) |
+      LOOM_BOUNDARY_PROJECTION_SLOT_ROLE_BIT(
+          LOOM_BOUNDARY_PROJECTION_SLOT_LOOP_STATE) |
+      LOOM_BOUNDARY_PROJECTION_SLOT_ROLE_BIT(
+          LOOM_BOUNDARY_PROJECTION_SLOT_BRANCH_RESULT);
+  for (iree_host_size_t i = 0; i < plan->rules.count; ++i) {
+    const loom_boundary_projection_rule_t* rule = plan->rules.values[i];
+    if (iree_any_bit_set(rule->slot_role_bits, local_role_bits) &&
+        loom_boundary_projection_rule_applies(rule, plan, function)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 static iree_host_size_t loom_boundary_projection_rule_index(
@@ -336,7 +357,13 @@ static iree_status_t loom_boundary_projection_plan_function_signature(
     if (!body_descriptor ||
         body_descriptor->terminator == LOOM_OP_KIND_UNKNOWN ||
         function.op->region_count != 1 || body_region_index != 0) {
-      out_function->selected = false;
+      // Callable signature projection requires the operation itself to be the
+      // one-region callable contract that the replacement path rebuilds. Keep
+      // independent CFG and LoopLike projection available in function-like
+      // operations with additional regions, such as kernel.def.
+      out_function->selected =
+          loom_boundary_projection_supports_function_local_slots(plan,
+                                                                 out_function);
       return iree_ok_status();
     }
     out_function->return_kind = body_descriptor->terminator;
@@ -555,7 +582,8 @@ iree_status_t loom_boundary_projection_add_provisional_slot(
     loom_boundary_projection_plan_t* plan,
     loom_boundary_projection_function_t* function, loom_value_id_t value_id,
     loom_boundary_projection_slot_role_t role, loom_block_t* block) {
-  IREE_ASSERT_EQ(role, LOOM_BOUNDARY_PROJECTION_SLOT_LOOP_STATE);
+  IREE_ASSERT(role == LOOM_BOUNDARY_PROJECTION_SLOT_LOOP_STATE ||
+              role == LOOM_BOUNDARY_PROJECTION_SLOT_BRANCH_RESULT);
   return loom_boundary_projection_append_slot(plan, function, value_id, role,
                                               block, /*call_op=*/NULL);
 }
@@ -678,6 +706,15 @@ static iree_status_t loom_boundary_projection_collect_op(
                                                  collect->function, loop);
   }
 
+  const loom_region_branch_t branch =
+      loom_region_branch_cast(collect->plan->module, op);
+  if (loom_region_branch_isa(branch) &&
+      loom_boundary_projection_supports_role(
+          collect->plan, LOOM_BOUNDARY_PROJECTION_SLOT_BRANCH_RESULT)) {
+    return loom_boundary_projection_collect_branch(collect->plan,
+                                                   collect->function, branch);
+  }
+
   const loom_call_like_t call = loom_call_like_cast(collect->plan->module, op);
   if (!loom_call_like_isa(call) ||
       loom_call_like_kind(call) != LOOM_CALL_LIKE_KIND_SEMANTIC) {
@@ -759,25 +796,39 @@ static iree_status_t loom_boundary_projection_collect_function(
   }
 
   if (plan->may_change_signatures ||
-      loom_boundary_projection_supports_loop_slots(plan)) {
+      loom_boundary_projection_supports_loop_slots(plan) ||
+      loom_boundary_projection_supports_role(
+          plan, LOOM_BOUNDARY_PROJECTION_SLOT_BRANCH_RESULT)) {
     loom_boundary_projection_collect_t collect = {
         .plan = plan,
         .function = function,
     };
     loom_walk_result_t walk_result = LOOM_WALK_CONTINUE;
     IREE_RETURN_IF_ERROR(loom_walk_function(
-        plan->module, function->function, LOOM_WALK_POST_ORDER,
+        plan->module, function->function, LOOM_WALK_PRE_ORDER,
         (loom_walk_callback_t){loom_boundary_projection_collect_op, &collect},
-        plan->arena, &walk_result));
+        &walk_result));
   }
 
+  loom_block_t* entry_block = loom_region_entry_block(body);
+  const bool entry_uses_function_argument_schemas =
+      function->argument_schemas != NULL &&
+      entry_block->arg_count == function->argument_count &&
+      (entry_block->arg_count == 0 ||
+       memcmp(entry_block->arg_ids, function->arguments,
+              entry_block->arg_count * sizeof(*entry_block->arg_ids)) == 0);
   bool may_have_block_slot = false;
   loom_block_t* block = NULL;
   loom_region_for_each_block(body, block) {
     for (uint16_t i = 0; i < block->arg_count; ++i) {
-      may_have_block_slot |= loom_boundary_projection_may_claim_slot(
-          plan, function, LOOM_BOUNDARY_PROJECTION_SLOT_BLOCK_ARGUMENT,
-          loom_block_arg_id(block, i), block);
+      may_have_block_slot |=
+          entry_uses_function_argument_schemas && block == entry_block
+              ? loom_boundary_projection_schema_is_projected(
+                    &function->argument_schemas[i])
+              : loom_boundary_projection_may_claim_slot(
+                    plan, function,
+                    LOOM_BOUNDARY_PROJECTION_SLOT_BLOCK_ARGUMENT,
+                    loom_block_arg_id(block, i), block);
     }
   }
 
@@ -798,10 +849,17 @@ static iree_status_t loom_boundary_projection_collect_function(
   if (may_have_block_slot) {
     loom_region_for_each_block(body, block) {
       for (uint16_t i = 0; i < block->arg_count; ++i) {
+        const loom_boundary_projection_schema_t* required_schema = NULL;
+        if (entry_uses_function_argument_schemas && block == entry_block) {
+          required_schema = &function->argument_schemas[i];
+          if (!loom_boundary_projection_schema_is_projected(required_schema)) {
+            continue;
+          }
+        }
         IREE_RETURN_IF_ERROR(loom_boundary_projection_add_slot(
             plan, function, loom_block_arg_id(block, i),
             LOOM_BOUNDARY_PROJECTION_SLOT_BLOCK_ARGUMENT, block, NULL,
-            /*required_schema=*/NULL));
+            required_schema));
       }
     }
   }
@@ -844,6 +902,40 @@ iree_host_size_t loom_boundary_projection_slot_index(
                  function->candidates[begin].value_id == value_id
              ? begin
              : IREE_HOST_SIZE_MAX;
+}
+
+iree_status_t loom_boundary_projection_record_value_replacement(
+    loom_boundary_projection_function_t* function, loom_value_id_t original,
+    loom_value_id_t replacement) {
+  IREE_ASSERT_NE(replacement, LOOM_VALUE_ID_INVALID);
+  return loom_ir_remap_map_value(&function->value_correspondence, original,
+                                 replacement);
+}
+
+iree_status_t loom_boundary_projection_replace_definition(
+    loom_boundary_projection_plan_t* plan,
+    loom_boundary_projection_function_t* function, loom_value_id_t source,
+    loom_value_id_t target) {
+  IREE_RETURN_IF_ERROR(loom_boundary_projection_record_value_replacement(
+      function, source, target));
+  IREE_RETURN_IF_ERROR(
+      loom_rewriter_move_value_name(&plan->rewriter, source, target));
+  return loom_rewriter_replace_all_uses_with(&plan->rewriter, source, target);
+}
+
+loom_value_id_t loom_boundary_projection_resolve_value(
+    const loom_boundary_projection_function_t* function,
+    loom_value_id_t value_id) {
+  loom_value_id_t current = value_id;
+  loom_value_id_t replacement = LOOM_VALUE_ID_INVALID;
+  iree_host_size_t depth = 0;
+  while (loom_ir_remap_try_lookup_value(&function->value_correspondence,
+                                        current, &replacement)) {
+    IREE_ASSERT_LT(depth++, function->value_correspondence.mapped_value_count);
+    IREE_ASSERT_NE(current, replacement);
+    current = replacement;
+  }
+  return current;
 }
 
 iree_status_t loom_boundary_projection_add_dependency(
@@ -1472,6 +1564,10 @@ iree_status_t loom_boundary_projection_plan_prepare(
           status = rule->prepare_function(rule, plan, function);
         }
       }
+    }
+    if (iree_status_is_ok(status) && function->selected &&
+        loom_func_like_body(function->function)) {
+      status = loom_boundary_projection_plan_branches(plan, function);
     }
     if (iree_status_is_ok(status) && function->selected &&
         loom_func_like_body(function->function)) {

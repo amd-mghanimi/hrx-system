@@ -36,16 +36,27 @@ Aie2pTargetKind = EnumDef(
     [
         EnumCase("core", 1, doc="One AIE2P compute-tile core target row."),
         EnumCase("array", 2, doc="One AIE2P logical-array program target row."),
+        EnumCase(
+            "configuration",
+            3,
+            doc=(
+                "Physical array initialization and invocation commands for "
+                "complete core programs."
+            ),
+        ),
     ],
     doc="AIE2P target row selected by aie2p.target.",
+    c_type="loom_aie2p_target_kind_t",
+    c_const_prefix="LOOM_AIE2P_TARGET_KIND",
+    c_include="loom/target/arch/amd/xdna/aie2p/records/target_records.h",
 )
 
 aie2p_target = Op(
     "aie2p.target",
     group=aie2p_ops,
     doc=(
-        "AMD XDNA AIE2P target record. The selector chooses either the owned "
-        "core ISA contract or the logical-array program contract."
+        "AMD XDNA AIE2P target record. The selector chooses the owned "
+        "core ISA, logical-array, or physical configuration program contract."
     ),
     traits=[SYMBOL_DEFINE],
     interfaces=[

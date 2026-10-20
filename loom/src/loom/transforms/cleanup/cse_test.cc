@@ -56,7 +56,7 @@ class CSETest : public ::testing::Test {
                                               IREE_SV("test_fn"), &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    loom_symbol_ref_t callee = {/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    loom_symbol_ref_t callee = {.module_id = 0, .symbol_id = symbol_id};
     loom_op_t* func_op = NULL;
     IREE_ASSERT_OK(loom_test_func_build(&module_builder, 0, 0, 0, callee, NULL,
                                         0, NULL, 0, NULL, 0, NULL, 0,
@@ -270,9 +270,8 @@ TEST_F(CSETest, CanonicalAttrDictOrderDoesNotBlockCSE) {
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("foo"), &foo_id));
 
   loom_named_attr_t label_first_entries[2] = {
-      {/*.name_id=*/label_id, /*.reserved=*/{},
-       /*.value=*/loom_attr_string(foo_id)},
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
+      {.name_id = label_id, .reserved = {}, .value = loom_attr_string(foo_id)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
   };
   loom_op_t* attrs0 = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -282,9 +281,8 @@ TEST_F(CSETest, CanonicalAttrDictOrderDoesNotBlockCSE) {
       f32, LOOM_LOCATION_UNKNOWN, &attrs0));
 
   loom_named_attr_t axis_first_entries[2] = {
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
-      {/*.name_id=*/label_id, /*.reserved=*/{},
-       /*.value=*/loom_attr_string(foo_id)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
+      {.name_id = label_id, .reserved = {}, .value = loom_attr_string(foo_id)},
   };
   loom_op_t* attrs1 = NULL;
   IREE_ASSERT_OK(loom_test_attrs_build(
@@ -461,9 +459,8 @@ TEST_F(CSETest, RewriterSetAttrRejectsNonCanonicalDictAttrOrder) {
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("foo"), &foo_id));
 
   loom_named_attr_t unsorted_entries[2] = {
-      {/*.name_id=*/label_id, /*.reserved=*/{},
-       /*.value=*/loom_attr_string(foo_id)},
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
+      {.name_id = label_id, .reserved = {}, .value = loom_attr_string(foo_id)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
   };
 
   iree_arena_allocator_t pass_arena;
@@ -496,8 +493,8 @@ TEST_F(CSETest, RewriterSetAttrRejectsDuplicateDictAttrKeys) {
   IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("axis"), &axis_id));
 
   loom_named_attr_t duplicate_entries[2] = {
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(0)},
-      {/*.name_id=*/axis_id, /*.reserved=*/{}, /*.value=*/loom_attr_i64(1)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(0)},
+      {.name_id = axis_id, .reserved = {}, .value = loom_attr_i64(1)},
   };
 
   iree_arena_allocator_t pass_arena;
@@ -549,7 +546,7 @@ TEST_F(CSETest, EliminatesIdenticalBinaryOps) {
 }
 
 TEST_F(CSETest, ReadOnlyOpsCSEWithoutInterveningWrite) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -578,7 +575,7 @@ TEST_F(CSETest, ReadOnlyOpsCSEWithoutInterveningWrite) {
 }
 
 TEST_F(CSETest, ReadOnlyOpsBlockedByInterveningWrite) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -617,7 +614,7 @@ TEST_F(CSETest, ReadOnlyOpsBlockedByInterveningWrite) {
 }
 
 TEST_F(CSETest, PureOpsSurviveWriteBarrier) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -659,7 +656,7 @@ TEST_F(CSETest, PureOpsSurviveWriteBarrier) {
 }
 
 TEST_F(CSETest, MutateResourceNotCSEd) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -863,7 +860,7 @@ TEST_F(CSETest, ReusesDominatingExpressionAcrossReverseOrderedCFG) {
 }
 
 TEST_F(CSETest, StatefulReadCSEAcrossStraightLineCFGEdge) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_block_t* entry_block = loom_region_entry_block(body_);
@@ -901,7 +898,7 @@ TEST_F(CSETest, StatefulReadCSEAcrossStraightLineCFGEdge) {
 }
 
 TEST_F(CSETest, StatefulReadNotCSEdAcrossLoopHeader) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_block_t* entry_block = loom_region_entry_block(body_);
@@ -995,7 +992,7 @@ TEST_F(CSETest, IsolatedRegionBlocksCrossScope) {
 }
 
 TEST_F(CSETest, WriteInsideNestedRegionInvalidatesOuterReads) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -1049,7 +1046,7 @@ TEST_F(CSETest, WriteInsideNestedRegionInvalidatesOuterReads) {
 }
 
 TEST_F(CSETest, PureOpSurvivesWriteInsideNestedRegion) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -1211,7 +1208,7 @@ TEST_F(CSETest, SameResultTypesCSEd) {
 TEST_F(CSETest, PureOpSurvivesExpiredMemoryRead) {
   // A write expires a memory read without affecting an independent pure
   // constant. Both kinds of expression share the same structural index.
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -1340,7 +1337,7 @@ TEST_F(CSETest, SingleOpNoCSEOpportunity) {
 
 TEST_F(CSETest, UniqueIdentityNotCSEd) {
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
 
   // Create an index block arg for the allocation size.
   loom_value_id_t size_id = LOOM_VALUE_ID_INVALID;
@@ -1376,7 +1373,7 @@ TEST_F(CSETest, UniqueIdentityNotCSEd) {
 
 TEST_F(CSETest, UniqueIdentityDoesNotTriggerWriteBarrier) {
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;

@@ -18,6 +18,7 @@
 #include "iree/async/util/completion_pool.h"
 #include "iree/async/util/ready_pool.h"
 #include "iree/base/internal/atomic_slist.h"
+#include "iree/base/internal/file_io_posix.h"
 #include "iree/base/threading/notification.h"
 #include "iree/base/threading/thread.h"
 
@@ -50,13 +51,6 @@ static iree_status_t iree_async_posix_execute_file_open(
   if (iree_any_bit_set(op->open_flags, IREE_ASYNC_FILE_OPEN_FLAG_APPEND)) {
     flags |= O_APPEND;
   }
-  if (iree_any_bit_set(op->open_flags, IREE_ASYNC_FILE_OPEN_FLAG_DIRECT)) {
-#if defined(O_DIRECT)
-    flags |= O_DIRECT;
-#else
-    // O_DIRECT not available on this platform - fall back to buffered I/O.
-#endif  // O_DIRECT
-  }
   flags |= O_CLOEXEC;  // Always set close-on-exec for safety.
 
   // Default mode for newly created files (rw-rw-r--).
@@ -71,11 +65,23 @@ static iree_status_t iree_async_posix_execute_file_open(
                             strerror(errno));
   }
 
-  // Import the fd as a file handle.
+  iree_async_file_flags_t file_flags = IREE_ASYNC_FILE_FLAG_NONE;
+  iree_status_t status = iree_ok_status();
+  if (iree_any_bit_set(op->open_flags, IREE_ASYNC_FILE_OPEN_FLAG_DIRECT)) {
+    file_flags |= IREE_ASYNC_FILE_FLAG_DIRECT;
+    status = iree_file_enable_direct_io(fd);
+  }
+
+  // Publish only after native mode and wrapper creation both succeed.
   iree_async_primitive_t primitive = {.type = IREE_ASYNC_PRIMITIVE_TYPE_FD,
                                       .value = {.fd = fd}};
-  iree_status_t status =
-      iree_async_file_import(&proactor->base, primitive, &op->opened_file);
+  if (iree_status_is_ok(status)) {
+    status = iree_async_file_import(&proactor->base, primitive, file_flags,
+                                    &op->opened_file);
+  }
+  if (!iree_status_is_ok(status)) {
+    close(fd);
+  }
 
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -324,7 +330,8 @@ static int iree_async_posix_worker_thread_entry(void* entry_arg) {
 
 iree_status_t iree_async_posix_worker_initialize(
     iree_async_proactor_posix_t* proactor, iree_host_size_t worker_index,
-    iree_allocator_t allocator, iree_async_posix_worker_t* out_worker) {
+    iree_thread_affinity_t affinity, iree_allocator_t allocator,
+    iree_async_posix_worker_t* out_worker) {
   IREE_TRACE_ZONE_BEGIN(z0);
 
   // Zero-init the worker struct. This ensures cleanup in deinitialize works
@@ -348,11 +355,7 @@ iree_status_t iree_async_posix_worker_initialize(
   params.name = iree_make_cstring_view("async_worker");
   params.create_suspended = false;
 
-  // Set thread affinity to the proactor's NUMA node if specified.
-  if (proactor->numa_node != 0) {
-    iree_thread_affinity_set_group_any(proactor->numa_node,
-                                       &params.initial_affinity);
-  }
+  params.initial_affinity = affinity;
 
   // Create and start the worker thread.
   iree_status_t status =

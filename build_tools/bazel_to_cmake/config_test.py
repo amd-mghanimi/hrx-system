@@ -27,6 +27,71 @@ class _PythonBuildFileFunctions(bazel_to_cmake_converter.BuildFileFunctions):
 
 
 class ConfigTest(unittest.TestCase):
+    def test_project_conditions_reach_other_project_consumers(self):
+        repo_cfg = SimpleNamespace(
+            REPO_MAP={"@hrx": ""},
+            CONDITION_MAPPINGS={"//config:enabled": "REPO_ENABLED"},
+            PROJECTS=[
+                bazel_to_cmake_config.ProjectConfig(
+                    name="producer",
+                    package_prefixes=["producer"],
+                    condition_mappings={
+                        "//producer/config:enabled": "PRODUCER_ENABLED",
+                    },
+                ),
+                bazel_to_cmake_config.ProjectConfig(
+                    name="consumer", package_prefixes=["consumer"]
+                ),
+            ],
+        )
+        output = bazel_to_cmake_converter.convert_build_file(
+            """
+cc_library(
+    name = "consumer",
+    srcs = select({
+        "//producer/config:enabled": ["enabled.c"],
+        "//conditions:default": ["disabled.c"],
+    }),
+    target_compatible_with = select({
+        "//config:enabled": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+""",
+            repo_cfg,
+            "/repo/consumer",
+            repo_root="/repo",
+        )
+        self.assertIn("if(PRODUCER_ENABLED)", output)
+        self.assertIn('"enabled.c"', output)
+        self.assertIn('"disabled.c"', output)
+        self.assertIn("if(REPO_ENABLED)", output)
+
+    def test_gpu_image_targets_use_their_own_driver_selection(self):
+        cases = (
+            ("amdgpu", "IREE_HAL_AMDGPU_TARGETS", "IREE_HAL_AMD_GPU_TARGETS"),
+            ("amd/gpu", "IREE_HAL_AMD_GPU_TARGETS", "IREE_HAL_AMDGPU_TARGETS"),
+        )
+        for driver, variable, other_variable in cases:
+            with self.subTest(driver=driver):
+                converter = SimpleNamespace(body="")
+                functions = bazel_to_cmake_converter.BuildFileFunctions(
+                    converter=converter,
+                    targets=bazel_to_cmake_targets.TargetConverter(repo_map={}),
+                    build_dir=f"/repo/runtime/src/iree/hal/drivers/{driver}/image",
+                    repo_root="/repo",
+                )
+                functions._iree_amdgpu_binary_variants_embed_data(
+                    name="hip_images",
+                    target="amdgcn-amd-amdhsa",
+                    srcs=["image.hip"],
+                    target_selectors_flag=f"//runtime/src/iree/hal/drivers/{driver}:targets",
+                    source_format="hip",
+                    testonly=True,
+                )
+                self.assertIn("TARGETS\n    ${" + variable + "}", converter.body)
+                self.assertNotIn("${" + other_variable + "}", converter.body)
+
     def test_selects_longest_matching_project_for_build_path(self):
         runtime = bazel_to_cmake_config.ProjectConfig(
             name="runtime",
@@ -149,6 +214,35 @@ unhandled_rule(name = "must_not_disappear")
                 repo_root=str(repo_root),
             )
 
+    def test_loaded_objc_library_requires_explicit_cmake_projection(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        repo_cfg = SimpleNamespace(PROJECTS=[], REPO_MAP={"@hrx": ""})
+        build = """
+load("@rules_cc//cc:objc_library.bzl", "objc_library")
+
+objc_library(
+    name = "native_activity",
+    non_arc_srcs = ["activity.m"],
+    tags = ["skip-bazel_to_cmake"],
+)
+"""
+        cmake = bazel_to_cmake_converter.convert_build_file(
+            build,
+            repo_cfg,
+            str(repo_root / "synthetic"),
+            repo_root=str(repo_root),
+        )
+        self.assertNotIn("native_activity", cmake)
+        with self.assertRaisesRegex(
+            NotImplementedError, "objc_library requires an explicit CMake projection"
+        ):
+            bazel_to_cmake_converter.convert_build_file(
+                build.replace('"skip-bazel_to_cmake"', ""),
+                repo_cfg,
+                str(repo_root / "synthetic"),
+                repo_root=str(repo_root),
+            )
+
     def test_loaded_shell_test_honors_explicit_conversion_skip(self):
         repo_root = Path(__file__).resolve().parents[2]
         repo_cfg = SimpleNamespace(PROJECTS=[], REPO_MAP={"@hrx": ""})
@@ -184,6 +278,43 @@ sh_test(
                 build_dir,
                 repo_root=str(repo_root),
             )
+
+    def test_loaded_executable_aliases_honor_explicit_conversion_skip(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        repo_cfg = SimpleNamespace(PROJECTS=[], REPO_MAP={"@hrx": ""})
+        build_dir = str(repo_root / "synthetic")
+
+        cmake = bazel_to_cmake_converter.convert_build_file(
+            """
+load("//build_tools/bazel:executable.bzl", "iree_executable_alias")
+
+iree_executable_alias(
+    name = "bazel_only_alias",
+    src = ":tool",
+    tags = ["skip-bazel_to_cmake"],
+)
+""",
+            repo_cfg,
+            build_dir,
+            repo_root=str(repo_root),
+        )
+        self.assertNotIn("bazel_only_alias", cmake)
+
+        cmake = bazel_to_cmake_converter.convert_build_file(
+            """
+load("//build_tools/bazel:executable.bzl", "iree_wasi_executable_alias")
+
+iree_wasi_executable_alias(
+    name = "bazel_only_wasi_alias",
+    src = ":tool",
+    tags = ["skip-bazel_to_cmake"],
+)
+""",
+            repo_cfg,
+            build_dir,
+            repo_root=str(repo_root),
+        )
+        self.assertNotIn("bazel_only_wasi_alias", cmake)
 
     def test_glob_exclusions_have_distinct_cmake_storage(self):
         repo_root = Path(__file__).resolve().parents[2]
@@ -279,6 +410,18 @@ cc_library(
                 }
             )
 
+    def test_converts_libamdf_build_condition(self):
+        functions = bazel_to_cmake_converter.BuildFileFunctions(
+            converter=SimpleNamespace(body=""),
+            targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
+            build_dir="",
+        )
+
+        self.assertEqual(
+            functions._convert_select_condition("//libamdf/config:enabled_setting"),
+            "AMDF_BUILD",
+        )
+
     def test_target_compatible_with_composes_selects_and_requirements(self):
         functions = bazel_to_cmake_converter.BuildFileFunctions(
             converter=SimpleNamespace(body=""),
@@ -301,7 +444,60 @@ cc_library(
             'IREE_HAL_DRIVER_WEBGPU AND IREE_ARCH STREQUAL "wasm_32"',
         )
 
-    def test_target_compatible_with_x86_64(self):
+    def test_target_compatible_with_x86(self):
+        functions = bazel_to_cmake_converter.BuildFileFunctions(
+            converter=SimpleNamespace(body=""),
+            targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
+            build_dir="",
+        )
+
+        for architecture in ("x86_32", "x86_64"):
+            with self.subTest(architecture=architecture):
+                self.assertEqual(
+                    functions._target_compatible_condition(
+                        [f"@platforms//cpu:{architecture}"]
+                    ),
+                    f'IREE_ARCH STREQUAL "{architecture}"',
+                )
+
+    def test_cc_source_selection_preserves_architecture_and_fallback(self):
+        for rule in ("cc_library", "cc_binary", "cc_test", "iree_cc_fuzz"):
+            for mixed in (False, True):
+                with self.subTest(rule=rule, mixed=mixed):
+                    converter = SimpleNamespace(body="")
+                    functions = bazel_to_cmake_converter.BuildFileFunctions(
+                        converter=converter,
+                        targets=bazel_to_cmake_targets.TargetConverter(
+                            repo_map={"@hrx": ""}
+                        ),
+                        build_dir="",
+                    )
+                    srcs = functions.select(
+                        {
+                            "@platforms//cpu:x86_32": [":host_x86.c"],
+                            "@platforms//cpu:x86_64": [":host_x86.c"],
+                            "//conditions:default": [":host_generic.c"],
+                        }
+                    )
+                    if mixed:
+                        srcs = [":shared.c"] + srcs
+                    getattr(functions, rule)(name="host", srcs=srcs)
+                    prefix, target = converter.body.split("iree_cc_", 1)
+                    self.assertEqual(
+                        prefix,
+                        'set(_host_platform_srcs "")\n'
+                        'if(IREE_ARCH STREQUAL "x86_32")\n'
+                        '  list(APPEND _host_platform_srcs "host_x86.c")\n'
+                        'elseif(IREE_ARCH STREQUAL "x86_64")\n'
+                        '  list(APPEND _host_platform_srcs "host_x86.c")\n'
+                        "else()\n"
+                        '  list(APPEND _host_platform_srcs "host_generic.c")\n'
+                        "endif()\n",
+                    )
+                    self.assertIn("    ${_host_platform_srcs}\n", target)
+                    self.assertEqual('    "shared.c"\n' in target, mixed)
+
+    def test_converts_wasi_platform_condition(self):
         functions = bazel_to_cmake_converter.BuildFileFunctions(
             converter=SimpleNamespace(body=""),
             targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
@@ -309,8 +505,8 @@ cc_library(
         )
 
         self.assertEqual(
-            functions._target_compatible_condition(["@platforms//cpu:x86_64"]),
-            'IREE_ARCH STREQUAL "x86_64"',
+            functions._convert_select_condition("@platforms//os:wasi"),
+            'CMAKE_SYSTEM_NAME STREQUAL "WASI"',
         )
 
     def test_target_compatible_with_parenthesizes_disjunctions(self):
@@ -462,24 +658,52 @@ cc_library(
         self.assertIn('"generated_kernel.bin"', converter.body)
         self.assertNotIn("$<TARGET_FILE:", converter.body)
 
-    def test_c_embed_data_srcs_preserve_source_file_labels(self):
-        repo_root = Path(__file__).resolve().parents[2]
+    def test_c_embed_data_preserves_strip_prefix(self):
         converter = SimpleNamespace(body="")
         functions = bazel_to_cmake_converter.BuildFileFunctions(
             converter=converter,
             targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
-            build_dir="runtime/src/iree/hal/drivers/task/executable/elf/testdata",
-            repo_root=str(repo_root),
+            build_dir="runtime/src/example",
+            repo_root="/repo",
         )
 
         functions.iree_c_embed_data(
-            name="elementwise_mul_source",
-            srcs=[":elementwise_mul_library.c"],
-            c_file_output="elementwise_mul_source.c",
-            h_file_output="elementwise_mul_source.h",
-            testonly=True,
-            flatten=True,
+            name="headers",
+            srcs=["include/nested/header.h"],
+            c_file_output="headers.c",
+            h_file_output="headers.h",
+            strip_prefix="runtime/src/example/include/",
         )
+
+        self.assertIn(
+            "  STRIP_PREFIX\n"
+            '    "${PROJECT_SOURCE_DIR}/runtime/src/example/include/"\n',
+            converter.body,
+        )
+
+    def test_c_embed_data_srcs_preserve_source_file_labels(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repo_root = Path(temporary_directory)
+            package = "runtime/src/iree/hal/drivers/task/executable/elf/testdata"
+            source_directory = repo_root / package
+            source_directory.mkdir(parents=True)
+            (source_directory / "elementwise_mul_library.c").touch()
+            converter = SimpleNamespace(body="")
+            functions = bazel_to_cmake_converter.BuildFileFunctions(
+                converter=converter,
+                targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
+                build_dir=package,
+                repo_root=str(repo_root),
+            )
+
+            functions.iree_c_embed_data(
+                name="elementwise_mul_source",
+                srcs=[":elementwise_mul_library.c"],
+                c_file_output="elementwise_mul_source.c",
+                h_file_output="elementwise_mul_source.h",
+                testonly=True,
+                flatten=True,
+            )
 
         self.assertIn(
             '"${PROJECT_SOURCE_DIR}/runtime/src/iree/hal/drivers/task/executable/elf/testdata/'
@@ -499,9 +723,13 @@ cc_library(
 
         functions.filegroup(name="device_headers", srcs=["device.h"])
 
-        self.assertIn("add_custom_target(device_headers", converter.body)
         self.assertIn(
-            "iree_register_generated_compile_input(device_headers\n"
+            'iree_package_target_name(_FILEGROUP_TARGET "::device_headers")',
+            converter.body,
+        )
+        self.assertIn("add_custom_target(${_FILEGROUP_TARGET}", converter.body)
+        self.assertIn(
+            "iree_register_generated_compile_input(${_FILEGROUP_TARGET}\n"
             "  OUTPUTS\n"
             '    "${CMAKE_CURRENT_BINARY_DIR}/device_headers.stamp"',
             converter.body,
@@ -556,6 +784,25 @@ cc_library(
         self.assertIn("TIMEOUT\n    60", converter.body)
         self.assertNotIn("TIMEOUT\n    3600", converter.body)
 
+    def test_py_test_preserves_resource_group(self):
+        repo_root = Path(__file__).resolve().parents[2]
+        converter = SimpleNamespace(body="")
+        functions = _PythonBuildFileFunctions(
+            converter=converter,
+            targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
+            build_dir="build_tools/bazel_to_cmake",
+            repo_root=str(repo_root),
+        )
+
+        functions.iree_py_test(
+            name="serialized_test",
+            srcs=["config_test.py"],
+            deps=[],
+            resource_group="shared-device",
+        )
+
+        self.assertIn("RESOURCE_GROUP\n    shared-device", converter.body)
+
     def test_py_library_resolves_cross_package_sources(self):
         repo_root = Path(__file__).resolve().parents[2]
         converter = SimpleNamespace(body="")
@@ -593,6 +840,56 @@ cc_library(
         )
         self.assertIn(
             'DATA\n    "${CMAKE_CURRENT_BINARY_DIR}/generated_data.spv"', converter.body
+        )
+
+    def test_py_test_preserves_configured_generated_arguments_and_data(self):
+        converter = SimpleNamespace(body="")
+        functions = _PythonBuildFileFunctions(
+            converter=converter,
+            targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
+            build_dir="/repo/pkg",
+            repo_root="/repo",
+        )
+        functions.iree_spirv_asm_module(name="generated_data", src="input.spvasm")
+        functions.iree_py_test(
+            name="configured_data_test",
+            srcs=["test.py"],
+            args=["--common"]
+            + functions.select(
+                {
+                    "@platforms//os:linux": ["--input=$(rootpath :generated_data)"],
+                    "//conditions:default": ["--no-input"],
+                }
+            ),
+            data=functions.select(
+                {
+                    "@platforms//os:linux": [":generated_data"],
+                    "//conditions:default": [],
+                }
+            ),
+        )
+        self.assertIn(
+            'if(CMAKE_SYSTEM_NAME STREQUAL "Linux")\n'
+            "  list(APPEND _configured_data_test_platform_args "
+            '"--input={{${CMAKE_CURRENT_BINARY_DIR}/generated_data.spv}}")\n'
+            "else()\n"
+            '  list(APPEND _configured_data_test_platform_args "--no-input")\n'
+            "endif()",
+            converter.body,
+        )
+        self.assertIn(
+            'if(CMAKE_SYSTEM_NAME STREQUAL "Linux")\n'
+            "  list(APPEND _configured_data_test_platform_data "
+            '"${CMAKE_CURRENT_BINARY_DIR}/generated_data.spv")\n'
+            "endif()",
+            converter.body,
+        )
+        self.assertIn(
+            'ARGS\n    "--common"\n    ${_configured_data_test_platform_args}',
+            converter.body,
+        )
+        self.assertIn(
+            "DATA\n    ${_configured_data_test_platform_data}", converter.body
         )
 
     def test_private_executable_test_can_skip_cmake(self):
@@ -914,8 +1211,38 @@ iree_execution_test_suite(
         )
 
         self.assertIn("file(GLOB _GLOB_X_TXT LIST_DIRECTORIES false", cmake)
-        self.assertIn('    "${_GLOB_X_TXT}"', cmake)
-        self.assertNotIn("::${_GLOB_X_TXT}", cmake)
+        self.assertIn(
+            'list(TRANSFORM _GLOB_X_TXT PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/"'
+            " OUTPUT_VARIABLE _GLOB_X_TXT_ABSOLUTE)",
+            cmake,
+        )
+        self.assertIn('    "${_GLOB_X_TXT_ABSOLUTE}"', cmake)
+        self.assertNotIn("::${_GLOB_X_TXT_ABSOLUTE}", cmake)
+
+    def test_glob_data_preserves_source_paths_and_exclusions(self):
+        converter = SimpleNamespace(body="")
+        functions = bazel_to_cmake_converter.BuildFileFunctions(
+            converter=converter,
+            targets=bazel_to_cmake_targets.TargetConverter(repo_map={"@hrx": ""}),
+            build_dir="/repo/pkg",
+            repo_root="/repo",
+        )
+        sources = functions.glob(["testdata/*.txt"], exclude=["testdata/skip.txt"])
+        variable = sources[0][2:-1]
+        functions.cc_test(name="direct", srcs=sources, data=sources)
+        functions.filegroup(name="fixtures", srcs=sources)
+        functions.cc_test(name="grouped", data=[":fixtures"])
+
+        self.assertIn(f'  SRCS\n    "${{{variable}}}"', converter.body)
+        self.assertEqual(
+            converter.body.count(f'  DATA\n    "${{{variable}_ABSOLUTE}}"'), 2
+        )
+        exclusion = converter.body.index(f"list(REMOVE_ITEM {variable} ")
+        conversion = converter.body.index(
+            f'list(TRANSFORM {variable} PREPEND "${{CMAKE_CURRENT_SOURCE_DIR}}/"'
+            f" OUTPUT_VARIABLE {variable}_ABSOLUTE)"
+        )
+        self.assertLess(exclusion, conversion)
 
     def test_native_test_omits_unresolved_external_location_env(self):
         converter = SimpleNamespace(body="")
@@ -1014,39 +1341,6 @@ iree_execution_test_suite(
         self.assertIn('if(IREE_ARCH STREQUAL "wasm_32")', converter.body)
         self.assertIn("iree_execution_test_suite(", converter.body)
         self.assertIn("endif()", converter.body)
-
-    def test_loom_artifact_execution_requires_compiler_project(self):
-        converter = SimpleNamespace(body="")
-        functions = bazel_to_cmake_converter.BuildFileFunctions(
-            converter=converter,
-            targets=bazel_to_cmake_config.ProjectTargetConverter(
-                repo_map={"@hrx": ""},
-                projects=[],
-                target_mappings={
-                    "//loom/src/loom/tools/loom-compile": ["loom::tools::loom-compile"],
-                },
-            ),
-            build_dir="/repo/experimental/xdna/cts",
-            repo_root="/repo",
-        )
-
-        functions.iree_execution_test_suite(
-            name="integer_shifts_test",
-            manifests=["integer_shifts.test.json"],
-            tools={"loom-compile": "//loom/src/loom/tools/loom-compile"},
-            target_compatible_with=functions.select(
-                {
-                    "//loom/config/target:xdna_artifacts": [],
-                    "//conditions:default": ["@platforms//:incompatible"],
-                }
-            ),
-        )
-
-        self.assertIn(
-            "if(LOOM_BUILD AND LOOM_TARGET_ARCH_XDNA AND LOOM_EMIT_XDNA)",
-            converter.body,
-        )
-        self.assertIn("loom-compile=", converter.body)
 
     def test_execution_test_suite_emits_resource_group(self):
         converter = SimpleNamespace(body="")

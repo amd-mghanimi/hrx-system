@@ -24,6 +24,9 @@ typedef struct loom_spirv_target_profile_t {
   // Target-neutral family identity and bundle projection.
   loom_target_profile_t base;
 
+  // Compute subgroup capabilities before root execution selection.
+  loom_spirv_subgroup_properties_t subgroup;
+
   // Cooperative operation rows selected for the active target, or NULL to use
   // the static modeled rows implied by the target feature set.
   const loom_spirv_cooperative_property_set_t* cooperative_properties;
@@ -34,6 +37,7 @@ typedef struct loom_spirv_target_profile_t {
 void loom_spirv_target_profile_initialize(
     const loom_target_bundle_t* target_bundle,
     loom_target_fact_field_set_t explicit_fields,
+    loom_spirv_subgroup_properties_t subgroup,
     const loom_spirv_cooperative_property_set_t* cooperative_properties,
     loom_spirv_target_profile_t* out_profile);
 
@@ -41,8 +45,12 @@ void loom_spirv_target_profile_initialize(
 //
 // "vulkan1.3+bda" models the baseline Vulkan buffer-device-address environment.
 // "vulkan1.3+bda+extended-types" additionally requires f16/f64/i8/i16/bf16
-// arithmetic and narrow storage-buffer access. "vulkan1.3+bda+hal" selects
-// the baseline environment with the HAL kernel entry ABI.
+// arithmetic, F32 denorm preservation for exact BF16 widening, and narrow
+// storage-buffer access. "vulkan1.3+bda+hal" selects the baseline environment
+// with the HAL kernel entry ABI.
+// "vulkan1.3+bda+subgroup32+ballot+hal" additionally requires a fixed
+// subgroup size of 32 and subgroup ballot operations.
+// "vulkan1.3+bda+subgroup32+ballot+vote+hal" also admits native boolean votes.
 //
 // The returned profile has process lifetime. Named profiles model static API
 // environments; device-discovered profiles may additionally carry dynamic

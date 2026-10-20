@@ -1,0 +1,57 @@
+// RUN: roundtrip
+
+// One published record is retained for history while a distinct reader owns
+// its asynchronous transport. Caller-owned backing outlives both bindings.
+func.decl @initialize(%pixels: view<144xi32>)
+
+func.decl @inspect(%pixels: view<144xi32>)
+
+func.def @copy_and_retain(%local: view<2x144xi32>, %remote: view<2x144xi32>) {
+  %capacity = index.constant 2 : index
+  %source = channel.bind<fifo> %local, %capacity : view<2x144xi32>, index -> channel<tile<144xi32>>
+  %destination = channel.bind<fifo> %remote, %capacity : view<2x144xi32>, index -> channel<tile<144xi32>>
+  %write, %pixels = channel.reserve %source : channel<tile<144xi32>> -> (write<tile<144xi32>>, view<144xi32>)
+  func.call @initialize(%pixels) : (view<144xi32>)
+  channel.publish %write : write<tile<144xi32>>
+  %read = channel.accept %source : channel<tile<144xi32>> -> read<tile<144xi32>>
+  %transfer, %history = channel.fanout %read : read<tile<144xi32>> -> (read<tile<144xi32>>, read<tile<144xi32>>)
+  %remote_write, %remote_pixels = channel.reserve %destination : channel<tile<144xi32>> -> (write<tile<144xi32>>, view<144xi32>)
+  channel.copy %transfer -> %remote_write : read<tile<144xi32>>, write<tile<144xi32>>
+  %previous = channel.wait %history : read<tile<144xi32>> -> view<144xi32>
+  func.call @inspect(%previous) : (view<144xi32>)
+  channel.release %history : read<tile<144xi32>>
+  func.return
+}
+
+// ====
+
+func.def @exclusive_consumer(%channel: channel<tile<6144xi32>>) {
+  %read, %raw = channel.acquire<mutable> %channel : channel<tile<6144xi32>> -> (read<tile<6144xi32>, mutable>, view<6144xi32>)
+  channel.release %read : read<tile<6144xi32>, mutable>
+  %pending = channel.accept<mutable> %channel : channel<tile<6144xi32>> -> read<tile<6144xi32>, mutable>
+  %next = channel.wait %pending : read<tile<6144xi32>, mutable> -> view<6144xi32>
+  channel.release %pending : read<tile<6144xi32>, mutable>
+  func.return
+}
+
+// ====
+
+// The record shape may contain SSA dimensions without changing per record.
+func.def @specialized_shape(%width: index, %storage: view<2x[%width]xbf16>) {
+  %capacity = index.constant 2 : index
+  %channel = channel.bind<fifo> %storage, %capacity : view<2x[%width]xbf16>, index -> channel<tile<[%width]xbf16>>
+  %read, %payload = channel.acquire %channel : channel<tile<[%width]xbf16>> -> (read<tile<[%width]xbf16>>, view<[%width]xbf16>)
+  channel.release %read : read<tile<[%width]xbf16>>
+  func.return
+}
+
+// ====
+
+// A relation-bound channel may expose several incoming endpoints while
+// retaining the ordinary scalar channel type.
+func.def @consume_ready(%progress: channel<tile<1xi32>>) -> (index) {
+  %source_rank, %read = channel.select %progress : channel<tile<1xi32>> -> (index, read<tile<1xi32>>)
+  %notice = channel.wait %read : read<tile<1xi32>> -> view<1xi32>
+  channel.release %read : read<tile<1xi32>>
+  func.return %source_rank : index
+}

@@ -14,13 +14,13 @@ using Half4 = _Float16 __attribute__((ext_vector_type(4)));
 
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void scale_half_vectors(const Half4* input, Half4* output) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   output[lane + 1] = scale(input[lane + 1], 5.0f16);
 }
 
 [[loom::kernel, loom::workgroup_size(32, 1, 1), loom::workgroup_count(1, 1, 1)]]
 void convert_half(const float* input, _Float16* output, float* expanded) {
-  unsigned lane = loom::workitem_id.x;
+  unsigned lane = loom::kernel::workitem::id.x;
   _Float16 value = input[lane];
   output[lane] = value;
   expanded[lane] = value;

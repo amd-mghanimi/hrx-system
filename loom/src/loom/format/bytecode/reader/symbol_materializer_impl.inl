@@ -139,9 +139,9 @@ static iree_status_t loom_bytecode_reader_materialize_function_header(
   uint8_t calling_convention = 0;
   IREE_RETURN_IF_ERROR(loom_bytecode_reader_read_u8(&reader->decoder, cursor,
                                                     &calling_convention));
-  uint8_t purity = 0;
+  uint8_t effect_contract = 0;
   IREE_RETURN_IF_ERROR(
-      loom_bytecode_reader_read_u8(&reader->decoder, cursor, &purity));
+      loom_bytecode_reader_read_u8(&reader->decoder, cursor, &effect_contract));
   uint64_t workload_arg_count = 0;
   uint64_t arg_count = 0;
   uint64_t result_count = 0;
@@ -213,7 +213,7 @@ static iree_status_t loom_bytecode_reader_materialize_function_header(
           .values = signature_values,
           .value_count = signature_scope.next_value_number,
           .bindings = &signature_scope.bindings,
-  };
+      };
   loom_attribute_t predicates_attr = loom_attr_absent();
   IREE_RETURN_IF_ERROR(loom_bytecode_symbol_policy_materialize_attribute_ssa(
       reader, cursor, /*descriptor=*/NULL, LOOM_BYTECODE_ATTR_PREDICATE_LIST,
@@ -263,12 +263,26 @@ static iree_status_t loom_bytecode_reader_materialize_function_header(
         vtable->symbol_def->retain_attr_index_plus_one - 1;
     func_attrs[retain_attr_index] = loom_attr_enum(1);
   }
+  if (flags & LOOM_BYTECODE_SYMBOL_FLAG_LINK_ONCE) {
+    const uint8_t linkage_attr_index =
+        loom_symbol_definition_linkage_attr_index(vtable->symbol_def);
+    if (linkage_attr_index == LOOM_ATTR_INDEX_NONE) {
+      return loom_bytecode_reader_emit_invalid_field(
+          &reader->decoder, IREE_SV("SYMBOLS"), IREE_SV("symbol"), symbol_id,
+          IREE_SV("flags"), 0,
+          IREE_SV("link_once_symbol_op_has_no_linkage_attr"));
+    }
+    func_attrs[linkage_attr_index] =
+        loom_attr_enum(LOOM_SYMBOL_LINKAGE_LINK_ONCE);
+  }
   if (calling_convention != 0 &&
       func_like->cc_attr_index != LOOM_ATTR_INDEX_NONE) {
     func_attrs[func_like->cc_attr_index] = loom_attr_enum(calling_convention);
   }
-  if (purity != 0 && func_like->purity_attr_index != LOOM_ATTR_INDEX_NONE) {
-    func_attrs[func_like->purity_attr_index] = loom_attr_enum(purity);
+  if (effect_contract != 0 &&
+      func_like->effect_contract_attr_index != LOOM_ATTR_INDEX_NONE) {
+    func_attrs[func_like->effect_contract_attr_index] =
+        loom_attr_enum(effect_contract);
   }
   if (import_module_id != LOOM_STRING_ID_INVALID) {
     uint8_t import_module_attr_index =
@@ -343,7 +357,7 @@ static iree_status_t loom_bytecode_reader_materialize_function_header(
       .location = location,
       .source_trivia = source_trivia,
       .calling_convention = calling_convention,
-      .purity = purity,
+      .effect_contract = effect_contract,
       .workload_argument_count = (uint16_t)workload_arg_count,
       .argument_count = (uint16_t)arg_count,
       .result_count = (uint16_t)result_count,
@@ -580,7 +594,7 @@ loom_bytecode_reader_materialize_global_symbol(
           .values = local_values,
           .value_count = global_scope.next_value_number,
           .bindings = &global_scope.bindings,
-  };
+      };
   for (uint64_t i = 0; i < attr_count; ++i) {
     uint64_t key_offset = loom_bytecode_reader_cursor_absolute_position(cursor);
     uint64_t key_id = 0;

@@ -20,6 +20,7 @@
 #include "loom/target/reporting/low_allocation.h"
 #include "loom/target/reporting/low_mix.h"
 #include "loom/target/reporting/low_names.h"
+#include "loom/target/reporting/memory_summary.h"
 #include "loom/util/cfg_graph.h"
 #include "loom/util/fact_table.h"
 
@@ -99,7 +100,7 @@ loom_target_compile_report_bank_service(
       .wave_size = source->wave_size,
       .bank_count = source->bank_count,
       .bank_word_byte_count = source->bank_word_byte_count,
-      .packet_word_count = source->packet_word_count,
+      .packet_byte_count = source->packet_byte_count,
       .phase_count = source->phase_count,
       .base_residue_count = source->base_residue_count,
       .required_rounds = source->required_rounds,
@@ -130,6 +131,7 @@ loom_target_compile_report_subgroup_access(
       .interval_coverage = source->interval_coverage,
       .unknown_reason = source->unknown_reason,
       .subgroup_size = source->subgroup_size,
+      .active_lane_count = source->active_lane_count,
       .lane_term_count = source->lane_term_count,
       .per_lane_packet_byte_count = source->per_lane_packet_byte_count,
       .linear_lane_byte_stride = source->linear_lane_byte_stride,
@@ -210,7 +212,8 @@ static void loom_target_compile_report_record_edge_copy_moves(
     loom_target_compile_report_t* report,
     const loom_low_allocation_table_t* allocation) {
   uint64_t packet_count = 0;
-  uint64_t unit_count = 0;
+  const uint64_t unit_count =
+      allocation->move_count - allocation->packet_move_count;
   for (iree_host_size_t i = 0; i < allocation->edge_copy_group_count; ++i) {
     const loom_low_allocation_edge_copy_group_t* group =
         &allocation->edge_copy_groups[i];
@@ -218,7 +221,6 @@ static void loom_target_compile_report_record_edge_copy_moves(
       continue;
     }
     ++packet_count;
-    unit_count += group->move_group.moves.count;
   }
   loom_target_compile_report_record_move_cause_if_nonzero(
       report, LOOM_TARGET_COMPILE_REPORT_MOVE_CAUSE_BRANCH_EDGE, packet_count,
@@ -239,6 +241,9 @@ static void loom_target_compile_report_record_packet_moves(
   for (iree_host_size_t i = 0; i < allocation->packet_move_group_count; ++i) {
     const loom_low_allocation_packet_move_group_t* group =
         &allocation->packet_move_groups[i];
+    if (group->move_group.moves.count == 0) {
+      continue;
+    }
     switch (group->cause) {
       case LOOM_LOW_PLACEMENT_CAUSE_LOW_COPY:
         ++copy_packet_count;
@@ -452,22 +457,18 @@ void loom_target_compile_report_record_low_kernel_workload(
 
 iree_status_t loom_target_compile_report_record_low_lowering(
     loom_target_compile_report_t* report,
-    const loom_low_lower_result_t* lower_result) {
+    const loom_low_lower_result_t* lower_result,
+    iree_arena_block_pool_t* scratch_block_pool) {
   loom_target_compile_report_record_low_workload(report, lower_result);
-  const bool has_source_low_summary =
-      lower_result->selected_source_op_count != 0 ||
-      lower_result->emitted_low_op_count != 0 ||
-      lower_result->report_rows.head != NULL ||
-      lower_result->memory_report_rows.count != 0;
-  if (!has_source_low_summary) {
+  const loom_low_lower_report_t* lowering_report = lower_result->report;
+  if (lowering_report == NULL) {
     return iree_ok_status();
   }
   report->detail_flags |= LOOM_TARGET_COMPILE_REPORT_DETAIL_SOURCE_LOW_ROWS;
   report->source_low_selected_op_count +=
-      lower_result->selected_source_op_count;
-  report->source_low_emitted_op_count += lower_result->emitted_low_op_count;
-  for (const loom_low_lower_report_row_vec_t* vec =
-           lower_result->report_rows.head;
+      lowering_report->selected_source_op_count;
+  report->source_low_emitted_op_count += lowering_report->emitted_low_op_count;
+  for (const loom_low_lower_report_row_vec_t* vec = lowering_report->rows.head;
        vec != NULL; vec = vec->next) {
     const loom_low_lower_report_row_t* source_rows =
         loom_low_lower_report_row_vec_const_rows(vec);
@@ -496,10 +497,17 @@ iree_status_t loom_target_compile_report_record_low_lowering(
           loom_target_compile_report_record_source_low_row(report, &row));
     }
   }
-  for (iree_host_size_t i = 0; i < lower_result->memory_report_rows.count;
+  iree_arena_allocator_t memory_arena;
+  iree_arena_initialize(scratch_block_pool, &memory_arena);
+  loom_target_compile_report_memory_batch_t memory_batch;
+  loom_target_compile_report_memory_batch_initialize(report, &memory_arena,
+                                                     &memory_batch);
+  iree_status_t status = iree_ok_status();
+  for (iree_host_size_t i = 0;
+       i < lowering_report->memory_rows.count && iree_status_is_ok(status);
        ++i) {
     const loom_low_lower_memory_report_row_t* source_row =
-        &lower_result->memory_report_rows.rows[i];
+        &lowering_report->memory_rows.rows[i];
     const loom_target_compile_report_memory_interval_t source_interval =
         loom_target_compile_report_source_interval(
             &source_row->source_interval);
@@ -544,10 +552,14 @@ iree_status_t loom_target_compile_report_record_low_lowering(
         .source_interval = source_interval,
         .execution_count_plus_one = source_row->execution_count_plus_one,
     };
-    IREE_RETURN_IF_ERROR(
-        loom_target_compile_report_record_source_low_memory_row(report, &row));
+    status =
+        loom_target_compile_report_memory_batch_append(&memory_batch, &row);
   }
-  return iree_ok_status();
+  if (iree_status_is_ok(status)) {
+    status = loom_target_compile_report_memory_batch_finish(&memory_batch);
+  }
+  iree_arena_deinitialize(&memory_arena);
+  return status;
 }
 
 void loom_target_compile_report_record_low_planning(
@@ -566,9 +578,11 @@ void loom_target_compile_report_record_low_planning(
   }
 }
 
-iree_status_t loom_target_compile_report_record_low_emission_frame(
+iree_status_t
+loom_target_compile_report_record_low_emission_frame_with_dynamic_context(
     loom_target_compile_report_t* report,
-    const loom_low_emission_frame_t* frame) {
+    const loom_low_emission_frame_t* frame,
+    const loom_target_compile_report_low_dynamic_context_t* dynamic_context) {
   loom_target_compile_report_record_low_frame_identity(report, frame);
   loom_low_allocation_value_scratch_t value_scratch = {0};
   IREE_RETURN_IF_ERROR(loom_low_allocation_acquire_value_scratch(
@@ -581,25 +595,19 @@ iree_status_t loom_target_compile_report_record_low_emission_frame(
   }
   loom_target_compile_report_record_schedule(
       report, frame->schedule.node_count, frame->schedule.scheduled_node_count,
-      frame->schedule.dependencies.count, frame->schedule.scopes.scope_count,
+      frame->schedule.dependency_count, frame->schedule.scopes.scope_count,
       frame->schedule.resource_use_count, frame->schedule.hazard_gap_count,
       frame->schedule.model_summary_count, liveness->pressure_summary_count,
       peak_live_units);
   loom_target_compile_report_record_low_static_instruction_mix(report, frame);
-  loom_target_compile_report_low_dynamic_context_t dynamic_context = {0};
-  iree_status_t status =
-      loom_target_compile_report_low_dynamic_context_initialize(
-          frame, &dynamic_context);
-  if (iree_status_is_ok(status)) {
-    status = loom_target_compile_report_record_low_dynamic_mix(
-        report, frame, &dynamic_context);
-  }
+  iree_status_t status = loom_target_compile_report_record_low_dynamic_mix(
+      report, frame, dynamic_context);
   if (iree_status_is_ok(status)) {
     loom_target_compile_report_record_move_causes(report, frame);
   }
   if (iree_status_is_ok(status)) {
     status = loom_target_compile_report_record_low_allocation_contents(
-        report, &frame->allocation, &frame->schedule, &dynamic_context);
+        report, &frame->allocation, &frame->schedule, dynamic_context);
   }
   if (iree_status_is_ok(status)) {
     loom_target_compile_report_record_allocation_materialization(
@@ -614,6 +622,21 @@ iree_status_t loom_target_compile_report_record_low_emission_frame(
                                                                        frame);
   }
   loom_low_allocation_release_value_scratch(&value_scratch);
+  return status;
+}
+
+iree_status_t loom_target_compile_report_record_low_emission_frame(
+    loom_target_compile_report_t* report,
+    const loom_low_emission_frame_t* frame) {
+  loom_target_compile_report_low_dynamic_context_t dynamic_context = {0};
+  iree_status_t status =
+      loom_target_compile_report_low_dynamic_context_initialize(
+          frame, &dynamic_context);
+  if (iree_status_is_ok(status)) {
+    status =
+        loom_target_compile_report_record_low_emission_frame_with_dynamic_context(
+            report, frame, &dynamic_context);
+  }
   loom_target_compile_report_low_dynamic_context_deinitialize(&dynamic_context);
   return status;
 }

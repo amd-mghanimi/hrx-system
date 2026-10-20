@@ -13,6 +13,7 @@ loom_check_test_suite(
   NAME
     test
   SRCS
+    "bitcast.loom-test"
     "canonicalize.loom-test"
     "facts.loom-test"
     "hints_canonicalize.loom-test"

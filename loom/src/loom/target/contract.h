@@ -24,8 +24,9 @@
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
 #include "loom/codegen/low/descriptors.h"
-#include "loom/error/error_defs.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/ir.h"
+#include "loom/ir/scalar_type.h"
 #include "loom/ops/func/ops.h"
 #include "loom/target/facts.h"
 #include "loom/target/types.h"
@@ -40,6 +41,155 @@ typedef struct loom_matrix_fragment_layout_t loom_matrix_fragment_layout_t;
 typedef struct loom_native_contraction_facts_t loom_native_contraction_facts_t;
 typedef struct loom_local_value_domain_t loom_local_value_domain_t;
 
+// Returns true when |type| has a complete vector-carrier mapping under the
+// selected target policy. A concrete source value retains its identity and
+// optional analysis facts so targets can admit value-dependent representations.
+// Hypothetical packet types use NULL facts and LOOM_VALUE_ID_INVALID; they must
+// not inherit the representation of the aggregate they will replace.
+typedef bool (*loom_target_vector_carrier_supported_fn_t)(
+    void* user_data, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t type);
+
+typedef struct loom_target_vector_carrier_supported_callback_t {
+  // Optional target query for complete vector-carrier admission.
+  loom_target_vector_carrier_supported_fn_t fn;
+  // Caller-owned payload passed to |fn|.
+  void* user_data;
+} loom_target_vector_carrier_supported_callback_t;
+
+// Target representation contract for shared packed-bitstream legalization.
+typedef struct loom_target_bitstream_policy_t {
+  // Preferred scalar integer word width. Supported values are 32 and 64 bits.
+  uint8_t word_bit_count;
+  // Complete admission query for packet carriers created by the bitstream
+  // legalization. This is independent of authored aggregate admission.
+  loom_target_vector_carrier_supported_callback_t packet_carrier_supported;
+} loom_target_bitstream_policy_t;
+
+// Maximum number of logical lane candidates in a packet policy. Shared
+// component planning represents the candidate intersection as one bit per
+// policy entry.
+#define LOOM_TARGET_VECTOR_PACKET_LANE_COUNT_LIMIT 64u
+
+// Target vector packet candidates consumed by shared legalization.
+//
+// The target contributes representation widths only. Shared planners query
+// projected operations through the target contract before selecting a packet
+// width. A handled answer is authoritative; targets whose custom Low planner
+// leaves structural memory candidates unhandled retain their declared packet
+// decomposition. Membership here is not itself a final legality claim.
+typedef struct loom_target_vector_packet_lane_limit_t {
+  // Scalar element type whose structural carrier has a logical lane ceiling.
+  loom_scalar_type_t element_type;
+  // Maximum logical lanes carried by one structural packet.
+  uint16_t maximum_lane_count;
+} loom_target_vector_packet_lane_limit_t;
+
+typedef enum loom_target_vector_packet_policy_flag_bits_e {
+  LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_NONE = 0u,
+  // Leaves rejected dynamic windows attached to their decomposable producer
+  // graphs so target legalization can replay packets at runtime origins.
+  LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_DYNAMIC_WINDOW_REPLAY = 1u << 0,
+  // Coordinates components touching oversized memory roots with the memory
+  // packet planner so they never slice an unsupported memory snapshot.
+  LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_MEMORY_ROOT_COMPONENTS = 1u << 1,
+  // Projects unsupported static vector carriers across callable, CFG,
+  // LoopLike, and RegionBranch boundaries using native lane candidates.
+  // Object-function signatures retain their authored platform ABI.
+  LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_BOUNDARY_PROJECTION = 1u << 2,
+  // Selects fact-bounded dynamic windows directly from retained SSA packet
+  // snapshots instead of reifying those snapshots in private memory.
+  LOOM_TARGET_VECTOR_PACKET_POLICY_FLAG_DYNAMIC_SNAPSHOT_SELECTION = 1u << 3,
+} loom_target_vector_packet_policy_flag_bits_t;
+typedef uint8_t loom_target_vector_packet_policy_flags_t;
+
+typedef struct loom_target_vector_packet_policy_t {
+  // Native packet widths in bits used by structural memory and carrier
+  // legalization. Widths are byte-aligned powers of two.
+  const uint16_t* native_bit_counts;
+  // Logical lane counts worth evaluating for decomposable components.
+  const uint16_t* native_lane_counts;
+  // Physical target width of index lanes. Zero uses the abstract source width.
+  uint8_t index_bit_count;
+  // Physical target width of offset lanes. Zero uses the abstract source width.
+  uint8_t offset_bit_count;
+  // Target-selected packet planning capabilities.
+  loom_target_vector_packet_policy_flags_t flags;
+  // Sparse per-element lane ceilings for structural packet widths.
+  const loom_target_vector_packet_lane_limit_t* structural_lane_limits;
+  // Largest payload in bits that remains owned by ordinary structural
+  // lowering instead of packet legalization.
+  uint16_t maximum_unpacketized_bit_count;
+  // Number of entries in |native_bit_counts|.
+  uint8_t native_bit_count_count;
+  // Number of entries in |native_lane_counts|, at most
+  // LOOM_TARGET_VECTOR_PACKET_LANE_COUNT_LIMIT.
+  uint8_t native_lane_count_count;
+  // Number of entries in |structural_lane_limits|.
+  uint8_t structural_lane_limit_count;
+} loom_target_vector_packet_policy_t;
+
+// Returns true when a static vector exceeds either the policy's aggregate bit
+// budget or its element-specific logical lane ceiling. Dynamic vectors and
+// element types without a physical bit width return false for their owning
+// legalization path to handle.
+bool loom_target_vector_packet_policy_requires_packets(
+    const loom_target_vector_packet_policy_t* policy, loom_type_t vector_type);
+
+// Scoped vector lane-count projection for one contract query. An all-zero
+// value reads authored types directly. A populated projection presents static
+// vectors with either authored lane count as rank-one vectors with its paired
+// projected lane count without mutating source IR. Most operations use only
+// the primary pair. The secondary pair represents rate-changing operations
+// whose logical and storage vectors have different lane counts. Source-memory
+// matching sees the same projected lane count while retaining every authored
+// address, layout, alignment, and execution fact.
+typedef struct loom_target_contract_vector_lane_projection_t {
+  // Authored static vector lane count selected for projection.
+  uint32_t source_lane_count;
+  // Rank-one vector lane count presented to the contract query.
+  uint32_t projected_lane_count;
+  // Optional second authored static vector lane count selected for projection.
+  uint32_t secondary_source_lane_count;
+  // Rank-one vector lane count paired with |secondary_source_lane_count|.
+  uint32_t secondary_projected_lane_count;
+} loom_target_contract_vector_lane_projection_t;
+
+// Returns the vector lane count visible to a projected contract query. Facts
+// for unrelated lane counts retain their authored value.
+static inline uint32_t loom_target_contract_query_vector_lane_count(
+    loom_target_contract_vector_lane_projection_t projection,
+    uint32_t authored_lane_count) {
+  if (projection.source_lane_count != 0 &&
+      authored_lane_count == projection.source_lane_count) {
+    return projection.projected_lane_count;
+  }
+  if (projection.secondary_source_lane_count != 0 &&
+      authored_lane_count == projection.secondary_source_lane_count) {
+    return projection.secondary_projected_lane_count;
+  }
+  return authored_lane_count;
+}
+
+// Returns the projected type for |value_id|. Callers first test for an empty
+// projection so ordinary authored queries remain on the direct type-table
+// path and only projected queries perform shape projection.
+loom_type_t loom_target_contract_query_projected_value_type(
+    loom_target_contract_vector_lane_projection_t projection,
+    const loom_module_t* module, loom_value_id_t value_id);
+
+// Returns the scoped query type for |value_id|.
+static inline loom_type_t loom_target_contract_query_value_type(
+    loom_target_contract_vector_lane_projection_t projection,
+    const loom_module_t* module, loom_value_id_t value_id) {
+  if (projection.source_lane_count == 0) {
+    return loom_module_value_type(module, value_id);
+  }
+  return loom_target_contract_query_projected_value_type(projection, module,
+                                                         value_id);
+}
+
 typedef enum loom_target_contract_query_outcome_e {
   // No linked contract fragment or provider has an opinion about the op.
   LOOM_TARGET_CONTRACT_QUERY_UNHANDLED = 0,
@@ -50,6 +200,10 @@ typedef enum loom_target_contract_query_outcome_e {
   LOOM_TARGET_CONTRACT_QUERY_UNSUPPORTED = 2,
   // The op violates the source contract required before target selection.
   LOOM_TARGET_CONTRACT_QUERY_INVALID_IR = 3,
+  // The target owns a structured rejection for the authored operation.
+  // Legalization must preserve it and must not expand its direct consumers
+  // through reference fallback before the rejection is emitted.
+  LOOM_TARGET_CONTRACT_QUERY_TERMINAL_REJECTION = 4,
 } loom_target_contract_query_outcome_t;
 
 typedef struct loom_target_contract_rejection_t {
@@ -68,9 +222,20 @@ enum loom_target_contract_descriptor_matrix_transform_flag_bits_e {
 };
 typedef uint32_t loom_target_contract_descriptor_matrix_transform_flags_t;
 
+typedef enum loom_target_contract_projection_flag_bits_e {
+  LOOM_TARGET_CONTRACT_PROJECTION_FLAG_NONE = 0u,
+  // Projected legality depends on whole-vector lane provenance. Vector packet
+  // planning must project the producer closure with the selected operation so
+  // every packet acquires a complete packet-local origin.
+  LOOM_TARGET_CONTRACT_PROJECTION_FLAG_ROOT_PRODUCER_CLOSURE = 1u << 0,
+} loom_target_contract_projection_flag_bits_t;
+typedef uint8_t loom_target_contract_projection_flags_t;
+
 typedef struct loom_target_contract_query_result_t {
   // Query outcome.
   loom_target_contract_query_outcome_t outcome;
+  // Requirements for preserving the selected contract under lane projection.
+  loom_target_contract_projection_flags_t projection_flags;
   // Active binding ordinal selected or rejected by the query.
   uint16_t binding_index;
   // Composed case ordinal selected or rejected by the query.
@@ -138,6 +303,11 @@ enum loom_target_contract_system_e {
   LOOM_TARGET_CONTRACT_SYSTEM_DESCRIPTOR_MATRIX = 6,
   // Guard-only lower-rule row for a bounded non-descriptor recipe.
   LOOM_TARGET_CONTRACT_SYSTEM_RECIPE_RULE = 7,
+  // Explicit target rejection for an operation family with no matching native
+  // case. Reference legalization may rewrite the operation before lowering.
+  LOOM_TARGET_CONTRACT_SYSTEM_UNSUPPORTED = 8,
+  // Descriptor-rule row used only by source-to-Low planning and emission.
+  LOOM_TARGET_CONTRACT_SYSTEM_DESCRIPTOR_RULE_LOWERING_ONLY = 9,
 };
 
 #define LOOM_TARGET_CONTRACT_ROW_NONE ((uint16_t)UINT16_MAX)
@@ -147,6 +317,9 @@ typedef struct loom_target_contract_op_entry_t {
   uint16_t case_start;
   // Number of case rows available for the dialect-local op index.
   uint16_t case_count;
+  // Number of lower-rule cases participating in target queries. Excludes
+  // matrix adapters, unsupported markers, and metadata-only cases.
+  uint16_t query_rule_count;
 } loom_target_contract_op_entry_t;
 
 // Returns an empty target contract op entry.
@@ -155,6 +328,7 @@ loom_target_contract_op_entry_empty(void) {
   return (loom_target_contract_op_entry_t){
       /*.case_start=*/LOOM_TARGET_CONTRACT_ROW_NONE,
       /*.case_count=*/0,
+      /*.query_rule_count=*/0,
   };
 }
 
@@ -208,7 +382,7 @@ typedef uint8_t loom_target_contract_fragment_flags_t;
 enum loom_target_contract_fragment_flag_bits_e {
   // Fragment cases participate in read-only target contract queries.
   LOOM_TARGET_CONTRACT_FRAGMENT_FLAG_TARGET_QUERY =
-      (loom_target_contract_fragment_flags_t)1u << 0,
+      (loom_target_contract_fragment_flags_t)(1u << 0),
 };
 
 typedef struct loom_target_contract_fragment_t {
@@ -216,12 +390,17 @@ typedef struct loom_target_contract_fragment_t {
   loom_target_contract_fragment_flags_t flags;
   // Number of descriptor-rule rows.
   uint16_t descriptor_rule_count;
-  // Descriptor-rule row pool.
-  const loom_target_contract_descriptor_rule_t* descriptor_rules;
   // Number of descriptor-matrix rows.
   uint16_t descriptor_matrix_count;
+  // Number of distinct op kinds participating in query-visible source graphs.
+  uint16_t source_graph_op_kind_count;
+  // Descriptor-rule row pool.
+  const loom_target_contract_descriptor_rule_t* descriptor_rules;
   // Descriptor-matrix row pool.
   const loom_target_contract_descriptor_matrix_rule_t* descriptor_matrices;
+  // Sorted union of root and related-node kinds from every emitted graph rule
+  // that participates in target queries. Immutable across source mutations.
+  const loom_op_kind_t* source_graph_op_kinds;
 } loom_target_contract_fragment_t;
 
 // Returns true when |fragment| participates in read-only target contract
@@ -232,11 +411,19 @@ static inline bool loom_target_contract_fragment_queries_target(
          0;
 }
 
+// Returns whether |op_kind| can participate as a root or related node in any
+// query-visible source graph. A false result proves that a point contract query
+// does not need source graph ownership analysis.
+bool loom_target_contract_fragment_has_source_graph_op(
+    const loom_target_contract_fragment_t* fragment, loom_op_kind_t op_kind);
+
 typedef struct loom_target_contract_binding_t {
   // Generated fragment rodata linked into the active target package.
   const loom_target_contract_fragment_t* fragment;
   // Policy rule-set ordinal corresponding to |fragment|'s descriptor-rule rows.
   uint16_t rule_set_index;
+  // Primary-descriptor feature class shared by every lowering rule, or zero.
+  uint8_t required_primary_feature_class;
 } loom_target_contract_binding_t;
 
 typedef struct loom_target_contract_index_t {
@@ -252,8 +439,14 @@ typedef struct loom_target_contract_index_t {
   const loom_target_contract_case_t* cases;
   // Number of active fragment bindings.
   uint8_t binding_count;
+  // Number of operation kinds that may root a multi-operation source graph.
+  uint16_t source_graph_root_op_kind_count;
   // Active fragment bindings referenced by composed case rows.
   const loom_target_contract_binding_t* bindings;
+  // Relocation-free candidate-selection rows, buckets, and ordinal sequences.
+  const uint32_t* selection_data;
+  // Sorted operation kinds that may root a multi-operation source graph.
+  const loom_op_kind_t* source_graph_root_op_kinds;
 } loom_target_contract_index_t;
 
 // Looks up the compact case span for an op kind in a composed index.
@@ -277,11 +470,30 @@ loom_target_contract_index_lookup_kind(
   return dialect_table->op_entries[op_index];
 }
 
+// Returns true when |op_kind| may root a multi-operation source graph. The
+// generated set is exact and sorted; related-node kinds remain in rule rows.
+static inline bool loom_target_contract_index_has_source_graph_root_op_kind(
+    const loom_target_contract_index_t* index, loom_op_kind_t op_kind) {
+  uint16_t lower_bound = 0;
+  uint16_t upper_bound = index->source_graph_root_op_kind_count;
+  while (lower_bound < upper_bound) {
+    const uint16_t middle = lower_bound + (upper_bound - lower_bound) / 2;
+    if (index->source_graph_root_op_kinds[middle] < op_kind) {
+      lower_bound = middle + 1;
+    } else {
+      upper_bound = middle;
+    }
+  }
+  return lower_bound < index->source_graph_root_op_kind_count &&
+         index->source_graph_root_op_kinds[lower_bound] == op_kind;
+}
+
 // Returns an empty target contract query result.
 static inline loom_target_contract_query_result_t
 loom_target_contract_query_result_empty(void) {
   return (loom_target_contract_query_result_t){
       /*.outcome=*/LOOM_TARGET_CONTRACT_QUERY_UNHANDLED,
+      /*.projection_flags=*/LOOM_TARGET_CONTRACT_PROJECTION_FLAG_NONE,
       /*.binding_index=*/UINT16_MAX,
       /*.case_index=*/UINT16_MAX,
       /*.rule_set_index=*/UINT16_MAX,
@@ -301,6 +513,22 @@ loom_target_contract_query_result_empty(void) {
   };
 }
 
+// Returns true when |result| owns a final structured rejection that must be
+// diagnosed without reference legalization changing its source program.
+static inline bool loom_target_contract_query_result_is_terminal_rejection(
+    const loom_target_contract_query_result_t* result) {
+  return result->outcome == LOOM_TARGET_CONTRACT_QUERY_TERMINAL_REJECTION;
+}
+
+typedef struct loom_target_contract_function_analysis_callback_t {
+  // Acquires complete analyses for the owner's immutable source snapshot.
+  iree_status_t (*fn)(void* user_data,
+                      loom_local_value_domain_t** out_value_domain,
+                      const loom_view_region_table_t** out_view_regions);
+  // Owner retaining the analyses until the source snapshot is retired.
+  void* user_data;
+} loom_target_contract_function_analysis_callback_t;
+
 typedef struct loom_target_contract_query_environment_t {
   // Source module being queried.
   const loom_module_t* module;
@@ -312,15 +540,32 @@ typedef struct loom_target_contract_query_environment_t {
   const loom_low_descriptor_set_t* descriptor_set;
   // Source value facts visible to the query.
   const loom_value_fact_table_t* fact_table;
+  // Shared reference/access scope valid for this immutable source snapshot.
+  struct loom_storage_access_scope_t* storage_access;
+  // Optional scoped vector lane projection used for candidate planning.
+  loom_target_contract_vector_lane_projection_t vector_lane_projection;
   // Optional active value domain extended by ordinal-keyed query analyses.
   loom_local_value_domain_t* value_domain;
   // Optional function-local view-region analysis visible to the query.
   const loom_view_region_table_t* view_regions;
+  // Optional lazy owner of the function-local domain and view analysis.
+  loom_target_contract_function_analysis_callback_t function_analysis;
   // Scoped arena available for rare query-side auxiliary records.
   iree_arena_allocator_t* arena;
   // Optional scoped storage allocator for target-owned query analyses.
   loom_target_contract_query_state_allocator_t target_state_allocator;
+  // Preserves query outcomes and legal selections but permits omitting rejected
+  // rule identity, ranking, and diagnostic payloads. Rewrite probes defer this
+  // work; final legality queries leave this false to retain exact diagnostics.
+  // Authoritative target and descriptor-matrix rejections remain unchanged.
+  bool defer_rejection_diagnostics;
 } loom_target_contract_query_environment_t;
+
+// Acquires the owner's function analyses when not already borrowed.
+// Environments without an owner retain their explicitly supplied, possibly
+// absent analyses.
+iree_status_t loom_target_contract_query_resolve_function_analysis(
+    loom_target_contract_query_environment_t* environment);
 
 // Returns the common target bundle selected for |environment|.
 static inline const loom_target_bundle_t*

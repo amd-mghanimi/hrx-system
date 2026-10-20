@@ -20,6 +20,7 @@
 #include "iree/io/vec_stream.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/temp_file.h"
+#include "link_index.h"
 #include "loom/binding/c/test/testdata/link_target_specialization_testdata.h"
 #include "loom/format/bytecode/writer.h"
 #include "loom/format/text/parser.h"
@@ -48,7 +49,7 @@ using loomc::testing::HandlePtr;
 using ContextPtr = HandlePtr<loomc_context_t, loomc_context_release>;
 using SourcePtr = HandlePtr<loomc_source_t, loomc_source_release>;
 using BuilderPtr =
-    HandlePtr<loomc_link_index_builder_t, loomc_link_index_builder_release>;
+    HandlePtr<loomc_link_index_builder_t, loomc_link_index_builder_free>;
 using LinkIndexPtr = HandlePtr<loomc_link_index_t, loomc_link_index_release>;
 using LinkerPtr = HandlePtr<loomc_linker_t, loomc_linker_release>;
 using WorkspacePtr = HandlePtr<loomc_workspace_t, loomc_workspace_release>;
@@ -73,13 +74,13 @@ static iree_status_t ProjectFakeTargetProfileFacts(
 }
 
 static const loom_target_profile_type_t kFakeTargetProfileType = {
-    /*.name=*/IREE_SVL("fake-link"),
-    /*.fact_type=*/&loom_test_target_fact_type,
-    /*.project_facts=*/ProjectFakeTargetProfileFacts,
+    .name = IREE_SVL("fake-link"),
+    .fact_type = &loom_test_target_fact_type,
+    .project_facts = ProjectFakeTargetProfileFacts,
 };
 
 static loom_target_profile_t kFakeTargetProfile = {
-    /*.type=*/&kFakeTargetProfileType,
+    .type = &kFakeTargetProfileType,
 };
 
 static iree_status_t RegisterFakeTargetContext(loom_context_t* context) {
@@ -112,21 +113,21 @@ static iree_status_t MaterializeFakeTargetDefinition(
 }
 
 static const loom_target_provider_t kFakeTargetProvider = {
-    /*.profile_type=*/&kFakeTargetProfileType,
-    /*.materialize_definition=*/MaterializeFakeTargetDefinition,
-    /*.register_context=*/RegisterFakeTargetContext,
-    /*.initialize_low_descriptor_registry=*/nullptr,
-    /*.initialize_low_lower_policy_registry=*/nullptr,
-    /*.initialize_math_policy_registry=*/nullptr,
-    /*.low_legality_provider_list=*/{},
-    /*.legalizer_provider_list=*/{},
-    /*.low_packet_diagnostic_provider_list=*/{},
-    /*.low_asm_diagnostic_provider_list=*/{},
-    /*.low_verify_provider_list=*/{},
-    /*.emitter_list=*/{},
-    /*.canonical_module_emitter=*/nullptr,
-    /*.pass_registry=*/nullptr,
-    /*.contribute_pipeline=*/nullptr,
+    .profile_type = &kFakeTargetProfileType,
+    .materialize_definition = MaterializeFakeTargetDefinition,
+    .register_context = RegisterFakeTargetContext,
+    .initialize_low_descriptor_registry = nullptr,
+    .initialize_low_lower_policy_registry = nullptr,
+    .initialize_math_policy_registry = nullptr,
+    .low_legality_provider_list = {},
+    .legalizer_provider_list = {},
+    .low_packet_diagnostic_provider_list = {},
+    .low_asm_diagnostic_provider_list = {},
+    .low_verify_provider_list = {},
+    .emitter_list = {},
+    .canonical_module_emitter = nullptr,
+    .pass_registry = nullptr,
+    .contribute_pipeline = nullptr,
 };
 
 static const loom_target_provider_t* const kFakeTargetProviders[] = {
@@ -134,8 +135,8 @@ static const loom_target_provider_t* const kFakeTargetProviders[] = {
 };
 
 static const loom_target_provider_set_t kFakeTargetProviderSet = {
-    /*.providers=*/kFakeTargetProviders,
-    /*.provider_count=*/IREE_ARRAYSIZE(kFakeTargetProviders),
+    .providers = kFakeTargetProviders,
+    .provider_count = IREE_ARRAYSIZE(kFakeTargetProviders),
 };
 
 std::string ToString(loomc_string_view_t value) {
@@ -180,11 +181,11 @@ SourcePtr SerializeModuleToSource(const loomc_module_t* module,
                                   loomc_source_format_t format,
                                   const char* identifier) {
   loomc_module_serialize_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.format=*/format,
-      /*.identifier=*/loomc_make_cstring_view(identifier),
+      .type = LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .format = format,
+      .identifier = loomc_make_cstring_view(identifier),
   };
   loomc_source_t* source = nullptr;
   loomc_status_t status = loomc_module_serialize_to_source(
@@ -240,25 +241,33 @@ ModulePtr DeserializeModuleFromPath(loomc_context_t* context,
   return ModulePtr(module);
 }
 
-ContextPtr CreateContext() {
+ContextPtr CreateContext(
+    loomc_source_retention_t source_retention = LOOMC_SOURCE_RETENTION_EXACT) {
+  loomc_context_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_CONTEXT_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .source_retention = source_retention,
+  };
   loomc_context_t* context = nullptr;
   loomc_status_t status =
-      loomc_context_create(nullptr, loomc_allocator_system(), &context);
+      loomc_context_create(&options, loomc_allocator_system(), &context);
   LOOMC_EXPECT_OK(status);
   return ContextPtr(context);
 }
 
 ContextPtr CreateContext(loomc_target_environment_t* target_environment) {
   loomc_context_target_options_t target_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_CONTEXT_TARGET_OPTIONS,
-      /*.structure_size=*/sizeof(target_options),
-      /*.next=*/nullptr,
-      /*.target_environment=*/target_environment,
+      .type = LOOMC_STRUCTURE_TYPE_CONTEXT_TARGET_OPTIONS,
+      .structure_size = sizeof(target_options),
+      .next = nullptr,
+      .target_environment = target_environment,
   };
   loomc_context_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_CONTEXT_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/&target_options,
+      .type = LOOMC_STRUCTURE_TYPE_CONTEXT_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = &target_options,
+      .source_retention = LOOMC_SOURCE_RETENTION_EXACT,
   };
   loomc_context_t* context = nullptr;
   loomc_status_t status =
@@ -269,8 +278,10 @@ ContextPtr CreateContext(loomc_target_environment_t* target_environment) {
 
 TargetEnvironmentPtr CreateFakeTargetEnvironment() {
   loomc_target_environment_t* target_environment = nullptr;
-  loomc_status_t status = loomc_target_environment_create_from_provider_set(
-      &kFakeTargetProviderSet, loomc_allocator_system(), &target_environment);
+  loomc_status_t status =
+      loomc_target_environment_create_from_provider_set_internal(
+          &kFakeTargetProviderSet, loomc_allocator_system(),
+          &target_environment);
   LOOMC_EXPECT_OK(status);
   return TargetEnvironmentPtr(target_environment);
 }
@@ -292,13 +303,13 @@ TargetProfilePtr CreateFakeTargetProfile(
 SourcePtr CreateSource(loomc_source_format_t format, const char* identifier,
                        const void* contents, size_t contents_length) {
   loomc_source_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.format=*/format,
-      /*.identifier=*/loomc_make_cstring_view(identifier),
-      /*.contents=*/loomc_make_byte_span(contents, contents_length),
-      /*.storage=*/LOOMC_SOURCE_STORAGE_COPY,
+      .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .format = format,
+      .identifier = loomc_make_cstring_view(identifier),
+      .contents = loomc_make_byte_span(contents, contents_length),
+      .storage = LOOMC_SOURCE_STORAGE_COPY,
   };
   loomc_source_t* source = nullptr;
   loomc_status_t status =
@@ -328,7 +339,7 @@ SourcePtr CreateEmbeddedTargetLinkSource(const char* filename) {
 
 BuilderPtr CreateBuilder(loomc_context_t* context) {
   loomc_link_index_builder_t* builder = nullptr;
-  loomc_status_t status = loomc_link_index_builder_create(
+  loomc_status_t status = loomc_link_index_builder_allocate(
       context, nullptr, loomc_allocator_system(), &builder);
   LOOMC_EXPECT_OK(status);
   return BuilderPtr(builder);
@@ -344,9 +355,9 @@ LinkerPtr CreateLinker(loomc_context_t* context) {
 
 CompilerPtr CreateCompiler(loomc_context_t* context) {
   loomc_compiler_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_COMPILER_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
+      .type = LOOMC_STRUCTURE_TYPE_COMPILER_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
   };
   loomc_compiler_t* compiler = nullptr;
   loomc_status_t status = loomc_compiler_create(
@@ -393,8 +404,8 @@ void AddSource(loomc_link_index_builder_t* builder, loomc_source_t* source,
                const char* provider_name,
                loomc_link_provider_role_t provider_role) {
   loomc_link_index_source_options_t options = {
-      /*.provider_name=*/loomc_make_cstring_view(provider_name),
-      /*.role=*/provider_role,
+      .provider_name = loomc_make_cstring_view(provider_name),
+      .role = provider_role,
   };
   LOOMC_ASSERT_OK(
       loomc_link_index_builder_add_source(builder, source, &options, nullptr));
@@ -461,15 +472,15 @@ LinkArtifact LinkLibrarySourcesToBytecode(
       loomc_make_cstring_view("@entry"),
   };
   const loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/IREE_ARRAYSIZE(roots),
-      /*.flags=*/flags,
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = IREE_ARRAYSIZE(roots),
+      .flags = flags,
   };
   LinkArtifact artifact;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -527,9 +538,9 @@ RequestPtr CreateModuleRequest(loomc_context_t* context,
 
   loom_symbol_id_t wire_symbol_ordinal = LOOM_SYMBOL_ID_INVALID;
   const loomc_module_symbol_projection_t projection = {
-      /*.module_symbol_ids=*/&module_symbol_id,
-      /*.bytecode_symbol_ordinals=*/&wire_symbol_ordinal,
-      /*.count=*/1,
+      .module_symbol_ids = &module_symbol_id,
+      .bytecode_symbol_ordinals = &wire_symbol_ordinal,
+      .count = 1,
   };
   loomc_source_t* source = nullptr;
   LOOMC_EXPECT_OK(loomc_module_serialize_internal_bytecode_to_source(
@@ -537,8 +548,8 @@ RequestPtr CreateModuleRequest(loomc_context_t* context,
       &projection, loomc_allocator_system(), &source));
 
   const loomc_request_root_t root = {
-      /*.module_ordinal=*/0,
-      /*.symbol_ordinal=*/wire_symbol_ordinal,
+      .module_ordinal = 0,
+      .symbol_ordinal = wire_symbol_ordinal,
   };
   loomc_request_t* request = nullptr;
   loomc_status_t status = loomc_request_create_take_source(
@@ -562,9 +573,9 @@ std::string PrintModule(const loom_module_t* module) {
 
 void VerifyModule(const loom_module_t* module) {
   loom_verify_options_t options = {
-      /*.sink=*/{},
-      /*.max_errors=*/20,
-      /*.source_resolver=*/{},
+      .sink = {},
+      .max_errors = 20,
+      .source_resolver = {},
   };
   loom_verify_result_t result = {};
   IREE_ASSERT_OK(loom_verify_module(module, &options, &result));
@@ -617,9 +628,9 @@ std::vector<uint8_t> WriteBytecodeModule(const char* source_text) {
   IREE_CHECK_OK(loom_context_finalize(&context));
 
   loom_text_parse_options_t parse_options = {
-      /*.diagnostic_sink=*/{},
-      /*.max_errors=*/20,
-      /*.low_asm_environment=*/{},
+      .diagnostic_sink = {},
+      .max_errors = 20,
+      .low_asm_environment = {},
   };
   loom_module_t* module = nullptr;
   IREE_CHECK_OK(loom_text_parse(iree_make_cstring_view(source_text),
@@ -690,14 +701,14 @@ func.def public @unused_library(%x: i32) -> (i32) {
       loomc_make_cstring_view("@caller"),
   };
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = 1,
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -724,10 +735,10 @@ func.def public @unused_library(%x: i32) -> (i32) {
   VerifyLinkedCallerModule(text_source_module.get());
 
   loomc_module_serialize_options_t text_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
-      /*.structure_size=*/sizeof(text_options),
-      /*.next=*/nullptr,
-      /*.format=*/LOOMC_SOURCE_FORMAT_TEXT,
+      .type = LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
+      .structure_size = sizeof(text_options),
+      .next = nullptr,
+      .format = LOOMC_SOURCE_FORMAT_TEXT,
   };
   FILE* text_file = tmpfile();
   ASSERT_NE(text_file, nullptr);
@@ -779,10 +790,10 @@ func.def public @unused_library(%x: i32) -> (i32) {
   FinishIndex(serialized_builder.get(), &serialized_index);
 
   loomc_module_serialize_options_t bytecode_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
-      /*.structure_size=*/sizeof(bytecode_options),
-      /*.next=*/nullptr,
-      /*.format=*/LOOMC_SOURCE_FORMAT_BYTECODE,
+      .type = LOOMC_STRUCTURE_TYPE_MODULE_SERIALIZE_OPTIONS,
+      .structure_size = sizeof(bytecode_options),
+      .next = nullptr,
+      .format = LOOMC_SOURCE_FORMAT_BYTECODE,
   };
   FILE* bytecode_file = tmpfile();
   ASSERT_NE(bytecode_file, nullptr);
@@ -806,6 +817,251 @@ func.def public @unused_library(%x: i32) -> (i32) {
       context.get(), workspace.get(), bytecode_path.path());
   VerifyLinkedCallerModule(bytecode_path_module.get());
   EXPECT_TRUE(bytecode_path.Remove());
+}
+
+TEST(LinkTest, LinksMaterializedModulesWithoutSerialization) {
+  static constexpr char kHarnessSource[] = R"(
+func.decl @identity(%x: i32) -> (i32)
+
+func.def public @caller(%x: i32) -> (i32) {
+  %y = func.call @identity(%x) : (i32) -> (i32)
+  func.return %y : i32
+}
+
+func.def public @unused_harness(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)";
+  static constexpr char kLibrarySource[] = R"(
+func.def public @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+
+func.def public @unused_library(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)";
+  for (loomc_source_retention_t source_retention : {
+           LOOMC_SOURCE_RETENTION_EXACT,
+           LOOMC_SOURCE_RETENTION_METADATA_ONLY,
+       }) {
+    SCOPED_TRACE(source_retention);
+    ContextPtr context = CreateContext(source_retention);
+    WorkspacePtr input_workspace = CreateWorkspace();
+    SourcePtr harness_source =
+        CreateTextSource("materialized_harness.loom", kHarnessSource);
+    SourcePtr library_source =
+        CreateTextSource("materialized_library.loom", kLibrarySource);
+    ModulePtr harness_module = DeserializeModuleFromSource(
+        context.get(), input_workspace.get(), harness_source.get());
+    ModulePtr library_module = DeserializeModuleFromSource(
+        context.get(), input_workspace.get(), library_source.get());
+
+    const loomc_link_module_provider_t module_providers[] = {
+        {
+            .module = harness_module.get(),
+            .provider_name = loomc_make_cstring_view("harness"),
+            .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
+        },
+        {
+            .module = library_module.get(),
+            .provider_name = loomc_make_cstring_view("library"),
+            .role = LOOMC_LINK_PROVIDER_ROLE_LIBRARY,
+        },
+    };
+    const loomc_string_view_t roots[] = {
+        loomc_make_cstring_view("@caller"),
+    };
+    loomc_link_options_t options = {
+        .type = LOOMC_STRUCTURE_TYPE_LINK_OPTIONS,
+        .structure_size = sizeof(options),
+        .mode = LOOMC_LINK_MODE_LINK,
+        .root_symbols = roots,
+        .root_symbol_count = IREE_ARRAYSIZE(roots),
+        .module_providers = module_providers,
+        .module_provider_count = IREE_ARRAYSIZE(module_providers),
+    };
+
+    LinkerPtr linker = CreateLinker(context.get());
+    WorkspacePtr link_workspace = CreateWorkspace();
+    ResultPtr result;
+    ModulePtr module = LinkIndex(linker.get(), link_workspace.get(), nullptr,
+                                 &options, &result);
+    ASSERT_TRUE(loomc_result_succeeded(result.get()));
+    ASSERT_NE(module.get(), nullptr);
+
+    harness_module.reset();
+    library_module.reset();
+    harness_source.reset();
+    library_source.reset();
+    input_workspace.reset();
+    link_workspace.reset();
+
+    VerifyLinkedCallerModule(module.get());
+    const loom_module_t* internal_module =
+        loomc_module_const_loom_module(module.get());
+    for (const char* symbol_name : {"caller", "identity"}) {
+      const loom_symbol_t* symbol =
+          FindModuleSymbol(internal_module, symbol_name);
+      ASSERT_NE(symbol, nullptr);
+      loom_source_range_t range = {};
+      ASSERT_TRUE(loom_source_resolve(
+          loomc_module_source_resolver(module.get()), internal_module,
+          symbol->defining_op->location, &range));
+      EXPECT_EQ(std::string(range.filename.data, range.filename.size),
+                strcmp(symbol_name, "caller") == 0
+                    ? "materialized_harness.loom"
+                    : "materialized_library.loom");
+      if (source_retention == LOOMC_SOURCE_RETENTION_EXACT) {
+        EXPECT_EQ(range.provenance, LOOM_SOURCE_PROVENANCE_EXACT_SOURCE);
+        EXPECT_EQ(std::string(range.source.data, range.source.size),
+                  strcmp(symbol_name, "caller") == 0 ? kHarnessSource
+                                                     : kLibrarySource);
+      } else {
+        EXPECT_EQ(range.provenance, LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE);
+        EXPECT_EQ(range.source.size, 0u);
+      }
+    }
+  }
+}
+
+TEST(LinkTest, LinksMaterializedInputAgainstFrozenLibraryIndex) {
+  ContextPtr context = CreateContext();
+  WorkspacePtr input_workspace = CreateWorkspace();
+  SourcePtr harness_source = CreateTextSource("live_harness.loom", R"(
+func.decl @identity(%x: i32) -> (i32)
+
+func.def public @caller(%x: i32) -> (i32) {
+  %y = func.call @identity(%x) : (i32) -> (i32)
+  func.return %y : i32
+}
+)");
+  ModulePtr harness_module = DeserializeModuleFromSource(
+      context.get(), input_workspace.get(), harness_source.get());
+
+  BuilderPtr library_builder = CreateBuilder(context.get());
+  SourcePtr library_source = CreateTextSource("frozen_library.loom", R"(
+func.def public @identity(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)");
+  AddSource(library_builder.get(), library_source.get(), "library",
+            LOOMC_LINK_PROVIDER_ROLE_LIBRARY);
+  LinkIndexPtr library_index;
+  FinishIndex(library_builder.get(), &library_index);
+
+  const loomc_link_module_provider_t module_provider = {
+      .module = harness_module.get(),
+      .provider_name = loomc_make_cstring_view("harness"),
+      .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
+  };
+  const loomc_string_view_t roots[] = {
+      loomc_make_cstring_view("@caller"),
+  };
+  loomc_link_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_LINK_OPTIONS,
+      .structure_size = sizeof(options),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = IREE_ARRAYSIZE(roots),
+      .module_providers = &module_provider,
+      .module_provider_count = 1,
+  };
+
+  LinkerPtr linker = CreateLinker(context.get());
+  WorkspacePtr link_workspace = CreateWorkspace();
+  ResultPtr result;
+  ModulePtr module = LinkIndex(linker.get(), link_workspace.get(),
+                               library_index.get(), &options, &result);
+  ASSERT_TRUE(loomc_result_succeeded(result.get()));
+  ASSERT_NE(module.get(), nullptr);
+
+  harness_module.reset();
+  harness_source.reset();
+  input_workspace.reset();
+  library_index.reset();
+  library_builder.reset();
+  library_source.reset();
+  link_workspace.reset();
+
+  VerifyLinkedCallerModule(module.get());
+  const loom_module_t* internal_module =
+      loomc_module_const_loom_module(module.get());
+  for (const char* symbol_name : {"caller", "identity"}) {
+    const loom_symbol_t* symbol =
+        FindModuleSymbol(internal_module, symbol_name);
+    ASSERT_NE(symbol, nullptr);
+    loom_source_range_t range = {};
+    ASSERT_TRUE(loom_source_resolve(loomc_module_source_resolver(module.get()),
+                                    internal_module,
+                                    symbol->defining_op->location, &range));
+    EXPECT_EQ(std::string(range.filename.data, range.filename.size),
+              strcmp(symbol_name, "caller") == 0 ? "live_harness.loom"
+                                                 : "frozen_library.loom");
+  }
+}
+
+TEST(LinkTest, MaterializedModuleProvidersValidateCompositionBoundary) {
+  ContextPtr context = CreateContext();
+  WorkspacePtr workspace = CreateWorkspace();
+  SourcePtr source = CreateTextSource("input.loom", R"(
+func.def public @entry(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)");
+  ModulePtr module =
+      DeserializeModuleFromSource(context.get(), workspace.get(), source.get());
+  LinkerPtr linker = CreateLinker(context.get());
+
+  loomc_link_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_LINK_OPTIONS,
+      .structure_size = sizeof(options),
+      .module_provider_count = 1,
+  };
+  loomc_module_t* output_module = reinterpret_cast<loomc_module_t*>(1);
+  loomc_result_t* result = reinterpret_cast<loomc_result_t*>(1);
+  LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
+                         loomc_link_module(linker.get(), workspace.get(),
+                                           &options, &output_module, &result));
+  EXPECT_EQ(output_module, nullptr);
+  EXPECT_EQ(result, nullptr);
+
+  ContextPtr other_context = CreateContext();
+  WorkspacePtr other_workspace = CreateWorkspace();
+  ModulePtr other_module = DeserializeModuleFromSource(
+      other_context.get(), other_workspace.get(), source.get());
+  loomc_link_module_provider_t module_provider = {
+      .module = other_module.get(),
+      .provider_name = loomc_make_cstring_view("other"),
+      .role = LOOMC_LINK_PROVIDER_ROLE_INPUT,
+  };
+  options.module_providers = &module_provider;
+  LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
+                         loomc_link_module(linker.get(), workspace.get(),
+                                           &options, &output_module, &result));
+  EXPECT_EQ(output_module, nullptr);
+  EXPECT_EQ(result, nullptr);
+
+  module_provider.module = module.get();
+  module_provider.role = static_cast<loomc_link_provider_role_t>(-1);
+  LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
+                         loomc_link_module(linker.get(), workspace.get(),
+                                           &options, &output_module, &result));
+  EXPECT_EQ(output_module, nullptr);
+  EXPECT_EQ(result, nullptr);
+
+  module_provider.role = LOOMC_LINK_PROVIDER_ROLE_INPUT;
+  BuilderPtr input_builder = CreateBuilder(context.get());
+  AddSource(input_builder.get(), source.get(), "frozen-input",
+            LOOMC_LINK_PROVIDER_ROLE_INPUT);
+  LinkIndexPtr input_index;
+  FinishIndex(input_builder.get(), &input_index);
+  options.link_index = input_index.get();
+  LOOMC_EXPECT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
+                         loomc_link_module(linker.get(), workspace.get(),
+                                           &options, &output_module, &result));
+  EXPECT_EQ(output_module, nullptr);
+  EXPECT_EQ(result, nullptr);
 }
 
 TEST(LinkTest, PartialLinksAreReusableAndOrderInvariant) {
@@ -960,14 +1216,14 @@ template.def<@demo.unused> @unused_provider(%x: i32) -> (i32) {
       loomc_make_cstring_view("@caller"),
   };
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = 1,
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -990,7 +1246,7 @@ TEST(LinkTest, LinkModuleMaterializesInvocationConfigOnLinkedOutput) {
   ContextPtr context = CreateContext();
   BuilderPtr builder = CreateBuilder(context.get());
   SourcePtr source = CreateTextSource("config.loom", R"(
-config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), mul(%value, 16)]
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), multiple_of(%value, 16)]
 
 func.def public @entry() -> (index) {
   %hidden = config.get @model36.model.hidden_size : index
@@ -1009,31 +1265,31 @@ func.def public @entry() -> (index) {
   };
   loomc_config_binding_t first_bindings[] = {
       {
-          /*.key=*/loomc_make_cstring_view("@model36.model.hidden_size"),
-          /*.value=*/loomc_make_cstring_view("4096"),
+          .key = loomc_make_cstring_view("@model36.model.hidden_size"),
+          .value = loomc_make_cstring_view("4096"),
       },
   };
   loomc_link_options_t first_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/1,
-      /*.flags=*/0,
-      /*.config=*/
-      {
-          /*.bindings=*/first_bindings,
-          /*.binding_count=*/1,
-          /*.json_object=*/loomc_make_cstring_view(R"({
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = 1,
+      .flags = 0,
+      .config =
+          {
+              .bindings = first_bindings,
+              .binding_count = 1,
+              .json_object = loomc_make_cstring_view(R"({
                 "model36": {
                   "model": {"hidden_size": 2048}
                 }
               })"),
-          /*.flags=*/LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
-      },
+              .flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+          },
   };
   ResultPtr first_result;
   ModulePtr first_module =
@@ -1043,17 +1299,18 @@ func.def public @entry() -> (index) {
   ASSERT_TRUE(loomc_result_succeeded(first_result.get()));
   ASSERT_NE(first_module.get(), nullptr);
   std::string first_text = SerializeModuleToText(first_module.get());
-  EXPECT_NE(
-      first_text.find("config.def @model36.model.hidden_size = 4096 : index"),
-      std::string::npos);
+  EXPECT_NE(first_text.find(
+                "config.def @model36.model.hidden_size = 4096 : %value: index "
+                "where [range(%value, 0, 8192), multiple_of(%value, 16)]"),
+            std::string::npos);
   EXPECT_EQ(first_text.find("config.decl @model36.model.hidden_size"),
             std::string::npos);
   EXPECT_EQ(first_text.find("2048"), std::string::npos);
 
   loomc_config_binding_t second_bindings[] = {
       {
-          /*.key=*/loomc_make_cstring_view("@model36.model.hidden_size"),
-          /*.value=*/loomc_make_cstring_view("1024"),
+          .key = loomc_make_cstring_view("@model36.model.hidden_size"),
+          .value = loomc_make_cstring_view("1024"),
       },
   };
   loomc_link_options_t second_options = first_options;
@@ -1068,9 +1325,10 @@ func.def public @entry() -> (index) {
   ASSERT_TRUE(loomc_result_succeeded(second_result.get()));
   ASSERT_NE(second_module.get(), nullptr);
   std::string second_text = SerializeModuleToText(second_module.get());
-  EXPECT_NE(
-      second_text.find("config.def @model36.model.hidden_size = 1024 : index"),
-      std::string::npos);
+  EXPECT_NE(second_text.find(
+                "config.def @model36.model.hidden_size = 1024 : %value: index "
+                "where [range(%value, 0, 8192), multiple_of(%value, 16)]"),
+            std::string::npos);
   EXPECT_EQ(second_text.find("4096"), std::string::npos);
 }
 
@@ -1102,14 +1360,14 @@ func.def public @targetless() {
   LinkerPtr linker = CreateLinker(context.get());
   WorkspacePtr workspace = CreateWorkspace();
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_MERGE,
-      /*.root_symbols=*/nullptr,
-      /*.root_symbol_count=*/0,
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_MERGE,
+      .root_symbols = nullptr,
+      .root_symbol_count = 0,
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1161,14 +1419,14 @@ TEST(LinkTest, TargetSpecializationParticipatesInProviderSelection) {
       loomc_make_cstring_view("@entry"),
   };
   loomc_link_options_t link_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/IREE_ARRAYSIZE(roots),
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = IREE_ARRAYSIZE(roots),
   };
 
   WorkspacePtr portable_workspace = CreateWorkspace();
@@ -1186,15 +1444,15 @@ TEST(LinkTest, TargetSpecializationParticipatesInProviderSelection) {
   EXPECT_TRUE(ModuleHasSymbol(portable_internal, "incompatible_provider"));
 
   const loomc_target_specialization_t specialization = {
-      /*.function_symbol=*/loomc_make_cstring_view("entry"),
-      /*.target_profile=*/profile.get(),
+      .function_symbol = loomc_make_cstring_view("entry"),
+      .target_profile = profile.get(),
   };
   const loomc_target_specialization_options_t target_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
-      /*.structure_size=*/sizeof(target_options),
-      /*.next=*/nullptr,
-      /*.specializations=*/&specialization,
-      /*.specialization_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
+      .structure_size = sizeof(target_options),
+      .next = nullptr,
+      .specializations = &specialization,
+      .specialization_count = 1,
   };
   link_options.next = &target_options;
   WorkspacePtr specialized_workspace = CreateWorkspace();
@@ -1269,21 +1527,21 @@ TEST(LinkTest, RequestLinkingForwardsTargetSpecialization) {
   LinkerPtr linker = CreateLinker(context.get());
 
   const loomc_target_specialization_t specialization = {
-      /*.function_symbol=*/loomc_make_cstring_view("entry"),
-      /*.target_profile=*/profile.get(),
+      .function_symbol = loomc_make_cstring_view("entry"),
+      .target_profile = profile.get(),
   };
   const loomc_target_specialization_options_t target_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
-      /*.structure_size=*/sizeof(target_options),
-      /*.next=*/nullptr,
-      /*.specializations=*/&specialization,
-      /*.specialization_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
+      .structure_size = sizeof(target_options),
+      .next = nullptr,
+      .specializations = &specialization,
+      .specialization_count = 1,
   };
   const loomc_link_request_options_t link_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_LINK_REQUEST_OPTIONS,
-      /*.structure_size=*/sizeof(link_options),
-      /*.next=*/&target_options,
-      /*.library_index=*/library_index.get(),
+      .type = LOOMC_STRUCTURE_TYPE_LINK_REQUEST_OPTIONS,
+      .structure_size = sizeof(link_options),
+      .next = &target_options,
+      .library_index = library_index.get(),
   };
   loomc_request_t* output_request = nullptr;
   loomc_result_t* result = nullptr;
@@ -1329,25 +1587,25 @@ TEST(LinkTest, TargetSpecializationRejectsIncompatibleAuthoredTarget) {
       loomc_make_cstring_view("@incompatible_entry"),
   };
   const loomc_target_specialization_t specialization = {
-      /*.function_symbol=*/loomc_make_cstring_view("incompatible_entry"),
-      /*.target_profile=*/profile.get(),
+      .function_symbol = loomc_make_cstring_view("incompatible_entry"),
+      .target_profile = profile.get(),
   };
   const loomc_target_specialization_options_t target_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
-      /*.structure_size=*/sizeof(target_options),
-      /*.next=*/nullptr,
-      /*.specializations=*/&specialization,
-      /*.specialization_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
+      .structure_size = sizeof(target_options),
+      .next = nullptr,
+      .specializations = &specialization,
+      .specialization_count = 1,
   };
   const loomc_link_options_t link_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/&target_options,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/IREE_ARRAYSIZE(roots),
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = &target_options,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = IREE_ARRAYSIZE(roots),
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1408,14 +1666,14 @@ template.def<@demo.capi_selected> priority(1) @fallback_provider(%value: i32) ->
       loomc_make_cstring_view("@entry"),
   };
   loomc_link_options_t link_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = 1,
   };
   ResultPtr link_result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1435,24 +1693,24 @@ template.def<@demo.capi_selected> priority(1) @fallback_provider(%value: i32) ->
   PassProgramPtr pass_program = CreatePassProgramFromPipelineText(
       context.get(), "select-templates{rewrite=inline},symbol-dce");
   const loomc_target_specialization_t specialization = {
-      /*.function_symbol=*/loomc_make_cstring_view("entry"),
-      /*.target_profile=*/profile.get(),
+      .function_symbol = loomc_make_cstring_view("entry"),
+      .target_profile = profile.get(),
   };
   loomc_target_specialization_options_t target_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
-      /*.structure_size=*/sizeof(target_options),
-      /*.next=*/nullptr,
-      /*.specializations=*/&specialization,
-      /*.specialization_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
+      .structure_size = sizeof(target_options),
+      .next = nullptr,
+      .specializations = &specialization,
+      .specialization_count = 1,
   };
   loomc_compile_options_t compile_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_COMPILE_OPTIONS,
-      /*.structure_size=*/sizeof(compile_options),
-      /*.next=*/&target_options,
-      /*.module_name=*/loomc_make_cstring_view("selected_provider_module"),
-      /*.artifact_flags=*/0,
-      /*.config_flags=*/0,
-      /*.config_module=*/nullptr,
+      .type = LOOMC_STRUCTURE_TYPE_COMPILE_OPTIONS,
+      .structure_size = sizeof(compile_options),
+      .next = &target_options,
+      .module_name = loomc_make_cstring_view("selected_provider_module"),
+      .artifact_flags = 0,
+      .config_flags = 0,
+      .config_module = nullptr,
   };
   loomc_result_t* raw_compile_result = nullptr;
   loomc_status_t status = loomc_compile_module(
@@ -1547,13 +1805,120 @@ func.def public @entry(%x: i32) -> (i32) {
   ASSERT_GT(loomc_result_diagnostic_count(result.get()), 0u);
 }
 
-TEST(LinkTest, LinksBytecodeAfterSourceRelease) {
+TEST(LinkTest, SourceRetentionProjectsOnlySelectedTextProviders) {
+  static constexpr char kSelectedSource[] = R"(
+func.def public @selected(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)";
+  static constexpr char kUnusedSource[] = R"(
+func.def public @unused(%x: i32) -> (i32) {
+  func.return %x : i32
+}
+)";
+  for (loomc_source_retention_t source_retention : {
+           LOOMC_SOURCE_RETENTION_EXACT,
+           LOOMC_SOURCE_RETENTION_METADATA_ONLY,
+       }) {
+    SCOPED_TRACE(source_retention);
+    const bool retain_exact_source =
+        source_retention == LOOMC_SOURCE_RETENTION_EXACT;
+    ContextPtr context = CreateContext(source_retention);
+    BuilderPtr builder = CreateBuilder(context.get());
+    SourcePtr selected_source =
+        CreateTextSource("selected.loom", kSelectedSource);
+    SourcePtr unused_source = CreateTextSource("unused.loom", kUnusedSource);
+    AddSource(builder.get(), selected_source.get(), "selected",
+              LOOMC_LINK_PROVIDER_ROLE_INPUT);
+    AddSource(builder.get(), unused_source.get(), "unused",
+              LOOMC_LINK_PROVIDER_ROLE_LIBRARY);
+
+    LinkIndexPtr link_index;
+    FinishIndex(builder.get(), &link_index);
+    const loomc_source_t* indexed_selected =
+        loomc_link_index_source_for_provider(link_index.get(), 0);
+    const loomc_source_t* indexed_unused =
+        loomc_link_index_source_for_provider(link_index.get(), 1);
+    ASSERT_NE(indexed_selected, nullptr);
+    ASSERT_NE(indexed_unused, nullptr);
+    EXPECT_EQ(loomc_source_contents(indexed_selected).data_length,
+              retain_exact_source ? strlen(kSelectedSource) : 0u);
+    EXPECT_EQ(loomc_source_contents(indexed_unused).data_length,
+              retain_exact_source ? strlen(kUnusedSource) : 0u);
+    selected_source.reset();
+    unused_source.reset();
+
+    LinkerPtr linker = CreateLinker(context.get());
+    WorkspacePtr workspace = CreateWorkspace();
+    const loomc_string_view_t roots[] = {
+        loomc_make_cstring_view("@selected"),
+    };
+    const loomc_link_options_t options = {
+        .type = LOOMC_STRUCTURE_TYPE_NONE,
+        .structure_size = 0,
+        .next = nullptr,
+        .link_index = nullptr,
+        .module_name = loomc_string_view_empty(),
+        .mode = LOOMC_LINK_MODE_LINK,
+        .root_symbols = roots,
+        .root_symbol_count = IREE_ARRAYSIZE(roots),
+    };
+    ResultPtr result;
+    ModulePtr module = LinkIndex(linker.get(), workspace.get(),
+                                 link_index.get(), &options, &result);
+    ASSERT_TRUE(loomc_result_succeeded(result.get()));
+    ASSERT_NE(module.get(), nullptr);
+    link_index.reset();
+    builder.reset();
+
+    const loom_module_t* internal_module =
+        loomc_module_const_loom_module(module.get());
+    ASSERT_NE(internal_module, nullptr);
+    const loom_symbol_t* selected_symbol =
+        FindModuleSymbol(internal_module, "selected");
+    ASSERT_NE(selected_symbol, nullptr);
+    loom_source_range_t range = {};
+    ASSERT_TRUE(loom_source_resolve(
+        loomc_module_source_resolver(module.get()), internal_module,
+        selected_symbol->defining_op->location, &range));
+    EXPECT_EQ(std::string(range.filename.data, range.filename.size),
+              "selected.loom");
+    EXPECT_GT(range.start_line, 0u);
+    if (retain_exact_source) {
+      EXPECT_EQ(range.provenance, LOOM_SOURCE_PROVENANCE_EXACT_SOURCE);
+      EXPECT_EQ(std::string(range.source.data, range.source.size),
+                kSelectedSource);
+    } else {
+      EXPECT_EQ(range.provenance, LOOM_SOURCE_PROVENANCE_UNAVAILABLE_SOURCE);
+      EXPECT_EQ(range.source.size, 0u);
+    }
+
+    const loom_source_table_resolver_t* source_table =
+        loomc_module_source_table(module.get());
+    ASSERT_NE(source_table, nullptr);
+    if (retain_exact_source) {
+      ASSERT_GT(source_table->count, 0u);
+      for (iree_host_size_t i = 0; i < source_table->count; ++i) {
+        const loom_source_entry_t& entry = source_table->entries[i];
+        if (entry.source_id == LOOM_SOURCE_ID_INVALID) {
+          continue;
+        }
+        EXPECT_NE(std::string(entry.filename.data, entry.filename.size),
+                  "unused.loom");
+      }
+    } else {
+      EXPECT_EQ(source_table->count, 0u);
+    }
+  }
+}
+
+TEST(LinkTest, MetadataModeRetainsOperationalBytecodeAfterSourceRelease) {
   std::vector<uint8_t> bytecode = WriteBytecodeModule(R"(
 func.def public @from_bytecode(%x: i32) -> (i32) {
   func.return %x : i32
 }
 )");
-  ContextPtr context = CreateContext();
+  ContextPtr context = CreateContext(LOOMC_SOURCE_RETENTION_METADATA_ONLY);
   BuilderPtr builder = CreateBuilder(context.get());
   SourcePtr source = CreateSource(LOOMC_SOURCE_FORMAT_BYTECODE, "module.loombc",
                                   bytecode.data(), bytecode.size());
@@ -1562,6 +1927,10 @@ func.def public @from_bytecode(%x: i32) -> (i32) {
 
   LinkIndexPtr link_index;
   FinishIndex(builder.get(), &link_index);
+  const loomc_source_t* indexed_source =
+      loomc_link_index_source_for_provider(link_index.get(), 0);
+  ASSERT_NE(indexed_source, nullptr);
+  EXPECT_EQ(loomc_source_contents(indexed_source).data_length, bytecode.size());
   source.reset();
   bytecode.clear();
 
@@ -1607,15 +1976,15 @@ check.benchmark<@kernel_case> @kernel_bench
   LinkerPtr linker = CreateLinker(context.get());
   WorkspacePtr workspace = CreateWorkspace();
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_MERGE,
-      /*.root_symbols=*/nullptr,
-      /*.root_symbol_count=*/0,
-      /*.flags=*/LOOMC_LINK_FLAG_STRIP_TEST_SYMBOLS,
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_MERGE,
+      .root_symbols = nullptr,
+      .root_symbol_count = 0,
+      .flags = LOOMC_LINK_FLAG_STRIP_TEST_SYMBOLS,
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1634,7 +2003,7 @@ check.benchmark<@kernel_case> @kernel_bench
 
 TEST(LinkTest, LinkModuleMaterializesConfigFromBytecodeIndex) {
   std::vector<uint8_t> bytecode = WriteBytecodeModule(R"(
-config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), mul(%value, 16)]
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), multiple_of(%value, 16)]
 
 func.def public @from_bytecode() -> (index) {
   %hidden = config.get @model36.model.hidden_size : index
@@ -1657,27 +2026,27 @@ func.def public @from_bytecode() -> (index) {
   WorkspacePtr workspace = CreateWorkspace();
   loomc_config_binding_t bindings[] = {
       {
-          /*.key=*/loomc_make_cstring_view("@model36.model.hidden_size"),
-          /*.value=*/loomc_make_cstring_view("4096"),
+          .key = loomc_make_cstring_view("@model36.model.hidden_size"),
+          .value = loomc_make_cstring_view("4096"),
       },
   };
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_MERGE,
-      /*.root_symbols=*/nullptr,
-      /*.root_symbol_count=*/0,
-      /*.flags=*/0,
-      /*.config=*/
-      {
-          /*.bindings=*/bindings,
-          /*.binding_count=*/1,
-          /*.json_object=*/loomc_string_view_empty(),
-          /*.flags=*/LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
-      },
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_MERGE,
+      .root_symbols = nullptr,
+      .root_symbol_count = 0,
+      .flags = 0,
+      .config =
+          {
+              .bindings = bindings,
+              .binding_count = 1,
+              .json_object = loomc_string_view_empty(),
+              .flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+          },
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1686,8 +2055,9 @@ func.def public @from_bytecode() -> (index) {
   ASSERT_TRUE(loomc_result_succeeded(result.get()));
   ASSERT_NE(module.get(), nullptr);
   std::string text = SerializeModuleToText(module.get());
-  EXPECT_NE(text.find("config.def @model36.model.hidden_size = 4096 : index"),
-            std::string::npos);
+  EXPECT_NE(
+      text.find("config.def @model36.model.hidden_size = 4096 : %value: index"),
+      std::string::npos);
   EXPECT_EQ(text.find("config.decl @model36.model.hidden_size"),
             std::string::npos);
 }
@@ -1725,28 +2095,28 @@ func.def public @specialized_rgb() -> (index) {
   };
   loomc_config_binding_t bindings[] = {
       {
-          /*.key=*/
-          loomc_make_cstring_view("@id4.vae.conv3x3_bias.output_channel_count"),
-          /*.value=*/loomc_make_cstring_view("3"),
+          .key = loomc_make_cstring_view(
+              "@id4.vae.conv3x3_bias.output_channel_count"),
+          .value = loomc_make_cstring_view("3"),
       },
   };
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/1,
-      /*.flags=*/0,
-      /*.config=*/
-      {
-          /*.bindings=*/bindings,
-          /*.binding_count=*/1,
-          /*.json_object=*/loomc_string_view_empty(),
-          /*.flags=*/LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
-      },
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = 1,
+      .flags = 0,
+      .config =
+          {
+              .bindings = bindings,
+              .binding_count = 1,
+              .json_object = loomc_string_view_empty(),
+              .flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+          },
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1793,27 +2163,27 @@ func.def public @unused() -> (index) {
   };
   loomc_config_binding_t bindings[] = {
       {
-          /*.key=*/loomc_make_cstring_view("@unused.operation.tile_count"),
-          /*.value=*/loomc_make_cstring_view("4"),
+          .key = loomc_make_cstring_view("@unused.operation.tile_count"),
+          .value = loomc_make_cstring_view("4"),
       },
   };
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_LINK,
-      /*.root_symbols=*/roots,
-      /*.root_symbol_count=*/1,
-      /*.flags=*/0,
-      /*.config=*/
-      {
-          /*.bindings=*/bindings,
-          /*.binding_count=*/1,
-          /*.json_object=*/loomc_string_view_empty(),
-          /*.flags=*/LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
-      },
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_LINK,
+      .root_symbols = roots,
+      .root_symbol_count = 1,
+      .flags = 0,
+      .config =
+          {
+              .bindings = bindings,
+              .binding_count = 1,
+              .json_object = loomc_string_view_empty(),
+              .flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+          },
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1844,27 +2214,27 @@ func.def public @entry(%x: i32) -> (i32) {
   WorkspacePtr workspace = CreateWorkspace();
   loomc_config_binding_t bindings[] = {
       {
-          /*.key=*/loomc_make_cstring_view("tile_m"),
-          /*.value=*/loomc_make_cstring_view("128"),
+          .key = loomc_make_cstring_view("tile_m"),
+          .value = loomc_make_cstring_view("128"),
       },
   };
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_MERGE,
-      /*.root_symbols=*/nullptr,
-      /*.root_symbol_count=*/0,
-      /*.flags=*/0,
-      /*.config=*/
-      {
-          /*.bindings=*/bindings,
-          /*.binding_count=*/1,
-          /*.json_object=*/loomc_string_view_empty(),
-          /*.flags=*/LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
-      },
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_MERGE,
+      .root_symbols = nullptr,
+      .root_symbol_count = 0,
+      .flags = 0,
+      .config =
+          {
+              .bindings = bindings,
+              .binding_count = 1,
+              .json_object = loomc_string_view_empty(),
+              .flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+          },
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),
@@ -1880,7 +2250,7 @@ TEST(LinkTest, LinkModuleReportsUnresolvedConfigAsResultDiagnostic) {
   ContextPtr context = CreateContext();
   BuilderPtr builder = CreateBuilder(context.get());
   SourcePtr source = CreateTextSource("config.loom", R"(
-config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), mul(%value, 16)]
+config.decl @model36.model.hidden_size : %value: index where [range(%value, 0, 8192), multiple_of(%value, 16)]
 
 func.def public @entry() -> (index) {
   %hidden = config.get @model36.model.hidden_size : index
@@ -1895,22 +2265,22 @@ func.def public @entry() -> (index) {
   LinkerPtr linker = CreateLinker(context.get());
   WorkspacePtr workspace = CreateWorkspace();
   loomc_link_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_NONE,
-      /*.structure_size=*/0,
-      /*.next=*/nullptr,
-      /*.link_index=*/nullptr,
-      /*.module_name=*/loomc_string_view_empty(),
-      /*.mode=*/LOOMC_LINK_MODE_MERGE,
-      /*.root_symbols=*/nullptr,
-      /*.root_symbol_count=*/0,
-      /*.flags=*/0,
-      /*.config=*/
-      {
-          /*.bindings=*/nullptr,
-          /*.binding_count=*/0,
-          /*.json_object=*/loomc_string_view_empty(),
-          /*.flags=*/LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
-      },
+      .type = LOOMC_STRUCTURE_TYPE_NONE,
+      .structure_size = 0,
+      .next = nullptr,
+      .link_index = nullptr,
+      .module_name = loomc_string_view_empty(),
+      .mode = LOOMC_LINK_MODE_MERGE,
+      .root_symbols = nullptr,
+      .root_symbol_count = 0,
+      .flags = 0,
+      .config =
+          {
+              .bindings = nullptr,
+              .binding_count = 0,
+              .json_object = loomc_string_view_empty(),
+              .flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+          },
   };
   ResultPtr result;
   ModulePtr module = LinkIndex(linker.get(), workspace.get(), link_index.get(),

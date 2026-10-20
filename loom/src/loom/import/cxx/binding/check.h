@@ -9,6 +9,7 @@
 
 #include <cxx/attributes.h>
 
+#include <cstdint>
 #include <optional>
 #include <string_view>
 
@@ -16,29 +17,45 @@
 
 namespace loom::cxx_import {
 
+class LaunchContracts;
+
 // Source contracts for the shared check runner's generation, invocation and
 // observation operations. Declaration admission retains their concrete types
 // and kernel identity; check-body translation owns constant arguments and IR.
 struct CheckIntrinsic {
-  enum class Operation { Equal, Fill, Slice, Bitwise, Requires, Event, Launch };
+  enum class Operation {
+    Equal,
+    Close,
+    Fill,
+    Iota,
+    Slice,
+    Bitwise,
+    Requires,
+    Event,
+    Launch,
+    Trial,
+    Generate,
+    Compare,
+    Invoke,
+    EntropyFork,
+    EntropyRead,
+  };
 
   static std::optional<Operation> parse_operation(std::string_view name);
-  static std::optional<CheckIntrinsic> resolve(cxx::TranslationUnit& unit,
-                                               Diagnostics& diagnostics,
-                                               Types& types,
-                                               cxx::FunctionSymbol* function,
-                                               const cxx::Attribute& attribute,
-                                               cxx::AST* owner);
+  static std::optional<CheckIntrinsic> resolve(
+      cxx::TranslationUnit& unit, Diagnostics& diagnostics, Types& types,
+      LaunchContracts& launches, cxx::FunctionSymbol* function,
+      const cxx::Attribute& attribute, cxx::AST* owner);
 
   bool equivalent(const CheckIntrinsic& other) const;
   bool is_observation() const {
-    return operation == Operation::Equal || operation == Operation::Bitwise ||
-           operation == Operation::Event;
+    return operation == Operation::Equal || operation == Operation::Close ||
+           operation == Operation::Bitwise || operation == Operation::Event;
   }
 
   // Operation selected by the declaration's explicit binding.
   Operation operation;
-  // Admitted operand type for scalar equality.
+  // Admitted operand type for scalar observations.
   loom_type_t scalar_type = {};
   // Tensor source for slicing or observation, owned by Types.
   const TensorPartition* source_tensor = nullptr;
@@ -46,6 +63,14 @@ struct CheckIntrinsic {
   const TensorPartition* result_tensor = nullptr;
   // Statically selected kernel declaration, borrowed from the source unit.
   cxx::FunctionSymbol* kernel = nullptr;
+  // Ordinary generator or target subject selected by a template argument.
+  cxx::FunctionSymbol* subject = nullptr;
+  // Optional distinct oracle selected by a second template argument.
+  cxx::FunctionSymbol* oracle = nullptr;
+  // Finite trial count selected by trial<Count>.
+  int64_t trial_count = 0;
+  // Kernel-owned launch configuration, if one supplies this launch's geometry.
+  cxx::FunctionSymbol* configuration = nullptr;
 };
 
 }  // namespace loom::cxx_import

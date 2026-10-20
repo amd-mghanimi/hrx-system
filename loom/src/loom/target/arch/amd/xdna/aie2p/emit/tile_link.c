@@ -6,21 +6,37 @@
 
 #include "loom/target/arch/amd/xdna/aie2p/emit/tile_link.h"
 
+#include <string.h>
+
 #include "loom/target/arch/amd/xdna/aie2p/emit/relocation.h"
+
+static bool loom_aie2p_tile_link_ranges_overlap(uint64_t lhs_address,
+                                                uint64_t lhs_length,
+                                                uint64_t rhs_address,
+                                                uint64_t rhs_length) {
+  return lhs_length != 0 && rhs_length != 0 &&
+         lhs_address < rhs_address + rhs_length &&
+         rhs_address < lhs_address + lhs_length;
+}
 
 static iree_status_t loom_aie2p_tile_link_assign_addresses(
     const loom_aie2p_leaf_contribution_t* contribution,
     const loom_aie2p_tile_link_layout_t* layout,
-    loom_native_section_contribution_assembly_t* assembly) {
+    loom_native_section_contribution_assembly_t* assembly,
+    loom_aie2p_linked_section_placement_t* section_placements) {
   const loom_native_object_contribution_t* object = &contribution->object;
   const loom_aie2p_leaf_realization_t* realization = &contribution->realization;
   if (layout == NULL ||
       layout->storage_placement_count != realization->storage_domain_count ||
       (layout->storage_placement_count != 0 &&
-       layout->storage_placements == NULL)) {
+       layout->storage_placements == NULL) ||
+      layout->read_only_data_placement_count !=
+          realization->read_only_data_count ||
+      (layout->read_only_data_placement_count != 0 &&
+       layout->read_only_data_placements == NULL)) {
     return iree_make_status(
         IREE_STATUS_FAILED_PRECONDITION,
-        "AIE2P tile layout must place every retained storage domain");
+        "AIE2P tile layout must place every retained data domain");
   }
   if (realization->entry_symbol_index >= object->symbol_count) {
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
@@ -40,14 +56,12 @@ static iree_status_t loom_aie2p_tile_link_assign_addresses(
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                             "AIE2P tile code section is invalid");
   }
-  loom_native_elf_section_t* code_section =
-      &assembly->sections[code_section_index];
-  const uint64_t code_flags = LOOM_NATIVE_ELF_SECTION_FLAG_ALLOC |
-                              LOOM_NATIVE_ELF_SECTION_FLAG_EXECINSTR;
-  const uint64_t code_length =
-      loom_native_elf_section_byte_length(code_section);
-  if (code_section->type != LOOM_NATIVE_ELF_SECTION_TYPE_PROGBITS ||
-      code_section->flags != code_flags ||
+  loom_native_section_t* code_section = &assembly->sections[code_section_index];
+  const loom_native_section_access_t code_access =
+      LOOM_NATIVE_SECTION_ACCESS_READ | LOOM_NATIVE_SECTION_ACCESS_EXECUTE;
+  const uint64_t code_length = loom_native_section_byte_length(code_section);
+  if (code_section->storage != LOOM_NATIVE_SECTION_STORAGE_CONTENTS ||
+      code_section->access != code_access ||
       code_length != realization->code.byte_length) {
     return iree_make_status(
         IREE_STATUS_FAILED_PRECONDITION,
@@ -66,6 +80,91 @@ static iree_status_t loom_aie2p_tile_link_assign_addresses(
                             "AIE2P tile code address is misaligned");
   }
   code_section->address = layout->program_address;
+  section_placements[code_section_index] =
+      (loom_aie2p_linked_section_placement_t){
+          .memory_space = LOOM_XDNA_MEMORY_SPACE_PROGRAM,
+          .owner_offset = layout->program_owner_offset,
+      };
+
+  for (iree_host_size_t i = 0; i < realization->read_only_data_count; ++i) {
+    const loom_aie2p_leaf_read_only_data_domain_t* domain =
+        &realization->read_only_data[i];
+    const loom_aie2p_tile_read_only_data_placement_t* placement =
+        &layout->read_only_data_placements[i];
+    if (domain->section_contribution_index >=
+            assembly->contribution_layout_count ||
+        domain->symbol_index >= object->symbol_count) {
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                              "AIE2P leaf read-only data domain is invalid");
+    }
+    const iree_host_size_t section_index =
+        assembly->contribution_layouts[domain->section_contribution_index]
+            .section_index;
+    if (section_index >= assembly->section_count ||
+        section_index == code_section_index) {
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                              "AIE2P leaf read-only data section is invalid");
+    }
+    const loom_native_object_symbol_t* domain_symbol =
+        &object->symbols[domain->symbol_index];
+    if (domain_symbol->section_contribution_index !=
+            domain->section_contribution_index ||
+        domain_symbol->section_offset != 0 ||
+        domain_symbol->size != placement->byte_length ||
+        domain_symbol->kind != LOOM_NATIVE_OBJECT_SYMBOL_KIND_DATA) {
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                              "AIE2P leaf read-only data symbol is invalid");
+    }
+    loom_native_section_t* section = &assembly->sections[section_index];
+    const uint64_t section_length = loom_native_section_byte_length(section);
+    const uint64_t section_end =
+        (uint64_t)placement->load_address + section_length;
+    if (section->storage != LOOM_NATIVE_SECTION_STORAGE_CONTENTS ||
+        section->access != LOOM_NATIVE_SECTION_ACCESS_READ ||
+        section_length != placement->byte_length || section->alignment == 0) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "AIE2P tile read-only data section does not match its realization");
+    }
+    if (section_end > (uint64_t)UINT32_MAX + 1u) {
+      return iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "AIE2P tile read-only data exceeds the 32-bit tile address space");
+    }
+    if (placement->load_address % section->alignment != 0) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "AIE2P tile read-only data address is misaligned");
+    }
+    for (iree_host_size_t j = 0; j < i; ++j) {
+      const loom_aie2p_leaf_read_only_data_domain_t* previous_domain =
+          &realization->read_only_data[j];
+      const iree_host_size_t previous_section_index =
+          assembly
+              ->contribution_layouts[previous_domain
+                                         ->section_contribution_index]
+              .section_index;
+      if (previous_section_index == section_index) {
+        return iree_make_status(
+            IREE_STATUS_FAILED_PRECONDITION,
+            "AIE2P read-only data domains must use distinct sections");
+      }
+      const loom_native_section_t* previous_section =
+          &assembly->sections[previous_section_index];
+      if (loom_aie2p_tile_link_ranges_overlap(
+              placement->load_address, section_length,
+              previous_section->address,
+              loom_native_section_byte_length(previous_section))) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "AIE2P tile read-only data placements overlap");
+      }
+    }
+    section->address = placement->load_address;
+    section_placements[section_index] = (loom_aie2p_linked_section_placement_t){
+        .memory_space = LOOM_XDNA_MEMORY_SPACE_DATA,
+        .owner_offset = placement->owner_offset,
+    };
+  }
 
   bool placement_seen[LOOM_STORAGE_SPACE_COUNT_] = {false};
   for (iree_host_size_t i = 0; i < layout->storage_placement_count; ++i) {
@@ -124,17 +223,16 @@ static iree_status_t loom_aie2p_tile_link_assign_addresses(
                               "AIE2P leaf storage symbol is invalid");
     }
 
-    loom_native_elf_section_t* section = &assembly->sections[section_index];
+    loom_native_section_t* section = &assembly->sections[section_index];
     const loom_aie2p_leaf_storage_requirement_t* requirement =
         loom_aie2p_leaf_storage_requirement(realization, domain->storage_space);
-    const uint64_t storage_flags =
-        LOOM_NATIVE_ELF_SECTION_FLAG_ALLOC | LOOM_NATIVE_ELF_SECTION_FLAG_WRITE;
-    const uint64_t section_length =
-        loom_native_elf_section_byte_length(section);
+    const loom_native_section_access_t storage_access =
+        LOOM_NATIVE_SECTION_ACCESS_READ | LOOM_NATIVE_SECTION_ACCESS_WRITE;
+    const uint64_t section_length = loom_native_section_byte_length(section);
     const uint64_t section_end =
         (uint64_t)placement->load_address + section_length;
-    if (section->type != LOOM_NATIVE_ELF_SECTION_TYPE_NOBITS ||
-        section->flags != storage_flags ||
+    if (section->storage != LOOM_NATIVE_SECTION_STORAGE_RESERVATION ||
+        section->access != storage_access ||
         section_length != requirement->byte_length ||
         section->alignment < requirement->minimum_alignment) {
       return iree_make_status(
@@ -142,8 +240,9 @@ static iree_status_t loom_aie2p_tile_link_assign_addresses(
           "AIE2P tile storage section does not match its realization");
     }
     if (section_end > (uint64_t)UINT32_MAX + 1u) {
-      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                              "AIE2P tile storage exceeds ELF32 address space");
+      return iree_make_status(
+          IREE_STATUS_OUT_OF_RANGE,
+          "AIE2P tile storage exceeds the 32-bit tile address space");
     }
     if (section->alignment != 0 &&
         placement->load_address % section->alignment != 0) {
@@ -163,39 +262,47 @@ static iree_status_t loom_aie2p_tile_link_assign_addresses(
             IREE_STATUS_FAILED_PRECONDITION,
             "AIE2P leaf storage domains must use distinct sections");
       }
-      const loom_native_elf_section_t* previous_section =
+      const loom_native_section_t* previous_section =
           &assembly->sections[previous_section_index];
       const uint64_t previous_end =
           previous_section->address +
-          loom_native_elf_section_byte_length(previous_section);
+          loom_native_section_byte_length(previous_section);
       if ((uint64_t)placement->load_address < previous_end &&
           previous_section->address < section_end) {
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                                 "AIE2P tile storage placements overlap");
       }
     }
+    for (iree_host_size_t j = 0; j < realization->read_only_data_count; ++j) {
+      const loom_aie2p_leaf_read_only_data_domain_t* data_domain =
+          &realization->read_only_data[j];
+      const iree_host_size_t data_section_index =
+          assembly
+              ->contribution_layouts[data_domain->section_contribution_index]
+              .section_index;
+      const loom_native_section_t* data_section =
+          &assembly->sections[data_section_index];
+      if (loom_aie2p_tile_link_ranges_overlap(
+              placement->load_address, section_length, data_section->address,
+              loom_native_section_byte_length(data_section))) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "AIE2P tile local data placements overlap");
+      }
+    }
     section->address = placement->load_address;
+    section_placements[section_index] = (loom_aie2p_linked_section_placement_t){
+        .memory_space = LOOM_XDNA_MEMORY_SPACE_DATA,
+        .owner_offset = placement->owner_offset,
+    };
   }
 
   for (iree_host_size_t i = 0; i < assembly->section_count; ++i) {
-    if (!iree_any_bit_set(assembly->sections[i].flags,
-                          LOOM_NATIVE_ELF_SECTION_FLAG_ALLOC) ||
-        i == code_section_index) {
-      continue;
-    }
-    bool has_domain = false;
-    for (iree_host_size_t j = 0; j < realization->storage_domain_count; ++j) {
-      const iree_host_size_t domain_section_index =
-          assembly
-              ->contribution_layouts[realization->storage_domains[j]
-                                         .section_contribution_index]
-              .section_index;
-      has_domain |= domain_section_index == i;
-    }
-    if (!has_domain) {
-      return iree_make_status(
-          IREE_STATUS_FAILED_PRECONDITION,
-          "AIE2P tile has an allocated section without placement facts");
+    if (!iree_any_bit_set(assembly->sections[i].access,
+                          LOOM_NATIVE_SECTION_ACCESS_READ) ||
+        (section_placements[i].memory_space != LOOM_XDNA_MEMORY_SPACE_PROGRAM &&
+         section_placements[i].memory_space != LOOM_XDNA_MEMORY_SPACE_DATA)) {
+      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                              "AIE2P tile section has no physical placement");
     }
   }
   return iree_ok_status();
@@ -224,8 +331,14 @@ iree_status_t loom_aie2p_tile_link(
   loom_native_section_contribution_assembly_t assembly = {0};
   IREE_RETURN_IF_ERROR(loom_native_assemble_section_contributions(
       object->sections, object->section_count, &assembly, arena));
-  IREE_RETURN_IF_ERROR(
-      loom_aie2p_tile_link_assign_addresses(contribution, layout, &assembly));
+  loom_aie2p_linked_section_placement_t* section_placements = NULL;
+  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(arena, assembly.section_count,
+                                                 sizeof(*section_placements),
+                                                 (void**)&section_placements));
+  memset(section_placements, 0,
+         assembly.section_count * sizeof(*section_placements));
+  IREE_RETURN_IF_ERROR(loom_aie2p_tile_link_assign_addresses(
+      contribution, layout, &assembly, section_placements));
   IREE_RETURN_IF_ERROR(
       loom_aie2p_native_object_apply_fixups(object, &assembly, arena));
 
@@ -251,12 +364,15 @@ iree_status_t loom_aie2p_tile_link(
           assembly.sections[entry_layout->section_index].address,
           entry_layout->section_offset, &entry_address) ||
       entry_address > UINT32_MAX) {
-    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                            "AIE2P tile entry address exceeds ELF32");
+    return iree_make_status(
+        IREE_STATUS_OUT_OF_RANGE,
+        "AIE2P tile entry address exceeds the 32-bit tile address space");
   }
 
   *out_tile = (loom_aie2p_linked_tile_t){
       .assembly = assembly,
+      .section_placements = section_placements,
+      .section_placement_count = assembly.section_count,
       .symbol_layouts = symbol_layouts,
       .symbol_layout_count = object->symbol_count,
       .entry_section_index = entry_layout->section_index,

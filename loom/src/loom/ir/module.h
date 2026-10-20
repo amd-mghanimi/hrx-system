@@ -35,9 +35,6 @@ extern "C" {
 // Capacity hints from bytecode header or source module (for cloning).
 // NULL = use defaults (text parsing, test construction).
 typedef struct loom_module_size_hints_t {
-  // Expected value count. Values allocate lazily in stable segments, so this
-  // does not reserve speculative row capacity.
-  iree_host_size_t value_count;
   // Expected interned string count, sizing content-interner buckets only.
   iree_host_size_t string_count;
   // Expected interned type count.
@@ -465,7 +462,9 @@ iree_status_t loom_module_verify_canonical_attr_dict(
 // distinct encodings so text output can emit unambiguous alias definitions.
 // `name_id` and `alias_id` must be pre-interned in the module's string table.
 // Parameters may point to temporary storage; they are recursively
-// canonicalized into module-owned arena storage.
+// canonicalized into module-owned arena storage. Duplicate candidates release
+// their copied parameters. Failure preserves existing encoding rows and their
+// index; family-alias expansion may still intern string names before failing.
 iree_status_t loom_module_add_encoding(loom_module_t* module,
                                        const loom_encoding_t* encoding,
                                        uint16_t* out_encoding_id);
@@ -583,17 +582,29 @@ iree_status_t loom_module_add_location(loom_module_t* module,
                                        loom_location_entry_t entry,
                                        loom_location_id_t* out_location_id);
 
+// Attaches compact parser-captured field spans to a file location entry.
+//
+// |location_id| must reference an existing LOOM_LOCATION_FILE entry owned by
+// |module|, and |field_spans| must contain |field_span_count| nonzero entries.
+// The spans are copied into module-owned arena storage, so the caller may pass
+// parser scratch storage. This compiler-internal fixed-representation entry
+// point consumes parser-established invariants and keeps compact text parsing
+// free of physical-format dispatch.
+iree_status_t loom_module_attach_location_compact_field_spans(
+    loom_module_t* module, loom_location_id_t location_id,
+    const loom_location_compact_field_span_t* field_spans,
+    uint16_t field_span_count);
+
 // Attaches parser-captured field spans to a file location entry.
 //
 // |location_id| must reference an existing LOOM_LOCATION_FILE entry owned by
-// |module|. |field_spans| are copied into module-owned arena storage, so the
-// caller may pass parser scratch storage. Returns INVALID_ARGUMENT if the
-// location is not a file range, the location ID is out of range, or spans were
-// already attached to that location.
+// |module|. |field_spans.data| is copied into module-owned arena storage, so
+// the caller may pass parser scratch storage. Returns INVALID_ARGUMENT if the
+// location is not a file range, the location ID is out of range, the physical
+// span array is malformed, or spans were already attached to that location.
 iree_status_t loom_module_attach_location_field_spans(
     loom_module_t* module, loom_location_id_t location_id,
-    const loom_location_field_span_t* field_spans,
-    iree_host_size_t field_span_count);
+    loom_location_field_span_array_t field_spans);
 
 // Looks up a symbol by name. Returns the symbol index (0-based) or
 // LOOM_SYMBOL_ID_INVALID if not found. O(n) linear scan — suitable
@@ -715,12 +726,14 @@ uint16_t loom_block_remove_args(loom_module_t* module, loom_block_t* block,
                                 const bool* remove_args,
                                 uint16_t remove_arg_count);
 
-// Appends an op to the end of a block.
+// Appends an op to the end of a block. Returns RESOURCE_EXHAUSTED if the block
+// has reached its sparse ordinal capacity.
 iree_status_t loom_block_append_op(loom_module_t* module, loom_block_t* block,
                                    loom_op_t* op);
 
 // Inserts an op before |before_op| in |block|. |before_op| must be a live op
-// in the block. Passing NULL appends.
+// in the block. Passing NULL appends. Returns RESOURCE_EXHAUSTED if the block
+// has reached its sparse ordinal capacity.
 iree_status_t loom_block_insert_before_op(loom_module_t* module,
                                           loom_block_t* block,
                                           loom_op_t* before_op, loom_op_t* op);
@@ -728,7 +741,8 @@ iree_status_t loom_block_insert_before_op(loom_module_t* module,
 // Inserts an op at |index| in the block. This is a cold indexed helper for
 // diagnostics and tests; hot mutation paths should carry an op pointer and use
 // loom_block_insert_before_op.
-// If index == block->op_count, equivalent to append.
+// If index == block->op_count, equivalent to append. Returns RESOURCE_EXHAUSTED
+// if the block has reached its sparse ordinal capacity.
 iree_status_t loom_block_insert_op(loom_module_t* module, loom_block_t* block,
                                    iree_host_size_t index, loom_op_t* op);
 
@@ -738,6 +752,13 @@ iree_status_t loom_block_insert_op(loom_module_t* module, loom_block_t* block,
 // Effect summaries retain exact transitive counts; hint summaries propagate
 // only region presence transitions. Repeated recording is idempotent.
 void loom_module_record_op_summaries(loom_module_t* module, loom_op_t* op);
+
+// Propagates an already-counted detached region's summaries when it joins
+// |parent_op|. The region's children must now name |parent_op|, and their
+// summaries must not yet contribute to its ancestors. Uses retained aggregate
+// counts without visiting the region's operations.
+void loom_module_record_region_summaries(loom_op_t* parent_op,
+                                         const loom_region_t* region);
 
 // Removes |op|'s previously recorded direct summaries and all nested op
 // summaries from their region inventories.

@@ -1,20 +1,23 @@
 # Checked Benchmark Corpus
 
-This corpus contains complete Loom programs with correctness cases and
-benchmark rows. Target providers compose these data-only sources into
-capability-coherent modules and execute them through production-facing
-infrastructure. A case belongs here when the important risk is the interaction
-between multiple compiler and runtime contracts, and that interaction cannot
-be represented faithfully by a smaller source-low, op, pass, tool, or authoring
-test.
+This corpus contains complete Loom programs with correctness scenarios and
+companion benchmark campaigns. Target providers compose these data-only
+sources into capability-coherent modules and execute them through
+production-facing infrastructure. A workload family belongs here when the
+important risk is the interaction between multiple compiler and runtime
+contracts, and that interaction cannot be represented faithfully by a smaller
+source-low, op, pass, tool, or authoring test.
 
-Each checked benchmark source is expected to contain:
+Each checked benchmark family is expected to contain:
 
 - One or more kernels or callable entry points under test.
-- One or more `check.case` records with deterministic input generation and
-  meaningful expectations.
-- One or more `check.benchmark<@case> @name` rows selecting the checked workload for
-  timing.
+- One or more `check.scenario` records that batch deterministic runtime trials
+  against an independent oracle. A focused `check.case` remains appropriate
+  when one integration program must coordinate several subjects.
+- A `_benchmark.loom` companion whose target-only scenarios select the timed
+  workload without placing benchmark scale in ordinary correctness execution.
+- One or more `check.benchmark<@scenario> @name` rows selecting those campaigns
+  for timing.
 - Comments that identify the represented behavior class and any non-obvious
   numeric, layout, target, or launch contract.
 
@@ -29,7 +32,7 @@ examples are comment-rich recipes for people and agents learning how to write
 Loom. Checked benchmark cases are regression and benchmark assets: they can
 have comments, but their main job is to preserve end-to-end signal.
 
-## Case Template
+## Scenario Template
 
 ```loom
 kernel.def @semantic_behavior_class() {
@@ -39,20 +42,26 @@ kernel.def @semantic_behavior_class() {
   kernel.return
 }
 
-check.case public @semantic_behavior_class_case {
-  // Deterministic inputs that distinguish the represented behavior.
-  kernel.launch @semantic_behavior_class(%input, %output)
-      : [](tensor<...>, tensor<...>)
-  check.expect.close actual(...) expected(...) atol(...) rtol(...) nan(...) : ...
-  check.return
+func.def @semantic_behavior_class_oracle(%input: buffer, %output: buffer) {
+  // Independent scalar reference.
+  func.return
 }
 
-check.benchmark<@semantic_behavior_class_case> @semantic_behavior_class_smoke
+check.scenario @semantic_behavior_class_values {
+  check.trial[...](%trial: index, %entropy: check.entropy) {
+    // Runtime inputs that distinguish the represented behavior.
+    check.compare<@semantic_behavior_class, @semantic_behavior_class_oracle>(%input, %output) : (tensor<...>, tensor<...>) -> () {
+      check.expect.close actual(...) expected(...) atol(...) rtol(...) nan(...) : ...
+    }
+  }
+  check.return
+}
 ```
 
-The template is intentionally small. A real case should add parameters and
-multiple benchmark rows only when those shape classes answer distinct compiler
-or runtime questions.
+The companion benchmark scenario uses `check.invoke<@semantic_behavior_class>`
+with the same production shape and no oracle execution in the timed path. The
+template is intentionally small. A real family adds trial domains only when
+those shapes answer distinct compiler or runtime questions.
 
 ## Seed Candidate Policy
 
@@ -87,10 +96,12 @@ unroll describes how many original iterations share a loop body.
 
 The depth-four form starts three records, issues a future record while
 consuming the oldest, and drains the remaining records in order. Counts below
-three take the serial path. Analytic cases use a closed-form exact result;
-the shared varied-input case changes every carried input independently and
-compares all forms bitwise across startup, steady-state remainders, and drain
-boundaries. Different output sentinels make missing stores observable.
+three take the serial path. One seven-trial scenario checks the serial
+recurrence against a closed-form exact oracle. The shared varied-input case
+changes every carried input independently and compares all forms bitwise across
+startup, steady-state remainders, and drain boundaries. Different output
+sentinels make missing stores observable. Benchmark-only count sweeps live in
+the companion source, outside ordinary correctness execution.
 
 The matched factor-two benchmark rows are
 `@streaming_packed_s8_dot_serial_unroll2_n128_time` and
@@ -111,11 +122,14 @@ weights/payloads one ahead. Carrying only the ID in the metadata stage avoids
 making the weight an immediate consumer of that lookup.
 
 The varied-input checks preserve row/weight identity across startup, drain,
-holes, duplicates and tails. Independent analytic cases check missing routes,
-floating-point recurrence order, and the benchmark outputs. Access testing uses
-undersized backing storage for inactive routes. The `n8_t1`, `n8_t16`, and
-`n8_t256` benchmark suffixes cover decode and batched combines; `n32` rows stress
-a longer recurrence. Each benchmark case launches exactly one kernel.
+holes, duplicates and tails. Correctness scenarios use an independent,
+route-ordered oracle and analytic expectations for missing routes and
+floating-point recurrence order. Access testing uses undersized backing storage
+for inactive routes. The `@routed_row_combine_serial_workloads` and
+`@routed_row_combine_pipelined_workloads` benchmarks each generate six samples:
+one, sixteen and 256 tokens with eight routes, followed by the same token counts
+with 32 routes. `--sample=2` selects eight routes and 256 tokens. Each sample
+launches one kernel, with input generation outside the measured invocation.
 
 Compare the serial and pipelined rows under the same batching and cache policy.
 Native partial waits show overlap inside the unrolled body; edge copies may
@@ -137,13 +151,14 @@ Independent analytic cases check maximum, denominator and normalized output
 for empty, absent, repeated, short and ragged pages. Varied inputs distinguish
 K/V row identity and lane fragments across shared pages and different query
 lengths. Undersized inactive backing makes accidental tail reads observable
-under the access sanitizer. Timing cases launch one kernel each, with exact
-expectations and the full K/V cache footprint.
+under the access sanitizer. Benchmark samples launch one kernel each, with the
+same full K/V cache footprint.
 
-Matched benchmark names are
-`@cooperative_paged_attention_serial_n128_i256` and
-`@cooperative_paged_attention_pipelined_n128_i256`. The `n128`/`n1024` and
-`i1`/`i16`/`i256` suffixes select token and query counts. The
+The `@cooperative_paged_attention_serial_workloads` and
+`@cooperative_paged_attention_pipelined_workloads` benchmarks each generate six
+samples: 128-token prefixes at 1, 16, and 256 queries, followed by 1024-token
+prefixes at the same query counts. `--sample=2` selects 128 tokens and 256
+queries. Input generation stays outside the measured invocation. The
 [cooperative pipeline workflow](../../../../../docs/src/workflows/tune-loop-schedules.md#pipeline-cooperative-paged-attention)
 connects these workloads to native resource reports and controlled timings.
 
@@ -162,10 +177,11 @@ by two. Independent analytic cases check maximum, denominator and normalized
 output; varied queries cover shared lists and differing prefixes. Minimal
 backing and NaN-poisoned inactive payloads exercise both access boundaries.
 
-The `@sparse_token_attention_serial_n128_i256` and
-`@sparse_token_attention_pipelined_n128_i256` benchmarks launch one kernel
-each. The `n128`/`n1024` and `i1`/`i16`/`i256` suffixes select prefix and query
-counts with the same full-cache footprint. The
+The `@sparse_token_attention_serial_workloads` and
+`@sparse_token_attention_pipelined_workloads` benchmarks each generate six
+samples: 128-token prefixes at 1, 16, and 256 queries, followed by 1024-token
+prefixes at the same query counts. Each sample launches one kernel with the
+same full-cache footprint; `--sample=2` selects 128 tokens and 256 queries. The
 [sparse attention workflow](../../../../../docs/src/workflows/tune-loop-schedules.md#pipeline-sparse-token-attention)
 connects this source to access checking, reports and schedule comparisons.
 
@@ -183,10 +199,11 @@ whose vector width comes from the target's subgroup size. Analytic checks
 anchor both heads' states and outputs; varied pairs distinguish query and
 table ownership. Minimal backing covers ragged tails, holes and repeated pages.
 
-The `@grouped_paged_attention_independent_n128_p1024` and
-`@grouped_paged_attention_shared_n128_p1024` benchmarks compare 2048 query heads
-over the same 64 MiB K/V pool. The `n128`/`n1024` and `p1`/`p128`/`p1024`
-suffixes select token and pair counts. Sharing halves issued K/V loads for
+The `@grouped_paged_attention_independent_workloads` and
+`@grouped_paged_attention_shared_workloads` benchmarks each generate six
+samples: 128-token prefixes at 1, 128, and 1024 pairs, followed by 1024-token
+prefixes at the same pair counts. `--sample=2` compares 2048 query heads over
+the same 64 MiB K/V pool. Sharing halves issued K/V loads for
 equal-length heads but retains more state and launches fewer subgroups. The
 [shared-loading workflow](../../../../../docs/src/workflows/tune-loop-schedules.md#share-kv-loads-across-query-heads)
 compares that tradeoff separately from pipeline depth.

@@ -20,6 +20,11 @@ iree_status_t loom_amdgpu_select_vector_fragment_repack_plan(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     loom_amdgpu_fragment_repack_plan_t* out_plan, bool* out_selected);
 
+// Publishes the selected repack carrier and rejects unsupported transitions.
+iree_status_t loom_amdgpu_finalize_vector_fragment_repack_plan(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_amdgpu_fragment_repack_plan_t* plan);
+
 // Lowers a source vector.fragment.repack op.
 iree_status_t loom_amdgpu_lower_vector_fragment_repack(
     loom_low_lower_context_t* context, const loom_op_t* source_op,

@@ -9,6 +9,7 @@
 #include "loom/codegen/low/allocation/storage.h"
 #include "loom/codegen/low/diagnostics.h"
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 
 static iree_status_t loom_low_allocation_emit_failure(
@@ -52,8 +53,8 @@ static iree_status_t loom_low_allocation_emit_predicted_spills(
             table->module, table->function_op)),
         loom_param_string(loom_low_diagnostic_value_name(table->module,
                                                          spill_plan->value_id)),
-        loom_param_string(loom_low_diagnostic_value_class_name(
-            table->target.descriptor_set, assignment->value_class)),
+        loom_param_string(loom_low_diagnostic_reg_class_name(
+            table->target.descriptor_set, assignment->descriptor_reg_class_id)),
         loom_param_u32(spill_plan->byte_size),
         loom_param_u32(spill_plan->store_count),
         loom_param_u32(spill_plan->reload_count),
@@ -161,6 +162,8 @@ static iree_string_view_t loom_low_allocation_placement_cause_name(
       return IREE_SV("schedule-pair-affinity");
     case LOOM_LOW_PLACEMENT_CAUSE_DESCRIPTOR_CONSTRAINT:
       return IREE_SV("descriptor-constraint");
+    case LOOM_LOW_PLACEMENT_CAUSE_EDGE_PAIR_AFFINITY:
+      return IREE_SV("edge-pair-affinity");
     default:
       return IREE_SV("unknown");
   }
@@ -293,13 +296,13 @@ static iree_status_t loom_low_allocation_emit_placement_decisions(
         loom_low_allocation_placement_decision_reason_key(
             table, relation, source_assignment, result_assignment, &accepted);
     const iree_string_view_t value_class_name =
-        result_assignment
-            ? loom_low_diagnostic_value_class_name(
-                  table->target.descriptor_set, result_assignment->value_class)
-        : source_assignment
-            ? loom_low_diagnostic_value_class_name(
-                  table->target.descriptor_set, source_assignment->value_class)
-            : IREE_SV("<unknown>");
+        result_assignment   ? loom_low_diagnostic_reg_class_name(
+                                  table->target.descriptor_set,
+                                  result_assignment->descriptor_reg_class_id)
+        : source_assignment ? loom_low_diagnostic_reg_class_name(
+                                  table->target.descriptor_set,
+                                  source_assignment->descriptor_reg_class_id)
+                            : IREE_SV("<unknown>");
     const loom_value_id_t source_value_id = loom_low_placement_value_id(
         &table->placement, relation->source_ordinal);
     const loom_value_id_t result_value_id = loom_low_placement_value_id(

@@ -38,6 +38,7 @@ from urllib.request import url2pathname
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from build_tools.devtools import project_presubmit
 from build_tools.devtools.bazel import clang_tidy_configuration_args
 from build_tools.devtools.source_lock import (
     NonEmptyTrackedFileSnapshot,
@@ -76,7 +77,25 @@ COMMAND_LINE_CHARACTER_LIMIT = 16_000
 C_FORMAT_BATCH_SIZE = 64
 C_FORMAT_DEFAULT_MAX_JOBS = 16
 SEMGREP_CONFIG = "build_tools/static_analysis/semgrep/iree.yml"
+SEMGREP_DOCUMENTATION_CONFIG = "build_tools/static_analysis/semgrep/amd-docs.yml"
+SEMGREP_DOCUMENTATION_TEST = "build_tools/static_analysis/semgrep/amd_docs_test.py"
+SEMGREP_CONFIGS = (
+    SEMGREP_CONFIG,
+    SEMGREP_DOCUMENTATION_CONFIG,
+)
 SEMGREP_EXTENSIONS = C_ANALYSIS_EXTENSIONS
+# Exact non-C policy surfaces scanned without broadening Semgrep to all Python.
+SEMGREP_POLICY_PATHS = frozenset(
+    {
+        "loom/py/loom/error/target.py",
+    }
+)
+# Expected-finding fixtures run through `semgrep test`, never an ordinary scan.
+SEMGREP_TEST_PATHS = frozenset(
+    {
+        "build_tools/static_analysis/semgrep/test/target_diagnostic_domain.py",
+    }
+)
 SEMGREP_PATH_PREFIXES = (
     "runtime/src/iree/",
     "loom/src/loom/",
@@ -108,7 +127,7 @@ CLANG_TIDY_FIXES_OUTPUT_GROUP = "iree_clang_tidy_fixes"
 CLANG_TIDY_LOCAL_FIXES_OUTPUT_GROUP = "iree_clang_tidy_local_fixes"
 CLANG_TIDY_LOCAL_OUTPUT_GROUP = "iree_clang_tidy_local_reports"
 CLANG_TIDY_OUTPUT_GROUP = "iree_clang_tidy_reports"
-CLANG_TIDY_PATH_PREFIXES = SEMGREP_PATH_PREFIXES
+CLANG_TIDY_PATH_PREFIXES = SEMGREP_PATH_PREFIXES + ("loom/binding/c/",)
 CLANG_TIDY_REPO_ENV = "--repo_env=IREE_CLANG_TIDY_LLVM=auto"
 CLANG_TIDY_CONFIG = REPO_ROOT / "build_tools/clang_tidy/clang_tidy_config.yaml"
 CLANG_TIDY_CMAKE_BUILD_DIR = REPO_ROOT / ".tmp" / "iree-clang-tidy-plugin"
@@ -227,14 +246,22 @@ LEFTHOOK_TEST_PATHS = frozenset(
         "build_tools/lefthook/commit_msg_test.py",
         "build_tools/lefthook/presubmit.py",
         "build_tools/lefthook/presubmit_test.py",
+        SEMGREP_CONFIG,
+        *SEMGREP_TEST_PATHS,
         "build_tools/devtools/source_lock.py",
+    }
+)
+CHANGE_SCOPE_TEST_PATHS = frozenset(
+    {
+        "build_tools/ci/BUILD.bazel",
+        "build_tools/ci/change_scope.py",
+        "build_tools/ci/change_scope_test.py",
     }
 )
 VULKAN_ENVIRONMENT_TEST_PATHS = frozenset(
     {
         ".github/scripts/check_vulkan_hardware_environment.sh",
-        ".github/workflows/ci_iree_bazel.yml",
-        ".github/workflows/ci_iree_cmake.yml",
+        ".github/workflows/ci_iree.yml",
         "build_tools/ci/BUILD.bazel",
         "build_tools/ci/vulkan_environment.py",
         "build_tools/ci/vulkan_environment_test.py",
@@ -242,6 +269,7 @@ VULKAN_ENVIRONMENT_TEST_PATHS = frozenset(
 )
 DEVTOOLS_PRESUBMIT_TEST_TARGET = "//build_tools/devtools:presubmit_tests"
 LEFTHOOK_PRESUBMIT_TEST_TARGET = "//build_tools/lefthook:presubmit_tests"
+CHANGE_SCOPE_TEST_TARGET = "//build_tools/ci:change_scope_test"
 VULKAN_ENVIRONMENT_TEST_TARGET = "//build_tools/ci:vulkan_environment_test"
 ROCM_ENVIRONMENT_TEST_PATHS = frozenset(
     {
@@ -252,6 +280,8 @@ ROCM_ENVIRONMENT_TEST_PATHS = frozenset(
     }
 )
 ROCM_ENVIRONMENT_TEST_TARGET = "//build_tools/ci:rocm_environment_test"
+CMAKE_TOOL_TEST_PATH_PREFIX = "build_tools/cmake/"
+CMAKE_TOOL_TEST_REGEX = "^build_tools/cmake/"
 CLANG_TIDY_FULL_SCOPE_EXACT_PATHS = {
     ".bazelrc",
     ".bazelversion",
@@ -1068,8 +1098,15 @@ def is_c_format_file(path: str) -> bool:
 
 
 def is_semgrep_candidate_file(path: str) -> bool:
-    return path.startswith(SEMGREP_PATH_PREFIXES) and (
-        Path(path).suffix in SEMGREP_EXTENSIONS
+    return (
+        path in SEMGREP_POLICY_PATHS
+        or path.startswith("docs/reference/amd/")
+        or path.startswith("libamdf/docs/")
+        or path == "libamdf/README.md"
+        or (
+            path.startswith(SEMGREP_PATH_PREFIXES)
+            and Path(path).suffix in SEMGREP_EXTENSIONS
+        )
     )
 
 
@@ -1248,14 +1285,24 @@ def semgrep_jobs() -> int:
     return min(SEMGREP_DEFAULT_MAX_JOBS, max(1, int(cpu_count * 0.85)))
 
 
-def clang_tidy_jobs() -> int:
+def configured_clang_tidy_jobs() -> int | None:
     configured_jobs = os.environ.get("IREE_CLANG_TIDY_JOBS")
-    if configured_jobs:
-        try:
-            jobs = int(configured_jobs)
-        except ValueError:
-            return 1
-        return max(1, jobs)
+    if not configured_jobs:
+        return None
+    try:
+        jobs = int(configured_jobs)
+    except ValueError:
+        raise ValueError("IREE_CLANG_TIDY_JOBS must be a positive integer") from None
+    if jobs < 1:
+        raise ValueError("IREE_CLANG_TIDY_JOBS must be a positive integer")
+    return jobs
+
+
+def clang_tidy_jobs() -> int:
+    """Returns the local tool budget, independent of Bazel execution policy."""
+    configured_jobs = configured_clang_tidy_jobs()
+    if configured_jobs is not None:
+        return configured_jobs
     cpu_count = os.cpu_count() or 1
     default_jobs = max(
         1,
@@ -1277,8 +1324,7 @@ def semgrep_scan_command(files: list[str]) -> list[str]:
         "ERROR",
         "--jobs",
         str(semgrep_jobs()),
-        "--config",
-        SEMGREP_CONFIG,
+        *[arg for config in SEMGREP_CONFIGS for arg in ("--config", config)],
         "--",
         *files,
     ]
@@ -1292,8 +1338,18 @@ def semgrep_validate_command() -> list[str]:
         "--disable-version-check",
         "--strict",
         "--validate",
+        *[arg for config in SEMGREP_CONFIGS for arg in ("--config", config)],
+    ]
+
+
+def semgrep_test_command() -> list[str]:
+    return [
+        "semgrep",
+        "test",
+        "--strict",
         "--config",
         SEMGREP_CONFIG,
+        *sorted(SEMGREP_TEST_PATHS),
     ]
 
 
@@ -1458,12 +1514,14 @@ def run_build_filename_check(paths: list[str]) -> bool:
 
 
 def is_bazel_to_cmake_global_trigger(path: str) -> bool:
+    input_path = Path(path)
     return (
-        Path(path).name == ".bazel_to_cmake.cfg.py"
-        or path == "loom/build_tools/amdgpu/target_config.bzl"
+        input_path.name == ".bazel_to_cmake.cfg.py"
+        or input_path.suffix == ".bzl"
         or path.startswith(
             (
                 "build_tools/bazel_to_cmake/",
+                "loom/build_tools/bazel_to_cmake/",
                 "loom/requirements/",
                 "runtime/requirements/",
             )
@@ -1500,6 +1558,7 @@ def run_amdgpu_target_map(paths: list[str], fix: bool, verbose: bool) -> bool:
         "build_tools/amdgpu/target_map.",
         "runtime/src/iree/hal/drivers/amdgpu/util/device_library_target_map.inl",
         "runtime/src/iree/hal/drivers/amdgpu/target/identity_catalog.inl",
+        "runtime/src/iree/hal/drivers/amd/gpu/target/identity_catalog.inl",
     )
     if not any(path.startswith(relevant_prefixes) for path in paths):
         return skip_step("AMDGPU target map", "no AMDGPU target-map inputs")
@@ -1516,6 +1575,7 @@ def run_amdgpu_target_map(paths: list[str], fix: bool, verbose: bool) -> bool:
                 "build_tools/amdgpu/target_map.h",
                 "runtime/src/iree/hal/drivers/amdgpu/util/device_library_target_map.inl",
                 "runtime/src/iree/hal/drivers/amdgpu/target/identity_catalog.inl",
+                "runtime/src/iree/hal/drivers/amd/gpu/target/identity_catalog.inl",
             ],
             verbose,
         )
@@ -1560,8 +1620,10 @@ def existing_project_scripts() -> list[Project]:
 
 def projects_for_paths(paths: list[str]) -> list[Project]:
     projects = existing_project_scripts()
-    if any(is_global_trigger(path) for path in paths):
+    if any(is_global_project_trigger(path) for path in paths):
         return projects
+    # Repository-root tools own focused test and CI contracts; they are not
+    # part of every product's local test contract.
     selected = []
     for project in projects:
         if any(path.startswith(project.root) for path in paths):
@@ -1569,9 +1631,7 @@ def projects_for_paths(paths: list[str]) -> list[Project]:
     return selected
 
 
-def is_global_trigger(path: str) -> bool:
-    if path.startswith("build_tools/"):
-        return True
+def is_global_project_trigger(path: str) -> bool:
     if path.startswith("requirements") and path.endswith(".txt"):
         return True
     return any(
@@ -1640,6 +1700,8 @@ def repository_tool_test_targets(paths: list[str]) -> list[str]:
         targets.append(DEVTOOLS_PRESUBMIT_TEST_TARGET)
     if any(is_lefthook_test_trigger(path) for path in paths):
         targets.append(LEFTHOOK_PRESUBMIT_TEST_TARGET)
+    if sys.platform == "linux" and CHANGE_SCOPE_TEST_PATHS.intersection(paths):
+        targets.append(CHANGE_SCOPE_TEST_TARGET)
     if sys.platform == "linux" and VULKAN_ENVIRONMENT_TEST_PATHS.intersection(paths):
         targets.append(VULKAN_ENVIRONMENT_TEST_TARGET)
     if sys.platform == "linux" and ROCM_ENVIRONMENT_TEST_PATHS.intersection(paths):
@@ -1663,6 +1725,7 @@ def run_repository_tool_tests(paths: list[str], verbose: bool) -> bool:
                 "bazel",
                 "test",
                 "--config=presubmit",
+                *project_presubmit.bazel_config_args(),
                 *test_targets,
             ],
             "Repository tool Bazel tests",
@@ -1692,23 +1755,59 @@ def run_repository_tool_tests_for_lane(
         return run_repository_tool_tests(paths, verbose)
     if lane != "cmake":
         raise ValueError(f"unknown lane: {lane}")
-    if not any(is_devtools_test_trigger(path) for path in paths):
-        return skip_step("Repository tool tests", "no devtools inputs")
-    return run_command(
-        [
-            "python",
-            "-B",
-            "-m",
-            "unittest",
-            "build_tools.devtools.cli_test",
-            "build_tools.devtools.command_plan_test",
-            "build_tools.devtools.environment_test",
-            "build_tools.devtools.install_test",
-            "build_tools.devtools.setup_test",
-        ],
-        "Root devtools Python tests",
-        verbose,
+    has_devtools_inputs = any(is_devtools_test_trigger(path) for path in paths)
+    has_cmake_tool_inputs = any(
+        path.startswith(CMAKE_TOOL_TEST_PATH_PREFIX) for path in paths
     )
+    if not has_devtools_inputs and not has_cmake_tool_inputs:
+        return skip_step("Repository tool tests", "no CMake repository tool inputs")
+
+    ok = True
+    if has_devtools_inputs:
+        ok = (
+            run_command(
+                [
+                    "python",
+                    "-B",
+                    "-m",
+                    "unittest",
+                    "build_tools.devtools.cli_test",
+                    "build_tools.devtools.command_plan_test",
+                    "build_tools.devtools.environment_test",
+                    "build_tools.devtools.install_test",
+                    "build_tools.devtools.setup_test",
+                ],
+                "Root devtools Python tests",
+                verbose,
+            )
+            and ok
+        )
+    if has_cmake_tool_inputs:
+        build_dir = project_presubmit.cmake_build_dir(REPO_ROOT)
+        if not project_presubmit.validate_cmake_build_tree(
+            "repository tools", build_dir
+        ):
+            ok = False
+        else:
+            ok = (
+                run_command(
+                    [
+                        sys.executable,
+                        "dev.py",
+                        "--cmake-build-dir",
+                        str(build_dir),
+                        "cmake",
+                        "test",
+                        "-R",
+                        CMAKE_TOOL_TEST_REGEX,
+                        "--no-tests=error",
+                    ],
+                    "Root CMake integration tests",
+                    verbose,
+                )
+                and ok
+            )
+    return ok
 
 
 def is_devtools_test_trigger(path: str) -> bool:
@@ -1728,10 +1827,17 @@ def is_lefthook_test_trigger(path: str) -> bool:
 
 def run_semgrep(inputs: PresubmitInputs, profile: str, verbose: bool) -> bool:
     paths = inputs.selected_paths
-    files = existing_files([path for path in paths if is_semgrep_candidate_file(path)])
-    validate_config = SEMGREP_CONFIG in paths
-    if not files and not validate_config:
-        return skip_step("Semgrep", "no C/C++ runtime inputs")
+    validate_config = any(config in paths for config in SEMGREP_CONFIGS)
+    test_rules = SEMGREP_CONFIG in paths or bool(SEMGREP_TEST_PATHS.intersection(paths))
+    test_documentation = (
+        SEMGREP_DOCUMENTATION_CONFIG in paths or SEMGREP_DOCUMENTATION_TEST in paths
+    )
+    candidate_paths = [path for path in paths if is_semgrep_candidate_file(path)]
+    if SEMGREP_CONFIG in paths:
+        candidate_paths.extend(SEMGREP_POLICY_PATHS)
+    files = existing_files(candidate_paths)
+    if not files and not validate_config and not test_rules and not test_documentation:
+        return skip_step("Semgrep", "no selected policy inputs")
     if sys.platform == "win32":
         return skip_step(
             "Semgrep",
@@ -1745,6 +1851,17 @@ def run_semgrep(inputs: PresubmitInputs, profile: str, verbose: bool) -> bool:
     if validate_config:
         ok = run_command(
             semgrep_validate_command(), "Semgrep config validation", verbose
+        )
+    if test_rules:
+        ok = run_command(semgrep_test_command(), "Semgrep rule tests", verbose) and ok
+    if test_documentation:
+        ok = (
+            run_command(
+                [sys.executable, SEMGREP_DOCUMENTATION_TEST],
+                "Semgrep documentation rule tests",
+                verbose,
+            )
+            and ok
         )
     if files:
         commands = command_argument_batches(semgrep_scan_command([]), files)
@@ -1769,7 +1886,6 @@ def clang_tidy_bazel_command(
     ]
     if keep_going:
         command.append("--keep_going")
-    command += ["--jobs", str(clang_tidy_jobs())]
     output_groups = [
         CLANG_TIDY_LOCAL_OUTPUT_GROUP if local_outputs else CLANG_TIDY_OUTPUT_GROUP
     ]
@@ -1782,6 +1898,7 @@ def clang_tidy_bazel_command(
     command += [
         CLANG_TIDY_REPO_ENV,
         *clang_tidy_configuration_args(targets),
+        *project_presubmit.bazel_config_args(),
         f"--aspects={CLANG_TIDY_ASPECT}",
         f"--output_groups={','.join(output_groups)}",
     ]
@@ -1792,6 +1909,9 @@ def clang_tidy_bazel_command(
             f"--build_event_json_file={build_events_path}",
             "--ui_event_filters=-info",
         ]
+    configured_jobs = configured_clang_tidy_jobs()
+    if configured_jobs is not None:
+        command += ["--jobs", str(configured_jobs)]
     command += [
         "--",
         *targets,
@@ -2057,6 +2177,7 @@ CLANG_TIDY_REPLACEMENT_PATH_FIELD_RE = re.compile(
     r"^(\s*(?:-\s*)?(?:MainSourceFile|FilePath|BuildDirectory):\s*)'(.*)'(\s*)$"
 )
 BAZEL_EXECROOT_MARKER = "/execroot/_main/"
+BAZEL_REMOTE_WORKSPACE_PREFIX = "/workspace/"
 
 
 def clang_tidy_worktree_replacement_path(value: str) -> str:
@@ -2064,6 +2185,9 @@ def clang_tidy_worktree_replacement_path(value: str) -> str:
         return value
     if BAZEL_EXECROOT_MARKER in value:
         relative_path = value.split(BAZEL_EXECROOT_MARKER, 1)[1]
+        return str(REPO_ROOT / relative_path)
+    if value.startswith(BAZEL_REMOTE_WORKSPACE_PREFIX):
+        relative_path = value.removeprefix(BAZEL_REMOTE_WORKSPACE_PREFIX)
         return str(REPO_ROOT / relative_path)
     path = Path(value)
     if not path.is_absolute():
@@ -2466,6 +2590,7 @@ def run_clang_tidy(
                     "bazel",
                     "test",
                     "--config=presubmit",
+                    *project_presubmit.bazel_config_args(),
                     CLANG_TIDY_REPO_ENV,
                     "//build_tools/clang_tidy:plugin_tests",
                 ],
@@ -2479,6 +2604,7 @@ def run_clang_tidy(
                 [
                     "bazel",
                     "build",
+                    *project_presubmit.bazel_config_args(),
                     CLANG_TIDY_REPO_ENV,
                     "//build_tools/clang_tidy:action_smoke",
                 ],
@@ -2596,6 +2722,10 @@ def print_plan(
         scopes.append("clang-tidy")
     print("presubmit plan:")
     print(f"  lane: {args.lane}")
+    if args.lane == "bazel":
+        bazel_configs = project_presubmit.bazel_configs_from_environment()
+        if bazel_configs:
+            print(f"  bazel configs: {', '.join(bazel_configs)}")
     print(f"  profile: {args.profile}")
     print(f"  mode: {mutation}")
     print(f"  validation input: {input_mode} ({len(paths)} path(s))")
@@ -2643,6 +2773,11 @@ def dev_py_rerun_command(args: argparse.Namespace, verbose: bool) -> list[str]:
             command.append("--commit")
         elif args.staged or args.paths:
             command.append("--staged")
+    if args.lane == "bazel":
+        command += [
+            f"--bazel-config={config}"
+            for config in project_presubmit.bazel_configs_from_environment()
+        ]
     if verbose:
         command.append("--verbose")
     return command

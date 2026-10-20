@@ -26,6 +26,11 @@ enum SyntheticReleaseReason {
   kSyntheticReleaseReasonStorage = 21,
 };
 
+enum SyntheticReleaseGroup {
+  kSyntheticReleaseGroupLoad = 1,
+  kSyntheticReleaseGroupStore = 2,
+};
+
 struct StorageLeaseTestState {
   loom_module_t module = {};
   loom_op_t function_op = {};
@@ -105,68 +110,70 @@ iree_status_t EmitEvent(loom_low_storage_lease_emit_fn_t emit,
                         loom_low_storage_lease_attachment_t attachment,
                         uint16_t attachment_index, uint32_t unit_offset,
                         uint32_t unit_count, uint16_t release_class_id,
+                        uint16_t release_group_id,
                         iree_string_view_t release_class_name,
                         loom_low_storage_lease_flags_t flags) {
   const loom_low_storage_lease_event_t event = {
-      /*.kind=*/kind,
-      /*.attachment=*/attachment,
-      /*.attachment_index=*/attachment_index,
-      /*.unit_offset=*/unit_offset,
-      /*.unit_count=*/unit_count,
-      /*.release_scope=*/LOOM_LOW_STORAGE_LEASE_RELEASE_SCOPE_PROGRESS_CLASS,
-      /*.release_class_id=*/release_class_id,
-      /*.release_class_name=*/release_class_name,
-      /*.release_action_id=*/kSyntheticReleaseActionWait,
-      /*.release_action_name=*/IREE_SV("synthetic.wait"),
-      /*.release_reason_id=*/kSyntheticReleaseReasonStorage,
-      /*.release_reason_name=*/IREE_SV("synthetic.storage-reuse"),
-      /*.flags=*/flags,
+      .kind = kind,
+      .attachment = attachment,
+      .attachment_index = attachment_index,
+      .unit_offset = unit_offset,
+      .unit_count = unit_count,
+      .release_scope = LOOM_LOW_STORAGE_LEASE_RELEASE_SCOPE_PROGRESS_CLASS,
+      .release_class_id = release_class_id,
+      .release_group_id = release_group_id,
+      .release_class_name = release_class_name,
+      .release_action_id = kSyntheticReleaseActionWait,
+      .release_action_name = IREE_SV("synthetic.wait"),
+      .release_reason_id = kSyntheticReleaseReasonStorage,
+      .release_reason_name = IREE_SV("synthetic.storage-reuse"),
+      .flags = flags,
   };
   return emit(emit_user_data, &event);
 }
 
-iree_status_t SyntheticLeaseQuery(void* user_data,
-                                  const loom_low_schedule_table_t* schedule,
-                                  const loom_low_schedule_node_t* node,
-                                  loom_low_storage_lease_emit_fn_t emit,
-                                  void* emit_user_data) {
+iree_status_t SyntheticLeaseQuery(
+    void* user_data, const loom_low_schedule_table_t* schedule,
+    const loom_low_schedule_node_t* node,
+    const loom_low_storage_lease_query_sink_t* sink) {
   (void)user_data;
   (void)schedule;
   if (node->source_ordinal == 0) {
-    IREE_RETURN_IF_ERROR(
-        EmitEvent(emit, emit_user_data, LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
-                  LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 1, 0, 2,
-                  kSyntheticReleaseStore, IREE_SV("synthetic.store"),
-                  LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE |
-                      LOOM_LOW_STORAGE_LEASE_FLAG_RELEASE_BEFORE_BOUNDARY));
-    return EmitEvent(emit, emit_user_data, LOOM_LOW_STORAGE_LEASE_RESULT_WRITE,
-                     LOOM_LOW_STORAGE_LEASE_ATTACHMENT_RESULT, 0, 3, 1,
-                     kSyntheticReleaseRead, IREE_SV("synthetic.read"),
-                     LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE);
+    IREE_RETURN_IF_ERROR(EmitEvent(
+        sink->emit_lease, sink->user_data, LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
+        LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 1, 0, 2,
+        kSyntheticReleaseStore, kSyntheticReleaseGroupStore,
+        IREE_SV("synthetic.store"),
+        LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE |
+            LOOM_LOW_STORAGE_LEASE_FLAG_RELEASE_BEFORE_BOUNDARY));
+    return EmitEvent(
+        sink->emit_lease, sink->user_data, LOOM_LOW_STORAGE_LEASE_RESULT_WRITE,
+        LOOM_LOW_STORAGE_LEASE_ATTACHMENT_RESULT, 0, 3, 1,
+        kSyntheticReleaseRead, LOOM_LOW_STORAGE_LEASE_RELEASE_GROUP_DEFAULT,
+        IREE_SV("synthetic.read"), LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE);
   }
-  return EmitEvent(emit, emit_user_data, LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
-                   LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 0, 0, 1,
-                   kSyntheticReleaseStore, IREE_SV("synthetic.store"),
-                   LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE);
+  return EmitEvent(
+      sink->emit_lease, sink->user_data, LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
+      LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 0, 0, 1,
+      kSyntheticReleaseStore, kSyntheticReleaseGroupLoad,
+      IREE_SV("synthetic.store"), LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE);
 }
 
 iree_status_t EmptyLeaseQuery(void* user_data,
                               const loom_low_schedule_table_t* schedule,
                               const loom_low_schedule_node_t* node,
-                              loom_low_storage_lease_emit_fn_t emit,
-                              void* emit_user_data) {
+                              const loom_low_storage_lease_query_sink_t* sink) {
   (void)user_data;
   (void)schedule;
   (void)node;
-  (void)emit;
-  (void)emit_user_data;
+  (void)sink;
   return iree_ok_status();
 }
 
 TEST_F(LowStorageLeaseTest, BuildsSyntheticTargetLeaseRecords) {
   const loom_low_storage_lease_provider_t provider = {
-      /*.user_data=*/{},
-      /*.query=*/SyntheticLeaseQuery,
+      .user_data = {},
+      .query = SyntheticLeaseQuery,
   };
   loom_low_storage_lease_table_t table = {};
   IREE_ASSERT_OK(loom_low_storage_lease_build(&state_.schedule, &provider,
@@ -189,6 +196,7 @@ TEST_F(LowStorageLeaseTest, BuildsSyntheticTargetLeaseRecords) {
   EXPECT_EQ(table.records[0].release_scope,
             LOOM_LOW_STORAGE_LEASE_RELEASE_SCOPE_PROGRESS_CLASS);
   EXPECT_EQ(table.records[0].release_class_id, kSyntheticReleaseStore);
+  EXPECT_EQ(table.records[0].release_group_id, kSyntheticReleaseGroupStore);
   EXPECT_TRUE(iree_string_view_equal(table.records[0].release_class_name,
                                      IREE_SV("synthetic.store")));
   EXPECT_EQ(table.records[0].release_action_id, kSyntheticReleaseActionWait);
@@ -200,6 +208,7 @@ TEST_F(LowStorageLeaseTest, BuildsSyntheticTargetLeaseRecords) {
   EXPECT_EQ(table.records[0].flags,
             LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE |
                 LOOM_LOW_STORAGE_LEASE_FLAG_RELEASE_BEFORE_BOUNDARY);
+  EXPECT_EQ(table.records[0].release_before_scheduled_ordinal_plus_one, 0u);
 
   EXPECT_EQ(table.records[1].packet_index, 0u);
   EXPECT_EQ(table.records[1].node_index, 0u);
@@ -210,89 +219,200 @@ TEST_F(LowStorageLeaseTest, BuildsSyntheticTargetLeaseRecords) {
   EXPECT_EQ(table.records[1].unit_offset, 3u);
   EXPECT_EQ(table.records[1].unit_count, 1u);
   EXPECT_EQ(table.records[1].release_class_id, kSyntheticReleaseRead);
+  EXPECT_EQ(table.records[1].release_group_id,
+            LOOM_LOW_STORAGE_LEASE_RELEASE_GROUP_DEFAULT);
 
   EXPECT_EQ(table.records[2].packet_index, 1u);
   EXPECT_EQ(table.records[2].node_index, 1u);
   EXPECT_EQ(table.records[2].scheduled_ordinal, 1u);
+  EXPECT_EQ(table.records[2].release_group_id, kSyntheticReleaseGroupLoad);
+  EXPECT_EQ(table.progress_bound_count, 0u);
 }
 
-TEST_F(LowStorageLeaseTest, BuildsReleaseActionIndexByPacket) {
-  const loom_low_storage_release_action_t actions[4] = {
+iree_status_t EmitProgressBound(loom_low_storage_progress_bound_emit_fn_t emit,
+                                void* emit_user_data,
+                                loom_low_storage_progress_bound_kind_t kind,
+                                uint16_t release_group_id,
+                                uint32_t remaining_count) {
+  const loom_low_storage_progress_bound_event_t event = {
+      .kind = kind,
+      .release_class_id = kSyntheticReleaseStore,
+      .release_group_id = release_group_id,
+      .remaining_count = remaining_count,
+  };
+  return emit(emit_user_data, &event);
+}
+
+iree_status_t SyntheticProgressQuery(
+    void* user_data, const loom_low_schedule_table_t* schedule,
+    const loom_low_schedule_node_t* node,
+    const loom_low_storage_lease_query_sink_t* sink) {
+  (void)user_data;
+  (void)schedule;
+  switch (node->source_ordinal) {
+    case 0:
+      return EmitEvent(sink->emit_lease, sink->user_data,
+                       LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
+                       LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 0, 0, 1,
+                       kSyntheticReleaseStore, kSyntheticReleaseGroupStore,
+                       IREE_SV("synthetic.store"),
+                       LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE);
+    case 1:
+      return EmitEvent(sink->emit_lease, sink->user_data,
+                       LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
+                       LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 0, 0, 1,
+                       kSyntheticReleaseStore, kSyntheticReleaseGroupLoad,
+                       IREE_SV("synthetic.store"),
+                       LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE);
+    case 2: {
+      IREE_RETURN_IF_ERROR(EmitEvent(
+          sink->emit_lease, sink->user_data, LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
+          LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 0, 0, 1,
+          kSyntheticReleaseStore, kSyntheticReleaseGroupStore,
+          IREE_SV("synthetic.store"),
+          LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE));
+      return EmitProgressBound(sink->emit_progress_bound, sink->user_data,
+                               LOOM_LOW_STORAGE_PROGRESS_BOUND_PACKET,
+                               kSyntheticReleaseGroupStore, 0);
+    }
+    case 3:
+      return EmitProgressBound(sink->emit_progress_bound, sink->user_data,
+                               LOOM_LOW_STORAGE_PROGRESS_BOUND_PACKET,
+                               LOOM_LOW_STORAGE_LEASE_RELEASE_GROUP_ALL, 1);
+    case 4:
+      return EmitProgressBound(sink->emit_progress_bound, sink->user_data,
+                               LOOM_LOW_STORAGE_PROGRESS_BOUND_REQUIRED,
+                               kSyntheticReleaseGroupStore, 0);
+    case 5:
+      return EmitProgressBound(sink->emit_progress_bound, sink->user_data,
+                               LOOM_LOW_STORAGE_PROGRESS_BOUND_PACKET,
+                               LOOM_LOW_STORAGE_LEASE_RELEASE_GROUP_ALL, 0);
+    case 6:
+      return EmitEvent(sink->emit_lease, sink->user_data,
+                       LOOM_LOW_STORAGE_LEASE_SOURCE_READ,
+                       LOOM_LOW_STORAGE_LEASE_ATTACHMENT_OPERAND, 0, 0, 1,
+                       kSyntheticReleaseStore, kSyntheticReleaseGroupLoad,
+                       IREE_SV("synthetic.store"),
+                       LOOM_LOW_STORAGE_LEASE_FLAG_STARTS_AT_ISSUE);
+    default:
+      return iree_ok_status();
+  }
+}
+
+TEST_F(LowStorageLeaseTest,
+       RetainsAndResolvesLocalProgressBoundsInScheduledOrder) {
+  loom_block_t second_block = {};
+  loom_block_t* region_blocks[] = {&state_.block, &second_block};
+  state_.region.block_count = IREE_ARRAYSIZE(region_blocks);
+  state_.region.block_capacity = IREE_ARRAYSIZE(region_blocks);
+  state_.region.blocks = region_blocks;
+  second_block.parent_region = &state_.region;
+  second_block.region_index = 1;
+
+  loom_low_schedule_node_t nodes[8] = {};
+  uint32_t scheduled_node_indices[] = {1, 0, 2, 3, 4, 5, 7, 6};
+  for (uint32_t i = 0; i < IREE_ARRAYSIZE(nodes); ++i) {
+    nodes[i].block_index = i < 6 ? 0 : 1;
+    nodes[i].source_ordinal = i;
+    nodes[i].kind = LOOM_LOW_SCHEDULE_NODE_DESCRIPTOR;
+    nodes[i].operand_count = 1;
+  }
+  for (uint32_t packet_index = 0;
+       packet_index < IREE_ARRAYSIZE(scheduled_node_indices); ++packet_index) {
+    const uint32_t node_index = scheduled_node_indices[packet_index];
+    nodes[node_index].scheduled_ordinal =
+        packet_index < 6 ? packet_index : packet_index - 6;
+  }
+  loom_low_schedule_block_t blocks[2] = {
       {
-          /*.insertion_packet_index=*/1,
-          /*.insertion_node_index=*/5,
+          .block = &state_.block,
+          .node_start = 0,
+          .node_count = 6,
+          .scheduled_node_start = 0,
+          .scheduled_node_count = 6,
       },
       {
-          /*.insertion_packet_index=*/0,
-          /*.insertion_node_index=*/2,
-      },
-      {
-          /*.insertion_packet_index=*/1,
-          /*.insertion_node_index=*/6,
-      },
-      {
-          /*.insertion_packet_index=*/2,
-          /*.insertion_node_index=*/7,
+          .block = &second_block,
+          .node_start = 6,
+          .node_count = 2,
+          .scheduled_node_start = 6,
+          .scheduled_node_count = 2,
       },
   };
-  loom_low_storage_release_action_index_t index = {};
-  IREE_ASSERT_OK(loom_low_storage_release_action_index_build(
-      actions, IREE_ARRAYSIZE(actions),
-      LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_BY_INSERTION_PACKET,
-      /*key_count=*/3, &arena_, &index));
+  loom_low_schedule_table_t schedule = state_.schedule;
+  schedule.blocks = blocks;
+  schedule.block_count = IREE_ARRAYSIZE(blocks);
+  schedule.nodes = nodes;
+  schedule.node_count = IREE_ARRAYSIZE(nodes);
+  schedule.scheduled_node_indices = scheduled_node_indices;
+  schedule.scheduled_node_count = IREE_ARRAYSIZE(scheduled_node_indices);
 
-  ASSERT_EQ(index.key_count, 3u);
-  ASSERT_NE(index.first_action_indices, nullptr);
-  ASSERT_NE(index.next_action_indices, nullptr);
-  EXPECT_EQ(index.first_action_indices[0], 1u);
-  EXPECT_EQ(index.next_action_indices[1],
-            LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE);
-  EXPECT_EQ(index.first_action_indices[1], 0u);
-  EXPECT_EQ(index.next_action_indices[0], 2u);
-  EXPECT_EQ(index.next_action_indices[2],
-            LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE);
-  EXPECT_EQ(index.first_action_indices[2], 3u);
-  EXPECT_EQ(index.next_action_indices[3],
-            LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE);
+  const loom_low_storage_lease_provider_t provider = {
+      .user_data = {},
+      .query = SyntheticProgressQuery,
+  };
+  loom_low_storage_lease_table_t table = {};
+  IREE_ASSERT_OK(
+      loom_low_storage_lease_build(&schedule, &provider, &arena_, &table));
+
+  ASSERT_EQ(table.record_count, 4u);
+  EXPECT_EQ(table.records[0].node_index, 1u);
+  EXPECT_EQ(table.records[0].release_before_scheduled_ordinal_plus_one, 6u);
+  EXPECT_EQ(table.records[1].node_index, 0u);
+  EXPECT_EQ(table.records[1].release_before_scheduled_ordinal_plus_one, 3u);
+  EXPECT_EQ(table.records[2].release_before_scheduled_ordinal_plus_one, 5u);
+  EXPECT_EQ(table.records[3].release_before_scheduled_ordinal_plus_one, 0u);
+
+  ASSERT_EQ(table.progress_bound_count, 4u);
+  EXPECT_EQ(table.progress_bounds[0].packet_index, 2u);
+  EXPECT_EQ(table.progress_bounds[0].kind,
+            LOOM_LOW_STORAGE_PROGRESS_BOUND_PACKET);
+  EXPECT_EQ(table.progress_bounds[0].release_group_id,
+            kSyntheticReleaseGroupStore);
+  EXPECT_EQ(table.progress_bounds[1].remaining_count, 1u);
+  EXPECT_EQ(table.progress_bounds[2].packet_index, 4u);
+  EXPECT_EQ(table.progress_bounds[2].kind,
+            LOOM_LOW_STORAGE_PROGRESS_BOUND_REQUIRED);
+  EXPECT_EQ(table.progress_bounds[3].release_group_id,
+            LOOM_LOW_STORAGE_LEASE_RELEASE_GROUP_ALL);
 }
 
 TEST_F(LowStorageLeaseTest, BuildsReleaseActionIndexByNode) {
-  const loom_low_storage_release_action_t actions[3] = {
+  loom_low_storage_release_action_t actions[3] = {
       {
-          /*.insertion_packet_index=*/7,
-          /*.insertion_node_index=*/2,
+          .insertion_packet_index = 7,
+          .insertion_node_index = 2,
       },
       {
-          /*.insertion_packet_index=*/8,
-          /*.insertion_node_index=*/1,
+          .insertion_packet_index = 8,
+          .insertion_node_index = 1,
       },
       {
-          /*.insertion_packet_index=*/9,
-          /*.insertion_node_index=*/2,
+          .insertion_packet_index = 9,
+          .insertion_node_index = 2,
       },
   };
-  loom_low_storage_release_action_index_t index = {};
+  uint32_t* first_action_indices = nullptr;
   IREE_ASSERT_OK(loom_low_storage_release_action_index_build(
-      actions, IREE_ARRAYSIZE(actions),
-      LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_BY_INSERTION_NODE,
-      /*key_count=*/3, &arena_, &index));
+      actions, IREE_ARRAYSIZE(actions), /*node_count=*/3, &arena_,
+      &first_action_indices));
 
-  ASSERT_EQ(index.key_count, 3u);
-  EXPECT_EQ(index.first_action_indices[0],
+  ASSERT_NE(first_action_indices, nullptr);
+  EXPECT_EQ(first_action_indices[0],
             LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE);
-  EXPECT_EQ(index.first_action_indices[1], 1u);
-  EXPECT_EQ(index.next_action_indices[1],
+  EXPECT_EQ(first_action_indices[1], 1u);
+  EXPECT_EQ(actions[1].next_same_insertion_node_action_index,
             LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE);
-  EXPECT_EQ(index.first_action_indices[2], 0u);
-  EXPECT_EQ(index.next_action_indices[0], 2u);
-  EXPECT_EQ(index.next_action_indices[2],
+  EXPECT_EQ(first_action_indices[2], 0u);
+  EXPECT_EQ(actions[0].next_same_insertion_node_action_index, 2u);
+  EXPECT_EQ(actions[2].next_same_insertion_node_action_index,
             LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE);
 }
 
 TEST_F(LowStorageLeaseTest, BuildsEmptyLeaseTable) {
   const loom_low_storage_lease_provider_t provider = {
-      /*.user_data=*/{},
-      /*.query=*/EmptyLeaseQuery,
+      .user_data = {},
+      .query = EmptyLeaseQuery,
   };
   loom_low_storage_lease_table_t table = {};
   IREE_ASSERT_OK(loom_low_storage_lease_build(&state_.schedule, &provider,
@@ -300,6 +420,8 @@ TEST_F(LowStorageLeaseTest, BuildsEmptyLeaseTable) {
   EXPECT_EQ(table.schedule, &state_.schedule);
   EXPECT_EQ(table.record_count, 0u);
   EXPECT_EQ(table.records, nullptr);
+  EXPECT_EQ(table.progress_bound_count, 0u);
+  EXPECT_EQ(table.progress_bounds, nullptr);
 }
 
 }  // namespace

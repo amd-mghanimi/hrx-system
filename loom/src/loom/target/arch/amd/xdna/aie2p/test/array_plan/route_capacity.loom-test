@@ -36,7 +36,7 @@ low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array
   %channel1 = channel %source1, %sink1, %two, %three : reg<aie2p.array.channel : tile<1xi32>>
   %channel2 = channel %source2, %sink2, %two, %three : reg<aie2p.array.channel : tile<1xi32>>
   %channel3 = channel %source3, %sink3, %two, %three : reg<aie2p.array.channel : tile<1xi32>>
-  // ERROR@+1: TARGET/092 {channel="4"}
+  // ERROR@+1: XDNA/007 {channel="4"}
   %channel4 = channel %source4, %sink4, %two, %three : reg<aie2p.array.channel : tile<1xi32>>
   constrain.location %writer0, %zero, %two
   constrain.location %writer1, %one, %two
@@ -95,7 +95,7 @@ low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array
   %row = constant.u32 2 : reg<aie2p.array.scalar : index>
   %group = group %one
   %worker = worker %group, %zero, @empty_worker
-  // ERROR@+1: TARGET/120 {column="8", row="2", column_count="8", row_count="6"}
+  // ERROR@+1: XDNA/013 {column="8", row="2", column_count="8", row_count="6"}
   constrain.location %worker, %column, %row
   return
 }

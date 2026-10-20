@@ -41,6 +41,12 @@ class TargetConverter:
                     "iree::third_party::aqlprofile_sdk_headers"
                 ],
                 "//third_party:libbacktrace": ["${IREE_LIBBACKTRACE_TARGET}"],
+                "//third_party:mimalloc": ["iree::third_party::mimalloc"],
+                "//third_party:miniaudio": ["iree::third_party::miniaudio"],
+                "//third_party:giflib": ["iree::third_party::giflib"],
+                "//third_party:libjpeg_turbo": ["iree::third_party::libjpeg_turbo"],
+                "//third_party:libpng": ["iree::third_party::libpng"],
+                "//third_party:libwebp": ["iree::third_party::libwebp"],
                 "//third_party:zstd": ["iree::third_party::zstd"],
                 "//third_party:spirv_as": ["iree::third_party::spirv_as"],
                 "//third_party:spirv_dis": ["iree::third_party::spirv_dis"],
@@ -54,6 +60,9 @@ class TargetConverter:
                 "//third_party:amdf_wkmi": ["iree::third_party::amdf_wkmi"],
                 # Driver protocol headers are private build inputs, not
                 # dependencies of the installed libamdf static interface.
+                "//third_party:linux_udmabuf_uapi": [
+                    "$<BUILD_LOCAL_INTERFACE:iree::third_party::linux_udmabuf_uapi>"
+                ],
                 "//third_party:linux_drm_uapi": [
                     "$<BUILD_LOCAL_INTERFACE:iree::third_party::linux_drm_uapi>"
                 ],
@@ -62,6 +71,9 @@ class TargetConverter:
                 ],
                 "//third_party:linux_kfd_uapi": [
                     "$<BUILD_LOCAL_INTERFACE:iree::third_party::linux_kfd_uapi>"
+                ],
+                "//third_party:linux_io_uapi": [
+                    "$<BUILD_LOCAL_INTERFACE:iree::third_party::linux_io_uapi>"
                 ],
                 "//third_party:linux_xdna_uapi": [
                     "$<BUILD_LOCAL_INTERFACE:iree::third_party::linux_xdna_uapi>"

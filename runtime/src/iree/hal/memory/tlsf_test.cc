@@ -59,15 +59,16 @@ static iree_async_frontier_t* BuildFrontier(
 // Default options for a 1 MB range with 16-byte alignment and 8-entry
 // frontiers. Sufficient for most tests.
 static iree_hal_memory_tlsf_options_t DefaultOptions() {
-  iree_hal_memory_tlsf_options_t options = {};
-  options.range_length = 1024 * 1024;  // 1 MB
-  options.alignment = 16;
-  options.initial_block_capacity = 64;
-  options.frontier_capacity = 8;
+  iree_hal_memory_tlsf_options_t options = {
+      .range_length = 1024 * 1024,  // 1 MB
+      .alignment = 16,
+      .initial_block_capacity = 64,
+      .frontier_capacity = 8,
+  };
   return options;
 }
 
-static constexpr uint32_t kTestAllocatorFlagFailRealloc = 1u << 0;
+static constexpr uint32_t kTestAllocatorFlagFailAllocation = 1u << 0;
 
 struct TestAllocatorState {
   // Allocator used for commands that are not explicitly failed by test flags.
@@ -81,19 +82,17 @@ static iree_status_t TestAllocatorCtl(void* self,
                                       iree_allocator_command_t command,
                                       const void* params, void** inout_ptr) {
   TestAllocatorState* state = reinterpret_cast<TestAllocatorState*>(self);
-  if (command == IREE_ALLOCATOR_COMMAND_REALLOC &&
-      (state->flags & kTestAllocatorFlagFailRealloc)) {
+  if (command != IREE_ALLOCATOR_COMMAND_FREE &&
+      (state->flags & kTestAllocatorFlagFailAllocation)) {
     return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
-                            "test allocator rejected realloc");
+                            "test allocator rejected allocation");
   }
   return state->base_allocator.ctl(state->base_allocator.self, command, params,
                                    inout_ptr);
 }
 
 static iree_allocator_t TestAllocator(TestAllocatorState* state) {
-  iree_allocator_t allocator = {};
-  allocator.self = state;
-  allocator.ctl = TestAllocatorCtl;
+  iree_allocator_t allocator = {.self = state, .ctl = TestAllocatorCtl};
   return allocator;
 }
 
@@ -119,6 +118,134 @@ TEST(TLSFTest, InitializeAndDeinitialize) {
   EXPECT_EQ(iree_hal_memory_tlsf_largest_free_block(&tlsf), 1024u * 1024u);
 
   iree_hal_memory_tlsf_deinitialize(&tlsf);
+}
+
+TEST(TLSFTest, RebindingRetainsGrownMetadataAndReplacesHistory) {
+  TestAllocatorState allocator = {iree_allocator_system()};
+  auto options = DefaultOptions();
+  options.initial_block_capacity = 1;
+  iree_hal_memory_tlsf_t tlsf;
+  IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
+      options, TestAllocator(&allocator), &tlsf));
+  MAKE_FRONTIER(first, 1, E(TestQueueAxis(0), 7));
+  MAKE_FRONTIER(second, 1, E(TestQueueAxis(1), 13));
+  iree_hal_memory_tlsf_allocation_t allocations[16];
+  for (auto& allocation : allocations) {
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 256, &allocation));
+  }
+  for (const auto& allocation : allocations) {
+    iree_hal_memory_tlsf_free(&tlsf, allocation.block_index, first);
+  }
+  allocator.flags = kTestAllocatorFlagFailAllocation;
+  iree_hal_memory_tlsf_reset(&tlsf, second);
+  for (auto& allocation : allocations) {
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 256, &allocation));
+    ASSERT_NE(allocation.death_frontier, nullptr);
+    EXPECT_EQ(iree_async_frontier_compare(allocation.death_frontier, second),
+              IREE_ASYNC_FRONTIER_EQUAL);
+  }
+  for (const auto& allocation : allocations) {
+    iree_hal_memory_tlsf_free(&tlsf, allocation.block_index, nullptr);
+  }
+  iree_hal_memory_tlsf_deinitialize(&tlsf);
+}
+
+TEST(TLSFTest, ExactFitAtEverySizeClassRemainder) {
+  // Exercise every aligned point inside bins large enough to contain multiple
+  // alignments, across several first-level boundaries. A whole free range must
+  // remain allocatable without padding it to the next size class.
+  for (iree_device_size_t length = 1024; length < 8192; length += 16) {
+    auto options = DefaultOptions();
+    options.range_length = length;
+    iree_hal_memory_tlsf_t tlsf;
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
+        options, iree_allocator_system(), &tlsf));
+    iree_hal_memory_tlsf_allocation_t allocation;
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, length, &allocation));
+    EXPECT_EQ(allocation.offset, 0u);
+    EXPECT_EQ(allocation.length, length);
+    iree_hal_memory_tlsf_free(&tlsf, allocation.block_index, nullptr);
+    iree_hal_memory_tlsf_deinitialize(&tlsf);
+  }
+}
+
+TEST(TLSFTest, FreeBlockQueryPreservesGeometryAndHistory) {
+  auto options = DefaultOptions();
+  options.range_length = 16384;
+  iree_hal_memory_tlsf_t tlsf;
+  IREE_ASSERT_OK(
+      iree_hal_memory_tlsf_initialize(options, iree_allocator_system(), &tlsf));
+  const iree_device_size_t lengths[] = {1024, 16, 1040, 16, 1024, 16, 4096, 16};
+  iree_hal_memory_tlsf_allocation_t allocations[IREE_ARRAYSIZE(lengths)];
+  for (size_t i = 0; i < IREE_ARRAYSIZE(lengths); ++i) {
+    IREE_ASSERT_OK(
+        iree_hal_memory_tlsf_allocate(&tlsf, lengths[i], &allocations[i]));
+  }
+  MAKE_FRONTIER(death, 1, E(TestQueueAxis(0), 7));
+  iree_hal_memory_tlsf_free(&tlsf, allocations[0].block_index, nullptr);
+  iree_hal_memory_tlsf_free(&tlsf, allocations[2].block_index, death);
+  iree_hal_memory_tlsf_free(&tlsf, allocations[4].block_index, nullptr);
+  iree_hal_memory_tlsf_free(&tlsf, allocations[6].block_index, nullptr);
+  iree_hal_memory_tlsf_stats_t before;
+  iree_hal_memory_tlsf_query_stats(&tlsf, &before);
+
+  // The first bin has a too-small head, a fitting middle, and a too-small tail.
+  // Continue through both later bins without removing any candidate.
+  auto candidate = iree_hal_memory_tlsf_query_free_block(
+      &tlsf, 1040, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+  EXPECT_EQ(candidate.block_index, allocations[2].block_index);
+  ASSERT_NE(candidate.death_frontier, nullptr);
+  EXPECT_EQ(candidate.death_frontier->entries[0].epoch, 7u);
+  const auto selected = candidate;
+  candidate =
+      iree_hal_memory_tlsf_query_free_block(&tlsf, 1040, candidate.block_index);
+  EXPECT_EQ(candidate.block_index, allocations[6].block_index);
+  candidate =
+      iree_hal_memory_tlsf_query_free_block(&tlsf, 1040, candidate.block_index);
+  ASSERT_NE(candidate.block_index, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+  candidate =
+      iree_hal_memory_tlsf_query_free_block(&tlsf, 1040, candidate.block_index);
+  EXPECT_EQ(candidate.block_index, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+  iree_hal_memory_tlsf_stats_t after;
+  iree_hal_memory_tlsf_query_stats(&tlsf, &after);
+  EXPECT_EQ(before.bytes_allocated, after.bytes_allocated);
+  EXPECT_EQ(before.bytes_free, after.bytes_free);
+  EXPECT_EQ(before.allocation_count, after.allocation_count);
+  EXPECT_EQ(before.free_block_count, after.free_block_count);
+  EXPECT_EQ(before.tainted_coalesce_count, after.tainted_coalesce_count);
+
+  iree_hal_memory_tlsf_allocation_t allocation;
+  iree_hal_memory_tlsf_allocate_block(&tlsf, selected.block_index, 1040,
+                                      &allocation);
+  EXPECT_EQ(allocation.offset, allocations[2].offset);
+  ASSERT_NE(allocation.death_frontier, nullptr);
+  EXPECT_EQ(allocation.death_frontier->entries[0].epoch, 7u);
+  iree_hal_memory_tlsf_free(&tlsf, allocation.block_index, nullptr);
+  for (size_t i = 1; i < IREE_ARRAYSIZE(allocations); i += 2) {
+    iree_hal_memory_tlsf_free(&tlsf, allocations[i].block_index, nullptr);
+  }
+  iree_hal_memory_tlsf_deinitialize(&tlsf);
+}
+
+TEST(TLSFTest, FreeBlockQueryHandlesFinalBitmapBits) {
+  const iree_device_size_t lengths[] = {
+      (iree_device_size_t)1 << 63,
+      IREE_DEVICE_SIZE_MAX & ~(iree_device_size_t)15,
+  };
+  for (iree_device_size_t length : lengths) {
+    auto options = DefaultOptions();
+    options.range_length = length;
+    iree_hal_memory_tlsf_t tlsf;
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
+        options, iree_allocator_system(), &tlsf));
+    auto candidate = iree_hal_memory_tlsf_query_free_block(
+        &tlsf, length, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+    ASSERT_NE(candidate.block_index, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+    candidate = iree_hal_memory_tlsf_query_free_block(&tlsf, length,
+                                                      candidate.block_index);
+    EXPECT_EQ(candidate.block_index, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+    iree_hal_memory_tlsf_deinitialize(&tlsf);
+  }
 }
 
 TEST(TLSFTest, InitializeZeroRangeFails) {
@@ -591,6 +718,79 @@ TEST(TLSFTest, RestorePreservesFrontierMetadata) {
   iree_hal_memory_tlsf_deinitialize(&tlsf);
 }
 
+TEST(TLSFTest, SplitPreservesFrontierThroughMetadataGrowth) {
+  iree_hal_memory_tlsf_t tlsf;
+  auto options = DefaultOptions();
+  options.range_length = 1024;
+  options.initial_block_capacity = 1;
+  IREE_ASSERT_OK(
+      iree_hal_memory_tlsf_initialize(options, iree_allocator_system(), &tlsf));
+
+  iree_hal_memory_tlsf_allocation_t whole_range;
+  IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 1024, &whole_range));
+  MAKE_FRONTIER(death, 2, E(TestQueueAxis(0), 10), E(TestQueueAxis(1), 20));
+  iree_hal_memory_tlsf_free(&tlsf, whole_range.block_index, death);
+
+  // Each subdivision inherits both dependencies, including when metadata grows.
+  iree_hal_memory_tlsf_allocation_t allocations[4];
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(allocations); ++i) {
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 256, &allocations[i]));
+    EXPECT_EQ(allocations[i].offset, i * 256);
+    EXPECT_EQ(allocations[i].length, 256u);
+    EXPECT_EQ(allocations[i].block_flags,
+              i + 1 == IREE_ARRAYSIZE(allocations)
+                  ? IREE_HAL_MEMORY_TLSF_BLOCK_FLAG_LAST
+                  : IREE_HAL_MEMORY_TLSF_BLOCK_FLAG_NONE);
+  }
+  EXPECT_GT(tlsf.block_capacity, options.initial_block_capacity);
+
+  // Resolve through the stable block indices after all metadata growth.
+  for (const auto& allocation : allocations) {
+    const iree_async_frontier_t* frontier =
+        iree_hal_memory_tlsf_block_death_frontier(&tlsf,
+                                                  allocation.block_index);
+    ASSERT_NE(frontier, nullptr);
+    ASSERT_EQ(frontier->entry_count, 2);
+    EXPECT_EQ(frontier->entries[0].axis, TestQueueAxis(0));
+    EXPECT_EQ(frontier->entries[0].epoch, 10u);
+    EXPECT_EQ(frontier->entries[1].axis, TestQueueAxis(1));
+    EXPECT_EQ(frontier->entries[1].epoch, 20u);
+  }
+
+  for (const auto& allocation : allocations) {
+    iree_hal_memory_tlsf_free(&tlsf, allocation.block_index, NULL);
+  }
+  iree_hal_memory_tlsf_deinitialize(&tlsf);
+}
+
+TEST(TLSFTest, SplitPreservesTaint) {
+  iree_hal_memory_tlsf_t tlsf;
+  auto options = DefaultOptions();
+  options.range_length = 1024;
+  options.frontier_capacity = 1;
+  IREE_ASSERT_OK(
+      iree_hal_memory_tlsf_initialize(options, iree_allocator_system(), &tlsf));
+
+  iree_hal_memory_tlsf_allocation_t whole_range;
+  IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 1024, &whole_range));
+  MAKE_FRONTIER(oversized_death, 2, E(TestQueueAxis(0), 10),
+                E(TestQueueAxis(1), 20));
+  iree_hal_memory_tlsf_free(&tlsf, whole_range.block_index, oversized_death);
+
+  iree_hal_memory_tlsf_allocation_t allocations[4];
+  for (auto& allocation : allocations) {
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 256, &allocation));
+    EXPECT_NE(allocation.block_flags & IREE_HAL_MEMORY_TLSF_BLOCK_FLAG_TAINTED,
+              0u);
+    EXPECT_EQ(allocation.death_frontier, nullptr);
+  }
+
+  for (const auto& allocation : allocations) {
+    iree_hal_memory_tlsf_free(&tlsf, allocation.block_index, NULL);
+  }
+  iree_hal_memory_tlsf_deinitialize(&tlsf);
+}
+
 TEST(TLSFTest, FrontierMergeOnCoalesce) {
   iree_hal_memory_tlsf_t tlsf;
   IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
@@ -796,11 +996,12 @@ TEST(TLSFTest, TaintPropagatesThroughLeftCoalesce) {
 TEST(TLSFTest, TaintClearedOnReuse) {
   iree_hal_memory_tlsf_t tlsf;
   auto options = DefaultOptions();
+  options.range_length = 512;
   options.frontier_capacity = 1;
   IREE_ASSERT_OK(
       iree_hal_memory_tlsf_initialize(options, iree_allocator_system(), &tlsf));
 
-  // Create a tainted block (same as above).
+  // Coalesce two releases into a tainted block spanning the entire range.
   iree_hal_memory_tlsf_allocation_t alloc1, alloc2;
   IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 256, &alloc1));
   IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 256, &alloc2));
@@ -816,7 +1017,8 @@ TEST(TLSFTest, TaintClearedOnReuse) {
   EXPECT_NE(tainted_alloc.block_flags & IREE_HAL_MEMORY_TLSF_BLOCK_FLAG_TAINTED,
             0u);
 
-  // Free with a fresh frontier and re-allocate; taint should be cleared.
+  // Replace the frontier for the entire tainted range. Releasing only a prefix
+  // would coalesce with the untouched remainder and preserve its taint.
   MAKE_FRONTIER(fresh, 1, E(TestQueueAxis(0), 100));
   iree_hal_memory_tlsf_free(&tlsf, tainted_alloc.block_index, fresh);
 
@@ -918,11 +1120,118 @@ TEST(TLSFTest, PoolGrowsOnDemand) {
   iree_hal_memory_tlsf_deinitialize(&tlsf);
 }
 
+TEST(TLSFTest, MetadataSegmentsPreserveLiveFrontiers) {
+  for (iree_host_size_t initial_capacity : {1, 3, 7, 16, 65}) {
+    SCOPED_TRACE(initial_capacity);
+    auto options = DefaultOptions();
+    options.initial_block_capacity = initial_capacity;
+    options.range_length = 8192;
+    MAKE_FRONTIER(initial, 2, E(TestQueueAxis(0), 7), E(TestQueueAxis(1), 11));
+    options.initial_frontier = initial;
+    iree_hal_memory_tlsf_t tlsf;
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
+        options, iree_allocator_system(), &tlsf));
+    EXPECT_GE(tlsf.block_capacity, initial_capacity);
+    EXPECT_LT(tlsf.block_capacity, initial_capacity * 2);
+
+    std::vector<iree_hal_memory_tlsf_allocation_t> allocations(257);
+    for (auto& allocation : allocations) {
+      IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 16, &allocation));
+    }
+    // Growth preserves both handles and the actual borrowed frontier addresses.
+    for (const auto& allocation : allocations) {
+      EXPECT_EQ(iree_hal_memory_tlsf_block_death_frontier(
+                    &tlsf, allocation.block_index),
+                allocation.death_frontier);
+      ASSERT_NE(allocation.death_frontier, nullptr);
+      EXPECT_EQ(allocation.death_frontier->entry_count, 2);
+      EXPECT_EQ(allocation.death_frontier->entries[0].epoch, 7u);
+      EXPECT_EQ(allocation.death_frontier->entries[1].epoch, 11u);
+    }
+    // Release in interleaved order to coalesce across every segment boundary.
+    for (size_t parity = 0; parity < 2; ++parity) {
+      for (size_t i = parity; i < allocations.size(); i += 2) {
+        iree_hal_memory_tlsf_restore(&tlsf, allocations[i].block_index);
+      }
+    }
+    iree_hal_memory_tlsf_allocation_t whole;
+    IREE_ASSERT_OK(iree_hal_memory_tlsf_allocate(&tlsf, 8192, &whole));
+    EXPECT_EQ(whole.offset, 0u);
+    ASSERT_NE(whole.death_frontier, nullptr);
+    EXPECT_EQ(whole.death_frontier->entry_count, 2);
+    EXPECT_EQ(whole.death_frontier->entries[0].epoch, 7u);
+    EXPECT_EQ(whole.death_frontier->entries[1].epoch, 11u);
+    iree_hal_memory_tlsf_free(&tlsf, whole.block_index, nullptr);
+    iree_hal_memory_tlsf_deinitialize(&tlsf);
+  }
+}
+
+TEST(TLSFTest, PreparedMetadataOutlivesItsSourceAllocator) {
+  auto options = DefaultOptions();
+  options.initial_block_capacity = 1;
+  iree_hal_memory_tlsf_t source;
+  IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
+      options, iree_allocator_system(), &source));
+  auto candidate = iree_hal_memory_tlsf_query_free_block(
+      &source, 16, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+  auto growth =
+      iree_hal_memory_tlsf_query_growth(&source, candidate.block_index, 16);
+  EXPECT_EQ(growth.first_block, 1u);
+  EXPECT_EQ(growth.block_count, 1u);
+  iree_hal_memory_tlsf_deinitialize(&source);
+  IREE_ASSERT_OK(
+      iree_hal_memory_tlsf_prepare_growth(&growth, iree_allocator_system()));
+
+  iree_hal_memory_tlsf_t replacement;
+  IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
+      options, iree_allocator_system(), &replacement));
+  auto competing_growth = growth;
+  competing_growth.storage = nullptr;
+  IREE_ASSERT_OK(iree_hal_memory_tlsf_prepare_growth(&competing_growth,
+                                                     iree_allocator_system()));
+  EXPECT_TRUE(iree_hal_memory_tlsf_apply_growth(&replacement, &growth));
+  EXPECT_EQ(growth.storage, nullptr);
+  EXPECT_FALSE(
+      iree_hal_memory_tlsf_apply_growth(&replacement, &competing_growth));
+  ASSERT_NE(competing_growth.storage, nullptr);
+  iree_allocator_free(iree_allocator_system(), competing_growth.storage);
+
+  candidate = iree_hal_memory_tlsf_query_free_block(
+      &replacement, 16, IREE_HAL_MEMORY_TLSF_BLOCK_INDEX_NONE);
+  EXPECT_EQ(
+      iree_hal_memory_tlsf_query_growth(&replacement, candidate.block_index, 16)
+          .first_block,
+      0u);
+  iree_hal_memory_tlsf_allocation_t allocation;
+  iree_hal_memory_tlsf_allocate_block(&replacement, candidate.block_index, 16,
+                                      &allocation);
+  EXPECT_EQ(allocation.offset, 0u);
+  EXPECT_EQ(allocation.length, 16u);
+  iree_hal_memory_tlsf_free(&replacement, allocation.block_index, nullptr);
+  iree_hal_memory_tlsf_deinitialize(&replacement);
+}
+
+TEST(TLSFTest, FinalSizeClassExhaustionDoesNotWrap) {
+  // Only offset metadata is allocated. A request beyond the available extent
+  // in the final size class has no larger bin to round up to.
+  auto options = DefaultOptions();
+  options.range_length = IREE_DEVICE_SIZE_MAX - 31;
+  iree_hal_memory_tlsf_t tlsf;
+  IREE_ASSERT_OK(
+      iree_hal_memory_tlsf_initialize(options, iree_allocator_system(), &tlsf));
+  iree_hal_memory_tlsf_allocation_t allocation;
+  iree_hal_memory_tlsf_allocate_result_t result;
+  IREE_ASSERT_OK(iree_hal_memory_tlsf_try_allocate(
+      &tlsf, IREE_DEVICE_SIZE_MAX - 15, &allocation, &result));
+  EXPECT_EQ(result, IREE_HAL_MEMORY_TLSF_ALLOCATE_EXHAUSTED);
+  EXPECT_EQ(iree_hal_memory_tlsf_largest_free_block(&tlsf),
+            options.range_length);
+  iree_hal_memory_tlsf_deinitialize(&tlsf);
+}
+
 TEST(TLSFTest, SplitMetadataGrowthFailureDoesNotMutateAllocator) {
   TestAllocatorState allocator_state = {};
   allocator_state.base_allocator = iree_allocator_system();
-  allocator_state.flags = kTestAllocatorFlagFailRealloc;
-
   iree_hal_memory_tlsf_t tlsf;
   auto options = DefaultOptions();
   options.initial_block_capacity = 1;
@@ -930,6 +1239,7 @@ TEST(TLSFTest, SplitMetadataGrowthFailureDoesNotMutateAllocator) {
   options.alignment = 16;
   IREE_ASSERT_OK(iree_hal_memory_tlsf_initialize(
       options, TestAllocator(&allocator_state), &tlsf));
+  allocator_state.flags = kTestAllocatorFlagFailAllocation;
 
   iree_hal_memory_tlsf_allocation_t alloc;
   iree_hal_memory_tlsf_allocate_result_t result =

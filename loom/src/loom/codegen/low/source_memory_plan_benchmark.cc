@@ -28,10 +28,21 @@
 
 namespace {
 
+enum class Indexing {
+  kLinear,
+  kConstantDivisor,
+  kRuntimeDivisor,
+};
+
 class SourceMemoryPlanBenchmark {
  public:
-  SourceMemoryPlanBenchmark(int64_t producer_depth, int64_t memory_access_count)
-      : producer_depth_(producer_depth) {
+  SourceMemoryPlanBenchmark(int64_t producer_depth, int64_t memory_access_count,
+                            Indexing indexing = Indexing::kLinear,
+                            int64_t root_count = 1,
+                            int64_t refinement_count = 0)
+      : producer_depth_(producer_depth),
+        indexing_(indexing),
+        root_count_(root_count) {
     iree_arena_block_pool_initialize(65536, iree_allocator_system(),
                                      &block_pool_);
     iree_arena_initialize(&block_pool_, &facts_arena_);
@@ -47,16 +58,18 @@ class SourceMemoryPlanBenchmark {
         &context_, IREE_SV("source_memory_plan_benchmark"), &block_pool_,
         nullptr, iree_allocator_system(), &module_));
     BuildFunction();
-    BuildMemoryAccesses(memory_access_count);
+    BuildMemoryAccesses(memory_access_count, refinement_count);
     IREE_CHECK_OK(loom_value_fact_table_initialize(&fact_table_, &facts_arena_,
                                                    module_->values.count));
     IREE_CHECK_OK(
         loom_value_fact_table_compute(&fact_table_, module_, function_));
 
     AnalyzeAndPlan();
-    IREE_ASSERT_EQ(last_plan_.static_byte_offset, producer_depth_ * 4);
+    IREE_ASSERT_EQ(last_plan_.static_byte_offset,
+                   indexing_ == Indexing::kLinear ? producer_depth_ * 4 : 0);
     IREE_ASSERT_EQ(last_plan_.dynamic_term_count, 1u);
     IREE_ASSERT_EQ(last_plan_.dynamic_terms[0].index, source_index_);
+    IREE_ASSERT_EQ(memory_space_refinement_count_, refinement_count);
   }
 
   SourceMemoryPlanBenchmark(const SourceMemoryPlanBenchmark&) = delete;
@@ -87,12 +100,21 @@ class SourceMemoryPlanBenchmark {
     for (const loom_op_t* memory_op : memory_ops_) {
       loom_low_source_memory_access_diagnostic_t diagnostic = {};
       const bool planned = loom_low_source_memory_access_plan_build(
-          &view_regions, memory_op, &last_plan_, &diagnostic);
+          &view_regions, memory_op, /*axis_byte_strides=*/NULL, &last_plan_,
+          &diagnostic);
       if (!planned) {
         std::abort();
       }
     }
     benchmark::DoNotOptimize(last_plan_);
+    symbolic_memo_capacity_ = expression_context.memo.capacity;
+    symbolic_memo_populated_entries_ = expression_context.memo.count;
+    symbolic_projection_count_ = expression_context.projections.count;
+    symbolic_projection_capacity_ = expression_context.projections.capacity;
+    memory_space_refinement_count_ =
+        view_regions.memory_space_refinements.count;
+    memory_space_refinement_capacity_ =
+        view_regions.memory_space_refinements.capacity;
     analysis_arena_used_bytes_ = analysis_arena.used_allocation_size;
     analysis_arena_owned_bytes_ = analysis_arena.total_allocation_size;
     loom_local_value_domain_release(&value_domain);
@@ -102,6 +124,19 @@ class SourceMemoryPlanBenchmark {
   void SetCounters(benchmark::State& state) const {
     state.counters["producer_depth"] = (double)producer_depth_;
     state.counters["memory_access_count"] = (double)memory_ops_.size();
+    state.counters["root_count"] = (double)root_count_;
+    state.counters["memory_space_refinement_count"] =
+        (double)memory_space_refinement_count_;
+    state.counters["memory_space_refinement_capacity"] =
+        (double)memory_space_refinement_capacity_;
+    state.counters["ssa_value_count"] = (double)module_->values.count;
+    state.counters["symbolic_memo_capacity"] = (double)symbolic_memo_capacity_;
+    state.counters["symbolic_memo_populated_entries"] =
+        (double)symbolic_memo_populated_entries_;
+    state.counters["symbolic_projection_count"] =
+        (double)symbolic_projection_count_;
+    state.counters["symbolic_projection_capacity"] =
+        (double)symbolic_projection_capacity_;
     state.counters["analysis_arena_used_bytes"] =
         (double)analysis_arena_used_bytes_;
     state.counters["analysis_arena_owned_bytes"] =
@@ -129,8 +164,8 @@ class SourceMemoryPlanBenchmark {
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
     const loom_symbol_ref_t callee = {
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
     loom_op_t* func_op = nullptr;
     IREE_CHECK_OK(loom_test_func_build(
@@ -166,10 +201,33 @@ class SourceMemoryPlanBenchmark {
     return loom_index_constant_result(op);
   }
 
-  void BuildMemoryAccesses(int64_t memory_access_count) {
-    const loom_value_id_t buffer = DefineBlockArgument(loom_type_buffer());
+  void BuildMemoryAccesses(int64_t memory_access_count,
+                           int64_t refinement_count) {
+    std::vector<loom_value_id_t> buffers(root_count_);
+    for (auto& buffer : buffers) {
+      buffer = DefineBlockArgument(loom_type_buffer());
+    }
     source_index_ =
         DefineBlockArgument(loom_type_scalar(LOOM_SCALAR_TYPE_INDEX));
+    // Each root has one consistent space. Increasing the refinement count
+    // deepens independently rooted chains without introducing more accesses.
+    const loom_value_fact_memory_space_t spaces[] = {
+        LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL,
+        LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP,
+        LOOM_VALUE_FACT_MEMORY_SPACE_PRIVATE,
+        LOOM_VALUE_FACT_MEMORY_SPACE_CONSTANT,
+        LOOM_VALUE_FACT_MEMORY_SPACE_HOST,
+        LOOM_VALUE_FACT_MEMORY_SPACE_DESCRIPTOR,
+        LOOM_VALUE_FACT_MEMORY_SPACE_GENERIC,
+    };
+    for (int64_t i = 0; i < refinement_count; ++i) {
+      const size_t root = i % buffers.size();
+      loom_op_t* refinement = nullptr;
+      IREE_CHECK_OK(loom_buffer_assume_memory_space_build(
+          &builder_, spaces[root % IREE_ARRAYSIZE(spaces)], buffers[root],
+          loom_type_buffer(), LOOM_LOCATION_UNKNOWN, &refinement));
+      buffers[root] = loom_buffer_assume_memory_space_result(refinement);
+    }
 
     loom_op_t* layout_op = nullptr;
     IREE_CHECK_OK(loom_encoding_layout_dense_build(
@@ -183,12 +241,33 @@ class SourceMemoryPlanBenchmark {
                             loom_dim_pack_static(1024 * 1024), 0);
     view_type.encoding_id = (uint16_t)layout;
     view_type.encoding_flags = LOOM_ENCODING_FLAG_SSA;
-    loom_op_t* view_op = nullptr;
-    IREE_CHECK_OK(loom_buffer_view_build(&builder_, buffer, zero, view_type,
-                                         LOOM_LOCATION_UNKNOWN, &view_op));
+    std::vector<loom_value_id_t> views;
+    views.reserve(buffers.size());
+    for (loom_value_id_t buffer : buffers) {
+      loom_op_t* view_op = nullptr;
+      IREE_CHECK_OK(loom_buffer_view_build(&builder_, buffer, zero, view_type,
+                                           LOOM_LOCATION_UNKNOWN, &view_op));
+      views.push_back(loom_buffer_view_result(view_op));
+    }
 
     const loom_value_id_t one = BuildIndexConstant(1);
     loom_value_id_t dynamic_index = source_index_;
+    if (indexing_ != Indexing::kLinear) {
+      const loom_predicate_t range = {
+          .kind = LOOM_PREDICATE_RANGE,
+          .arg_count = 3,
+          .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST,
+                       LOOM_PRED_ARG_CONST},
+          .reserved = {},
+          .args = {source_index_, 0, 1024 * 1024},
+      };
+      const auto index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+      loom_op_t* assumed = nullptr;
+      IREE_CHECK_OK(loom_index_assume_build(&builder_, &source_index_, 1,
+                                            &range, 1, &index_type, 1,
+                                            LOOM_LOCATION_UNKNOWN, &assumed));
+      dynamic_index = loom_index_assume_results(assumed).values[0];
+    }
     for (int64_t i = 0; i < producer_depth_; ++i) {
       loom_op_t* add_op = nullptr;
       IREE_CHECK_OK(
@@ -196,6 +275,17 @@ class SourceMemoryPlanBenchmark {
                                loom_type_scalar(LOOM_SCALAR_TYPE_INDEX),
                                LOOM_LOCATION_UNKNOWN, &add_op));
       dynamic_index = loom_index_add_result(add_op);
+    }
+    if (indexing_ != Indexing::kLinear) {
+      const auto divisor =
+          indexing_ == Indexing::kConstantDivisor
+              ? BuildIndexConstant(8)
+              : DefineBlockArgument(loom_type_scalar(LOOM_SCALAR_TYPE_INDEX));
+      loom_op_t* quotient = nullptr;
+      IREE_CHECK_OK(loom_index_div_build(&builder_, dynamic_index, divisor,
+                                         LOOM_LOCATION_UNKNOWN, &quotient));
+      dynamic_index = loom_index_div_result(quotient);
+      source_index_ = dynamic_index;
     }
 
     memory_ops_.reserve((size_t)memory_access_count);
@@ -206,7 +296,7 @@ class SourceMemoryPlanBenchmark {
     for (int64_t i = 0; i < memory_access_count; ++i) {
       loom_op_t* load_op = nullptr;
       IREE_CHECK_OK(loom_vector_load_build(
-          &builder_, 0, /*instance_flags=*/0, loom_buffer_view_result(view_op),
+          &builder_, 0, /*instance_flags=*/0, views[i % views.size()],
           dynamic_indices, IREE_ARRAYSIZE(dynamic_indices), static_indices,
           IREE_ARRAYSIZE(static_indices), 0, 0, vector_type,
           LOOM_LOCATION_UNKNOWN, &load_op));
@@ -216,6 +306,11 @@ class SourceMemoryPlanBenchmark {
 
   // Number of unique index producers shared by every memory access.
   int64_t producer_depth_;
+  // Whether address analysis can retain an exact digit or must stop at
+  // division.
+  Indexing indexing_;
+  // Number of independent source buffer roots sharing the address expression.
+  int64_t root_count_;
   // Reusable storage backing the module, facts, and each analysis run.
   iree_arena_block_pool_t block_pool_;
   // Arena retaining the function fact table across analysis runs.
@@ -230,12 +325,24 @@ class SourceMemoryPlanBenchmark {
   loom_builder_t builder_ = {};
   // Stable facts shared by every function-analysis lifetime.
   loom_value_fact_table_t fact_table_ = {};
-  // Root index expected in every canonical source-memory plan.
+  // Materialized SSA index expected in every canonical source-memory plan.
   loom_value_id_t source_index_ = LOOM_VALUE_ID_INVALID;
   // Memory operations planned after each function analysis.
   std::vector<const loom_op_t*> memory_ops_;
   // Last plan retained to validate and observe benchmark results.
   loom_low_source_memory_access_plan_t last_plan_ = {};
+  // Allocated expression memo slots in the most recent analysis.
+  iree_host_size_t symbolic_memo_capacity_ = 0;
+  // Expression memo slots populated in the most recent analysis.
+  iree_host_size_t symbolic_memo_populated_entries_ = 0;
+  // Exact digit records retained by the most recent analysis.
+  iree_host_size_t symbolic_projection_count_ = 0;
+  // Allocated exact digit record slots in the most recent analysis.
+  iree_host_size_t symbolic_projection_capacity_ = 0;
+  // Source-space operation/root rows retained by the most recent analysis.
+  iree_host_size_t memory_space_refinement_count_ = 0;
+  // Arena row capacity after geometric growth in the most recent analysis.
+  iree_host_size_t memory_space_refinement_capacity_ = 0;
   // Live analysis storage used by the most recent run.
   iree_host_size_t analysis_arena_used_bytes_ = 0;
   // Block-pool storage owned by the most recent run.
@@ -243,7 +350,7 @@ class SourceMemoryPlanBenchmark {
 };
 
 static void SymbolicMemoryShapes(::benchmark::Benchmark* benchmark) {
-  for (int64_t producer_depth : {1, 16, 40, 4096}) {
+  for (int64_t producer_depth : {1, 16, 40, 4096, 20000}) {
     for (int64_t memory_access_count : {1, 16, 256, 1024}) {
       benchmark->Args({producer_depth, memory_access_count});
     }
@@ -260,5 +367,51 @@ static void BM_AnalyzeAndPlanSymbolicMemory(benchmark::State& state) {
                           (state.range(0) + state.range(1)));
 }
 BENCHMARK(BM_AnalyzeAndPlanSymbolicMemory)->Apply(SymbolicMemoryShapes);
+
+static void DigitMemoryShapes(::benchmark::Benchmark* benchmark) {
+  for (int64_t producer_depth : {1, 4096, 20000}) {
+    for (int64_t memory_access_count : {1, 1024}) {
+      benchmark->Args({producer_depth, memory_access_count});
+    }
+  }
+}
+
+static void BM_AnalyzeAndPlanDigitMemory(benchmark::State& state,
+                                         Indexing indexing) {
+  SourceMemoryPlanBenchmark fixture(state.range(0), state.range(1), indexing);
+  for (auto _ : state) {
+    fixture.AnalyzeAndPlan();
+  }
+  fixture.SetCounters(state);
+}
+BENCHMARK_CAPTURE(BM_AnalyzeAndPlanDigitMemory, ConstantDivisor,
+                  Indexing::kConstantDivisor)
+    ->Apply(DigitMemoryShapes);
+BENCHMARK_CAPTURE(BM_AnalyzeAndPlanDigitMemory, RuntimeDivisor,
+                  Indexing::kRuntimeDivisor)
+    ->Apply(DigitMemoryShapes);
+
+static void RefinedMemoryShapes(::benchmark::Benchmark* benchmark) {
+  // Change one dimension at a time: chain depth, independent roots, and uses.
+  for (int64_t refinements : {0, 1, 8, 64, 512, 4096}) {
+    benchmark->Args({1, refinements, 1});
+  }
+  for (int64_t roots : {8, 64, 512}) {
+    benchmark->Args({roots, 512, 1});
+  }
+  for (int64_t accesses : {64, 512, 4096}) {
+    benchmark->Args({64, 512, accesses});
+  }
+}
+
+static void BM_AnalyzeAndPlanRefinedMemory(benchmark::State& state) {
+  SourceMemoryPlanBenchmark fixture(1, state.range(2), Indexing::kLinear,
+                                    state.range(0), state.range(1));
+  for (auto _ : state) {
+    fixture.AnalyzeAndPlan();
+  }
+  fixture.SetCounters(state);
+}
+BENCHMARK(BM_AnalyzeAndPlanRefinedMemory)->Apply(RefinedMemoryShapes);
 
 }  // namespace

@@ -24,6 +24,7 @@ typedef struct loom_low_lower_rule_match_context_t
     loom_low_lower_rule_match_context_t;
 typedef struct loom_low_lower_rule_source_memory_state_t
     loom_low_lower_rule_source_memory_state_t;
+typedef struct loom_consumption_region_query_t loom_consumption_region_query_t;
 typedef struct loom_symbolic_expr_context_t loom_symbolic_expr_context_t;
 
 typedef iree_status_t (*loom_low_lower_rule_match_map_value_fn_t)(
@@ -64,12 +65,32 @@ typedef struct loom_low_lower_rule_match_descriptor_ref_callback_t {
   void* user_data;
 } loom_low_lower_rule_match_descriptor_ref_callback_t;
 
+typedef uint64_t (
+    *loom_low_lower_rule_match_source_memory_root_byte_offset_fn_t)(
+    void* user_data,
+    const loom_low_source_memory_access_plan_t* source_memory_access);
+
+typedef struct
+    loom_low_lower_rule_match_source_memory_root_byte_offset_callback_t {
+  // Optional physical allocation-root offset query. Mutable lowering installs
+  // an adapter to its target policy; read-only contract queries leave this
+  // empty because they test source semantic support, not selected placement.
+  loom_low_lower_rule_match_source_memory_root_byte_offset_fn_t fn;
+  // Caller-owned payload passed to |fn|.
+  void* user_data;
+} loom_low_lower_rule_match_source_memory_root_byte_offset_callback_t;
+
 typedef uint16_t loom_low_lower_rule_match_flags_t;
 
 // Match contract-only rule rows that are visible to read-only legality queries
 // but never execute as source-to-low emission programs.
 #define LOOM_LOW_LOWER_RULE_MATCH_FLAG_CONTRACT_ONLY \
   ((loom_low_lower_rule_match_flags_t)1u << 0)
+
+// Primary descriptor refs come from the policy paired with descriptor_set.
+// Selection may consume generated feature classes without resolving presence.
+#define LOOM_LOW_LOWER_RULE_MATCH_FLAG_PRIMARY_DESCRIPTORS_BOUND \
+  ((loom_low_lower_rule_match_flags_t)1u << 1)
 
 struct loom_low_lower_rule_match_context_t {
   // Source module being matched.
@@ -82,6 +103,9 @@ struct loom_low_lower_rule_match_context_t {
   const loom_low_descriptor_set_t* descriptor_set;
   // Feature bits selected by the target-low contract.
   uint64_t feature_bits;
+  // Optional scoped vector lane projection used for value-type and
+  // source-memory candidate matching.
+  loom_target_contract_vector_lane_projection_t vector_lane_projection;
   // Source-value to target-low register metadata mapper.
   loom_low_lower_rule_match_map_value_callback_t map_value;
   // Optional source value materializer predicate bridge.
@@ -89,22 +113,42 @@ struct loom_low_lower_rule_match_context_t {
   // Optional rule-local descriptor-ref resolver. Missing uses descriptor keys
   // directly and is intended for tests and cold standalone queries.
   loom_low_lower_rule_match_descriptor_ref_callback_t descriptor_ref;
+  // Optional target physical allocation-root placement query.
+  loom_low_lower_rule_match_source_memory_root_byte_offset_callback_t
+      source_memory_root_byte_offset;
   // Optional dense source value facts used by fact-backed guard rows.
   const loom_value_fact_table_t* fact_table;
   // Optional precomputed view summaries used by source-memory guard rows.
   const loom_view_region_table_t* view_regions;
+  // Optional immutable-snapshot owner used only by source-memory matches.
+  loom_target_contract_function_analysis_callback_t function_analysis;
   // Caller-owned state retaining the canonical source-memory plan for the
   // source op being matched. Required for rule sets with source-memory rows.
   loom_low_lower_rule_source_memory_state_t* source_memory_state;
   // Optional symbolic proof context used as a cold fallback for fact-backed
   // guard rows whose scalar intervals are inconclusive.
   loom_symbolic_expr_context_t* symbolic_expr_context;
+  // Optional reusable path-sensitive value-consumption query. Source planning
+  // supplies one for the source operation's region; standalone queries omit it
+  // and conservatively reject consumption-dependent optimization guards.
+  loom_consumption_region_query_t* consumption_query;
+  // Optional first related source operation retained while matching the exact
+  // single-rule graph candidate that established it.
+  const loom_op_t* resolved_first_source_node;
   // Match behavior flags.
   loom_low_lower_rule_match_flags_t flags;
   // One-based policy rule-set ordinal supplied by composed contract selection;
   // zero when no policy owner is known.
   uint16_t policy_rule_set_ordinal;
 };
+
+// Returns the source-value type visible to this match.
+static inline loom_type_t loom_low_lower_rule_match_value_type(
+    const loom_low_lower_rule_match_context_t* context,
+    loom_value_id_t value_id) {
+  return loom_target_contract_query_value_type(context->vector_lane_projection,
+                                               context->module, value_id);
+}
 
 typedef struct loom_low_lower_rule_failure_t {
   // Source op carrying the best rejection diagnostic. Defaults to the rule
@@ -137,6 +181,9 @@ typedef struct loom_low_lower_rule_selection_t {
   bool uses_source_memory_access;
   // Number of populated source_nodes entries for the selected rule.
   uint8_t source_node_count;
+  // Source-node ordinal where the rule can emit after every source-backed
+  // operand is available. Zero preserves root emission.
+  uint8_t emission_source_node_index;
 } loom_low_lower_rule_selection_t;
 
 // Returns true when |candidate| carries a more useful selection failure than
@@ -145,6 +192,22 @@ typedef struct loom_low_lower_rule_selection_t {
 bool loom_low_lower_rule_failure_is_better(
     loom_low_lower_rule_failure_t candidate,
     loom_low_lower_rule_failure_t incumbent);
+
+// Returns true when two matched rules cover the same resolved source graph.
+// Rules with different graph coverage are independent lowering choices even
+// when they share a root source op.
+bool loom_low_lower_rule_selections_have_same_source_graph(
+    const loom_low_lower_rule_selection_t* lhs,
+    const loom_low_lower_rule_selection_t* rhs);
+
+// Resolves the first related node of |rule| from |source_op|. This is an exact
+// necessary condition used to prune source-graph candidates. Callers may retain
+// the result in the match context for the authoritative match; every related
+// node guard is still evaluated there.
+bool loom_low_lower_rule_resolve_first_source_node(
+    const loom_low_lower_rule_match_context_t* match_context,
+    const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
+    const loom_low_lower_rule_t* rule, const loom_op_t** out_source_node);
 
 // Initializes a rule match context backed by a mutable lowering context.
 // |source_memory_state| retains the canonical source-memory plan across every
@@ -155,7 +218,7 @@ void loom_low_lower_rule_match_context_initialize_from_lowering(
     loom_low_lower_rule_source_memory_state_t* source_memory_state,
     loom_low_lower_rule_match_context_t* out_match_context);
 
-// Resolves descriptor refs through a lowering context's function-local cache.
+// Resolves descriptor refs through the scope's shared immutable table bindings.
 // This adapts the mutable lowering lifecycle to the read-only match callback.
 iree_status_t loom_low_lower_rule_match_descriptor_ref_from_lowering(
     void* user_data, const loom_low_lower_rule_match_context_t* match_context,
@@ -205,7 +268,7 @@ const loom_low_lower_diagnostic_t* loom_low_lower_rule_set_failure_diagnostic(
     loom_low_lower_rule_failure_t failure);
 
 // Materializes generated diagnostic parameter projections for a rejected rule.
-void loom_low_lower_rule_materialize_diagnostic_params(
+iree_status_t loom_low_lower_rule_materialize_diagnostic_params(
     const loom_low_lower_rule_match_context_t* match_context,
     const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
     const loom_low_lower_diagnostic_t* diagnostic,
@@ -224,6 +287,31 @@ iree_status_t loom_low_lower_rule_resolve_descriptor_ref(
 loom_low_lower_descriptor_ref_t loom_low_lower_rule_primary_descriptor_ref(
     const loom_low_lower_rule_set_t* rule_set,
     const loom_low_lower_rule_t* rule);
+
+// Returns whether every target feature in |feature_class| is available.
+// Zero is the featureless class; the dynamic class is not accepted here.
+bool loom_low_lower_rule_primary_feature_class_available(
+    const loom_low_lower_rule_match_context_t* match_context,
+    const loom_low_lower_rule_set_t* rule_set, uint8_t feature_class);
+
+typedef uint8_t loom_low_lower_rule_primary_descriptor_status_t;
+enum loom_low_lower_rule_primary_descriptor_status_e {
+  // The rule has no primary descriptor or it is ready for selection.
+  LOOM_LOW_LOWER_RULE_PRIMARY_DESCRIPTOR_AVAILABLE = 0,
+  // The descriptor key is absent from an externally supplied descriptor set.
+  LOOM_LOW_LOWER_RULE_PRIMARY_DESCRIPTOR_MISSING = 1,
+  // The descriptor is present but requires unavailable target features.
+  LOOM_LOW_LOWER_RULE_PRIMARY_DESCRIPTOR_FEATURES_UNAVAILABLE = 2,
+};
+
+// Queries the selected rule's primary descriptor status. Bound policy rule
+// sets use their generated feature class; external queries resolve the
+// complete descriptor mask and distinguish missing descriptor keys.
+iree_status_t loom_low_lower_rule_query_primary_descriptor(
+    const loom_low_lower_rule_match_context_t* match_context,
+    const loom_low_lower_rule_set_t* rule_set,
+    const loom_low_lower_rule_t* rule,
+    loom_low_lower_rule_primary_descriptor_status_t* out_status);
 
 // Emits the structured diagnostic for a failed selection.
 iree_status_t loom_low_lower_rule_set_emit_selection_failure(

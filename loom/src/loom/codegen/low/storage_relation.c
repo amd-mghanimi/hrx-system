@@ -147,6 +147,7 @@ static void loom_low_storage_relation_from_value_relation(
     case LOOM_VALUE_RELATION_SELECT_PAYLOAD:
     case LOOM_VALUE_RELATION_ELEMENTWISE:
     case LOOM_VALUE_RELATION_LOOP_BYPASS:
+    case LOOM_VALUE_RELATION_REFERENCE_SOURCE:
     case LOOM_VALUE_RELATION_COUNT_:
       IREE_ASSERT_UNREACHABLE("unsupported low storage value relation");
       IREE_BUILTIN_UNREACHABLE();

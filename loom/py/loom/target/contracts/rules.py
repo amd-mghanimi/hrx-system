@@ -8,12 +8,20 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum, unique
 from typing import Self
 
-from loom.dsl import FACT_IDENTITY, PURE, MemoryAccessInterface, Op
+from loom.dsl import (
+    CONTEXTUAL,
+    CONVERGENT,
+    FACT_IDENTITY,
+    PURE,
+    MemoryAccessInterface,
+    Op,
+    TiedResult,
+)
 from loom.target.contracts.descriptors import _require_descriptor
 from loom.target.contracts.emits import (
     ContractEmit,
@@ -21,23 +29,33 @@ from loom.target.contracts.emits import (
     EmitDescriptorOp,
     EmitRegisterConcat,
     EmitRegisterCopy,
+    EmitRegisterMove,
     EmitRegisterSlice,
 )
-from loom.target.contracts.guards import Guard
+from loom.target.contracts.guards import Guard, GuardKind
+from loom.target.contracts.immediates import OperandSegmentProject
 from loom.target.contracts.kinds import ContractSystem, SourceValueKind
 from loom.target.contracts.source import ValueRef
-from loom.target.low_descriptors import Descriptor, DescriptorSet, OperandRole
+from loom.target.low_descriptors import (
+    Descriptor,
+    DescriptorOpKind,
+    DescriptorSet,
+    OperandRole,
+)
 
 MAX_SOURCE_NODES = 8
 SOURCE_NODE_COUNT_BITS = (MAX_SOURCE_NODES - 1).bit_length()
+MAX_RULE_PRIORITY = 15
 
 
 @unique
 class SourceNodeRelation(Enum):
-    """SSA relation used to find one source op adjacent to another."""
+    """SSA relation used to find one source op from another."""
 
     ADJACENT_UNIQUE_USER = "adjacent_unique_user"
     ADJACENT_DEFINITION = "adjacent_definition"
+    EXCLUSIVE_USER = "exclusive_user"
+    EXCLUSIVE_DEFINITION = "exclusive_definition"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +135,52 @@ class SourceNode:
             guards=guards,
         )
 
+    @classmethod
+    def exclusive_user(
+        cls,
+        name: str,
+        *,
+        source_op: Op,
+        parent_result: ValueRef,
+        node_operand: ValueRef,
+        parent: str = "",
+        guards: Sequence[Guard] = (),
+    ) -> Self:
+        """Finds the sole user of a parent result in the same block."""
+
+        return cls(
+            name=name,
+            source_op=source_op,
+            relation=SourceNodeRelation.EXCLUSIVE_USER,
+            parent_value=parent_result,
+            node_value=node_operand,
+            parent=parent,
+            guards=guards,
+        )
+
+    @classmethod
+    def exclusive_definition(
+        cls,
+        name: str,
+        *,
+        source_op: Op,
+        parent_operand: ValueRef,
+        node_result: ValueRef,
+        parent: str = "",
+        guards: Sequence[Guard] = (),
+    ) -> Self:
+        """Finds a same-block definition whose result has one use."""
+
+        return cls(
+            name=name,
+            source_op=source_op,
+            relation=SourceNodeRelation.EXCLUSIVE_DEFINITION,
+            parent_value=parent_operand,
+            node_value=node_result,
+            parent=parent,
+            guards=guards,
+        )
+
     def validate(self, source_ops: dict[str, Op]) -> None:
         if not self.name:
             raise ValueError("descriptor-rule source node name must be non-empty")
@@ -138,6 +202,16 @@ class SourceNode:
                 f"{self.source_op.name}: related source nodes must be pure and "
                 "regionless"
             )
+        if any(
+            trait in self.source_op.traits for trait in (CONVERGENT, CONTEXTUAL)
+        ) or any(isinstance(result, TiedResult) for result in self.source_op.results):
+            raise ValueError(
+                f"{self.source_op.name}: related source nodes must be relocatable"
+            )
+        if not self.source_op.results:
+            raise ValueError(
+                f"{self.source_op.name}: related source nodes must produce a result"
+            )
         for subject, value_ref in (
             ("parent connection", self.parent_value),
             ("node connection", self.node_value),
@@ -152,7 +226,10 @@ class SourceNode:
                     f"{self.source_op.name}: source node '{self.name}' {subject} "
                     "cannot use a materializer"
                 )
-        if self.relation is SourceNodeRelation.ADJACENT_UNIQUE_USER:
+        if self.relation in (
+            SourceNodeRelation.ADJACENT_UNIQUE_USER,
+            SourceNodeRelation.EXCLUSIVE_USER,
+        ):
             expected_parent_kind = SourceValueKind.RESULT
             expected_node_kind = SourceValueKind.OPERAND
         else:
@@ -180,7 +257,11 @@ class DescriptorRule:
     """Source-to-Low rule contract case authored in Python.
 
     Cases for the same source operation are selected by descending priority,
-    preserving authored order among cases with equal priority.
+    preserving authored order among cases with equal priority. Related source
+    graphs also use the priority to resolve ownership across root operations.
+    Rules that only combine operations already covered by singleton rules set
+    target_query to false so they participate in lowering without independently
+    establishing target legality.
     """
 
     source_op: Op
@@ -190,6 +271,7 @@ class DescriptorRule:
     emit: tuple[ContractEmit, ...] = ()
     priority: int = 0
     report_key: str = ""
+    target_query: bool = True
 
     def __init__(
         self,
@@ -201,6 +283,7 @@ class DescriptorRule:
         emit: Sequence[ContractEmit] = (),
         priority: int = 0,
         report_key: str = "",
+        target_query: bool = True,
     ) -> None:
         object.__setattr__(self, "source_op", source_op)
         object.__setattr__(self, "descriptor", descriptor)
@@ -209,13 +292,22 @@ class DescriptorRule:
         object.__setattr__(self, "emit", tuple(emit))
         object.__setattr__(self, "priority", priority)
         object.__setattr__(self, "report_key", report_key)
+        object.__setattr__(self, "target_query", target_query)
         if priority < 0:
             raise ValueError("descriptor rule priority must be non-negative")
+        if priority > MAX_RULE_PRIORITY:
+            raise ValueError(
+                f"descriptor rule priority must not exceed {MAX_RULE_PRIORITY}"
+            )
         _validate_report_key(source_op, report_key)
 
     @property
     def system(self) -> ContractSystem:
-        return ContractSystem.DESCRIPTOR_RULE
+        return (
+            ContractSystem.DESCRIPTOR_RULE
+            if self.target_query
+            else ContractSystem.DESCRIPTOR_RULE_LOWERING_ONLY
+        )
 
     def validate(self, descriptor_set: DescriptorSet) -> None:
         if self.descriptor is not None:
@@ -228,6 +320,7 @@ class DescriptorRule:
         source_ops = {"": self.source_op}
         for source_node in self.source_nodes:
             source_node.validate(source_ops)
+        self._validate_source_graph_forest(source_ops)
         for guard in self.guards:
             guard.validate(self.source_op)
         defined_temporaries = set[str]()
@@ -244,11 +337,92 @@ class DescriptorRule:
                 source_ops=source_ops,
             )
             defined_temporaries.update(produced_temporaries)
-        self._validate_related_results()
-        self._validate_source_memory_index_preservation()
+        self._validate_operand_segment_projections()
+        self._validate_source_memory_preservation()
         self._validate_per_lane_sequence()
+        self._validate_source_results(source_ops)
+        self._validate_terminator_emit()
 
-    def _validate_related_results(self) -> None:
+    def _validate_operand_segment_projections(self) -> None:
+        exact_segment_guards = {
+            (guard.field, guard.bit_width)
+            for guard in self.guards
+            if guard.kind is GuardKind.OPERAND_SEGMENT_EXACT_BITS
+        }
+        for emit in self.emit:
+            if not isinstance(emit, EmitDescriptorOp) or not isinstance(
+                emit.immediates, Mapping
+            ):
+                continue
+            for projection in emit.immediates.values():
+                if not isinstance(projection, OperandSegmentProject):
+                    continue
+                required_guard = (projection.source_operand, projection.bit_width)
+                if required_guard not in exact_segment_guards:
+                    raise ValueError(
+                        f"{self.source_op.name}: operand-segment projection for "
+                        f"'{projection.source_operand}' needs a matching "
+                        "operand_segment_exact_bits guard"
+                    )
+
+    def _validate_source_graph_forest(self, source_ops: dict[str, Op]) -> None:
+        endpoint_guards = {"": self.guards}
+        endpoint_guards.update(
+            (source_node.name, source_node.guards) for source_node in self.source_nodes
+        )
+        connected_results = set[tuple[str, str, int]]()
+        for source_node in self.source_nodes:
+            if source_node.relation in (
+                SourceNodeRelation.ADJACENT_UNIQUE_USER,
+                SourceNodeRelation.EXCLUSIVE_USER,
+            ):
+                definition_name = source_node.parent
+                definition_value = source_node.parent_value
+            else:
+                definition_name = source_node.name
+                definition_value = source_node.node_value
+            result_key = (
+                definition_name,
+                definition_value.field,
+                definition_value.element,
+            )
+            if result_key in connected_results:
+                endpoint = definition_name or "root"
+                raise ValueError(
+                    f"{self.source_op.name}: source graph result "
+                    f"'{endpoint}.{definition_value.field}' has multiple users"
+                )
+            connected_results.add(result_key)
+
+            definition_op = source_ops[definition_name]
+            if any(result.variadic for result in definition_op.results):
+                endpoint = definition_name or "root"
+                raise ValueError(
+                    f"{self.source_op.name}: source graph definition '{endpoint}' "
+                    "cannot have variadic results"
+                )
+            if len(definition_op.results) <= 1:
+                continue
+            dead_result_fields = {
+                guard.field
+                for guard in endpoint_guards[definition_name]
+                if guard.kind is GuardKind.VALUE_NO_USES
+            }
+            live_sibling_fields = tuple(
+                result.name
+                for result in definition_op.results
+                if result.name != definition_value.field
+                and result.name not in dead_result_fields
+            )
+            if live_sibling_fields:
+                endpoint = definition_name or "root"
+                raise ValueError(
+                    f"{self.source_op.name}: source graph definition '{endpoint}' "
+                    "must guard sibling results as unused: "
+                    + ", ".join(live_sibling_fields)
+                )
+
+    def _validate_source_results(self, source_ops: Mapping[str, Op]) -> None:
         covered_results = set[tuple[str, str, int]]()
         for source_node in self.source_nodes:
             if source_node.node_value.kind is SourceValueKind.RESULT:
@@ -259,9 +433,7 @@ class DescriptorRule:
                         source_node.node_value.element,
                     )
                 )
-            if source_node.parent and (
-                source_node.parent_value.kind is SourceValueKind.RESULT
-            ):
+            if source_node.parent_value.kind is SourceValueKind.RESULT:
                 covered_results.add(
                     (
                         source_node.parent,
@@ -274,7 +446,12 @@ class DescriptorRule:
                 result_refs = tuple(emit.results.values())
             elif isinstance(
                 emit,
-                (EmitRegisterConcat, EmitRegisterCopy, EmitRegisterSlice),
+                (
+                    EmitRegisterConcat,
+                    EmitRegisterCopy,
+                    EmitRegisterMove,
+                    EmitRegisterSlice,
+                ),
             ):
                 result_refs = (emit.result,)
             else:
@@ -282,23 +459,48 @@ class DescriptorRule:
             covered_results.update(
                 (value_ref.source_node, value_ref.field, value_ref.element)
                 for value_ref in result_refs
-                if value_ref.kind is SourceValueKind.RESULT and value_ref.source_node
+                if value_ref.kind is SourceValueKind.RESULT
             )
-        for source_node in self.source_nodes:
-            for result in source_node.source_op.results:
-                if result.variadic:
-                    raise ValueError(
-                        f"{source_node.source_op.name}: related source node "
-                        f"'{source_node.name}' cannot have variadic results"
+        for source_node_name, source_op in source_ops.items():
+            endpoint = source_node_name or "root"
+            endpoint_guards = (
+                self.guards
+                if not source_node_name
+                else next(
+                    node.guards
+                    for node in self.source_nodes
+                    if node.name == source_node_name
+                )
+            )
+            for guard in endpoint_guards:
+                if (
+                    guard.kind is GuardKind.VALUE_NO_USES
+                    and source_op.result(guard.field) is not None
+                ):
+                    covered_results.add(
+                        (
+                            source_node_name,
+                            guard.field,
+                            guard.element if guard.element is not None else 0,
+                        )
                     )
-                if (source_node.name, result.name, 0) not in covered_results:
+            for result in source_op.results:
+                if result.variadic:
+                    if source_node_name:
+                        raise ValueError(
+                            f"{source_op.name}: source node '{endpoint}' cannot "
+                            "have variadic results"
+                        )
+                    continue
+                if (source_node_name, result.name, 0) not in covered_results:
+                    rule_key = self.descriptor.key if self.descriptor else "<none>"
                     raise ValueError(
-                        f"{source_node.source_op.name}: related source node "
-                        f"'{source_node.name}' result '{result.name}' is neither "
+                        f"{source_op.name}: descriptor rule '{rule_key}' source "
+                        f"node '{endpoint}' result '{result.name}' is neither "
                         "internal nor bound by the emit program"
                     )
 
-    def _validate_source_memory_index_preservation(self) -> None:
+    def _validate_source_memory_preservation(self) -> None:
         source_memories = tuple(
             emit.source_memory
             for emit in self.emit
@@ -307,6 +509,31 @@ class DescriptorRule:
         )
         if not source_memories:
             return
+        if any(memory.reuse_view_base for memory in source_memories):
+            # One rule shares its materialized offsets across emit rows. Every
+            # row must use the same dynamic/static decomposition.
+            if not all(memory.reuse_view_base for memory in source_memories):
+                raise ValueError(
+                    f"{self.source_op.name}: memory emits must agree on view-base reuse"
+                )
+            offset_used = False
+            for emit in self.emit:
+                if not isinstance(emit, EmitDescriptorOp):
+                    continue
+                for value_ref in emit.operands.values():
+                    if value_ref.kind == SourceValueKind.SOURCE_MEMORY_ADDRESS:
+                        raise ValueError(
+                            f"{self.source_op.name}: view-base reuse requires "
+                            "byte-offset materialization"
+                        )
+                    offset_used |= value_ref.kind in (
+                        SourceValueKind.SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET,
+                        SourceValueKind.SOURCE_MEMORY_BYTE_OFFSET,
+                    )
+            if not offset_used:
+                raise ValueError(
+                    f"{self.source_op.name}: view-base reuse requires a byte offset"
+                )
         memory_access = next(
             (
                 interface
@@ -362,10 +589,10 @@ class DescriptorRule:
                 f"{self.source_op.name}: per-lane-sequence emits must form the "
                 "final contiguous emit-program tail"
             )
-        if len(sequence_emits) < 2:
+        if len(sequence_emits) == 1 and sequence_start == 0:
             raise ValueError(
-                f"{self.source_op.name}: per-lane-sequence emit programs need "
-                "at least two lane emits"
+                f"{self.source_op.name}: a single per-lane-sequence emit "
+                "requires shared setup"
             )
         for sequence_index, emit in enumerate(sequence_emits):
             emit_index = sequence_start + sequence_index
@@ -414,6 +641,19 @@ class DescriptorRule:
                         f"{self.source_op.name}: per-lane-sequence operands "
                         "cannot use value materializers"
                     )
+
+    def _validate_terminator_emit(self) -> None:
+        for emit_index, emit in enumerate(self.emit):
+            if (
+                not isinstance(emit, EmitDescriptorOp)
+                or emit.descriptor.op_kind is not DescriptorOpKind.COND_BR
+            ):
+                continue
+            if emit_index + 1 != len(self.emit):
+                raise ValueError(
+                    f"{self.source_op.name}: low.op.cond_br must be the final "
+                    "emit in a descriptor rule"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,6 +824,20 @@ class RecipeRule:
 
 
 @dataclass(frozen=True, slots=True)
+class UnsupportedRule:
+    """Contract case explicitly rejecting unmatched forms of an operation."""
+
+    source_op: Op
+
+    @property
+    def system(self) -> ContractSystem:
+        return ContractSystem.UNSUPPORTED
+
+    def validate(self, descriptor_set: DescriptorSet) -> None:
+        del descriptor_set
+
+
+@dataclass(frozen=True, slots=True)
 class DescriptorMatrixRule:
     """Contract case handled by the shared descriptor-matrix system."""
 
@@ -617,6 +871,7 @@ type ContractCase = (
     | OrdinalValueAliasRule
     | ValueElideRule
     | RecipeRule
+    | UnsupportedRule
     | DescriptorMatrixRule
 )
 

@@ -19,7 +19,7 @@ void lookup(
     [[loom::noalias]] const Bytes4* input,
     [[loom::noalias, loom::assume_aligned(64)]] const Codebook16* codebook,
     [[loom::noalias]] Codes4* output) {
-  unsigned position = loom::workitem_id.x;
+  unsigned position = loom::kernel::workitem::id.x;
   Bytes4 indices = input[position] & 15;
   output[position] = lookup_indexed(*codebook, indices);
 }
@@ -65,7 +65,7 @@ using Codebook16 = signed char __attribute__((ext_vector_type(16)));
 void lookup(const Bytes4* input, Codes4* output) {
   constexpr Codebook16 table = {-127, -104, -83, -65, -49, -35, -22, -10,
                                1,    13,   25,  38,  53,  69,  89,  113};
-  unsigned position = loom::workitem_id.x;
+  unsigned position = loom::kernel::workitem::id.x;
   Bytes4 indices = input[position] & 15;
   Codes4 result = {table[indices[0]], table[indices[1]], table[indices[2]],
                    table[indices[3]]};
@@ -114,7 +114,7 @@ static Codes4 lookup_indexed(Codebook16 table, Bytes4 indices) {
 [[loom::kernel, loom::workgroup_size(32, 1, 1),
   loom::workgroup_count(1, 1, 1)]]
 void lookup(const Bytes4* input, const Codebook16* codebook, Codes4* output) {
-  unsigned position = loom::workitem_id.x;
+  unsigned position = loom::kernel::workitem::id.x;
   Bytes4 indices = input[position] >> 4;
   output[position] = lookup_indexed(*codebook, indices);
 }

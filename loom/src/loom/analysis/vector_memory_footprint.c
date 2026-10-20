@@ -18,8 +18,10 @@
 #include "loom/analysis/memory_root_bounds.h"
 #include "loom/analysis/symbolic_expr.h"
 #include "loom/analysis/symbolic_expr_proof.h"
+#include "loom/analysis/symbolic_projection.h"
 #include "loom/analysis/vector_memory_mask_bounds.h"
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ir/types.h"
@@ -45,8 +47,11 @@ typedef struct loom_vector_memory_footprint_state_t {
   // Caller-owned verification options.
   const loom_vector_memory_footprint_options_t* options;
 
-  // Call-scoped arena owning all verification analysis storage.
+  // Call-scoped arena owning temporary verification analysis storage.
   iree_arena_allocator_t* arena;
+
+  // Reusable edge-derivation and projection scratch, reset between regions.
+  iree_arena_allocator_t* derivation_arena;
 
   // Per-function value facts visible to footprint proof.
   const loom_value_fact_table_t* fact_table;
@@ -57,11 +62,15 @@ typedef struct loom_vector_memory_footprint_state_t {
   // Invocation-owned value domain when the caller supplies none.
   loom_local_value_domain_t owned_value_domain;
 
-  // Direct CFG argument representatives indexed by value_domain.
+  // Direct CFG argument representatives indexed by value_domain. Storage is
+  // borrowed from the caller when supplied, otherwise owned by arena.
   loom_cfg_value_identity_table_t value_identities;
 
   // Per-function symbolic expression context sharing the fact table above.
   loom_symbolic_expr_context_t expression_context;
+
+  // Latest access-local mask derivation; allocated lazily in arena.
+  loom_vector_memory_mask_scope_t* mask_scope;
 
   // Lazily initialized dominance info for CFG path-sensitive checks.
   loom_dominance_info_t dominance;
@@ -542,28 +551,6 @@ static iree_status_t loom_vector_memory_footprint_fail_linear_span(
   return iree_diagnostic_emit(state->options->emitter, &emission);
 }
 
-static bool loom_vector_memory_footprint_facts_i64_bounds(
-    loom_value_facts_t facts, int64_t* out_lower, int64_t* out_upper) {
-  if (loom_value_facts_is_float(facts)) {
-    return false;
-  }
-  if (facts.range_lo == INT64_MIN || facts.range_hi == INT64_MAX) {
-    return false;
-  }
-  *out_lower = facts.range_lo;
-  *out_upper = facts.range_hi;
-  return true;
-}
-
-static bool loom_vector_memory_footprint_facts_exact_i64(
-    loom_value_facts_t facts, int64_t* out_value) {
-  if (!loom_value_facts_is_exact(facts) || loom_value_facts_is_float(facts)) {
-    return false;
-  }
-  *out_value = facts.range_lo;
-  return true;
-}
-
 static int64_t loom_vector_memory_footprint_vector_axis(
     const loom_vector_memory_access_t* access, uint8_t view_axis) {
   return view_axis >= access->first_vector_axis
@@ -768,6 +755,31 @@ static iree_status_t loom_vector_memory_footprint_scale_axis_proof(
       state, bound, logical_element_count, out_bound);
 }
 
+// Keeps a compound expression's guarded SSA identity when its access coordinate
+// adds a constant. Expansion already retained the exact dynamic
+// materialization; querying it here does not walk the arithmetic producers
+// again.
+static iree_status_t loom_vector_memory_footprint_materialized_relation_expr(
+    loom_vector_memory_footprint_state_t* state, loom_value_id_t value,
+    loom_symbolic_expr_t* inout_expression, bool* out_changed) {
+  *out_changed = false;
+  loom_symbolic_expr_summary_t summary = {0};
+  if (!loom_symbolic_expr_context_try_lookup_summary(&state->expression_context,
+                                                     value, &summary) ||
+      summary.materialized_dynamic_value_id == LOOM_VALUE_ID_INVALID ||
+      summary.expression.constant == 0) {
+    return iree_ok_status();
+  }
+  loom_symbolic_expr_t dynamic = {0};
+  IREE_RETURN_IF_ERROR(loom_symbolic_expr_value(
+      &state->expression_context, summary.materialized_dynamic_value_id,
+      &dynamic));
+  IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_expr_add_i64(
+      state, &dynamic, summary.expression.constant, inout_expression));
+  *out_changed = true;
+  return iree_ok_status();
+}
+
 static iree_status_t
 loom_vector_memory_footprint_prove_axis_upper_bound_from_origin_relation(
     loom_vector_memory_footprint_state_t* state,
@@ -790,8 +802,9 @@ loom_vector_memory_footprint_prove_axis_upper_bound_from_origin_relation(
   IREE_RETURN_IF_ERROR(
       loom_vector_memory_footprint_expr_add(state, &origin, extent, &end));
   loom_symbolic_expr_t bound = {0};
+  loom_value_id_t bound_value = LOOM_VALUE_ID_INVALID;
   if (loom_type_dim_is_dynamic_at(memory_access->view_type, view_axis)) {
-    loom_value_id_t bound_value =
+    bound_value =
         loom_type_dim_value_id_at(memory_access->view_type, view_axis);
     if (bound_value == LOOM_VALUE_ID_INVALID) {
       return iree_ok_status();
@@ -805,6 +818,25 @@ loom_vector_memory_footprint_prove_axis_upper_bound_from_origin_relation(
   }
   IREE_RETURN_IF_ERROR(
       loom_vector_memory_footprint_prove_le(state, &end, &bound, out_proven));
+  if (*out_proven) {
+    return iree_ok_status();
+  }
+
+  bool origin_changed = false;
+  bool bound_changed = false;
+  IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_materialized_relation_expr(
+      state, origin_value, &origin, &origin_changed));
+  if (bound_value != LOOM_VALUE_ID_INVALID) {
+    IREE_RETURN_IF_ERROR(
+        loom_vector_memory_footprint_materialized_relation_expr(
+            state, bound_value, &bound, &bound_changed));
+  }
+  if (origin_changed || bound_changed) {
+    IREE_RETURN_IF_ERROR(
+        loom_vector_memory_footprint_expr_add(state, &origin, extent, &end));
+    return loom_vector_memory_footprint_prove_le(state, &end, &bound,
+                                                 out_proven);
+  }
   return iree_ok_status();
 }
 
@@ -901,6 +933,10 @@ static iree_status_t loom_vector_memory_footprint_check_direct_axis(
         unit_extent ? IREE_SV("vector_footprint.scalar_axis_upper_bound")
                     : IREE_SV("vector_footprint.full_vector_upper_bound"));
   }
+  // The root allocation check consumes this endpoint, not the symbolic proof.
+  // Retain the proved bound without changing the shared value's ambient facts.
+  (void)loom_value_facts_refine_relation(LOOM_PREDICATE_LE, end_facts,
+                                         proof_bound.facts, &end_facts, NULL);
   *out_exclusive_end_facts = end_facts;
   return iree_ok_status();
 }
@@ -995,6 +1031,9 @@ static iree_status_t loom_vector_memory_footprint_check_origin_axis(
         LOOM_ERR_SUBRANGE_011,
         IREE_SV("vector_footprint.scalar_axis_upper_bound"));
   }
+  (void)loom_value_facts_refine_relation(LOOM_PREDICATE_LE, exclusive_end.facts,
+                                         bound.facts, &exclusive_end.facts,
+                                         NULL);
   *out_exclusive_end_facts = exclusive_end.facts;
   return iree_ok_status();
 }
@@ -1033,111 +1072,18 @@ static iree_status_t loom_vector_memory_footprint_check_scalar(
   return iree_ok_status();
 }
 
-static bool loom_vector_memory_footprint_iota_bounds_from_facts(
+static bool loom_vector_memory_footprint_offset_bounds_from_facts(
     loom_vector_memory_footprint_state_t* state, loom_value_facts_t facts,
     loom_type_t offsets_type, int64_t* out_lower, int64_t* out_upper) {
   if (loom_type_rank(offsets_type) != 1) {
     return false;
   }
-  loom_value_fact_vector_iota_t iota = {0};
-  if (!loom_value_facts_query_vector_iota(&state->fact_table->context, facts,
-                                          &iota)) {
-    return false;
-  }
 
-  int64_t base_lower = 0;
-  int64_t base_upper = 0;
-  int64_t step = 0;
-  if (!loom_vector_memory_footprint_facts_i64_bounds(iota.base, &base_lower,
-                                                     &base_upper) ||
-      !loom_vector_memory_footprint_facts_exact_i64(iota.step, &step)) {
-    return false;
-  }
-
-  int64_t lane_count_upper = 0;
-  if (!loom_type_dim_is_dynamic_at(offsets_type, 0)) {
-    lane_count_upper = loom_type_dim_static_size_at(offsets_type, 0);
-    if (lane_count_upper <= 0) {
-      *out_lower = 0;
-      *out_upper = -1;
-      return true;
-    }
-  } else {
-    loom_value_facts_t count_facts = loom_value_fact_table_lookup(
-        state->fact_table, loom_type_dim_value_id_at(offsets_type, 0));
-    int64_t lane_count_lower = 0;
-    if (!loom_value_facts_is_positive(count_facts) ||
-        !loom_vector_memory_footprint_facts_i64_bounds(
-            count_facts, &lane_count_lower, &lane_count_upper)) {
-      return false;
-    }
-  }
-
-  int64_t last_lane = 0;
-  int64_t last_delta = 0;
-  if (!iree_checked_sub_i64(lane_count_upper, 1, &last_lane) ||
-      !iree_checked_mul_i64(last_lane, step, &last_delta)) {
-    return false;
-  }
-
-  if (step >= 0) {
-    if (!iree_checked_add_i64(base_upper, last_delta, out_upper)) {
-      return false;
-    }
-    *out_lower = base_lower;
-  } else {
-    if (!iree_checked_add_i64(base_lower, last_delta, out_lower)) {
-      return false;
-    }
-    *out_upper = base_upper;
-  }
-  return true;
-}
-
-static bool loom_vector_memory_footprint_offset_bounds_from_facts(
-    loom_vector_memory_footprint_state_t* state, loom_value_facts_t facts,
-    loom_type_t offsets_type, int64_t* out_lower, int64_t* out_upper) {
-  if (loom_vector_memory_footprint_iota_bounds_from_facts(
-          state, facts, offsets_type, out_lower, out_upper)) {
-    return true;
-  }
-
-  loom_value_fact_uniform_element_t uniform = {0};
-  if (loom_value_facts_query_uniform_element(&state->fact_table->context, facts,
-                                             &uniform)) {
-    return loom_vector_memory_footprint_facts_i64_bounds(uniform.element,
-                                                         out_lower, out_upper);
-  }
-
-  loom_value_fact_small_static_lanes_t lanes = {0};
-  if (!loom_value_facts_query_small_static_lanes(&state->fact_table->context,
-                                                 facts, &lanes)) {
-    return false;
-  }
-  if (lanes.count == 0) {
-    *out_lower = 0;
-    *out_upper = -1;
-    return true;
-  }
-  int64_t lower = INT64_MAX;
-  int64_t upper = INT64_MIN;
-  for (iree_host_size_t i = 0; i < lanes.count; ++i) {
-    int64_t lane_lower = 0;
-    int64_t lane_upper = 0;
-    if (!loom_vector_memory_footprint_facts_i64_bounds(
-            lanes.lanes[i], &lane_lower, &lane_upper)) {
-      return false;
-    }
-    if (lane_lower < lower) {
-      lower = lane_lower;
-    }
-    if (lane_upper > upper) {
-      upper = lane_upper;
-    }
-  }
-  *out_lower = lower;
-  *out_upper = upper;
-  return true;
+  return loom_value_facts_query_vector_integer_bounds(
+      &state->fact_table->context, facts,
+      loom_value_fact_table_maximum_element_count(state->fact_table,
+                                                  offsets_type),
+      out_lower, out_upper);
 }
 
 static bool loom_vector_memory_footprint_value_defines_iota(
@@ -1171,7 +1117,7 @@ static iree_status_t loom_vector_memory_footprint_iota_offset_bounds(
   loom_value_facts_t step_facts = loom_value_fact_table_lookup(
       state->fact_table, loom_vector_iota_step(iota_op));
   int64_t step = 0;
-  if (!loom_vector_memory_footprint_facts_exact_i64(step_facts, &step)) {
+  if (!loom_value_facts_as_exact_i64(step_facts, &step)) {
     return iree_ok_status();
   }
 
@@ -1238,8 +1184,19 @@ static iree_status_t loom_vector_memory_footprint_offset_bounds(
   const loom_op_t* iota_op = NULL;
   if (loom_vector_memory_footprint_value_defines_iota(
           state->module, access->offsets, &iota_op)) {
-    IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_iota_offset_bounds(
-        state, iota_op, offsets_type, out_lower, out_upper, out_known));
+    // Fixed-width coordinates may wrap rather than follow the mathematical
+    // affine endpoints. Only use those endpoints when the retained facts prove
+    // the whole sequence fits; source-index coordinates keep their own domain.
+    const loom_value_facts_t facts =
+        loom_value_fact_table_lookup(state->fact_table, access->offsets);
+    int64_t lower = 0;
+    int64_t upper = 0;
+    if (loom_type_element_type(offsets_type) == LOOM_SCALAR_TYPE_INDEX ||
+        loom_vector_memory_footprint_offset_bounds_from_facts(
+            state, facts, offsets_type, &lower, &upper)) {
+      IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_iota_offset_bounds(
+          state, iota_op, offsets_type, out_lower, out_upper, out_known));
+    }
     if (*out_known) {
       return iree_ok_status();
     }
@@ -1421,6 +1378,9 @@ static iree_status_t loom_vector_memory_footprint_check_offsets(
     return loom_vector_memory_footprint_fail_linear_span(state, access,
                                                          LOOM_ERR_SUBRANGE_016);
   }
+  (void)loom_value_facts_refine_relation(LOOM_PREDICATE_LE, exclusive_end.facts,
+                                         storage_span.facts,
+                                         &exclusive_end.facts, NULL);
   return loom_vector_memory_footprint_check_root_element_end(
       state, access, &memory_access, exclusive_end.facts);
 }
@@ -1475,14 +1435,13 @@ static bool loom_vector_memory_footprint_access_is_scalar_element(
 
 static iree_status_t loom_vector_memory_footprint_check_access(
     loom_vector_memory_footprint_state_t* state,
-    const loom_vector_memory_footprint_access_t* access) {
+    const loom_vector_memory_footprint_access_t* access,
+    const loom_condition_fact_scope_t* lexical_scope) {
   state->current_access_failed = false;
   loom_vector_memory_mask_bounds_t mask_bounds = {0};
-  if (access->mask != LOOM_VALUE_ID_INVALID) {
-    IREE_RETURN_IF_ERROR(loom_vector_memory_mask_bounds_analyze(
-        state->module, state->fact_table, &state->expression_context,
-        access->mask, &mask_bounds));
-  }
+  IREE_RETURN_IF_ERROR(loom_vector_memory_mask_bounds_analyze(
+      &state->expression_context, lexical_scope, access->mask,
+      &state->mask_scope, &mask_bounds));
   if (loom_vector_memory_footprint_access_empty(access) ||
       mask_bounds.definitely_empty) {
     ++state->result->skipped_op_count;
@@ -1597,8 +1556,10 @@ static iree_status_t
 loom_vector_memory_footprint_condition_scope_for_assumption(
     loom_vector_memory_footprint_state_t* state,
     const loom_condition_fact_scope_t* parent, loom_value_id_t condition,
-    bool assumed_truth, const loom_condition_fact_scope_t** out_scope) {
+    bool assumed_truth, const loom_condition_fact_scope_t** out_scope,
+    loom_control_participant_zeros_t* out_zeros) {
   *out_scope = parent;
+  *out_zeros = 0;
   if (!state->fact_table) {
     return iree_ok_status();
   }
@@ -1607,6 +1568,15 @@ loom_vector_memory_footprint_condition_scope_for_assumption(
   IREE_RETURN_IF_ERROR(loom_condition_facts_query_complete(
       &state->expression_context.condition_query, state->fact_table, condition,
       assumed_truth, &derivation));
+  if (state->options->participants) {
+    if (state->expression_context.condition_scope) {
+      state->expression_context.condition_scope = NULL;
+      loom_symbolic_expr_context_reset(&state->expression_context);
+    }
+    IREE_RETURN_IF_ERROR(loom_control_participant_zeros_from_conditions(
+        &state->expression_context, derivation.integer_facts.integer_relations,
+        derivation.integer_facts.integer_relation_count, out_zeros));
+  }
   if (derivation.integer_facts.integer_relation_count == 0 &&
       derivation.boolean_fact_count == 0) {
     return iree_ok_status();
@@ -1635,6 +1605,8 @@ typedef struct loom_vector_memory_footprint_frame_t {
   loom_vector_memory_footprint_frame_kind_t kind;
   // Lexical condition facts active while processing this frame.
   const loom_condition_fact_scope_t* condition_scope;
+  // Topology coordinates proven zero by the complete enclosing control path.
+  loom_control_participant_zeros_t participant_zeros;
   union {
     // Region waiting to expand into block frames.
     loom_region_t* region;
@@ -1691,10 +1663,35 @@ static void loom_vector_memory_footprint_stack_pop(
   }
 }
 
+static iree_status_t loom_vector_memory_footprint_query_relation_anchors(
+    void* user_data, loom_value_id_t relation_value_id,
+    const loom_cfg_condition_relation_anchor_sink_t* sink) {
+  loom_symbolic_expr_context_t* context =
+      (loom_symbolic_expr_context_t*)user_data;
+  loom_symbolic_expr_t expression = {0};
+  IREE_RETURN_IF_ERROR(
+      loom_symbolic_expr_from_value(context, relation_value_id, &expression));
+  for (iree_host_size_t i = 0; i < expression.term_count; ++i) {
+    IREE_RETURN_IF_ERROR(
+        sink->emit(sink->user_data, expression.terms[i].value_id));
+    if (expression.terms[i].relation_value_id != expression.terms[i].value_id) {
+      IREE_RETURN_IF_ERROR(
+          sink->emit(sink->user_data, expression.terms[i].relation_value_id));
+    }
+  }
+  const loom_symbolic_projection_t* projection =
+      loom_symbolic_expr_lookup_projection(context, &expression);
+  if (projection != NULL) {
+    IREE_RETURN_IF_ERROR(sink->emit(sink->user_data, projection->value_id));
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t loom_vector_memory_footprint_push_region(
     loom_vector_memory_footprint_state_t* state,
     loom_vector_memory_footprint_stack_t* stack, loom_region_t* region,
-    const loom_condition_fact_scope_t* condition_scope) {
+    const loom_condition_fact_scope_t* condition_scope,
+    loom_control_participant_zeros_t participant_zeros) {
   if (!region) {
     return iree_ok_status();
   }
@@ -1703,6 +1700,7 @@ static iree_status_t loom_vector_memory_footprint_push_region(
       (loom_vector_memory_footprint_frame_t){
           .kind = LOOM_VECTOR_MEMORY_FOOTPRINT_FRAME_REGION,
           .condition_scope = condition_scope,
+          .participant_zeros = participant_zeros,
           .region = region,
       });
 }
@@ -1710,15 +1708,21 @@ static iree_status_t loom_vector_memory_footprint_push_region(
 static iree_status_t loom_vector_memory_footprint_push_block(
     loom_vector_memory_footprint_state_t* state,
     loom_vector_memory_footprint_stack_t* stack, loom_block_t* block,
-    const loom_condition_fact_scope_t* condition_scope) {
+    const loom_condition_fact_scope_t* condition_scope,
+    loom_control_participant_zeros_t participant_zeros) {
   if (!block) {
     return iree_ok_status();
+  }
+  if (state->options->participants) {
+    IREE_RETURN_IF_ERROR(loom_control_participant_table_append(
+        state->options->participants, block, participant_zeros));
   }
   return loom_vector_memory_footprint_stack_push(
       state->arena, stack,
       (loom_vector_memory_footprint_frame_t){
           .kind = LOOM_VECTOR_MEMORY_FOOTPRINT_FRAME_BLOCK,
           .condition_scope = condition_scope,
+          .participant_zeros = participant_zeros,
           .block =
               {
                   .block = block,
@@ -1730,11 +1734,12 @@ static iree_status_t loom_vector_memory_footprint_push_block(
 static iree_status_t loom_vector_memory_footprint_push_structured_blocks(
     loom_vector_memory_footprint_state_t* state,
     loom_vector_memory_footprint_stack_t* stack, loom_region_t* region,
-    const loom_condition_fact_scope_t* condition_scope) {
+    const loom_condition_fact_scope_t* condition_scope,
+    loom_control_participant_zeros_t participant_zeros) {
   for (iree_host_size_t i = region->block_count; i > 0; --i) {
     IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_block(
         state, stack, loom_region_block(region, (uint16_t)(i - 1)),
-        condition_scope));
+        condition_scope, participant_zeros));
   }
   return iree_ok_status();
 }
@@ -1742,7 +1747,8 @@ static iree_status_t loom_vector_memory_footprint_push_structured_blocks(
 static iree_status_t loom_vector_memory_footprint_push_cfg_blocks(
     loom_vector_memory_footprint_state_t* state,
     loom_vector_memory_footprint_stack_t* stack, loom_region_t* region,
-    const loom_condition_fact_scope_t* condition_scope) {
+    const loom_condition_fact_scope_t* condition_scope,
+    loom_control_participant_zeros_t participant_zeros) {
   IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_ensure_dominance(state));
 
   const loom_value_fact_cfg_region_t* retained_region =
@@ -1751,19 +1757,36 @@ static iree_status_t loom_vector_memory_footprint_push_cfg_blocks(
   const loom_cfg_graph_t* graph = &retained_region->graph;
   if (graph->malformed) {
     return loom_vector_memory_footprint_push_structured_blocks(
-        state, stack, region, condition_scope);
+        state, stack, region, condition_scope, participant_zeros);
   }
   IREE_RETURN_IF_ERROR(loom_cfg_value_identity_table_update(
       &state->value_identities, retained_region, &state->dominance,
       state->arena));
+  state->expression_context.condition_scope = NULL;
+  loom_symbolic_expr_context_reset(&state->expression_context);
 
   loom_cfg_condition_relation_table_t* condition_table = NULL;
   IREE_RETURN_IF_ERROR(iree_arena_allocate(
       state->arena, sizeof(*condition_table), (void**)&condition_table));
-  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_table_compute(
+  const loom_cfg_condition_relation_anchor_provider_t anchor_provider = {
+      .user_data = &state->expression_context,
+      .query = loom_vector_memory_footprint_query_relation_anchors,
+  };
+  iree_arena_reset(state->derivation_arena);
+  loom_cfg_condition_edge_facts_t* edge_facts = NULL;
+  IREE_RETURN_IF_ERROR(loom_cfg_condition_derive_edges(
+      state->module, graph, state->fact_table, state->value_domain,
+      state->derivation_arena, &edge_facts));
+  IREE_RETURN_IF_ERROR(loom_cfg_condition_relation_table_compute_from_edges(
       state->module, graph, state->fact_table, &state->dominance,
-      state->value_domain, &state->value_identities, state->arena,
-      condition_table));
+      state->value_domain, &state->value_identities, &anchor_provider,
+      edge_facts, state->derivation_arena, state->arena, condition_table));
+  loom_control_participant_zeros_t* block_zeros = NULL;
+  if (state->options->participants) {
+    IREE_RETURN_IF_ERROR(loom_control_participant_zeros_for_cfg(
+        graph, edge_facts, &state->expression_context, state->derivation_arena,
+        &block_zeros));
+  }
   for (iree_host_size_t i = graph->block_count; i > 0; --i) {
     uint16_t block_index = (uint16_t)(i - 1);
     if (!loom_cfg_graph_block_is_reachable(graph, block_index)) {
@@ -1773,6 +1796,8 @@ static iree_status_t loom_vector_memory_footprint_push_cfg_blocks(
     if (!block) {
       continue;
     }
+    const loom_control_participant_zeros_t zeros =
+        participant_zeros | (block_zeros ? block_zeros[block_index] : 0);
     const loom_cfg_condition_relation_view_t* block_view =
         loom_cfg_condition_relation_table_block(condition_table, block_index);
     if (block_view == NULL ||
@@ -1780,7 +1805,7 @@ static iree_status_t loom_vector_memory_footprint_push_cfg_blocks(
          block_view->boolean_values[0] == LOOM_CONDITION_RELATION_SET_EMPTY &&
          block_view->boolean_values[1] == LOOM_CONDITION_RELATION_SET_EMPTY)) {
       IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_block(
-          state, stack, block, condition_scope));
+          state, stack, block, condition_scope, zeros));
       continue;
     }
     loom_condition_fact_scope_t* block_scope = NULL;
@@ -1789,48 +1814,60 @@ static iree_status_t loom_vector_memory_footprint_push_cfg_blocks(
     loom_condition_fact_scope_initialize_indexed(
         condition_scope, condition_table, block_view, block_scope);
     IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_block(
-        state, stack, block, block_scope));
+        state, stack, block, block_scope, zeros));
   }
+  // All surviving proofs own their storage, and block summaries are copied.
+  iree_arena_reset(state->derivation_arena);
   return iree_ok_status();
 }
 
 static iree_status_t loom_vector_memory_footprint_expand_region(
     loom_vector_memory_footprint_state_t* state,
     loom_vector_memory_footprint_stack_t* stack, loom_region_t* region,
-    const loom_condition_fact_scope_t* condition_scope) {
+    const loom_condition_fact_scope_t* condition_scope,
+    loom_control_participant_zeros_t participant_zeros) {
   if (iree_any_bit_set(region->flags, LOOM_REGION_INSTANCE_FLAG_CFG)) {
-    return loom_vector_memory_footprint_push_cfg_blocks(state, stack, region,
-                                                        condition_scope);
+    return loom_vector_memory_footprint_push_cfg_blocks(
+        state, stack, region, condition_scope, participant_zeros);
   }
   return loom_vector_memory_footprint_push_structured_blocks(
-      state, stack, region, condition_scope);
+      state, stack, region, condition_scope, participant_zeros);
 }
 
 static iree_status_t loom_vector_memory_footprint_push_op_regions(
     loom_vector_memory_footprint_state_t* state,
     loom_vector_memory_footprint_stack_t* stack, loom_op_t* op,
-    const loom_condition_fact_scope_t* condition_scope) {
+    const loom_condition_fact_scope_t* condition_scope,
+    loom_control_participant_zeros_t participant_zeros) {
   if (loom_scf_if_isa(op)) {
     const loom_condition_fact_scope_t* else_scope = NULL;
+    loom_control_participant_zeros_t else_zeros = 0;
     IREE_RETURN_IF_ERROR(
         loom_vector_memory_footprint_condition_scope_for_assumption(
             state, condition_scope, loom_scf_if_condition(op),
-            /*assumed_truth=*/false, &else_scope));
+            /*assumed_truth=*/false, &else_scope, &else_zeros));
     IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_region(
-        state, stack, loom_scf_if_else_region(op), else_scope));
+        state, stack, loom_scf_if_else_region(op), else_scope,
+        participant_zeros | else_zeros));
     const loom_condition_fact_scope_t* then_scope = NULL;
+    loom_control_participant_zeros_t then_zeros = 0;
     IREE_RETURN_IF_ERROR(
         loom_vector_memory_footprint_condition_scope_for_assumption(
             state, condition_scope, loom_scf_if_condition(op),
-            /*assumed_truth=*/true, &then_scope));
+            /*assumed_truth=*/true, &then_scope, &then_zeros));
     return loom_vector_memory_footprint_push_region(
-        state, stack, loom_scf_if_then_region(op), then_scope);
+        state, stack, loom_scf_if_then_region(op), then_scope,
+        participant_zeros | then_zeros);
   }
 
   loom_region_t** regions = loom_op_regions(op);
   for (uint8_t i = op->region_count; i > 0; --i) {
+    const loom_condition_fact_scope_t* region_scope = NULL;
+    IREE_RETURN_IF_ERROR(loom_condition_fact_scope_extend_region(
+        state->fact_table, regions[i - 1], condition_scope, state->arena,
+        &region_scope));
     IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_region(
-        state, stack, regions[i - 1], condition_scope));
+        state, stack, regions[i - 1], region_scope, participant_zeros));
   }
   return iree_ok_status();
 }
@@ -1851,7 +1888,8 @@ static iree_status_t loom_vector_memory_footprint_check_with_stack(
   IREE_RETURN_IF_ERROR(
       loom_vector_memory_footprint_stack_initialize(state->arena, &stack));
   IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_region(
-      state, &stack, root_region, /*condition_scope=*/NULL));
+      state, &stack, root_region, /*condition_scope=*/NULL,
+      /*participant_zeros=*/0));
 
   while (stack.count > 0) {
     if (loom_vector_memory_footprint_should_suppress_error(state)) {
@@ -1863,9 +1901,11 @@ static iree_status_t loom_vector_memory_footprint_check_with_stack(
       loom_region_t* region = frame->region;
       const loom_condition_fact_scope_t* condition_scope =
           frame->condition_scope;
+      const loom_control_participant_zeros_t participant_zeros =
+          frame->participant_zeros;
       loom_vector_memory_footprint_stack_pop(&stack);
       IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_expand_region(
-          state, &stack, region, condition_scope));
+          state, &stack, region, condition_scope, participant_zeros));
       continue;
     }
 
@@ -1875,19 +1915,21 @@ static iree_status_t loom_vector_memory_footprint_check_with_stack(
       continue;
     }
     frame->block.op = op->next_op;
-    loom_vector_memory_footprint_activate_condition_scope(
-        state, frame->condition_scope);
 
     loom_vector_memory_footprint_access_t access = {0};
     if (loom_vector_memory_footprint_describe_op(state, op, &access)) {
-      IREE_RETURN_IF_ERROR(
-          loom_vector_memory_footprint_check_access(state, &access));
+      IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_check_access(
+          state, &access, frame->condition_scope));
       if (loom_vector_memory_footprint_should_suppress_error(state)) {
         continue;
       }
     }
-    IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_op_regions(
-        state, &stack, op, frame->condition_scope));
+    if (op->region_count) {
+      loom_vector_memory_footprint_activate_condition_scope(
+          state, frame->condition_scope);
+      IREE_RETURN_IF_ERROR(loom_vector_memory_footprint_push_op_regions(
+          state, &stack, op, frame->condition_scope, frame->participant_zeros));
+    }
   }
   return iree_ok_status();
 }
@@ -1907,11 +1949,14 @@ iree_status_t loom_vector_memory_footprint_verify_function(
 
   iree_arena_allocator_t arena;
   iree_arena_initialize(module->arena.block_pool, &arena);
+  iree_arena_allocator_t derivation_arena;
+  iree_arena_initialize(module->arena.block_pool, &derivation_arena);
   loom_vector_memory_footprint_state_t state = {
       .module = module,
       .root_region = body,
       .options = options,
       .arena = &arena,
+      .derivation_arena = &derivation_arena,
       .fact_table = options->fact_table,
       .result = out_result,
   };
@@ -1926,8 +1971,12 @@ iree_status_t loom_vector_memory_footprint_verify_function(
     }
   }
   if (iree_status_is_ok(status)) {
-    status = loom_cfg_value_identity_table_initialize(
-        state.value_domain, &arena, &state.value_identities);
+    if (options->value_identities) {
+      state.value_identities = *options->value_identities;
+    } else {
+      status = loom_cfg_value_identity_table_initialize(
+          state.value_domain, &arena, &state.value_identities);
+    }
   }
   if (iree_status_is_ok(status)) {
     loom_symbolic_expr_context_initialize(module, state.value_domain,
@@ -1936,9 +1985,13 @@ iree_status_t loom_vector_memory_footprint_verify_function(
     state.expression_context.value_identities = &state.value_identities;
     status = loom_vector_memory_footprint_check_with_stack(&state, body);
   }
+  if (iree_status_is_ok(status) && options->participants) {
+    loom_control_participant_table_publish(options->participants);
+  }
   if (!options->value_domain && state.value_domain) {
     loom_local_value_domain_release(&state.owned_value_domain);
   }
+  iree_arena_deinitialize(&derivation_arena);
   iree_arena_deinitialize(&arena);
   return status;
 }

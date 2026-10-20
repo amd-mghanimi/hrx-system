@@ -17,9 +17,11 @@
 #include "loom/codegen/low/descriptors.h"
 #include "loom/codegen/low/placement.h"
 #include "loom/codegen/low/storage_lease.h"
+#include "loom/codegen/low/storage_transport.h"
 #include "loom/codegen/low/target_binding.h"
 #include "loom/ir/ir.h"
 #include "loom/util/cfg_graph.h"
+#include "loom/util/cfg_loop.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -27,6 +29,16 @@ extern "C" {
 
 typedef struct loom_low_allocation_storage_lease_unit_index_t
     loom_low_allocation_storage_lease_unit_index_t;
+
+enum loom_low_allocation_flag_bits_e {
+  // Retain coalesced branch inputs indexed by destination value ordinal.
+  LOOM_LOW_ALLOCATION_FLAG_RETAIN_COALESCED_INCOMING_INDEX = 1u << 0,
+  // Retain storage-release action chains indexed by insertion schedule node.
+  LOOM_LOW_ALLOCATION_FLAG_RETAIN_STORAGE_RELEASE_ACTION_INDEX = 1u << 1,
+};
+typedef uint32_t loom_low_allocation_flags_t;
+
+#define LOOM_LOW_ALLOCATION_EDGE_COPY_INDEX_NONE UINT32_MAX
 
 typedef enum loom_low_allocation_remark_kind_e {
   // Unknown or uninitialized remark kind.
@@ -88,6 +100,21 @@ typedef struct loom_low_allocation_spill_plan_t {
   uint32_t reload_count;
 } loom_low_allocation_spill_plan_t;
 
+// Distinct fixed retained-read blockers encountered by spilled assignments, in
+// spill-decision order. Each assignment attempt owns its list independently of
+// the immutable fixed-value facts shared by alternative colorings. An index is
+// present iff it is the last entry or its successor is nonzero.
+typedef struct loom_low_allocation_retained_fixed_values_t {
+  // Arena-owned successors indexed by fixed value; each successor is encoded
+  // as index plus one. Zero terminates the list and marks absent non-tail
+  // entries. NULL for an empty list; otherwise sized to the fixed-value count.
+  uint32_t* next_indices_plus_one;
+  // First fixed-value index plus one, or zero for an empty list.
+  uint32_t first_index_plus_one;
+  // Last fixed-value index plus one, or zero for an empty list.
+  uint32_t last_index_plus_one;
+} loom_low_allocation_retained_fixed_values_t;
+
 // Copy/coalescing decision for one low.copy op.
 typedef struct loom_low_allocation_copy_decision_t {
   // Source SSA value consumed by the low.copy op.
@@ -115,8 +142,9 @@ typedef struct loom_low_allocation_edge_copy_t {
   loom_value_ordinal_t source_ordinal;
   // Function-local ordinal of the destination block argument.
   loom_value_ordinal_t destination_ordinal;
-  // Assignment index for |source_ordinal|.
-  uint32_t source_assignment_index;
+  // Previous coalesced edge-copy index for |destination_ordinal|, or
+  // LOOM_LOW_ALLOCATION_EDGE_COPY_INDEX_NONE when absent or materialized.
+  uint32_t next_coalesced_incoming_copy_index;
   // Assignment index for |destination_ordinal|.
   uint32_t destination_assignment_index;
   // Unit offset inside the source assignment.
@@ -144,16 +172,104 @@ typedef struct loom_low_allocation_edge_copy_group_t {
   loom_low_move_group_t move_group;
 } loom_low_allocation_edge_copy_group_t;
 
-// Final move group for one materialized packet-local parallel move operation.
+// The high bit of an exact packet-transfer relation index distinguishes a
+// materialized run from a forwarded run. Placement relation tables use the
+// remaining compact index domain.
+#define LOOM_LOW_ALLOCATION_PACKET_TRANSFER_MATERIALIZED_BIT \
+  UINT32_C(0x80000000)
+#define LOOM_LOW_ALLOCATION_PACKET_TRANSFER_RELATION_INDEX_MASK \
+  UINT32_C(0x7FFFFFFF)
+
+// One maximal live run within an exact packet-local structural transfer.
+//
+// The referenced placement relation owns the source/result value ordinals and
+// base unit offsets. Uniform groups retain no rows; this table exists only when
+// allocation split one group across forwarded, materialized, or dead units.
+typedef struct loom_low_allocation_packet_transfer_t {
+  // Placement relation index with MATERIALIZED_BIT set for a physical copy.
+  uint32_t encoded_relation_index;
+  // Unit offset within the placement relation.
+  uint32_t relation_unit_offset;
+  // Number of consecutive live units with the same transfer kind.
+  uint32_t unit_count;
+} loom_low_allocation_packet_transfer_t;
+
+static_assert(
+    sizeof(loom_low_allocation_packet_transfer_t) == 12,
+    "packet transfer runs must retain their compact allocation shape");
+
+static inline uint32_t loom_low_allocation_packet_transfer_relation_index(
+    const loom_low_allocation_packet_transfer_t* transfer) {
+  return transfer->encoded_relation_index &
+         LOOM_LOW_ALLOCATION_PACKET_TRANSFER_RELATION_INDEX_MASK;
+}
+
+static inline bool loom_low_allocation_packet_transfer_is_materialized(
+    const loom_low_allocation_packet_transfer_t* transfer) {
+  return (transfer->encoded_relation_index &
+          LOOM_LOW_ALLOCATION_PACKET_TRANSFER_MATERIALIZED_BIT) != 0;
+}
+
+enum loom_low_allocation_packet_transfer_group_flag_bits_e {
+  // At least one result range forwards its source dependency.
+  LOOM_LOW_ALLOCATION_PACKET_TRANSFER_GROUP_FLAG_FORWARDED = 1u << 0,
+  // At least one result range is materialized by a physical move.
+  LOOM_LOW_ALLOCATION_PACKET_TRANSFER_GROUP_FLAG_MATERIALIZED = 1u << 1,
+  // The group indexes exact packet-transfer rows. Uniform groups omit them.
+  LOOM_LOW_ALLOCATION_PACKET_TRANSFER_GROUP_FLAG_EXACT = 1u << 2,
+};
+typedef uint8_t loom_low_allocation_packet_transfer_group_flags_t;
+
+// Final transfer facts for one packet-local parallel move operation.
 typedef struct loom_low_allocation_packet_move_group_t {
   // Source-order ordinal of the owning low.copy, low.move, low.slice, or
   // low.concat.
   uint32_t source_ordinal;
-  // Structural placement cause that produced the move group.
+  // First exact row in the allocation's packet-transfer table.
+  uint32_t transfer_start;
+  // Number of exact rows, or zero for a uniform or dead group.
+  uint32_t transfer_count;
+  // Structural placement cause that produced the group.
   loom_low_placement_cause_t cause;
+  // Forwarded, materialized, and exact-range facts for the group.
+  loom_low_allocation_packet_transfer_group_flags_t transfer_flags;
   // Final sequential physical moves emitted by the owning operation.
   loom_low_move_group_t move_group;
 } loom_low_allocation_packet_move_group_t;
+
+#if UINTPTR_MAX == UINT64_MAX
+static_assert(sizeof(loom_low_allocation_packet_move_group_t) == 48,
+              "packet transfer groups must retain their compact shape");
+#else
+static_assert(sizeof(loom_low_allocation_packet_move_group_t) == 32,
+              "packet transfer groups must retain their compact shape");
+#endif  // UINTPTR_MAX == UINT64_MAX
+
+// Call transport belongs to the call that consumes the arguments. Each range
+// indexes the allocation's common move table, after cycle resolution.
+typedef struct loom_low_allocation_call_moves_t {
+  // Source-order ordinal of the retained low.func.call.
+  uint32_t source_ordinal;
+  // Complete semantic argument count, including storage ABI operands.
+  uint16_t argument_count;
+  // Complete semantic result count, including storage ABI results.
+  uint16_t result_count;
+  // Register transport immediately before transferring control to the callee.
+  loom_low_move_range_t arguments;
+  // Register transport immediately after the callee returns.
+  loom_low_move_range_t results;
+} loom_low_allocation_call_moves_t;
+
+// Return transport belongs to the exit that produces the function results.
+// The range indexes the allocation's common move table after cycle resolution.
+typedef struct loom_low_allocation_exit_moves_t {
+  // Source-order ordinal of the owning low.return.
+  uint32_t source_ordinal;
+  // Complete semantic result count, including storage ABI results.
+  uint16_t result_count;
+  // Register transport immediately before leaving the function body.
+  loom_low_move_range_t results;
+} loom_low_allocation_exit_moves_t;
 
 // Assignment-backed storage lease over target-visible physical units.
 //
@@ -161,6 +277,8 @@ typedef struct loom_low_allocation_packet_move_group_t {
 // record names the scheduled packet attachment and target release class; this
 // allocation-side record names the concrete assignment subrange that must
 // remain unavailable for incompatible reuse while the lease is active.
+// Provisional spilled assignments have an empty lease ending at zero; spill
+// materialization and frame rebuilding establish their final register leases.
 typedef struct loom_low_allocation_storage_lease_t {
   // Index into |storage_leases.records|.
   uint32_t lease_record_index;
@@ -170,7 +288,8 @@ typedef struct loom_low_allocation_storage_lease_t {
   loom_value_id_t value_id;
   // Program point where the lease becomes active.
   uint32_t start_point;
-  // Program point where allocation may reuse the leased units.
+  // Program point where allocation may reuse the leased units, or zero for a
+  // provisional spilled assignment with no physical reservation.
   uint32_t end_point;
   // Release action covering this lease, or STORAGE_RELEASE_ACTION_INDEX_NONE.
   uint32_t release_action_index;
@@ -178,7 +297,7 @@ typedef struct loom_low_allocation_storage_lease_t {
   uint16_t descriptor_reg_class_id;
   // Target-visible storage kind for the leased units.
   loom_low_allocation_location_kind_t location_kind;
-  // First physical register or target ID leased.
+  // First unit of the assignment subrange, interpreted by |location_kind|.
   uint32_t location_base;
   // Number of contiguous physical units leased.
   uint32_t location_count;
@@ -192,8 +311,13 @@ typedef struct loom_low_allocation_table_t {
   loom_module_t* module;
   // Target-low function operation allocated by this table.
   const loom_op_t* function_op;
+  // Last entry live-in/resource declaration retained for body rewrite anchors.
+  // NULL for an empty preamble; borrows the unchanged source declarations.
+  const loom_op_t* entry_preamble_end;
   // Resolved target context selected by |function_op|.
   loom_low_resolved_target_t target;
+  // Final invocation-owned cells consumed by STORAGE assignments and moves.
+  const loom_low_storage_transport_t* storage_transport;
   // Liveness analysis that produced the allocated intervals.
   loom_liveness_analysis_t liveness;
   // Arena-owned physical reservations indexed by assignment segment ranges.
@@ -213,12 +337,16 @@ typedef struct loom_low_allocation_table_t {
   const loom_low_allocation_assignment_t* assignments;
   // Number of records in |assignments|.
   iree_host_size_t assignment_count;
-  // Dense physical extents retained from assignment and move planning.
+  // Dense resource extents retained from assignment and move planning.
   struct {
     // Maximum one-past-last assigned or move-scratch location indexed by
-    // descriptor register class ID.
+    // descriptor register class ID. Excludes the descriptor's ABI-fixed range,
+    // which does not consume allocatable register resources.
     const uint32_t* ends_by_reg_class;
-    // Number of entries in |ends_by_reg_class|.
+    // Maximum one-past-last assignment or move location within each descriptor
+    // register class's ABI-fixed range. Zero denotes an unused fixed range.
+    const uint32_t* fixed_ends_by_reg_class;
+    // Number of entries in both extent arrays.
     iree_host_size_t count;
   } physical_extents;
   // Assignment indices by liveness local value ordinal. Entries without an
@@ -234,6 +362,8 @@ typedef struct loom_low_allocation_table_t {
   const loom_low_allocation_spill_plan_t* spill_plans;
   // Number of records in |spill_plans|.
   iree_host_size_t spill_plan_count;
+  // Distinct retained-read blockers published by the accepted coloring.
+  loom_low_allocation_retained_fixed_values_t retained_fixed_values;
   // Allocation remarks in spill-decision order.
   const loom_low_allocation_remark_t* remarks;
   // Number of records in |remarks|.
@@ -244,20 +374,45 @@ typedef struct loom_low_allocation_table_t {
   const loom_low_allocation_copy_decision_t* copy_decisions;
   // Number of records in |copy_decisions|.
   iree_host_size_t copy_decision_count;
+  // Final parallel entry transport, executed once before all body block
+  // labels. CFG backedges never execute this group. Sources are external ABI
+  // coordinates; destinations are the finalized argument assignments.
+  loom_low_move_group_t entry_moves;
   // Edge-copy records grouped by low.br terminator source order.
   const loom_low_allocation_edge_copy_t* edge_copies;
   // Number of records in |edge_copies|.
   iree_host_size_t edge_copy_count;
+  // First coalesced incoming edge-copy index by local value ordinal, or NULL
+  // when the consumer did not request the retained relation.
+  const uint32_t* first_coalesced_incoming_copy_by_value_ordinal;
   // Per-low.br groups indexing |edge_copies|.
   const loom_low_allocation_edge_copy_group_t* edge_copy_groups;
   // Number of records in |edge_copy_groups|.
   iree_host_size_t edge_copy_group_count;
-  // Packet-local move groups in source order.
+  // Exact live packet-local transfer runs grouped by |packet_move_groups|.
+  const loom_low_allocation_packet_transfer_t* packet_transfers;
+  // Number of records in |packet_transfers|.
+  iree_host_size_t packet_transfer_count;
+  // Packet-local transfer groups in source order.
   const loom_low_allocation_packet_move_group_t* packet_move_groups;
   // Number of records in |packet_move_groups|.
   iree_host_size_t packet_move_group_count;
+  // Call transport in source order; absent for call-free functions.
+  const loom_low_allocation_call_moves_t* call_moves;
+  // Number of records in |call_moves|.
+  iree_host_size_t call_move_count;
+  // Return transport in source order; absent without register ABI results.
+  const loom_low_allocation_exit_moves_t* exit_moves;
+  // Number of records in |exit_moves|.
+  iree_host_size_t exit_move_count;
   // Final sequential physical move rows shared by all move groups.
   const loom_low_move_t* moves;
+  // Number of final move rows across edge and packet-local move groups.
+  iree_host_size_t move_count;
+  // Final invocation-owned transport cells, indexed by MOVE_STORAGE locations.
+  const loom_low_move_storage_t* move_storage;
+  // Number of cells; zero when every cycle has a free register.
+  iree_host_size_t move_storage_count;
   // Indices into |moves| for the first row writing each cycle-scratch location.
   const iree_host_size_t* scratch_move_indices;
   // Number of final move rows across packet-local move groups.
@@ -276,6 +431,10 @@ typedef struct loom_low_allocation_table_t {
   const loom_low_storage_release_action_t* storage_release_actions;
   // Number of records in |storage_release_actions|.
   iree_host_size_t storage_release_action_count;
+  // First storage-release action index per schedule node. Nodes without an
+  // action contain LOOM_LOW_STORAGE_RELEASE_ACTION_INDEX_NONE. NULL when the
+  // consumer did not request the retained relation or there are no actions.
+  const uint32_t* first_storage_release_action_by_node;
   // Number of assignments whose location kind is SPILL_SLOT.
   iree_host_size_t spill_count;
   // Number of low.copy ops coalesced into one location.
@@ -290,6 +449,9 @@ typedef struct loom_low_allocation_table_t {
   // remains valid while spill materialization rewrites branch payloads without
   // changing topology; edge terminator pointers remain snapshot facts.
   loom_cfg_graph_t cfg_graph;
+  // Canonical loop intervals derived from |cfg_graph|. Spill repair preserves
+  // topology, so the execution domains remain valid across a repair batch.
+  loom_cfg_loop_forest_t loop_forest;
 } loom_low_allocation_table_t;
 
 // Active allocation-owned lease over the module value-ordinal scratch map.
@@ -344,10 +506,21 @@ const loom_low_allocation_edge_copy_group_t*
 loom_low_allocation_find_edge_copy_group_by_source_ordinal(
     const loom_low_allocation_table_t* table, uint32_t source_ordinal);
 
-// Finds the materialized packet-local move group for the source-order node, or
-// NULL when the node emits no final moves.
+// Finds the packet-local transfer group for the source-order node, or NULL when
+// the node has no packet-local structural transfer relations.
 const loom_low_allocation_packet_move_group_t*
 loom_low_allocation_find_packet_move_group_by_source_ordinal(
+    const loom_low_allocation_table_t* table, uint32_t source_ordinal);
+
+// Returns the retained register transport for a call, or NULL when allocation
+// was performed without a target call contract.
+const loom_low_allocation_call_moves_t*
+loom_low_allocation_find_call_moves_by_source_ordinal(
+    const loom_low_allocation_table_t* table, uint32_t source_ordinal);
+
+// Returns retained function-exit transport for |source_ordinal|, or NULL.
+const loom_low_allocation_exit_moves_t*
+loom_low_allocation_find_exit_moves_by_source_ordinal(
     const loom_low_allocation_table_t* table, uint32_t source_ordinal);
 
 // Resolves the descriptor-set register class spelling for |assignment|.

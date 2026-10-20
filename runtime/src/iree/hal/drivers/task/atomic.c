@@ -46,6 +46,62 @@ iree_hal_atomic_capabilities_t iree_hal_task_atomic_capabilities(
   return capabilities;
 }
 
+iree_hal_atomic_flags_t iree_hal_task_barrier_resolve_atomic_flags(
+    const iree_hal_barrier_t* barrier) {
+  iree_hal_barrier_flags_t barrier_flags =
+      iree_hal_barrier_resolve_flags(barrier);
+  if (iree_any_bit_set(barrier->source_stage_mask,
+                       IREE_HAL_EXECUTION_STAGE_HOST)) {
+    barrier_flags |= IREE_HAL_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE;
+  }
+  if (iree_any_bit_set(barrier->target_stage_mask,
+                       IREE_HAL_EXECUTION_STAGE_HOST)) {
+    barrier_flags |= IREE_HAL_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE;
+  }
+
+  iree_hal_atomic_flags_t flags = IREE_HAL_ATOMIC_FLAG_NONE;
+  if (iree_any_bit_set(barrier_flags,
+                       IREE_HAL_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE)) {
+    flags |= IREE_HAL_ATOMIC_FLAG_ACQUIRE;
+  }
+  if (iree_any_bit_set(barrier_flags,
+                       IREE_HAL_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE)) {
+    flags |= IREE_HAL_ATOMIC_FLAG_RELEASE;
+  }
+  for (iree_host_size_t i = 0; i < barrier->memory_barrier_count; ++i) {
+    if (barrier->memory_barriers[i].source_scope) {
+      flags |= IREE_HAL_ATOMIC_FLAG_RELEASE;
+    }
+    if (barrier->memory_barriers[i].target_scope) {
+      flags |= IREE_HAL_ATOMIC_FLAG_ACQUIRE;
+    }
+  }
+  for (iree_host_size_t i = 0; i < barrier->buffer_barrier_count; ++i) {
+    const iree_hal_buffer_barrier_t* buffer_barrier =
+        &barrier->buffer_barriers[i];
+    if (buffer_barrier->source_scope) {
+      flags |= IREE_HAL_ATOMIC_FLAG_RELEASE;
+    }
+    if (buffer_barrier->target_scope) {
+      flags |= IREE_HAL_ATOMIC_FLAG_ACQUIRE;
+    }
+    if (!buffer_barrier->recipe) {
+      continue;
+    }
+    for (uint32_t j = 0; j < buffer_barrier->recipe->operation_count; ++j) {
+      const iree_hal_memory_transition_operation_t operation =
+          buffer_barrier->recipe->operations[j].operation;
+      if (operation == IREE_HAL_MEMORY_TRANSITION_OPERATION_RELEASE_TO_SYSTEM ||
+          operation == IREE_HAL_MEMORY_TRANSITION_OPERATION_HOST_FLUSH) {
+        flags |= IREE_HAL_ATOMIC_FLAG_RELEASE;
+      } else {
+        flags |= IREE_HAL_ATOMIC_FLAG_ACQUIRE;
+      }
+    }
+  }
+  return flags;
+}
+
 static iree_memory_order_t iree_hal_task_atomic_memory_order(
     iree_hal_atomic_flags_t flags) {
   const bool acquire = iree_any_bit_set(flags, IREE_HAL_ATOMIC_FLAG_ACQUIRE);
@@ -75,6 +131,13 @@ static bool iree_hal_task_atomic_wait_condition_matches(
     default:
       IREE_ASSERT_UNREACHABLE("atomic wait parameters must be validated");
       return false;
+  }
+}
+
+void iree_hal_task_atomic_fence(iree_hal_atomic_flags_t flags) {
+  if (iree_any_bit_set(
+          flags, IREE_HAL_ATOMIC_FLAG_ACQUIRE | IREE_HAL_ATOMIC_FLAG_RELEASE)) {
+    iree_atomic_thread_fence(iree_hal_task_atomic_memory_order(flags));
   }
 }
 

@@ -18,6 +18,7 @@ loom_cc_library(
     "options.c"
   DEPS
     iree::base
+  LINKABLE_MORE_THAN_ONCE
   PUBLIC
 )
 
@@ -31,7 +32,6 @@ loom_cc_library(
   DEPS
     ::options
     iree::base
-    iree::base::internal::arena
     loom::ir
     loom::ops::kernel
     loom::ops::op_defs
@@ -54,6 +54,7 @@ loom_cc_library(
     ::site_payload
     iree::base
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::index
     loom::ops::sanitizer
@@ -61,11 +62,13 @@ loom_cc_library(
     loom::ops::scf
     loom::ops::vector
     loom::ops::view
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types
     loom::pass::value_facts
     loom::rewrite::rewriter
+    loom::util::predicate_facts
   PUBLIC
 )
 
@@ -79,6 +82,7 @@ loom_cc_library(
   DEPS
     iree::base
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::index
     loom::ops::kernel
@@ -105,13 +109,16 @@ loom_cc_library(
     ::site_payload
     iree::base
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::atomic
     loom::ops::index
     loom::ops::kernel
     loom::ops::sanitizer
+    loom::ops::scf
     loom::ops::vector
     loom::ops::view
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types

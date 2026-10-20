@@ -83,7 +83,7 @@ func.def @mutable_default_does_not_fold() -> (index) {
 // Declaration predicates on a shaped global remap to the corresponding load
 // co-results. The shaped value itself remains unknown, but facts on %m are
 // strong enough for local canonicalization.
-global.constant @weights : tile<[%n]xf32> where [mul(%n, 16)]
+global.constant @weights : tile<[%n]xf32> where [multiple_of(%n, 16)]
 
 func.def @load_global_predicate() -> (index) {
   %tile, %m = global.load @weights : tile<[%m]xf32>
@@ -94,7 +94,7 @@ func.def @load_global_predicate() -> (index) {
 }
 
 // ----
-global.constant @weights : tile<[%n]xf32> where [mul(%n, 16)]
+global.constant @weights : tile<[%n]xf32> where [multiple_of(%n, 16)]
 
 func.def @load_global_predicate() -> (index) {
   %tile, %m = global.load @weights : tile<[%m]xf32>

@@ -60,6 +60,7 @@ from loom.ir import (
     FileLocation,
     FunctionType,
     FusedLocation,
+    GroupType,
     LocationTable,
     Module,
     OpaqueLocation,
@@ -78,6 +79,7 @@ from loom.ir import (
     StaticDim,
     StorageSpace,
     StorageType,
+    StringArrayAttr,
     StringTable,
     Symbol,
     SymbolKind,
@@ -441,34 +443,41 @@ class TestShapedTypeWithDynamicEncoding:
 
 
 class TestPoolType:
-    def test_static_block_size(self) -> None:
-        t = PoolType(block_size=StaticDim(65536))
+    def test_opaque_pool(self) -> None:
+        t = PoolType()
         assert t.type_kind == TypeKind.POOL
-        assert not t.has_dynamic_block_size
-        assert repr(t) == "pool<65536>"
+        assert repr(t) == "pool"
 
-    def test_dynamic_block_size(self) -> None:
-        t = PoolType(block_size=DynamicDim())
-        assert t.type_kind == TypeKind.POOL
-        assert t.has_dynamic_block_size
-        assert repr(t) == "pool<?>"
-
-    def test_equality(self) -> None:
-        a = PoolType(block_size=StaticDim(4096))
-        b = PoolType(block_size=StaticDim(4096))
-        c = PoolType(block_size=StaticDim(65536))
+    def test_equality_and_hash(self) -> None:
+        a = PoolType()
+        b = PoolType()
         assert a == b
-        assert a != c
-
-    def test_hashable(self) -> None:
-        a = PoolType(block_size=StaticDim(4096))
-        b = PoolType(block_size=StaticDim(4096))
         assert len({a, b}) == 1
+        assert a != BUFFER_TYPE
 
-    def test_dynamic_vs_static(self) -> None:
-        a = PoolType(block_size=DynamicDim())
-        b = PoolType(block_size=StaticDim(4096))
-        assert a != b
+
+# ============================================================================
+# Group type
+# ============================================================================
+
+
+class TestGroupType:
+    def test_static_shape(self) -> None:
+        group = GroupType((StaticDim(2), StaticDim(4)))
+        assert group.type_kind == TypeKind.GROUP
+        assert group.rank == 2
+        assert group.is_all_static
+        assert repr(group) == "group<2x4>"
+
+    def test_dynamic_shape(self) -> None:
+        group = GroupType((DynamicDim(7), StaticDim(4)))
+        assert group.rank == 2
+        assert not group.is_all_static
+        assert repr(group) == "group<[%7]x4>"
+
+    def test_requires_participants(self) -> None:
+        with pytest.raises(ValueError, match="rank >= 1"):
+            GroupType(())
 
 
 # ============================================================================
@@ -993,6 +1002,22 @@ class TestOperations:
             with pytest.raises(ValueError, match="enum array element"):
                 EnumArrayAttr(values)  # type: ignore[arg-type]
 
+    def test_string_array_attribute_preserves_order_and_duplicates(self) -> None:
+        op = Operation(
+            kind=4,
+            name="test.string_array_attrs",
+            attributes={"targets": ["gfx12-generic", "gfx1250", "gfx12-generic"]},
+        )
+
+        values = op.attributes["targets"]
+        assert isinstance(values, StringArrayAttr)
+        assert values.values == ("gfx12-generic", "gfx1250", "gfx12-generic")
+        assert len(StringArrayAttr()) == 0
+
+    def test_string_array_attribute_rejects_non_string_elements(self) -> None:
+        with pytest.raises(TypeError, match="string array element 1"):
+            StringArrayAttr(["gfx1250", 12])  # type: ignore[list-item]
+
     def test_signed_enum_set_is_canonical_and_distinguishes_polarity(self) -> None:
         value = SignedEnumSetAttr([255, 1], [7])
 
@@ -1389,6 +1414,16 @@ class TestEncodingInstance:
         )
         assert enc.params == (("block", 32), ("group_size", 128))
 
+    def test_string_array_params_use_the_canonical_wrapper(self) -> None:
+        enc = EncodingInstance(
+            name="portable",
+            params=(("targets", ["gfx12-generic", "gfx1250"]),),
+        )
+
+        assert enc.params == (
+            ("targets", StringArrayAttr(["gfx12-generic", "gfx1250"])),
+        )
+
     def test_duplicate_params_rejected(self) -> None:
         with pytest.raises(ValueError, match="duplicate encoding parameter"):
             EncodingInstance(
@@ -1533,6 +1568,10 @@ class TestPredicateEvaluation:
             self._pred("le", ("value", 7), ("const", 1024)),
             {7: 1024},
         )
+        assert not evaluate_predicate(
+            self._pred("le", ("value", 7), ("const", 1024)),
+            {7: 1025},
+        )
 
     def test_gt(self) -> None:
         assert evaluate_predicate(
@@ -1545,62 +1584,64 @@ class TestPredicateEvaluation:
             self._pred("ge", ("value", 3), ("const", 16)),
             {3: 16},
         )
+        assert not evaluate_predicate(
+            self._pred("ge", ("value", 3), ("const", 16)),
+            {3: 15},
+        )
 
-    def test_mul_true(self) -> None:
+    @pytest.mark.parametrize(
+        ("kind", "expected"),
+        [("ult", True), ("ule", True), ("ugt", False), ("uge", False)],
+    )
+    def test_unsigned_relations_order_carrier_bits(
+        self, kind: str, expected: bool
+    ) -> None:
+        predicate = self._pred(kind, ("value", 3), ("value", 7))
+        assert evaluate_predicate(predicate, {3: 1, 7: -1}) is expected
+        assert evaluate_predicate(predicate, {3: -1, 7: 1}) is not expected
+
+    def test_unsigned_relation_rejects_float(self) -> None:
+        assert not evaluate_predicate(
+            self._pred("ule", ("value", 3), ("const", 8)),
+            {3: 8.0},
+        )
+
+    def test_multiple_of_true(self) -> None:
         assert evaluate_predicate(
-            self._pred("mul", ("value", 3), ("const", 16)),
+            self._pred("multiple_of", ("value", 3), ("const", 16)),
             {3: 64},
         )
 
-    def test_mul_false(self) -> None:
+    def test_multiple_of_false(self) -> None:
         assert not evaluate_predicate(
-            self._pred("mul", ("value", 3), ("const", 16)),
+            self._pred("multiple_of", ("value", 3), ("const", 16)),
             {3: 17},
         )
 
-    def test_mul_zero_modulus(self) -> None:
+    @pytest.mark.parametrize("divisor", [-16, 0])
+    def test_multiple_of_requires_positive_divisor(self, divisor: int) -> None:
         assert not evaluate_predicate(
-            self._pred("mul", ("value", 3), ("const", 0)),
+            self._pred("multiple_of", ("value", 3), ("const", divisor)),
             {3: 42},
         )
 
-    def test_min(self) -> None:
-        assert evaluate_predicate(
-            self._pred("min", ("value", 3), ("const", 32)),
-            {3: 32},
-        )
-        assert not evaluate_predicate(
-            self._pred("min", ("value", 3), ("const", 32)),
-            {3: 31},
-        )
-
-    def test_max(self) -> None:
-        assert evaluate_predicate(
-            self._pred("max", ("value", 3), ("const", 512)),
-            {3: 512},
-        )
-        assert not evaluate_predicate(
-            self._pred("max", ("value", 3), ("const", 512)),
-            {3: 513},
-        )
-
-    def test_pow2_true(self) -> None:
+    def test_power_of_two_true(self) -> None:
         for n in [1, 2, 4, 8, 16, 32, 64, 128, 256, 1024]:
             assert evaluate_predicate(
-                self._pred("pow2", ("value", 11)),
+                self._pred("power_of_two", ("value", 11)),
                 {11: n},
-            ), f"pow2({n}) should be true"
+            ), f"power_of_two({n}) should be true"
 
-    def test_pow2_false(self) -> None:
+    def test_power_of_two_false(self) -> None:
         for n in [0, 3, 5, 6, 7, 9, 10, 15, 17, 100]:
             assert not evaluate_predicate(
-                self._pred("pow2", ("value", 11)),
+                self._pred("power_of_two", ("value", 11)),
                 {11: n},
-            ), f"pow2({n}) should be false"
+            ), f"power_of_two({n}) should be false"
 
-    def test_pow2_rejects_float(self) -> None:
+    def test_power_of_two_rejects_float(self) -> None:
         assert not evaluate_predicate(
-            self._pred("pow2", ("value", 11)),
+            self._pred("power_of_two", ("value", 11)),
             {11: 8.0},
         )
 
@@ -1657,20 +1698,20 @@ class TestPredicateEvaluation:
     def test_missing_value_always_true(self) -> None:
         """Missing values can't be evaluated — defer judgment."""
         assert evaluate_predicate(
-            self._pred("mul", ("value", 19), ("const", 16)),
+            self._pred("multiple_of", ("value", 19), ("const", 16)),
             {3: 42},
         )
 
     def test_evaluate_predicates_all_true(self) -> None:
         preds = [
-            self._pred("mul", ("value", 3), ("const", 16)),
+            self._pred("multiple_of", ("value", 3), ("const", 16)),
             self._pred("lt", ("value", 7), ("const", 1024)),
         ]
         assert evaluate_predicates(preds, {3: 64, 7: 512})
 
     def test_evaluate_predicates_one_false(self) -> None:
         preds = [
-            self._pred("mul", ("value", 3), ("const", 16)),
+            self._pred("multiple_of", ("value", 3), ("const", 16)),
             self._pred("lt", ("value", 7), ("const", 1024)),
         ]
         assert not evaluate_predicates(preds, {3: 64, 7: 2048})

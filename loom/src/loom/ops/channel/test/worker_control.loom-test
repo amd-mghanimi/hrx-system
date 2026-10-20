@@ -1,0 +1,134 @@
+// RUN: pass scf-to-cfg,ownership-lifetime
+
+// View-only helpers borrow payloads while workers retain the channel accesses.
+// A variable-rate producer can publish several packets per input; the consumer
+// can accumulate several packets into one output and retain it as history.
+func.decl @encode_next(%raw: view<4xi32>, %packet: view<8xi32>) -> (i1)
+
+func.def noinline @expand_record(%read: read<tile<4xi32>, mutable>, %prepared: channel<tile<8xi32>>, %start: i1) {
+  %raw = channel.wait %read : read<tile<4xi32>, mutable> -> view<4xi32>
+  %finished = scf.while(%more = %start : i1) -> (i1) {
+    scf.condition %more, %more : i1, i1
+  } do(%active: i1) {
+    %packet_write, %packet = channel.reserve %prepared : channel<tile<8xi32>> -> (write<tile<8xi32>>, view<8xi32>)
+    %again = func.call @encode_next(%raw, %packet) : (view<4xi32>, view<8xi32>) -> (i1)
+    channel.publish %packet_write : write<tile<8xi32>>
+    scf.yield %again : i1
+  }
+  channel.release %read : read<tile<4xi32>, mutable>
+  func.return
+}
+
+// ----
+func.decl @encode_next(%raw: view<4xi32>, %packet: view<8xi32>) -> (i1)
+
+func.def noinline @expand_record(%read: read<tile<4xi32>, mutable>, %prepared: channel<tile<8xi32>>, %start: i1) {
+  %raw = channel.wait %read : read<tile<4xi32>, mutable> -> view<4xi32>
+  cfg.br ^_bb1(%start: i1)
+^_bb1(%more: i1):
+  cfg.cond_br %more, ^_bb2, ^_bb3
+^_bb2:
+  %packet_write, %packet = channel.reserve %prepared : channel<tile<8xi32>> -> (write<tile<8xi32>>, view<8xi32>)
+  %again = func.call @encode_next(%raw, %packet) : (view<4xi32>, view<8xi32>) -> (i1)
+  channel.publish %packet_write : write<tile<8xi32>>
+  cfg.br ^_bb1(%again: i1)
+^_bb3:
+  cfg.br ^_bb4(%more: i1)
+^_bb4(%finished: i1):
+  channel.release %read : read<tile<4xi32>, mutable>
+  func.return
+}
+
+// ====
+
+// A consumer retains its output reservation through a variable number of
+// input records, then transfers the write obligation back to its caller.
+func.decl @accumulate(%packet: view<8xi32>, %output: view<4xi32>, %previous: view<4xi32>) -> (i1)
+
+func.def noinline @collect_record(%prepared: channel<tile<8xi32>>, %output_write: write<tile<4xi32>>, %output: view<4xi32>, %previous: view<4xi32>, %start: i1) -> (write<tile<4xi32>>) {
+  %finished = scf.while(%more = %start : i1) -> (i1) {
+    scf.condition %more, %more : i1, i1
+  } do(%active: i1) {
+    %packet_read, %packet = channel.acquire<mutable> %prepared : channel<tile<8xi32>> -> (read<tile<8xi32>, mutable>, view<8xi32>)
+    %again = func.call @accumulate(%packet, %output, %previous) : (view<8xi32>, view<4xi32>, view<4xi32>) -> (i1)
+    channel.release %packet_read : read<tile<8xi32>, mutable>
+    scf.yield %again : i1
+  }
+  func.return %output_write : write<tile<4xi32>>
+}
+
+func.def noinline @collect_and_send(%prepared: channel<tile<8xi32>>, %outputs: channel<tile<4xi32>>, %destination: channel<tile<4xi32>>, %previous: view<4xi32>, %start: i1) -> (read<tile<4xi32>>) {
+  %output_write, %output = channel.reserve %outputs : channel<tile<4xi32>> -> (write<tile<4xi32>>, view<4xi32>)
+  %completed = func.call @collect_record(%prepared, %output_write, %output, %previous, %start) : (channel<tile<8xi32>>, write<tile<4xi32>>, view<4xi32>, view<4xi32>, i1) -> (write<tile<4xi32>>)
+  channel.publish %completed : write<tile<4xi32>>
+  %output_read = channel.accept %outputs : channel<tile<4xi32>> -> read<tile<4xi32>>
+  %dma, %history = channel.fanout %output_read : read<tile<4xi32>> -> (read<tile<4xi32>>, read<tile<4xi32>>)
+  %remote_write, %remote = channel.reserve %destination : channel<tile<4xi32>> -> (write<tile<4xi32>>, view<4xi32>)
+  channel.copy %dma -> %remote_write : read<tile<4xi32>>, write<tile<4xi32>>
+  func.return %history : read<tile<4xi32>>
+}
+
+// A non-empty stream seeds history from a borrowed view. Subsequent results
+// read history while asynchronous transport independently owns another reader.
+func.def @collect_stream(%prepared: channel<tile<8xi32>>, %outputs: channel<tile<4xi32>>, %destination: channel<tile<4xi32>>, %seed: view<4xi32>, %count: index, %start: i1) {
+  %record_step = index.constant 1 : index
+  %first = func.call @collect_and_send(%prepared, %outputs, %destination, %seed, %start) : (channel<tile<8xi32>>, channel<tile<4xi32>>, channel<tile<4xi32>>, view<4xi32>, i1) -> (read<tile<4xi32>>)
+  %last = scf.for %record = [%record_step to %count step %record_step](%previous_read = %first : read<tile<4xi32>>) -> (read<tile<4xi32>>) {
+    %previous = channel.wait %previous_read : read<tile<4xi32>> -> view<4xi32>
+    %next = func.call @collect_and_send(%prepared, %outputs, %destination, %previous, %start) : (channel<tile<8xi32>>, channel<tile<4xi32>>, channel<tile<4xi32>>, view<4xi32>, i1) -> (read<tile<4xi32>>)
+    channel.release %previous_read : read<tile<4xi32>>
+    scf.yield %next : read<tile<4xi32>>
+  }
+  channel.release %last : read<tile<4xi32>>
+  func.return
+}
+
+// ----
+func.decl @accumulate(%packet: view<8xi32>, %output: view<4xi32>, %previous: view<4xi32>) -> (i1)
+
+func.def noinline @collect_record(%prepared: channel<tile<8xi32>>, %output_write: write<tile<4xi32>>, %output: view<4xi32>, %previous: view<4xi32>, %start: i1) -> (write<tile<4xi32>>) {
+  cfg.br ^_bb1(%start: i1)
+^_bb1(%more: i1):
+  cfg.cond_br %more, ^_bb2, ^_bb3
+^_bb2:
+  %packet_read, %packet = channel.acquire<mutable> %prepared : channel<tile<8xi32>> -> (read<tile<8xi32>, mutable>, view<8xi32>)
+  %again = func.call @accumulate(%packet, %output, %previous) : (view<8xi32>, view<4xi32>, view<4xi32>) -> (i1)
+  channel.release %packet_read : read<tile<8xi32>, mutable>
+  cfg.br ^_bb1(%again: i1)
+^_bb3:
+  cfg.br ^_bb4(%more: i1)
+^_bb4(%finished: i1):
+  func.return %output_write : write<tile<4xi32>>
+}
+
+func.def noinline @collect_and_send(%prepared: channel<tile<8xi32>>, %outputs: channel<tile<4xi32>>, %destination: channel<tile<4xi32>>, %previous: view<4xi32>, %start: i1) -> (read<tile<4xi32>>) {
+  %output_write, %output = channel.reserve %outputs : channel<tile<4xi32>> -> (write<tile<4xi32>>, view<4xi32>)
+  %completed = func.call @collect_record(%prepared, %output_write, %output, %previous, %start) : (channel<tile<8xi32>>, write<tile<4xi32>>, view<4xi32>, view<4xi32>, i1) -> (write<tile<4xi32>>)
+  channel.publish %completed : write<tile<4xi32>>
+  %output_read = channel.accept %outputs : channel<tile<4xi32>> -> read<tile<4xi32>>
+  %dma, %history = channel.fanout %output_read : read<tile<4xi32>> -> (read<tile<4xi32>>, read<tile<4xi32>>)
+  %remote_write, %remote = channel.reserve %destination : channel<tile<4xi32>> -> (write<tile<4xi32>>, view<4xi32>)
+  channel.copy %dma -> %remote_write : read<tile<4xi32>>, write<tile<4xi32>>
+  func.return %history : read<tile<4xi32>>
+}
+
+func.def @collect_stream(%prepared: channel<tile<8xi32>>, %outputs: channel<tile<4xi32>>, %destination: channel<tile<4xi32>>, %seed: view<4xi32>, %count: index, %start: i1) {
+  %record_step = index.constant 1 : index
+  %first = func.call @collect_and_send(%prepared, %outputs, %destination, %seed, %start) : (channel<tile<8xi32>>, channel<tile<4xi32>>, channel<tile<4xi32>>, view<4xi32>, i1) -> (read<tile<4xi32>>)
+  cfg.br ^_bb1(%record_step: index, %first: read<tile<4xi32>>)
+^_bb1(%46: index, %previous_read: read<tile<4xi32>>):
+  %49 = index.cmp slt, %46, %count : index
+  cfg.cond_br %49, ^_bb2, ^_bb3
+^_bb2:
+  %record = index.assume %46 [range(%46, 1, 9223372036854775806), lt(%46, %count)] : index
+  %previous = channel.wait %previous_read : read<tile<4xi32>> -> view<4xi32>
+  %next = func.call @collect_and_send(%prepared, %outputs, %destination, %previous, %start) : (channel<tile<8xi32>>, channel<tile<4xi32>>, channel<tile<4xi32>>, view<4xi32>, i1) -> (read<tile<4xi32>>)
+  channel.release %previous_read : read<tile<4xi32>>
+  %50 = index.add %record, %record_step : index
+  cfg.br ^_bb1(%50: index, %next: read<tile<4xi32>>)
+^_bb3:
+  cfg.br ^_bb4(%previous_read: read<tile<4xi32>>)
+^_bb4(%last: read<tile<4xi32>>):
+  channel.release %last : read<tile<4xi32>>
+  func.return
+}

@@ -17,6 +17,18 @@ extern "C" {
 
 typedef struct loom_target_compile_report_t loom_target_compile_report_t;
 
+// Available fact families. Missing families are absent in formatted reports;
+// zero is reserved for a measured empty inventory.
+enum loom_target_compile_report_pipeline_fact_bits_e {
+  // Logical groups, channels, record protocols, and their assigned resources.
+  LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_CHANNELS = 1u << 0,
+  // Distinct compiled images, independently of their physical load count.
+  LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_PROGRAMS = 1u << 1,
+  // Physical memory occupancy, including stores with no resident worker.
+  LOOM_TARGET_COMPILE_REPORT_PIPELINE_FACT_MEMORY = 1u << 2,
+};
+typedef uint8_t loom_target_compile_report_pipeline_facts_t;
+
 // Pipeline worker behavior and available physical-plan facts.
 enum loom_target_compile_report_pipeline_worker_flag_bits_e {
   // The worker remains resident and repeatedly processes activations.
@@ -106,6 +118,8 @@ typedef struct loom_target_compile_report_pipeline_plan_summary_t {
   iree_string_view_t root_name;
   // Selected realization class, such as "spatial-program".
   iree_string_view_t realization;
+  // Fact families retained at the reporting boundary.
+  loom_target_compile_report_pipeline_facts_t available_facts;
   // Number of logical worker groups.
   uint32_t group_count;
   // Number of realized workers.
@@ -126,6 +140,14 @@ typedef struct loom_target_compile_report_pipeline_plan_summary_t {
   uint32_t route_count;
   // Total native code bytes across realized workers.
   uint64_t worker_code_byte_count;
+  // Distinct native images, before replication onto workers.
+  uint32_t program_count;
+  // Code bytes in distinct images, counted once per compiled function.
+  uint64_t program_code_byte_count;
+  // Number of physical backing stores in the report inventory.
+  uint32_t memory_count;
+  // Union of explicitly reserved bytes across physical backing stores.
+  uint64_t reserved_storage_byte_count;
   // Largest native worker program.
   uint32_t maximum_worker_code_byte_count;
   // Smallest remaining program-memory headroom among workers.
@@ -195,6 +217,30 @@ typedef struct loom_target_compile_report_pipeline_worker_row_t {
   uint32_t bank_storage_capacity_byte_count;
 } loom_target_compile_report_pipeline_worker_row_t;
 
+// One physical backing store shared by reservations and loaded programs.
+// Occupancy counts the union of resident ranges; the high-water extent also
+// includes unoccupied alignment gaps. No logical channel ownership is inferred.
+typedef struct loom_target_compile_report_pipeline_memory_row_t {
+  // Dense index in the reported memory inventory.
+  uint32_t memory_index;
+  // Physical owner of the backing store.
+  loom_target_compile_report_pipeline_placement_t placement;
+  // Union of explicit lifetime-long reservations.
+  uint32_t reserved_byte_count;
+  // Private and read-only program data placed outside the reservations.
+  uint32_t program_data_byte_count;
+  // Total occupied bytes, excluding alignment gaps.
+  uint32_t occupied_byte_count;
+  // End of the highest resident byte relative to the backing-store base.
+  uint32_t high_water_byte_count;
+  // Complete addressable capacity of this backing store.
+  uint32_t capacity_byte_count;
+  // Largest occupied byte count in any bank of this backing store.
+  uint32_t maximum_bank_storage_byte_count;
+  // Capacity of one bank in this backing store.
+  uint32_t bank_storage_capacity_byte_count;
+} loom_target_compile_report_pipeline_memory_row_t;
+
 // One realized pipeline channel.
 typedef struct loom_target_compile_report_pipeline_channel_row_t {
   // Channel index referenced by target resource plans.
@@ -244,6 +290,10 @@ typedef struct loom_target_compile_report_pipeline_plan_t {
   const loom_target_compile_report_pipeline_channel_row_t* channel_rows;
   // Number of entries in |channel_rows|.
   iree_host_size_t channel_row_count;
+  // Owned physical memory rows, present only in detailed reports.
+  const loom_target_compile_report_pipeline_memory_row_t* memory_rows;
+  // Number of entries in |memory_rows|.
+  iree_host_size_t memory_row_count;
 } loom_target_compile_report_pipeline_plan_t;
 
 // Ordered owned pipeline realization snapshots in one compile report.

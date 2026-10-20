@@ -16,6 +16,7 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
+#include "loom/analysis/symbol_facts.h"
 #include "loom/ir/ir.h"
 #include "loom/pass/types.h"
 #include "loom/util/fact_table.h"
@@ -50,7 +51,7 @@ typedef struct loom_pass_value_fact_lifecycle_counts_t {
   uint64_t cache_hit_count;
   // Number of complete scope computations attempted after cache misses.
   uint64_t recomputation_count;
-  // Number of empty scopes prepared for caller-maintained facts.
+  // Number of scopes prepared for caller-maintained facts.
   uint64_t preparation_count;
   // Number of explicit invalidation requests against an initialized table.
   uint64_t invalidation_count;
@@ -66,6 +67,11 @@ typedef struct loom_pass_value_fact_scope_t {
   // Requested fact population scope.
   loom_pass_value_fact_scope_kind_t kind;
 
+  // Optional producer-known value-entry prefix to reserve before population.
+  // Zero leaves capacity to definition-time growth. This is a backing-storage
+  // hint, not scope identity: a cache hit never reallocates for a new hint.
+  uint32_t minimum_value_capacity;
+
   // Function context for ordinary or conditioned FUNCTION and REGION scopes.
   // REGION scopes may leave this empty when analyzing detached IR, but
   // projected func-like regions provide the owning function for op fact
@@ -80,6 +86,14 @@ typedef struct loom_pass_value_fact_scope_t {
 
   // Optional immutable target facts for target-sensitive fact inference.
   const loom_target_facts_t* target_facts;
+
+  // Optional scope inputs established by an enclosing analysis. Entries and
+  // their extension payloads are cloned before inference, independently of the
+  // target environment. The table, selected value IDs and their facts remain
+  // immutable until the scope is invalidated or replaced. Their identities are
+  // part of the cache key; a producer changing facts in place must invalidate
+  // the owner before reacquiring. The source cannot be this owner's table.
+  loom_value_fact_table_view_t seed_facts;
 } loom_pass_value_fact_scope_t;
 
 static inline loom_pass_value_fact_scope_t loom_pass_value_fact_scope_none(
@@ -102,6 +116,16 @@ loom_pass_value_fact_scope_function_for_target(
     loom_func_like_t function, const loom_target_facts_t* target_facts) {
   loom_pass_value_fact_scope_t scope = {LOOM_PASS_VALUE_FACT_SCOPE_NONE};
   scope.kind = LOOM_PASS_VALUE_FACT_SCOPE_FUNCTION;
+  scope.function = function;
+  scope.target_facts = target_facts;
+  return scope;
+}
+
+static inline loom_pass_value_fact_scope_t
+loom_pass_value_fact_scope_conditioned_function_for_target(
+    loom_func_like_t function, const loom_target_facts_t* target_facts) {
+  loom_pass_value_fact_scope_t scope = {LOOM_PASS_VALUE_FACT_SCOPE_NONE};
+  scope.kind = LOOM_PASS_VALUE_FACT_SCOPE_CONDITIONED_FUNCTION;
   scope.function = function;
   scope.target_facts = target_facts;
   return scope;
@@ -148,6 +172,9 @@ struct loom_pass_value_fact_owner_t {
   const loom_module_t* module;
   // Reusable value-id-addressed fact table.
   loom_value_fact_table_t table;
+  // Authored execution targets projected lazily for independent regions.
+  // Entries share the current value-fact scope's transient arena and lifetime.
+  loom_symbol_fact_table_t target_symbols;
   // Active populated fact scope, or NONE when table entries are not valid.
   loom_pass_value_fact_scope_t active_scope;
   // Owner state flags.
@@ -170,9 +197,9 @@ void loom_pass_value_fact_owner_deinitialize(
 // reusable direct-address storage, which grows as new values are analyzed.
 void loom_pass_value_fact_owner_invalidate(loom_pass_value_fact_owner_t* owner);
 
-// Prepares empty fact storage for |scope|. The returned table is borrowed and
-// may be populated by the caller through normal fact-table APIs. Use this for
-// production algorithms such as rewriting that must compute and incrementally
+// Prepares fact storage containing only |scope|'s selected seeds. The returned
+// table is borrowed and may be populated through normal fact-table APIs. Use
+// this for algorithms such as rewriting that must compute and incrementally
 // maintain facts while they mutate IR. If population fails, the caller must
 // invalidate the owner before returning the failure.
 iree_status_t loom_pass_value_fact_owner_prepare(

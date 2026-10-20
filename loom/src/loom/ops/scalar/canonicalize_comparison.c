@@ -192,6 +192,25 @@ static iree_status_t loom_scalar_cmpi_boolean_canonicalize(
                                                       replacement);
 }
 
+// Both integer extensions preserve whether a predicate is zero. Only the
+// immediate producer participates; other integer values retain their test.
+static loom_value_id_t loom_scalar_extended_boolean_input(
+    const loom_rewriter_t* rewriter, loom_value_id_t value_id) {
+  const loom_value_t* value = loom_module_value(rewriter->module, value_id);
+  if (loom_value_is_block_arg(value)) {
+    return LOOM_VALUE_ID_INVALID;
+  }
+  const loom_op_t* producer = loom_value_def_op(value);
+  if (!loom_scalar_extui_isa(producer) && !loom_scalar_extsi_isa(producer)) {
+    return LOOM_VALUE_ID_INVALID;
+  }
+  const loom_value_id_t input = loom_op_const_operands(producer)[0];
+  return loom_type_element_type(loom_module_value_type(
+             rewriter->module, input)) == LOOM_SCALAR_TYPE_I1
+             ? input
+             : LOOM_VALUE_ID_INVALID;
+}
+
 iree_status_t loom_scalar_cmpi_canonicalize(loom_op_t* op,
                                             loom_rewriter_t* rewriter) {
   loom_value_id_t lhs = loom_scalar_cmpi_lhs(op);
@@ -202,7 +221,9 @@ iree_status_t loom_scalar_cmpi_canonicalize(loom_op_t* op,
   bool result = false;
   loom_value_facts_t lhs_facts = loom_rewriter_value_facts(rewriter, lhs);
   loom_value_facts_t rhs_facts = loom_rewriter_value_facts(rewriter, rhs);
-  if ((lhs == rhs && loom_scalar_cmpi_same_value_result(predicate, &result)) ||
+  if ((loom_rewriter_value_identity(rewriter, lhs) ==
+           loom_rewriter_value_identity(rewriter, rhs) &&
+       loom_scalar_cmpi_same_value_result(predicate, &result)) ||
       loom_scalar_cmpi_result_from_facts(loom_type_element_type(operand_type),
                                          predicate, &lhs_facts, &rhs_facts,
                                          &result)) {
@@ -213,6 +234,29 @@ iree_status_t loom_scalar_cmpi_canonicalize(loom_op_t* op,
   if (loom_type_element_type(operand_type) == LOOM_SCALAR_TYPE_I1) {
     return loom_scalar_cmpi_boolean_canonicalize(op, rewriter, predicate, lhs,
                                                  rhs);
+  }
+  if ((predicate == LOOM_SCALAR_CMPI_PREDICATE_EQ ||
+       predicate == LOOM_SCALAR_CMPI_PREDICATE_NE) &&
+      loom_value_facts_is_exact(rhs_facts) && rhs_facts.range_lo == 0) {
+    loom_value_id_t input = loom_scalar_extended_boolean_input(rewriter, lhs);
+    if (input != LOOM_VALUE_ID_INVALID) {
+      loom_builder_set_before(&rewriter->builder, op);
+      if (predicate == LOOM_SCALAR_CMPI_PREDICATE_EQ) {
+        const loom_value_id_t checkpoint =
+            loom_rewriter_value_checkpoint(rewriter);
+        const loom_type_t type = loom_type_scalar(LOOM_SCALAR_TYPE_I1);
+        loom_value_id_t one = LOOM_VALUE_ID_INVALID;
+        IREE_RETURN_IF_ERROR(loom_rewriter_build_constant(
+            rewriter, loom_value_facts_exact_i64(1), type, op->location, &one));
+        loom_op_t* inverted = NULL;
+        IREE_RETURN_IF_ERROR(loom_scalar_xori_build(
+            &rewriter->builder, input, one, type, op->location, &inverted));
+        input = loom_scalar_xori_result(inverted);
+        IREE_RETURN_IF_ERROR(loom_rewriter_preserve_result_names_on_new_values(
+            rewriter, op, &input, 1, checkpoint));
+      }
+      return loom_scalar_replace_single_result_with_value(op, rewriter, input);
+    }
   }
   bool changed = false;
   IREE_RETURN_IF_ERROR(loom_scalar_cmpi_unsigned_zero_canonicalize(
@@ -239,7 +283,9 @@ iree_status_t loom_scalar_cmpf_canonicalize(loom_op_t* op,
 
   bool result = false;
   if (loom_scalar_cmpf_constant_result(
-          predicate, lhs, rhs, loom_scalar_cmpf_fastmath(op), &result)) {
+          predicate, loom_rewriter_value_identity(rewriter, lhs),
+          loom_rewriter_value_identity(rewriter, rhs),
+          loom_scalar_cmpf_fastmath(op), &result)) {
     return loom_scalar_replace_single_result_with_i64_constant(op, rewriter,
                                                                result ? 1 : 0);
   }

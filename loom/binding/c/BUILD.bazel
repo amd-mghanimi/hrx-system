@@ -4,12 +4,14 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+load("//build_tools/bazel:query.bzl", "iree_assert_dependency_boundary")
 load(
     "//loom/build_tools/bazel:build_defs.bzl",
     "iree_cmake_extra_content",
     "loom_cc_library",
     "loom_config_compatible_with",
 )
+load(":shared.bzl", "loomc_interop_headers", "loomc_shared_libraries")
 
 package(
     default_visibility = ["//visibility:public"],
@@ -24,30 +26,35 @@ set(IREE_PACKAGE_ROOT_PREFIX "loom/binding/c")
 """,
 )
 
-LOOMC_PUBLIC_HDRS = [
-    "include/loomc/artifact.h",
-    "include/loomc/artifact_manifest.h",
+LOOMC_BASE_HDRS = [
     "include/loomc/base.h",
     "include/loomc/byte_sequence.h",
+    "include/loomc/iree.h",
+    "include/loomc/status.h",
+]
+
+LOOMC_PUBLIC_HDRS = LOOMC_BASE_HDRS + [
+    "include/loomc/artifact.h",
+    "include/loomc/artifact_manifest.h",
     "include/loomc/compile.h",
     "include/loomc/compile_report.h",
     "include/loomc/config.h",
     "include/loomc/context.h",
     "include/loomc/diagnostic.h",
     "include/loomc/emit.h",
-    "include/loomc/iree.h",
     "include/loomc/launch_config.h",
     "include/loomc/link.h",
     "include/loomc/link_dependency.h",
     "include/loomc/link_index.h",
     "include/loomc/loomc.h",
     "include/loomc/module.h",
+    "include/loomc/module_config.h",
     "include/loomc/pass.h",
+    "include/loomc/pass_trace.h",
     "include/loomc/product.h",
     "include/loomc/result.h",
     "include/loomc/sanitizer.h",
     "include/loomc/source.h",
-    "include/loomc/status.h",
     "include/loomc/task.h",
     "include/loomc/target.h",
     "include/loomc/workspace.h",
@@ -63,7 +70,6 @@ LOOMC_TARGET_SPIRV_PUBLIC_HDRS = [
 LOOMC_TARGET_AMDGPU_PUBLIC_HDRS = [
     "include/loomc/target/amdgpu.h",
     "include/loomc/target/amdgpu/base.h",
-    "include/loomc/target/amdgpu/emit.h",
     "include/loomc/target/amdgpu/profile.h",
 ]
 
@@ -71,10 +77,33 @@ LOOMC_TARGET_AMDGPU_IREE_HAL_PUBLIC_HDRS = [
     "include/loomc/target/amdgpu/iree_hal.h",
 ]
 
+LOOMC_TARGET_CPU_IREE_HAL_PUBLIC_HDRS = [
+    "include/loomc/target/cpu/iree_hal.h",
+]
+
 LOOMC_TARGET_XDNA_PUBLIC_HDRS = [
     "include/loomc/target/amd/xdna.h",
     "include/loomc/target/amd/xdna/base.h",
+    "include/loomc/target/amd/xdna/iree_hal.h",
     "include/loomc/target/amd/xdna/profile.h",
+]
+
+LOOMC_TARGET_VM_PUBLIC_HDRS = [
+    "include/loomc/target/vm.h",
+]
+
+LOOMC_TARGET_WASM_PUBLIC_HDRS = [
+    "include/loomc/target/wasm.h",
+]
+
+LOOMC_TARGET_X86_PUBLIC_HDRS = [
+    "include/loomc/target/x86.h",
+]
+
+LOOMC_TARGET_CONFIGURED_PUBLIC_HDRS = [
+    "include/loomc/target/configured.h",
+    "include/loomc/target/configured_ir.h",
+    "include/loomc/target/configured_target.h",
 ]
 
 LOOMC_TARGET_CMD_PUBLIC_HDRS = [
@@ -115,23 +144,50 @@ exports_files(
     LOOMC_TARGET_AMDGPU_IREE_HAL_PUBLIC_HDRS +
     LOOMC_TARGET_AMDGPU_PUBLIC_HDRS +
     LOOMC_TARGET_CMD_PUBLIC_HDRS +
+    LOOMC_TARGET_CONFIGURED_PUBLIC_HDRS +
+    LOOMC_TARGET_CPU_IREE_HAL_PUBLIC_HDRS +
     LOOMC_TARGET_IREE_HAL_PUBLIC_HDRS +
     LOOMC_TARGET_SPIRV_PUBLIC_HDRS +
     LOOMC_TARGET_SPIRV_IREE_HAL_PUBLIC_HDRS +
     LOOMC_TARGET_SPIRV_VULKANINFO_PUBLIC_HDRS +
     LOOMC_TARGET_SPIRV_VULKAN_PUBLIC_HDRS +
+    LOOMC_TARGET_VM_PUBLIC_HDRS +
+    LOOMC_TARGET_WASM_PUBLIC_HDRS +
+    LOOMC_TARGET_X86_PUBLIC_HDRS +
     LOOMC_TARGET_XDNA_PUBLIC_HDRS,
     visibility = _TARGET_EXTENSION_VISIBILITY,
 )
 
 loom_cc_library(
-    name = "loomc",
+    name = "base",
     srcs = [
-        "src/artifact.c",
-        "src/artifact_manifest.c",
         "src/base.c",
         "src/base_system.c",
         "src/byte_sequence.c",
+        "src/status.c",
+    ],
+    hdrs = LOOMC_BASE_HDRS,
+    includes = ["include"],
+    deps = ["//runtime/src/iree/base"],
+)
+
+iree_assert_dependency_boundary(
+    name = "base_has_no_compiler_dependencies",
+    forbidden_dependencies = ["//loom/binding/c:loomc"],
+    forbidden_subtrees = [
+        "//loom/binding/c/target/...",
+        "//loom/src/loom/...",
+    ],
+    message = "LoomC base allocation, status, and byte storage must remain independent of the compiler",
+    target = ":base",
+)
+
+loom_cc_library(
+    name = "loomc",
+    srcs = [
+        "include/loomc/interop.h",
+        "src/artifact.c",
+        "src/artifact_manifest.c",
         "src/compile.c",
         "src/compile_report.c",
         "src/config.c",
@@ -139,6 +195,7 @@ loom_cc_library(
         "src/context.c",
         "src/diagnostic.c",
         "src/emit.c",
+        "src/interop.c",
         "src/launch_config.c",
         "src/link.c",
         "src/link_dependency.c",
@@ -146,17 +203,19 @@ loom_cc_library(
         "src/link_materialization.c",
         "src/module.c",
         "src/module_bytecode.c",
+        "src/module_config.c",
         "src/module_function.c",
         "src/module_global.c",
         "src/module_source.c",
         "src/module_text.c",
         "src/option_chain.c",
         "src/pass_program.c",
+        "src/pass_run.c",
+        "src/pass_trace.c",
         "src/product.c",
         "src/request_index_overlay.c",
         "src/result.c",
         "src/source.c",
-        "src/status.c",
         "src/target.c",
         "src/task.c",
         "src/workspace.c",
@@ -165,12 +224,15 @@ loom_cc_library(
         "src/config.h",
         "src/context.h",
         "src/diagnostic.h",
+        "src/emit.h",
         "src/link_index.h",
         "src/link_materialization.h",
         "src/module.h",
         "src/module_bytecode.h",
         "src/option_chain.h",
         "src/pass_program.h",
+        "src/pass_run.h",
+        "src/pass_trace.h",
         "src/product.h",
         "src/request_index_overlay.h",
         "src/result.h",
@@ -185,7 +247,8 @@ loom_cc_library(
         "src",
     ],
     deps = [
-        "//loom/src/loom/analysis:symbol_value_constraints",
+        ":base",
+        "//loom/src/loom/analysis:kernel_launch_config",
         "//loom/src/loom/codegen:pass_environment",
         "//loom/src/loom/codegen/low:launch_config_program",
         "//loom/src/loom/codegen/low:repr",
@@ -193,9 +256,16 @@ loom_cc_library(
         "//loom/src/loom/codegen/low:text_asm",
         "//loom/src/loom/codegen/low:verify",
         "//loom/src/loom/codegen/low/pipeline:legalizer_registry",
+        "//loom/src/loom/compile:request",
+        "//loom/src/loom/config:application",
+        "//loom/src/loom/config:schema",
+        "//loom/src/loom/config:text",
+        "//loom/src/loom/config:text_binding",
         "//loom/src/loom/error:diagnostic",
         "//loom/src/loom/error:error_defs",
+        "//loom/src/loom/error:json_sink",
         "//loom/src/loom/error:renderer",
+        "//loom/src/loom/error:source",
         "//loom/src/loom/format/bytecode:format",
         "//loom/src/loom/format/bytecode:index",
         "//loom/src/loom/format/bytecode:reader",
@@ -204,13 +274,12 @@ loom_cc_library(
         "//loom/src/loom/format/text:parser",
         "//loom/src/loom/format/text:printer",
         "//loom/src/loom/ir",
-        "//loom/src/loom/ir:facts",
         "//loom/src/loom/link:dependency_analysis",
         "//loom/src/loom/link:dependency_report",
         "//loom/src/loom/link:index_materializer",
-        "//loom/src/loom/link:linker",
         "//loom/src/loom/link:materialization_environment",
         "//loom/src/loom/link:module_index",
+        "//loom/src/loom/link:plan_materializer",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops:op_registry",
         "//loom/src/loom/ops/func",
@@ -218,12 +287,16 @@ loom_cc_library(
         "//loom/src/loom/ops/kernel",
         "//loom/src/loom/ops/low",
         "//loom/src/loom/ops/pass",
+        "//loom/src/loom/ops/target",
         "//loom/src/loom/pass:builtin_registry",
         "//loom/src/loom/pass:environment",
         "//loom/src/loom/pass:interpreter",
+        "//loom/src/loom/pass:pipeline_snapshot",
         "//loom/src/loom/pass:program",
         "//loom/src/loom/pass:registry",
+        "//loom/src/loom/pass:report",
         "//loom/src/loom/pass:tooling",
+        "//loom/src/loom/pass:trace",
         "//loom/src/loom/pass:value_facts",
         "//loom/src/loom/sanitizer:options",
         "//loom/src/loom/target:function_version",
@@ -233,13 +306,12 @@ loom_cc_library(
         "//loom/src/loom/target:predicate",
         "//loom/src/loom/target:profile",
         "//loom/src/loom/target:provider",
+        "//loom/src/loom/target:selection",
         "//loom/src/loom/target:specialization",
         "//loom/src/loom/target:types",
         "//loom/src/loom/target/reporting:artifact_manifest",
         "//loom/src/loom/target/reporting:format",
         "//loom/src/loom/target/reporting:report",
-        "//loom/src/loom/tooling/compile:pipeline",
-        "//loom/src/loom/tooling/config",
         "//loom/src/loom/transforms/cleanup:configured",
         "//loom/src/loom/transforms/cleanup:patterns",
         "//loom/src/loom/util:json",
@@ -251,6 +323,42 @@ loom_cc_library(
         "//runtime/src/iree/io:file_handle",
         "//runtime/src/iree/io:stream",
     ],
+)
+
+loom_cc_library(
+    name = "interop",
+    hdrs = ["include/loomc/interop.h"],
+    includes = ["include"],
+    deps = [
+        ":interop_headers",
+        ":loomc",
+    ],
+)
+
+loomc_interop_headers(
+    name = "interop_headers",
+    deps = [
+        "//loom/src/loom/error:source",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/pass:registry",
+        "//loom/src/loom/pass:report",
+        "//loom/src/loom/target:pipeline",
+        "//loom/src/loom/target:provider",
+        "//loom/src/loom/target/reporting:report",
+    ],
+)
+
+iree_assert_dependency_boundary(
+    name = "loomc_has_no_tooling_or_concrete_target_dependencies",
+    forbidden_subtrees = [
+        "//loom/binding/c/target/...",
+        "//loom/src/loom/target/arch/...",
+        "//loom/src/loom/target/emit/...",
+        "//loom/src/loom/tooling/...",
+        "//loom/src/loom/tools/...",
+    ],
+    message = "The LoomC compiler must remain target-agnostic and independent of ejectable tooling adapters",
+    target = ":loomc",
 )
 
 loom_cc_library(
@@ -272,7 +380,7 @@ loom_cc_library(
         ":loomc",
         "//loom/binding/c/target/iree_hal",
         "//loom/binding/c/target/spirv",
-        "//loom/binding/c/target/spirv/iree_hal",
+        "//loom/binding/c/target/spirv:iree_hal",
         "//loom/binding/c/target/spirv/vulkan",
         "//loom/binding/c/target/spirv/vulkaninfo",
     ],
@@ -319,4 +427,116 @@ iree_cmake_extra_content(
 endif()
 """,
     inline = True,
+)
+
+# One configured binding inventory serves the installed SDK and shared tools.
+# Static callers continue selecting the individual component targets above.
+loomc_shared_libraries(
+    name = "loomc_shared",
+    components = [
+        ":base",
+        ":loomc",
+        ":task_pool",
+        ":task_queue",
+        "//loom/binding/c/target/configured:ir",
+        "//loom/binding/c/target/configured:target",
+        "//loom/binding/c/target/configured",
+        "//loom/binding/c/target/cmd",
+        "//loom/binding/c/target/cpu:iree_hal",
+        "//loom/binding/c/target/iree_hal",
+    ] + select({
+        "//loom/config/import:cxx": [
+            "//loom/binding/c/import/cxx",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/target:amdgpu_artifacts": [
+            "//loom/binding/c/target/amdgpu",
+            "//loom/binding/c/target/amdgpu:iree_hal",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/target:xdna_artifacts": [
+            "//loom/binding/c/target/amd/xdna",
+            "//loom/binding/c/target/amd/xdna:iree_hal",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/target:spirv_artifacts": [
+            "//loom/binding/c/target/spirv",
+            "//loom/binding/c/target/spirv/vulkaninfo",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/target:spirv_vulkan_artifacts": [
+            "//loom/binding/c/target/spirv:iree_hal",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/execute:spirv_vulkan_hal": [
+            "//loom/binding/c/target/spirv/vulkan",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/target/arch:vm": [
+            "//loom/binding/c/target/vm",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/target:wasm_artifacts": [
+            "//loom/binding/c/target/wasm",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//loom/config/target/arch:x86": [
+            "//loom/binding/c/target/x86",
+        ],
+        "//conditions:default": [],
+    }),
+    tool_components = ["//loom/src/loom/testing:target_environment"],
+    runtime_deps = [
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/async/util:proactor_thread",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base:core_headers",
+        "//runtime/src/iree/base:cpu_data",
+        "//runtime/src/iree/base/internal",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/base/internal:base64",
+        "//runtime/src/iree/base/internal:fpu_state",
+        "//runtime/src/iree/base/internal:json",
+        "//runtime/src/iree/base/internal:path",
+        "//runtime/src/iree/base/internal:unicode",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/base/threading:thread",
+        "//runtime/src/iree/base/tooling:flags",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/task:device_spec",
+        "//runtime/src/iree/hal/drivers/task/executable:loader",
+        "//runtime/src/iree/hal/drivers/task/executable/library:abi",
+        "//runtime/src/iree/hal/memory:slab_cache",
+        "//runtime/src/iree/hal/memory:tlsf_pool",
+        "//runtime/src/iree/io:file_handle",
+        "//runtime/src/iree/io:parameter_index",
+        "//runtime/src/iree/io:parameter_index_provider",
+        "//runtime/src/iree/io:parameter_provider",
+        "//runtime/src/iree/io:stream",
+        "//runtime/src/iree/math",
+        "//runtime/src/iree/module/hal:types",
+        "//runtime/src/iree/net:carrier",
+        "//runtime/src/iree/net/carrier/stream",
+        "//runtime/src/iree/schemas:xdna_executable",
+        "//runtime/src/iree/task",
+        "//runtime/src/iree/tokenizer",
+        "//runtime/src/iree/tokenizer/format/huggingface:tokenizer_json",
+        "//runtime/src/iree/tokenizer/vocab",
+        "//runtime/src/iree/tooling:device_flags",
+        "//runtime/src/iree/tooling:device_profiling",
+        "//runtime/src/iree/tooling:device_util",
+        "//runtime/src/iree/tooling:parameter_util",
+        "//runtime/src/iree/vm",
+        "//runtime/src/iree/vm/bytecode:module",
+        "//runtime/src/iree/vm/bytecode:wire",
+    ],
 )

@@ -20,6 +20,27 @@ low.func.def target<test.low.core>(@test_target) abi(object_function) @copied_sc
 // ====
 // RUN: pass source-to-low
 
+// The selected extract recipe gives a rule temporary an explicit slice width,
+// then uses that temporary's carrier for the result move.
+test.target<low_core> @test_target
+
+func.def target(@test_target) @sliced_temporary_carrier(%pair: vector<2xi32>) -> (i32) {
+  %element = vector.extract %pair[1] : vector<2xi32> -> i32
+  func.return %element : i32
+}
+
+// ----
+test.target<low_core> @test_target
+
+low.func.def target<test.low.core>(@test_target) abi(object_function) @sliced_temporary_carrier(%pair: reg<test.i32 x2>) -> (reg<test.i32>) asm {
+  %5 = slice %pair[1] : reg<test.i32 x2> -> reg<test.i32>
+  %element = move %5 : reg<test.i32> -> reg<test.i32>
+  return %element
+}
+
+// ====
+// RUN: pass source-to-low
+
 test.target<low_core> @test_target
 
 func.def target(@test_target) @copied_per_lane_aggregate(%lhs: vector<4xi32>, %rhs: vector<4xi32>) -> (vector<4xi32>) {

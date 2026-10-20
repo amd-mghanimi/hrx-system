@@ -73,6 +73,7 @@ iree_runtime_cc_library(
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal",
         "//runtime/src/iree/hal/drivers/vulkan/util:libvulkan",
+        "//runtime/src/iree/hal/memory:tracing",
         "//third_party:vulkan_headers",
     ],
 )
@@ -119,13 +120,17 @@ iree_runtime_cc_test(
 
 iree_runtime_cc_test(
     name = "command_buffer_test",
-    srcs = ["command_buffer_test.cc"],
+    srcs = [
+        "barrier.h",
+        "command_buffer_test.cc",
+    ],
     deps = [
         ":headers",
         ":vulkan",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/vulkan/util:libvulkan",
         "//runtime/src/iree/hal/testing:mock_device",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
@@ -210,6 +215,7 @@ iree_runtime_cc_library(
     hdrs = ["transient_buffer.h"],
     visibility = ["//visibility:private"],
     deps = [
+        ":headers",
         "//runtime/src/iree/async",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/threading",
@@ -243,8 +249,67 @@ iree_runtime_cc_test(
 )
 
 iree_runtime_cc_library(
+    name = "queue_test_util",
+    testonly = True,
+    srcs = [
+        "allocator.h",
+        "barrier.h",
+        "builtins.h",
+        "queue.h",
+        "queue_test_util.cc",
+        "semaphore.h",
+    ],
+    hdrs = ["queue_test_util.h"],
+    deps = [
+        ":headers",
+        ":profile",
+        ":vulkan",
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/base/threading:thread",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/vulkan/util:libvulkan",
+        "//runtime/src/iree/hal/utils:submitted_signal",
+    ],
+)
+
+iree_runtime_cc_library(
+    name = "sparse_binding_test",
+    testonly = True,
+    srcs = [
+        "allocator.h",
+        "barrier.h",
+        "builtins.h",
+        "queue.h",
+        "semaphore.h",
+        "sparse_binding_test.cc",
+    ],
+    deps = [
+        ":headers",
+        ":profile",
+        ":queue_test_util",
+        ":vulkan",
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
+        "//runtime/src/iree/base/threading",
+        "//runtime/src/iree/base/threading:thread",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/cts/util:test_base",
+        "//runtime/src/iree/hal/drivers/vulkan/util:libvulkan",
+        "//runtime/src/iree/hal/utils:submitted_signal",
+        "//runtime/src/iree/testing:gtest",
+    ],
+    alwayslink = True,
+)
+
+iree_runtime_cc_library(
     name = "vulkan",
     srcs = [
+        "allocation_queue.c",
+        "allocation_queue.h",
         "allocator.c",
         "allocator.h",
         "api.c",
@@ -268,14 +333,19 @@ iree_runtime_cc_library(
         "driver.h",
         "executable.c",
         "executable.h",
+        "file_transfer.c",
+        "file_transfer.h",
         "logical_device.c",
         "logical_device.h",
+        "memory_backend.c",
+        "memory_backend.h",
         "physical_device.c",
         "physical_device.h",
         "physical_device_selection.c",
         "physical_device_selection.h",
         "queue.c",
         "queue.h",
+        "queue_memory.c",
         "queue_stats.h",
         "semaphore.c",
         "semaphore.h",
@@ -286,6 +356,7 @@ iree_runtime_cc_library(
         "spirv.c",
         "spirv.h",
         "syms.h",
+        "virtual_buffer.c",
     ],
     deps = [
         ":api",
@@ -298,6 +369,7 @@ iree_runtime_cc_library(
         "//runtime/src/iree/base:core_headers",
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/base/internal:memory",
         "//runtime/src/iree/base/threading",
         "//runtime/src/iree/base/threading:thread",
         "//runtime/src/iree/hal",
@@ -305,10 +377,10 @@ iree_runtime_cc_library(
         "//runtime/src/iree/hal/drivers/vulkan/util:libvulkan",
         "//runtime/src/iree/hal/memory:passthrough_pool",
         "//runtime/src/iree/hal/memory:slab_provider",
-        "//runtime/src/iree/hal/memory:tlsf_pool",
         "//runtime/src/iree/hal/memory:tracing",
         "//runtime/src/iree/hal/utils:files",
         "//runtime/src/iree/hal/utils:resource_set",
+        "//runtime/src/iree/hal/utils:submitted_signal",
         "//third_party:vulkan_headers",
     ],
 )

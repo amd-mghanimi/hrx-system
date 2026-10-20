@@ -97,7 +97,7 @@ TEST_P(SpirvFloat8MemoryTest, PreservesEveryPayloadAndWidensExactly) {
       queue, iree_hal_semaphore_list_empty(), completion, executable, function,
       iree_hal_make_static_dispatch_config(1, 1, 1),
       iree_const_byte_span_empty(), {IREE_ARRAYSIZE(bindings), bindings},
-      IREE_HAL_DISPATCH_FLAG_NONE));
+      /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
       completion, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
 

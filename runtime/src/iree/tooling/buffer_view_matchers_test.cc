@@ -9,6 +9,8 @@
 #include "iree/base/api.h"
 #include "iree/base/internal/math.h"
 #include "iree/base/internal/span.h"
+#include "iree/hal/memory/heap_pool.h"
+#include "iree/hal/testing/mapped_transfer_buffer.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
@@ -171,47 +173,54 @@ static const iree_hal_buffer_equality_t kExactEquality = ([]() {
 })();
 
 static const iree_hal_buffer_equality_t kApproximateAbsoluteEquality = ([]() {
-  iree_hal_buffer_equality_t equality = {};
-  equality.mode = IREE_HAL_BUFFER_EQUALITY_APPROXIMATE;
-  equality.f16_atol = 0.001f;
-  equality.f32_atol = 0.0001f;
-  equality.f64_atol = 0.0001;
-  equality.bf16_atol = 0.01f;
-  equality.rtol = 0.0;
+  iree_hal_buffer_equality_t equality = {
+      .mode = IREE_HAL_BUFFER_EQUALITY_APPROXIMATE,
+      .f16_atol = 0.001f,
+      .f32_atol = 0.0001f,
+      .f64_atol = 0.0001,
+      .bf16_atol = 0.01f,
+      .rtol = 0.0,
+  };
   return equality;
 })();
 
 static const iree_hal_buffer_equality_t kApproximateRelativeEquality = ([]() {
-  iree_hal_buffer_equality_t equality = {};
-  equality.mode = IREE_HAL_BUFFER_EQUALITY_APPROXIMATE;
-  equality.f16_atol = 0.0f;
-  equality.f32_atol = 0.0f;
-  equality.f64_atol = 0.0;
-  equality.bf16_atol = 0.0f;
-  equality.rtol = 0.001;
+  iree_hal_buffer_equality_t equality = {
+      .mode = IREE_HAL_BUFFER_EQUALITY_APPROXIMATE,
+      .f16_atol = 0.0f,
+      .f32_atol = 0.0f,
+      .f64_atol = 0.0,
+      .bf16_atol = 0.0f,
+      .rtol = 0.001,
+  };
   return equality;
 })();
 
 static const iree_hal_buffer_equality_t kApproximateNumpyEquality = ([]() {
-  iree_hal_buffer_equality_t equality = {};
-  equality.mode = IREE_HAL_BUFFER_EQUALITY_APPROXIMATE;
-  equality.f16_atol = 1e-5f;
-  equality.f32_atol = 1e-5f;
-  equality.f64_atol = 1e-5;
-  equality.bf16_atol = 1e-5f;
-  equality.rtol = 1e-5;
+  iree_hal_buffer_equality_t equality = {
+      .mode = IREE_HAL_BUFFER_EQUALITY_APPROXIMATE,
+      .f16_atol = 1e-5f,
+      .f32_atol = 1e-5f,
+      .f64_atol = 1e-5,
+      .bf16_atol = 1e-5f,
+      .rtol = 1e-5,
+  };
   return equality;
 })();
 
 class BufferViewMatchersTest : public ::testing::Test {
  protected:
-  iree_hal_allocator_t* device_allocator_ = nullptr;
+  iree_hal_pool_t* pool_ = nullptr;
   virtual void SetUp() {
-    IREE_CHECK_OK(iree_hal_allocator_create_heap(
-        IREE_SV("heap"), iree_allocator_system(), iree_allocator_system(),
-        &device_allocator_));
+    const iree_hal_pool_host_access_t host_access = {
+        .access = IREE_HAL_MEMORY_ACCESS_ALL,
+        .modes = IREE_HAL_MAPPING_MODE_SCOPED,
+        .cacheability = IREE_HAL_HOST_CACHEABILITY_WRITE_BACK,
+    };
+    IREE_CHECK_OK(iree_hal_heap_pool_create(
+        host_access, iree_allocator_system(), iree_allocator_system(), &pool_));
   }
-  virtual void TearDown() { iree_hal_allocator_release(device_allocator_); }
+  virtual void TearDown() { iree_hal_pool_release(pool_); }
 
   template <typename T>
   StatusOr<BufferView> CreateBufferView(iree::span<const iree_hal_dim_t> shape,
@@ -221,14 +230,13 @@ class BufferViewMatchersTest : public ::testing::Test {
     for (iree_hal_dim_t dim : shape) {
       num_elements *= dim;
     }
-    iree_hal_buffer_params_t params = {0};
-    params.type =
-        IREE_HAL_MEMORY_TYPE_HOST_LOCAL | IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE,
-    params.usage =
-        IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_MAPPING;
+    const iree_device_size_t allocation_size =
+        iree_max((iree_device_size_t)(num_elements * sizeof(T)), 1u);
     Buffer buffer;
-    IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(
-        device_allocator_, params, num_elements * sizeof(T), &buffer));
+    IREE_RETURN_IF_ERROR(iree_hal_pool_allocate_buffer(
+        pool_,
+        iree_hal_make_pool_reservation_request(allocation_size, alignof(T)),
+        iree_infinite_timeout(), &buffer));
     IREE_RETURN_IF_ERROR(iree_hal_buffer_map_write(buffer, 0, contents,
                                                    num_elements * sizeof(T)));
     BufferView buffer_view;
@@ -243,6 +251,78 @@ class BufferViewMatchersTest : public ::testing::Test {
 //===----------------------------------------------------------------------===//
 // iree_hal_buffer_equality_t
 //===----------------------------------------------------------------------===//
+
+TEST_F(BufferViewMatchersTest, ObservesCompletedDeviceWritesAndCacheFailures) {
+  for (iree_hal_memory_type_t coherence :
+       {0u, static_cast<uint32_t>(IREE_HAL_MEMORY_TYPE_HOST_COHERENT)}) {
+    auto actual = iree::hal::testing::MakeMappedTransferBuffer(coherence);
+    auto expected = iree::hal::testing::MakeMappedTransferBuffer(coherence);
+    const iree_hal_dim_t shape[] = {1};
+    BufferView actual_view;
+    BufferView expected_view;
+    IREE_ASSERT_OK(iree_hal_buffer_view_create(
+        actual.get(), 1, shape, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+        IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, iree_allocator_system(),
+        &actual_view));
+    IREE_ASSERT_OK(iree_hal_buffer_view_create(
+        expected.get(), 1, shape, IREE_HAL_ELEMENT_TYPE_FLOAT_32,
+        IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, iree_allocator_system(),
+        &expected_view));
+    for (int mode = 0; mode < 3; ++mode) {
+      SCOPED_TRACE(mode);
+      auto builder = StringBuilder::MakeSystem();
+      bool matched = false;
+      float value = 0.0f;
+      auto compare = [&]() {
+        switch (mode) {
+          case 0:
+            return iree_hal_buffer_view_match_elements(
+                kExactEquality, iree_hal_make_buffer_element_f32(value),
+                actual_view, builder, &matched);
+          case 1:
+            return iree_hal_buffer_view_match_array(
+                kExactEquality, IREE_HAL_ELEMENT_TYPE_FLOAT_32, 1,
+                iree_make_const_byte_span(&value, sizeof(value)), actual_view,
+                builder, &matched);
+          default:
+            return iree_hal_buffer_view_match_equal(
+                kExactEquality, expected_view, actual_view, builder, &matched);
+        }
+      };
+      for (float next : {2.0f, 3.0f}) {
+        value = next;
+        actual->host_contents.fill(0);
+        expected->host_contents.fill(0xFF);
+        memcpy(actual->device_contents.data(), &value, sizeof(value));
+        memcpy(expected->device_contents.data(), &value, sizeof(value));
+        IREE_ASSERT_OK(compare());
+        EXPECT_TRUE(matched);
+        EXPECT_EQ(actual->mapping_count, 0u);
+        EXPECT_EQ(expected->mapping_count, 0u);
+      }
+      if (!coherence) {
+        actual->invalidate_code = IREE_STATUS_DATA_LOSS;
+        IREE_EXPECT_STATUS_IS(IREE_STATUS_DATA_LOSS, compare());
+        EXPECT_FALSE(matched);
+        EXPECT_EQ(actual->mapping_count, 0u);
+        EXPECT_EQ(expected->mapping_count, 0u);
+        actual->invalidate_code = IREE_STATUS_OK;
+        if (mode == 2) {
+          expected->invalidate_code = IREE_STATUS_DATA_LOSS;
+          IREE_EXPECT_STATUS_IS(IREE_STATUS_DATA_LOSS, compare());
+          EXPECT_FALSE(matched);
+          EXPECT_EQ(actual->mapping_count, 0u);
+          EXPECT_EQ(expected->mapping_count, 0u);
+          expected->invalidate_code = IREE_STATUS_OK;
+        }
+      }
+    }
+    if (coherence) {
+      EXPECT_EQ(actual->invalidate_count, 0u);
+      EXPECT_EQ(expected->invalidate_count, 0u);
+    }
+  }
+}
 
 TEST_F(BufferViewMatchersTest, CompareBroadcastI8EQ) {
   const int8_t lhs = 1;
@@ -941,6 +1021,14 @@ TEST_F(BufferViewMatchersTest, MatchEmpty) {
   bool match = false;
   IREE_ASSERT_OK(
       iree_hal_buffer_view_match_equal(kExactEquality, lhs, rhs, sb, &match));
+  EXPECT_TRUE(match);
+  EXPECT_TRUE(sb.ToString().empty());
+  IREE_ASSERT_OK(iree_hal_buffer_view_match_elements(
+      kExactEquality, iree_hal_make_buffer_element_f32(0.0f), rhs, sb, &match));
+  EXPECT_TRUE(match);
+  IREE_ASSERT_OK(iree_hal_buffer_view_match_array(
+      kExactEquality, IREE_HAL_ELEMENT_TYPE_FLOAT_32, 0,
+      iree_const_byte_span_empty(), rhs, sb, &match));
   EXPECT_TRUE(match);
   EXPECT_TRUE(sb.ToString().empty());
 }

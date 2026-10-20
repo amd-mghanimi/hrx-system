@@ -2,6 +2,28 @@
 
 wasm.target<simd128> @target
 
+func.def target(@target) @view_origin_exceeds_wasm32(%input: buffer, %origin_input: offset) -> (view<1xi32>) {
+  %origin = index.assume %origin_input [range(%origin_input, 4294967296, 8589934591)] : offset
+  // ERROR@+1: WASM/006 {op_name="buffer.view", bit_count="32"}
+  %view = buffer.view %input[%origin] : buffer -> view<1xi32>
+  func.return %view : view<1xi32>
+}
+
+// ====
+
+wasm.target<simd128> @target
+
+func.def target(@target) @view_origin_may_overflow_wasm32(%input: buffer, %origin_input: offset) -> (view<1xi32>) {
+  %origin = index.assume %origin_input [range(%origin_input, 0, 4294967296)] : offset
+  // ERROR@+1: WASM/006 {op_name="buffer.view", bit_count="32"}
+  %view = buffer.view %input[%origin] : buffer -> view<1xi32>
+  func.return %view : view<1xi32>
+}
+
+// ====
+
+wasm.target<simd128> @target
+
 func.def target(@target) @scalar_powf_rejected_by_math_policy(%base: f32, %exponent: f32) -> (f32) {
   // ERROR@+1: LOWERING/036 {op_name="scalar.powf", phase_name="legalize-math", policy_name="wasm-math", math_op="powf", lane_domain="scalar", element_type="f32", constraint_key="math.op.supported"}
   %result = scalar.powf<afn> %base, %exponent : f32
@@ -22,11 +44,78 @@ func.def target(@target) @scalar_tanhf_rejected_by_math_policy(%input: f32) -> (
 
 wasm.target<simd128> @target
 
-func.def target(@target) @unsupported_vector_shape(%lhs: vector<8xi32>, %rhs: vector<8xi32>) -> (vector<8xi32>) {
-  // ERROR@+1: WASM/001 {field_name="lhs", required_type="vector<4xi32>"}
-  %sum = vector.addi %lhs, %rhs : vector<8xi32>
-  func.return %sum : vector<8xi32>
+func.def target(@target) @round_away_rejected_by_math_policy(%input: f32) -> (f32) {
+  // ERROR@+1: LOWERING/036 {op_name="scalar.roundf", phase_name="legalize-math", policy_name="wasm-math", math_op="roundf", lane_domain="scalar", element_type="f32", constraint_key="math.op.supported"}
+  %result = scalar.roundf %input : f32
+  func.return %result : f32
 }
+
+// ====
+
+wasm.target<simd128> @target
+
+func.def target(@target) @vector_round_away_rejected_by_math_policy(%input: vector<4xf32>) -> (vector<4xf32>) {
+  // ERROR@+1: LOWERING/036 {op_name="vector.roundf", phase_name="legalize-math", policy_name="wasm-math", math_op="roundf", lane_domain="vector", element_type="f32", constraint_key="math.op.supported"}
+  %result = vector.roundf %input : vector<4xf32>
+  func.return %result : vector<4xf32>
+}
+
+// ====
+
+wasm.target<simd128> @target
+
+func.def target(@target) @wide_roundeven_rejected_by_math_policy(%input: f64) -> (f64) {
+  // ERROR@+1: LOWERING/036 {op_name="scalar.roundevenf", phase_name="legalize-math", policy_name="wasm-math", math_op="roundevenf", lane_domain="scalar", element_type="f64", constraint_key="math.element.f32"}
+  %result = scalar.roundevenf %input : f64
+  func.return %result : f64
+}
+
+// ====
+
+wasm.target<simd128> @target
+
+// The function boundary owns carrier admission before any body operation can
+// select a native descriptor or scalar reference recipe.
+// ERROR@+1: TARGET/031 {op_name="func.def", type_constraint="vector.target_carrier"}
+func.def target(@target) @unsupported_vector_carrier(%value: vector<8xi32>) {
+  func.return
+}
+
+// ====
+
+// RUN: with-checks compile-report target-legalize{mode=eager}
+
+wasm.target<simd128> @target
+
+// Structural reduction legalization must preserve the same boundary. Expanding
+// this operation would hide the invalid callable carrier behind a much larger
+// scalar program.
+func.def target(@target) @unsupported_reduction_carrier(%values: vector<2x4xi32>, %init: vector<4xi32>) -> (vector<4xi32>) {
+  %result = vector.reduce.axes<addi> %values, %init axes [0] : vector<2x4xi32>, vector<4xi32>
+  func.return %result : vector<4xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=0 scalarized=0 target_rewritten=0 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=1 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=unsupported_reduction_carrier source_op=vector.reduce.axes * action=unhandled outcome=unhandled * scalarized=false * created_ops=0 erased_ops=0
+
+// ====
+
+// RUN: with-checks compile-report target-legalize{mode=complete}
+
+wasm.target<simd128> @target
+
+// Wasm explicitly rejects the complete unmatched vector-cast family so the
+// ordinary policy can select its shared lane-wise reference implementation.
+func.def target(@target) @reference_vector_cast(%input: vector<4xf32>) {
+  %rounded = vector.fptrunc %input : vector<4xf32> to vector<4xbf16>
+  test.use %rounded : vector<4xbf16>
+  func.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=0 reference_rewritten=1 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=reference_vector_cast source_op=vector.fptrunc * action=rewritten outcome=reference-fallback contract=unsupported legalizer=vector strategy=reference * scalarized=true *
 
 // ====
 
@@ -66,11 +155,11 @@ func.def target(@target) @negative_index_offset(%input: index) -> (offset) {
 
 wasm.target<simd128> @target
 
-func.def target(@target) @index_remainder_unproven_dividend(%value: index) -> (index) {
+func.def target(@target) @index_division_unproven_dividend(%value: index) -> (index) {
   %divisor = index.constant 3 : index
-  // ERROR@+1: TARGET/005 {op_name="index.rem", subject_name="lhs", minimum="0", maximum="4294967295"}
-  %remainder = index.rem %value, %divisor : index
-  func.return %remainder : index
+  // ERROR@+1: TARGET/005 {op_name="index.div", subject_name="lhs", minimum="0", maximum="4294967295"}
+  %quotient = index.div %value, %divisor : index
+  func.return %quotient : index
 }
 
 // ====
@@ -88,12 +177,12 @@ func.def target(@target) @index_remainder_unproven_divisor(%value: index, %divis
 
 wasm.target<simd128> @target
 
-func.def target(@target) @index_remainder_wide_dividend(%value: index) -> (index) {
+func.def target(@target) @index_division_wide_dividend(%value: index) -> (index) where [range(%value, 4294967296, 8589934591)] {
   %wide_value = index.assume %value [range(%value, 4294967296, 8589934591)] : index
   %divisor = index.constant 3 : index
-  // ERROR@+1: TARGET/005 {op_name="index.rem", subject_name="lhs", minimum="0", maximum="4294967295"}
-  %remainder = index.rem %wide_value, %divisor : index
-  func.return %remainder : index
+  // ERROR@+1: TARGET/005 {op_name="index.div", subject_name="lhs", minimum="0", maximum="4294967295"}
+  %quotient = index.div %wide_value, %divisor : index
+  func.return %quotient : index
 }
 
 // ====
@@ -138,7 +227,7 @@ wasm.target<simd128> @target
 
 func.def target(@target) @dynamic_base_plus_index_overflows_wasm32(%input: buffer, %base_input: offset, %position_input: index) -> (i32) {
   %aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
-  %base = index.assume %base_input [range(%base_input, 4294967264, 4294967268), mul(%base_input, 4)] : offset
+  %base = index.assume %base_input [range(%base_input, 4294967264, 4294967268), multiple_of(%base_input, 4)] : offset
   %position = index.assume %position_input [range(%position_input, 0, 7)] : index
   %view = buffer.view %aligned[%base] : buffer -> view<8xi32>
   // ERROR@+1: WASM/006 {bit_count="32"}
@@ -177,4 +266,22 @@ func.def target(@target) @wide_offset_rejects_negative(%input: i64) -> (offset) 
   // ERROR@+1: TARGET/005 {op_name="index.cast", subject_name="input", constraint_key="index_cast.offset_non_negative"}
   %offset = index.cast %bounded : i64 to offset
   func.return %offset : offset
+}
+
+// ====
+
+wasm.target<simd128> @target
+
+// Twelve source packets require 126 Low operations and remain admissible. The
+// next packet raises the complete native sequence to 147 operations, so the
+// authored window is rejected before its store can trigger scalar fallback.
+func.def target(@target) @materialized_window_exceeds_operation_limit(%packet: vector<16xi8>, %offset0: index, %output: buffer) {
+  %offset = index.assume %offset0 [range(%offset0, 0, 80)] : index
+  %source = vector.concat<0> %packet, %packet, %packet, %packet, %packet, %packet, %packet, %packet, %packet, %packet, %packet, %packet, %packet : vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8>, vector<16xi8> -> vector<208xi8>
+  // ERROR@+1: WASM/007 {op_name="vector.slice", required_operation_count="147", maximum_operation_count="128"}
+  %window = vector.slice %source[%offset] : vector<208xi8> -> vector<128xi8>
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<128xi8>
+  vector.store %window, %results[0] : vector<128xi8>, view<128xi8>
+  func.return
 }

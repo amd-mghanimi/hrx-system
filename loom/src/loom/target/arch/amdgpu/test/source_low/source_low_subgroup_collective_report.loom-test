@@ -28,6 +28,31 @@ CHECK: COMPILE-REPORT: source_low_memory_argument_packet[*] * source_root=output
 
 // ====
 
+// RUN: with-checks compile-report specialize-target-callgraph,target-legalize{mode=final},dce,canonicalize,scf-to-cfg,cfg-simplify,source-to-low,low-dce
+amdgpu.target<gfx11-generic> @target
+
+kernel.def target(@target) @report_subgroup_match_any_i32_wave32() {
+  %unit = index.constant 1 : index
+  %items = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%output: buffer) {
+  %lane = kernel.subgroup.lane.id : index
+  %lane_i32 = index.cast %lane : index to i32
+  %class_mask = scalar.constant 3 : i32
+  %value = scalar.andi %lane_i32, %class_mask : i32
+  %matches = kernel.subgroup.match.any %value : i32 -> i64
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<64xi64>
+  view.store %matches, %output_view[%lane] : i64, view<64xi64>
+  kernel.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low_target[*] * subgroup_size=32
+CHECK: COMPILE-REPORT: target_legalization[*] function=report_subgroup_match_any_i32_wave32 source_op=kernel.subgroup.match.any * action=rewritten outcome=target-rewrite * legalizer=amdgpu strategy=target * created_ops=388 erased_ops=1
+
+// ====
+
 amdgpu.target<gfx11-generic> @target
 
 kernel.def target(@target) @report_workgroup_reduce_scalar_leader_publication() {

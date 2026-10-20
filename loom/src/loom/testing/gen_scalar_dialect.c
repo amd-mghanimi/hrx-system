@@ -64,9 +64,9 @@ static iree_status_t loom_test_gen_hook_scalar_integer_binary(
     uint8_t flags = 0;
     if (loom_test_gen_next_probability(context->gen, 20)) {
       flags = (uint8_t)loom_test_gen_next_range(
-          context->gen, (LOOM_SCALAR_INTOVERFLOWFLAGS_NSW |
-                         LOOM_SCALAR_INTOVERFLOWFLAGS_NUW) +
-                            1);
+          context->gen,
+          (LOOM_INTEGER_OVERFLOW_FLAG_NSW | LOOM_INTEGER_OVERFLOW_FLAG_NUW) +
+              1);
     }
     IREE_RETURN_IF_ERROR(flagged_ops[pick](context->builder, flags, lhs, rhs,
                                            type, LOOM_LOCATION_UNKNOWN, &op));
@@ -115,9 +115,9 @@ static iree_status_t loom_test_gen_hook_scalar_integer_bitwise(
     uint8_t flags = 0;
     if (loom_test_gen_next_probability(context->gen, 20)) {
       flags = (uint8_t)loom_test_gen_next_range(
-          context->gen, (LOOM_SCALAR_INTOVERFLOWFLAGS_NSW |
-                         LOOM_SCALAR_INTOVERFLOWFLAGS_NUW) +
-                            1);
+          context->gen,
+          (LOOM_INTEGER_OVERFLOW_FLAG_NSW | LOOM_INTEGER_OVERFLOW_FLAG_NUW) +
+              1);
     }
     IREE_RETURN_IF_ERROR(loom_scalar_shli_build(
         context->builder, flags, lhs, rhs, type, LOOM_LOCATION_UNKNOWN, &op));
@@ -330,6 +330,20 @@ typedef iree_status_t (*loom_scalar_conversion_fn_t)(
     loom_builder_t* builder, loom_value_id_t input, loom_type_t input_type,
     loom_type_t result_type, loom_location_id_t location, loom_op_t** out_op);
 
+static iree_status_t loom_test_gen_scalar_extf_build(
+    loom_builder_t* builder, loom_value_id_t input, loom_type_t input_type,
+    loom_type_t result_type, loom_location_id_t location, loom_op_t** out_op) {
+  return loom_scalar_extf_build(builder, /*instance_flags=*/0, input,
+                                input_type, result_type, location, out_op);
+}
+
+static iree_status_t loom_test_gen_scalar_fptrunc_build(
+    loom_builder_t* builder, loom_value_id_t input, loom_type_t input_type,
+    loom_type_t result_type, loom_location_id_t location, loom_op_t** out_op) {
+  return loom_scalar_fptrunc_build(builder, /*instance_flags=*/0, input,
+                                   input_type, result_type, location, out_op);
+}
+
 typedef struct loom_scalar_conversion_candidate_t {
   // Builder for the candidate conversion operation.
   loom_scalar_conversion_fn_t build;
@@ -391,11 +405,11 @@ static iree_status_t loom_test_gen_hook_scalar_conversion(
         loom_scalar_fptoui_build, LOOM_SCALAR_TYPE_I32);
     if (loom_scalar_type_bitwidth(source_scalar) < 64) {
       candidates[candidate_count++] = loom_scalar_conversion_candidate_make(
-          loom_scalar_extf_build, LOOM_SCALAR_TYPE_F64);
+          loom_test_gen_scalar_extf_build, LOOM_SCALAR_TYPE_F64);
     }
     if (loom_scalar_type_bitwidth(source_scalar) > 16) {
       candidates[candidate_count++] = loom_scalar_conversion_candidate_make(
-          loom_scalar_fptrunc_build, LOOM_SCALAR_TYPE_F16);
+          loom_test_gen_scalar_fptrunc_build, LOOM_SCALAR_TYPE_F16);
     }
   }
 

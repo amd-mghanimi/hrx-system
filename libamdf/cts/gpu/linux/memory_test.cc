@@ -4,10 +4,14 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <linux/mempolicy.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <array>
+#include <cerrno>
+#include <climits>
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -16,6 +20,8 @@
 #include "amdf/gpu.h"
 #include "gtest/gtest.h"
 #include "libamdf/cts/gpu/gpu_device_fixture.h"
+#include "libamdf/cts/gpu/sdma/encoding/commands.h"
+#include "libamdf/cts/gpu/util/command_fixture.h"
 
 namespace {
 
@@ -60,9 +66,10 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
   }
 
   amdf_memory_create_info_t MakeSystemMemoryCreateInfo() {
-    amdf_memory_create_info_t info = {};
-    info.type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO;
-    info.structure_size = sizeof(info);
+    amdf_memory_create_info_t info = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO,
+        .structure_size = sizeof(info),
+    };
     memory_access_.requirements.access =
         AMDF_MEMORY_ACCESS_READ | AMDF_MEMORY_ACCESS_WRITE;
     memory_access_.requirements.flags =
@@ -82,12 +89,13 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
   amdf_status_t MapMemory(amdf_memory_t* memory, uint32_t ordinal,
                           uint64_t byte_offset, uint64_t byte_length,
                           amdf_memory_map_flags_t flags) {
-    amdf_memory_map_info_t info = {};
-    info.type = AMDF_STRUCTURE_TYPE_MEMORY_MAP_INFO;
-    info.structure_size = sizeof(info);
-    info.byte_offset = byte_offset;
-    info.byte_length = byte_length;
-    info.flags = flags;
+    amdf_memory_map_info_t info = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_MAP_INFO,
+        .structure_size = sizeof(info),
+        .byte_offset = byte_offset,
+        .byte_length = byte_length,
+        .flags = flags,
+    };
     amdf_status_t status = api_->memory_map(memory, &info, &mappings_[ordinal]);
     if (!amdf_status_is_ok(status)) {
       return status;
@@ -120,19 +128,22 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
       const DeviceAccessCase& access_case = kDeviceAccessCases[case_ordinal];
       const amdf_memory_device_access_t access = {
           device_,
-          {.access = access_case.access,
-           .flags = AMDF_MEMORY_FLAG_DEVICE_ADDRESS |
-                    (memory_class == AMDF_MEMORY_CLASS_SYSTEM
-                         ? AMDF_MEMORY_FLAG_HOST_COHERENT
-                         : 0) |
-                    access_case.additional_flags},
+          {
+              .access = access_case.access,
+              .flags = AMDF_MEMORY_FLAG_DEVICE_ADDRESS |
+                       (memory_class == AMDF_MEMORY_CLASS_SYSTEM
+                            ? AMDF_MEMORY_FLAG_HOST_COHERENT
+                            : 0) |
+                       access_case.additional_flags,
+          },
       };
-      amdf_memory_create_info_t create_info = {};
-      create_info.type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO;
-      create_info.structure_size = sizeof(create_info);
-      create_info.access_count = 1;
-      create_info.accesses = &access;
-      create_info.required_flags = required_flags;
+      amdf_memory_create_info_t create_info = {
+          .type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO,
+          .structure_size = sizeof(create_info),
+          .access_count = 1,
+          .required_flags = required_flags,
+          .accesses = &access,
+      };
       create_info.memory_profile_ordinal = FindMemoryProfileOrdinal(
           scope,
           AMDF_MEMORY_PROFILE_ROLE_CREATE |
@@ -141,12 +152,14 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
       create_info.byte_length = 4097;
       create_info.minimum_alignment = 1024 * 1024;
 
-      amdf_memory_profile_t profile = {};
-      profile.type = AMDF_STRUCTURE_TYPE_MEMORY_PROFILE;
-      profile.structure_size = sizeof(profile);
-      amdf_memory_access_capabilities_t capabilities = {};
-      capabilities.type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_CAPABILITIES;
-      capabilities.structure_size = sizeof(capabilities);
+      amdf_memory_profile_t profile = {
+          .type = AMDF_STRUCTURE_TYPE_MEMORY_PROFILE,
+          .structure_size = sizeof(profile),
+      };
+      amdf_memory_access_capabilities_t capabilities = {
+          .type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_CAPABILITIES,
+          .structure_size = sizeof(capabilities),
+      };
       ASSERT_EQ(
           QueryMemoryProfile(scope, create_info.memory_profile_ordinal,
                              access.requirements, &profile, &capabilities),
@@ -166,13 +179,15 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
                 AMDF_STATUS_OK)
           << "access case " << case_ordinal;
 
-      amdf_memory_info_t info = {};
-      info.type = AMDF_STRUCTURE_TYPE_MEMORY_INFO;
-      info.structure_size = sizeof(info);
+      amdf_memory_info_t info = {
+          .type = AMDF_STRUCTURE_TYPE_MEMORY_INFO,
+          .structure_size = sizeof(info),
+      };
       ASSERT_EQ(api_->memory_query_info(memories_[0], &info), AMDF_STATUS_OK);
-      amdf_memory_access_info_t access_info = {};
-      access_info.type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_INFO;
-      access_info.structure_size = sizeof(access_info);
+      amdf_memory_access_info_t access_info = {
+          .type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_INFO,
+          .structure_size = sizeof(access_info),
+      };
       ASSERT_EQ(api_->memory_query_access_info(memories_[0], 0, &access_info),
                 AMDF_STATUS_OK);
       EXPECT_EQ(info.memory_profile_ordinal,
@@ -224,14 +239,24 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
                     AMDF_HOST_CACHE_INSTRUCTION_X86_CLFLUSH);
         } else {
           EXPECT_EQ(mapping_infos_[0].cache_line_size, 0u);
-          EXPECT_EQ(mapping_infos_[0].flush.kind,
-                    AMDF_CACHE_TRANSITION_KIND_GLOBAL);
-          EXPECT_EQ(mapping_infos_[0].flush.executor,
-                    AMDF_CACHE_TRANSITION_EXECUTOR_HOST_DIRECT);
-          EXPECT_EQ(mapping_infos_[0].flush.host_operation,
-                    AMDF_HOST_CACHE_OPERATION_FLUSH);
-          EXPECT_EQ(mapping_infos_[0].flush.host_fence_after,
-                    AMDF_HOST_CACHE_FENCE_X86_MFENCE);
+          if (mapping_infos_[0].flush.kind ==
+              AMDF_CACHE_TRANSITION_KIND_UNKNOWN) {
+            EXPECT_EQ(mapping_infos_[0].flush.executor,
+                      AMDF_CACHE_TRANSITION_EXECUTOR_NONE);
+          } else {
+            EXPECT_EQ(mapping_infos_[0].flush.kind,
+                      AMDF_CACHE_TRANSITION_KIND_GLOBAL);
+            EXPECT_EQ(mapping_infos_[0].flush.executor,
+                      AMDF_CACHE_TRANSITION_EXECUTOR_HOST_API);
+            EXPECT_EQ(mapping_infos_[0].flush.host_operation,
+                      AMDF_HOST_CACHE_OPERATION_FLUSH);
+            EXPECT_EQ(mapping_infos_[0].flush.host_instruction,
+                      AMDF_HOST_CACHE_INSTRUCTION_NONE);
+            EXPECT_EQ(mapping_infos_[0].flush.host_fence_before,
+                      AMDF_HOST_CACHE_FENCE_NONE);
+            EXPECT_EQ(mapping_infos_[0].flush.host_fence_after,
+                      AMDF_HOST_CACHE_FENCE_NONE);
+          }
           EXPECT_EQ(mapping_infos_[0].invalidate.kind,
                     AMDF_CACHE_TRANSITION_KIND_GLOBAL);
           EXPECT_EQ(mapping_infos_[0].invalidate.executor,
@@ -247,18 +272,22 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
         EXPECT_EQ(static_cast<const uint8_t*>(
                       mapping_infos_[0].pointer)[info.byte_length - 1],
                   value);
-        EXPECT_EQ(api_->host_mapping_cache_control(
-                      mappings_[0], AMDF_HOST_CACHE_OPERATION_FLUSH, 0,
-                      info.byte_length),
-                  AMDF_STATUS_OK);
+        const amdf_status_t flush_status = api_->host_mapping_cache_control(
+            mappings_[0], AMDF_HOST_CACHE_OPERATION_FLUSH, 0, info.byte_length);
+        EXPECT_EQ(
+            flush_status,
+            mapping_infos_[0].flush.kind == AMDF_CACHE_TRANSITION_KIND_UNKNOWN
+                ? amdf_make_api_status(AMDF_STATUS_CODE_UNSUPPORTED)
+                : AMDF_STATUS_OK);
         ASSERT_EQ(api_->host_mapping_destroy(mappings_[0]), AMDF_STATUS_OK);
         mappings_[0] = nullptr;
       } else {
-        amdf_memory_map_info_t map_info = {};
-        map_info.type = AMDF_STRUCTURE_TYPE_MEMORY_MAP_INFO;
-        map_info.structure_size = sizeof(map_info);
-        map_info.byte_length = 1;
-        map_info.flags = AMDF_MEMORY_MAP_FLAG_READ;
+        amdf_memory_map_info_t map_info = {
+            .type = AMDF_STRUCTURE_TYPE_MEMORY_MAP_INFO,
+            .structure_size = sizeof(map_info),
+            .byte_length = 1,
+            .flags = AMDF_MEMORY_MAP_FLAG_READ,
+        };
         auto* const sentinel =
             reinterpret_cast<amdf_host_mapping_t*>(uintptr_t{1});
         amdf_host_mapping_t* output = sentinel;
@@ -319,13 +348,15 @@ class GpuLinuxMemoryTest : public GpuDeviceFixture {
     const amdf_memory_create_info_t create_info = MakeSystemMemoryCreateInfo();
     ASSERT_EQ(api_->memory_create(system_scope_, &create_info, &memories_[0]),
               AMDF_STATUS_OK);
-    amdf_memory_info_t info = {};
-    info.type = AMDF_STRUCTURE_TYPE_MEMORY_INFO;
-    info.structure_size = sizeof(info);
+    amdf_memory_info_t info = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_INFO,
+        .structure_size = sizeof(info),
+    };
     ASSERT_EQ(api_->memory_query_info(memories_[0], &info), AMDF_STATUS_OK);
-    amdf_memory_access_info_t access_info = {};
-    access_info.type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_INFO;
-    access_info.structure_size = sizeof(access_info);
+    amdf_memory_access_info_t access_info = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_INFO,
+        .structure_size = sizeof(access_info),
+    };
     ASSERT_EQ(api_->memory_query_access_info(memories_[0], 0, &access_info),
               AMDF_STATUS_OK);
     EXPECT_EQ(info.memory_class, AMDF_MEMORY_CLASS_SYSTEM);
@@ -446,12 +477,14 @@ TEST_F(GpuLinuxMemoryTest, OmitsRegistrationWhenLifetimeDoesNotSupportIt) {
     GTEST_SKIP() << "selected lifetime supports host registration";
   }
   for (uint32_t ordinal = 0;; ++ordinal) {
-    amdf_memory_profile_t profile = {};
-    profile.type = AMDF_STRUCTURE_TYPE_MEMORY_PROFILE;
-    profile.structure_size = sizeof(profile);
-    amdf_memory_access_capabilities_t capabilities = {};
-    capabilities.type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_CAPABILITIES;
-    capabilities.structure_size = sizeof(capabilities);
+    amdf_memory_profile_t profile = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_PROFILE,
+        .structure_size = sizeof(profile),
+    };
+    amdf_memory_access_capabilities_t capabilities = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_CAPABILITIES,
+        .structure_size = sizeof(capabilities),
+    };
     const amdf_status_t status =
         QueryMemoryProfile(system_scope_, ordinal, memory_access_.requirements,
                            &profile, &capabilities);
@@ -472,9 +505,10 @@ TEST_F(GpuLinuxMemoryTest, RegistersOverlappingCallerPagesWithExactAccess) {
     GTEST_SKIP()
         << "host registration is unavailable under this native lifetime";
   }
-  amdf_gpu_device_info_t device_info = {};
-  device_info.type = AMDF_STRUCTURE_TYPE_GPU_DEVICE_INFO;
-  device_info.structure_size = sizeof(device_info);
+  amdf_gpu_device_info_t device_info = {
+      .type = AMDF_STRUCTURE_TYPE_GPU_DEVICE_INFO,
+      .structure_size = sizeof(device_info),
+  };
   ASSERT_EQ(gpu_api_->device_query_info(device_, &device_info), AMDF_STATUS_OK);
   EXPECT_EQ(device_info.features, features_);
   ASSERT_NO_FATAL_FAILURE(AllocateCallerPages());
@@ -492,17 +526,20 @@ TEST_F(GpuLinuxMemoryTest, RegistersOverlappingCallerPagesWithExactAccess) {
     const DeviceAccessCase& access_case = kDeviceAccessCases[case_ordinal];
     const amdf_memory_device_access_t access = {
         device_,
-        {.access = access_case.access,
-         .flags = AMDF_MEMORY_FLAG_HOST_COHERENT |
-                  AMDF_MEMORY_FLAG_DEVICE_ADDRESS |
-                  access_case.additional_flags},
+        {
+            .access = access_case.access,
+            .flags = AMDF_MEMORY_FLAG_HOST_COHERENT |
+                     AMDF_MEMORY_FLAG_DEVICE_ADDRESS |
+                     access_case.additional_flags,
+        },
     };
-    amdf_memory_create_info_t create_info = {};
-    create_info.type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO;
-    create_info.structure_size = sizeof(create_info);
-    create_info.access_count = 1;
-    create_info.accesses = &access;
-    create_info.required_flags = base_flags;
+    amdf_memory_create_info_t create_info = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO,
+        .structure_size = sizeof(create_info),
+        .access_count = 1,
+        .required_flags = base_flags,
+        .accesses = &access,
+    };
     create_info.memory_profile_ordinal = FindMemoryProfileOrdinal(
         system_scope_,
         AMDF_MEMORY_PROFILE_ROLE_REGISTER | AMDF_MEMORY_PROFILE_ROLE_HOST_MAP,
@@ -523,9 +560,10 @@ TEST_F(GpuLinuxMemoryTest, RegistersOverlappingCallerPagesWithExactAccess) {
     info.structure_size = sizeof(info);
     ASSERT_EQ(api_->memory_query_info(memories_[case_ordinal], &info),
               AMDF_STATUS_OK);
-    amdf_memory_access_info_t access_info = {};
-    access_info.type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_INFO;
-    access_info.structure_size = sizeof(access_info);
+    amdf_memory_access_info_t access_info = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_INFO,
+        .structure_size = sizeof(access_info),
+    };
     ASSERT_EQ(api_->memory_query_access_info(memories_[case_ordinal], 0,
                                              &access_info),
               AMDF_STATUS_OK);
@@ -584,27 +622,30 @@ TEST_F(GpuLinuxMemoryTest, RegistersOverlappingCallerPagesWithExactAccess) {
   EXPECT_EQ(caller_pages_[kCallerOffsets.front() - 1], 0x5A);
   EXPECT_EQ(caller_pages_[kCallerOffsets.back() + logical_byte_length], 0x5A);
 
-  amdf_memory_map_info_t overrun = {};
-  overrun.type = AMDF_STRUCTURE_TYPE_MEMORY_MAP_INFO;
-  overrun.structure_size = sizeof(overrun);
-  overrun.flags = AMDF_MEMORY_MAP_FLAG_READ;
-  overrun.byte_length = logical_byte_length + 1;
+  amdf_memory_map_info_t overrun = {
+      .type = AMDF_STRUCTURE_TYPE_MEMORY_MAP_INFO,
+      .structure_size = sizeof(overrun),
+      .byte_length = logical_byte_length + 1,
+      .flags = AMDF_MEMORY_MAP_FLAG_READ,
+  };
   amdf_host_mapping_t* output =
       reinterpret_cast<amdf_host_mapping_t*>(uintptr_t{1});
   EXPECT_EQ(amdf_status_code(api_->memory_map(memories_[0], &overrun, &output)),
             AMDF_STATUS_CODE_INVALID_ARGUMENT);
   EXPECT_EQ(reinterpret_cast<uintptr_t>(output), uintptr_t{1});
 
-  amdf_memory_create_info_t invalid_access = {};
-  invalid_access.type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO;
-  invalid_access.structure_size = sizeof(invalid_access);
-  invalid_access.memory_profile_ordinal =
-      memory_infos[0].memory_profile_ordinal;
+  amdf_memory_create_info_t invalid_access = {
+      .type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO,
+      .structure_size = sizeof(invalid_access),
+      .memory_profile_ordinal = memory_infos[0].memory_profile_ordinal,
+  };
   const amdf_memory_device_access_t write_only_access = {
       device_,
-      {.access = AMDF_MEMORY_ACCESS_WRITE,
-       .flags =
-           AMDF_MEMORY_FLAG_HOST_COHERENT | AMDF_MEMORY_FLAG_DEVICE_ADDRESS}};
+      {
+          .access = AMDF_MEMORY_ACCESS_WRITE,
+          .flags =
+              AMDF_MEMORY_FLAG_HOST_COHERENT | AMDF_MEMORY_FLAG_DEVICE_ADDRESS,
+      }};
   invalid_access.access_count = 1;
   invalid_access.accesses = &write_only_access;
   invalid_access.required_flags = base_flags;
@@ -632,6 +673,203 @@ TEST_F(GpuLinuxMemoryTest, RegistersOverlappingCallerPagesWithExactAccess) {
   EXPECT_EQ(caller_pages_[caller_byte_length_ - 1], 0x3C);
   ASSERT_EQ(munmap(caller_pages_, caller_byte_length_), 0);
   caller_pages_ = nullptr;
+}
+
+class GpuHostNumaMemoryTest : public GpuCommandTest {
+ protected:
+  GpuHostNumaMemoryTest()
+      : GpuCommandTest({
+            .command_type = AMDF_QUEUE_COMMAND_TYPE_GPU_SDMA,
+            .roles = AMDF_QUEUE_ROLE_TRANSFER,
+            .publication_modes = AMDF_QUEUE_PUBLICATION_MODE_USER |
+                                 AMDF_QUEUE_PUBLICATION_MODE_KERNEL,
+        }) {}
+};
+
+TEST_F(GpuHostNumaMemoryTest, CopiesUsingPagesOnEveryAllowedHostNode) {
+  const amdf_memory_device_access_t access = {
+      device_,
+      {
+          .access = AMDF_MEMORY_ACCESS_READ | AMDF_MEMORY_ACCESS_WRITE,
+          .flags =
+              AMDF_MEMORY_FLAG_HOST_COHERENT | AMDF_MEMORY_FLAG_DEVICE_ADDRESS,
+      },
+  };
+  amdf_memory_scope_info_t scope_info = {
+      .type = AMDF_STRUCTURE_TYPE_MEMORY_SCOPE_INFO,
+      .structure_size = sizeof(scope_info),
+  };
+  ASSERT_EQ(api_->memory_scope_query_info(system_scope_, &scope_info),
+            AMDF_STATUS_OK);
+  uint32_t profile_ordinal = AMDF_MEMORY_PROFILE_ORDINAL_UNKNOWN;
+  for (uint32_t ordinal = 0; ordinal < scope_info.memory_profile_count;
+       ++ordinal) {
+    amdf_memory_profile_t profile = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_PROFILE,
+        .structure_size = sizeof(profile),
+    };
+    amdf_memory_access_capabilities_t capabilities = {
+        .type = AMDF_STRUCTURE_TYPE_MEMORY_ACCESS_CAPABILITIES,
+        .structure_size = sizeof(capabilities),
+    };
+    const auto status = api_->memory_scope_query_device_profile(
+        system_scope_, ordinal, 1, &access, &profile, &capabilities);
+    if (status == amdf_make_api_status(AMDF_STATUS_CODE_UNSUPPORTED)) {
+      continue;
+    }
+    ASSERT_EQ(status, AMDF_STATUS_OK);
+    if ((profile.roles & AMDF_MEMORY_PROFILE_ROLE_CREATE) != 0 &&
+        (profile.allocation.placement_kinds &
+         (UINT32_C(1) << AMDF_MEMORY_PLACEMENT_KIND_HOST_NUMA)) != 0) {
+      profile_ordinal = ordinal;
+      break;
+    }
+  }
+  if (profile_ordinal == AMDF_MEMORY_PROFILE_ORDINAL_UNKNOWN) {
+    GTEST_SKIP()
+        << "Selected native lifetime/device has no placed host registration";
+  }
+  const long page_size = sysconf(_SC_PAGESIZE);
+  ASSERT_GT(page_size, 0);
+  constexpr size_t kWordBits = sizeof(unsigned long) * CHAR_BIT;
+  std::vector<unsigned long> allowed(page_size / sizeof(unsigned long));
+  const size_t node_count = allowed.size() * kWordBits;
+  ASSERT_EQ(syscall(SYS_get_mempolicy, nullptr, allowed.data(), node_count + 1,
+                    nullptr, MPOL_F_MEMS_ALLOWED),
+            0)
+      << std::strerror(errno);
+  GpuCommandQueue* queue = nullptr;
+  ASSERT_NO_FATAL_FAILURE(CreateQueue(&queue));
+  SdmaCommandWriter commands(queue->words().data(), family_.format_features);
+  uint32_t tested_nodes = 0;
+  for (uint32_t node = 0; node < node_count; ++node) {
+    if ((allowed[node / kWordBits] & (1UL << (node % kWordBits))) == 0) {
+      continue;
+    }
+    ++tested_nodes;
+    for (amdf_memory_flags_t flags : std::array<amdf_memory_flags_t, 2>{
+             0, AMDF_MEMORY_FLAG_HOST_MAPPING_SOURCE}) {
+      SCOPED_TRACE(::testing::Message()
+                   << "node=" << node << " flags=" << flags);
+      const amdf_memory_create_info_t create_info = {
+          .type = AMDF_STRUCTURE_TYPE_MEMORY_CREATE_INFO,
+          .structure_size = sizeof(create_info),
+          .memory_profile_ordinal = profile_ordinal,
+          .access_count = 1,
+          .required_flags = AMDF_MEMORY_FLAG_HOST_VISIBLE | flags,
+          .byte_length = static_cast<uint64_t>(page_size) * 4,
+          .accesses = &access,
+          .placement = {AMDF_MEMORY_PLACEMENT_KIND_HOST_NUMA, node},
+      };
+      GpuMemory* memory = nullptr;
+      ASSERT_NO_FATAL_FAILURE(
+          CreateMemory(system_scope_, create_info, &memory));
+      EXPECT_EQ(memory->info.placement.kind, create_info.placement.kind);
+      EXPECT_EQ(memory->info.placement.node, node);
+      amdf_memory_profile_pair_query_t pair_query = {
+          .type = AMDF_STRUCTURE_TYPE_MEMORY_PROFILE_PAIR_QUERY,
+          .structure_size = sizeof(pair_query),
+          .memory_profile_ordinal = profile_ordinal,
+          .access_count = 1,
+          .required_flags = create_info.required_flags,
+          .accesses = &access,
+      };
+      pair_query.producer.kind = AMDF_MEMORY_SITE_KIND_HOST;
+      pair_query.producer.value.host_access =
+          AMDF_MEMORY_MAP_FLAG_READ | AMDF_MEMORY_MAP_FLAG_WRITE;
+      pair_query.consumer.kind = AMDF_MEMORY_SITE_KIND_DEVICE;
+      pair_query.consumer.value.device = {0, family_.ordinal};
+      auto source = memory->HostSite();
+      auto target = memory->DeviceSite(family_.ordinal);
+      amdf_cache_operations_t cache_operations = 0;
+      for (uint32_t direction = 0; direction < 2; ++direction) {
+        amdf_memory_pair_info_t prospective = {
+            .type = AMDF_STRUCTURE_TYPE_MEMORY_PAIR_INFO,
+            .structure_size = sizeof(prospective),
+        };
+        auto concrete = prospective;
+        ASSERT_EQ(api_->memory_scope_query_pair_info(system_scope_, &pair_query,
+                                                     &prospective),
+                  AMDF_STATUS_OK);
+        ASSERT_EQ(api_->memory_query_pair_info(&source, &target, &concrete),
+                  AMDF_STATUS_OK);
+        EXPECT_EQ(prospective.flags, concrete.flags);
+        EXPECT_EQ(prospective.release.kind, concrete.release.kind);
+        EXPECT_EQ(prospective.release.executor, concrete.release.executor);
+        EXPECT_EQ(prospective.acquire.kind, concrete.acquire.kind);
+        EXPECT_EQ(prospective.acquire.executor, concrete.acquire.executor);
+        const auto& host_transition =
+            direction == 0 ? concrete.release : concrete.acquire;
+        ASSERT_EQ(host_transition.kind, AMDF_CACHE_TRANSITION_KIND_NONE);
+        const auto& device_transition =
+            direction == 0 ? concrete.acquire : concrete.release;
+        if (device_transition.kind == AMDF_CACHE_TRANSITION_KIND_NONE) {
+          ASSERT_EQ(device_transition.executor,
+                    AMDF_CACHE_TRANSITION_EXECUTOR_NONE);
+          ASSERT_EQ(device_transition.operation, AMDF_CACHE_OPERATION_NONE);
+        } else {
+          const auto operation = direction == 0
+                                     ? AMDF_CACHE_OPERATION_ACQUIRE_FROM_SYSTEM
+                                     : AMDF_CACHE_OPERATION_RELEASE_TO_SYSTEM;
+          ASSERT_EQ(device_transition.kind, AMDF_CACHE_TRANSITION_KIND_GLOBAL);
+          ASSERT_EQ(device_transition.executor,
+                    AMDF_CACHE_TRANSITION_EXECUTOR_QUEUE);
+          ASSERT_EQ(device_transition.operation, operation);
+          ASSERT_NE(
+              family_.format_features & AMDF_GPU_SDMA_FORMAT_FEATURE_USER_GCR,
+              0u);
+          cache_operations |= UINT64_C(1) << operation;
+        }
+        std::swap(pair_query.producer, pair_query.consumer);
+        std::swap(source, target);
+      }
+      auto* bytes = static_cast<uint8_t*>(memory->host.pointer);
+      const uint64_t completion =
+          reinterpret_cast<uintptr_t>(bytes + page_size * 3);
+      GpuStoreRelease<uint32_t>(completion, 0);
+      for (uint32_t epoch = 1; epoch <= 2; ++epoch) {
+        for (long i = 0; i < page_size; ++i) {
+          bytes[i] = (i * 17 + epoch + node) & 0xFF;
+        }
+        std::memset(bytes + page_size, 0xA5, page_size * 2);
+        ASSERT_GE(queue->words().size(), commands.word_count() + 32);
+        if ((cache_operations & AMDF_CACHE_OPERATIONS_ACQUIRE_FROM_SYSTEM) !=
+            0) {
+          commands.AcquireFromSystem();
+        }
+        for (uint32_t destination = 1; destination <= 2; ++destination) {
+          commands.CopyLinear(memory->device_address,
+                              memory->device_address + page_size * destination,
+                              static_cast<uint32_t>(page_size) - 1);
+        }
+        if ((cache_operations & AMDF_CACHE_OPERATIONS_RELEASE_TO_SYSTEM) != 0) {
+          commands.ReleaseToSystem();
+        }
+        commands.Fence32(memory->device_address + page_size * 3, epoch);
+        ASSERT_NO_FATAL_FAILURE(
+            queue->Publish(api_, gpu_api_, commands.word_count()));
+        ASSERT_TRUE(GpuWaitEqual<uint32_t>(completion, epoch));
+        for (uint32_t destination = 1; destination <= 2; ++destination) {
+          EXPECT_EQ(std::memcmp(bytes, bytes + page_size * destination,
+                                page_size - 1),
+                    0);
+          EXPECT_EQ(bytes[page_size * (destination + 1) - 1], 0xA5);
+        }
+        ASSERT_NO_FATAL_FAILURE(queue->WaitRetired(api_));
+        for (uint32_t page = 0; page < 4; ++page) {
+          int resident_node = -1;
+          ASSERT_EQ(
+              syscall(SYS_get_mempolicy, &resident_node, nullptr, 0,
+                      bytes + page_size * page, MPOL_F_NODE | MPOL_F_ADDR),
+              0)
+              << std::strerror(errno);
+          EXPECT_EQ(resident_node, static_cast<int>(node)) << "page " << page;
+        }
+      }
+    }
+  }
+  EXPECT_GT(tested_nodes, 0u);
+  RecordProperty("numa_nodes", tested_nodes);
 }
 
 }  // namespace

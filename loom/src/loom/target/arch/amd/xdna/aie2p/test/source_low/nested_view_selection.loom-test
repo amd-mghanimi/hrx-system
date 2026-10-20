@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/nested_view_selection.loom-test
 // RUN: emit source-low target=amd.xdna.aie2p:core output=low
 
 // A derived selection retains both the selected buffer and its byte base.
@@ -35,17 +34,17 @@ low.func.def target<amd.xdna.aie2p.core> abi(object_function) @derived_selection
 ^_bb2:
   low.br ^_bb3(%second_aligned: reg<aie2p.ep>, %base1: reg<aie2p.er>)
 ^_bb3(%pair_root: reg<aie2p.ep>, %pair_offset: reg<aie2p.er>):
-  %59 = mov.i32 2
-  %66 = lshl %position, %59
-  %75, %76 = add.carry %pair_offset, %66
+  %56 = mov.i32 2
+  %63 = lshl %position, %56
+  %69 = add.rr %pair_offset, %63
   low.cond_br %select_pair, ^_bb4, ^_bb5 : reg<aie2p.er>
 ^_bb4:
-  low.br ^_bb6(%pair_root: reg<aie2p.ep>, %75: reg<aie2p.er>)
+  low.br ^_bb6(%pair_root: reg<aie2p.ep>, %69: reg<aie2p.er>)
 ^_bb5:
   low.br ^_bb6(%third_aligned: reg<aie2p.ep>, %base2: reg<aie2p.er>)
 ^_bb6(%selected: reg<aie2p.ep>, %selected_offset: reg<aie2p.er>):
-  %81 = mov.address-index %selected_offset
-  %value = lda.i32.index %selected, %81
+  %70 = mov.address-index %selected_offset
+  %value = lda.i32.index %selected, %70
   return %value
 }
 

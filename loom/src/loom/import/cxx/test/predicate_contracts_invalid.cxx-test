@@ -1,0 +1,120 @@
+// RUN: verify
+// Function contracts use the standard trailing function-attribute position.
+#include <loomcxx/predicate.h>
+// ERROR@+1: LOWERING/059 "function where contracts must follow the parameter list"
+[[loom::where(true)]] void misplaced() {}
+
+// ====
+#include <loomcxx/predicate.h>
+// ERROR@+2: LOWERING/059 "one where contract per declaration is allowed"
+void duplicate(unsigned value)
+    [[loom::where(value > 0u), loom::where(value < 16u)]] {}
+
+// ====
+// Callable contracts cannot capture namespace or local runtime state.
+#include <loomcxx/predicate.h>
+extern unsigned global_value;
+// ERROR@+2: LOWERING/059 "function predicates may reference only parameters and the typed result placeholder"
+unsigned captured(unsigned value)
+    [[loom::where(value > 0u && global_value > 0u)]] {
+  return value;
+}
+
+// ====
+// The result placeholder names the source callable's exact result type.
+#include <loomcxx/predicate.h>
+// ERROR@+3: LOWERING/059 "predicate result placeholder must use the callable result type"
+unsigned wrong_result(unsigned value)
+    [[loom::where(loom::predicate::finite(
+        loom::predicate::result<float>()))]] {
+  return value;
+}
+
+// ====
+// Kernel callables have no result identities.
+#include <loomcxx/kernel.h>
+#include <loomcxx/predicate.h>
+[[loom::kernel, loom::workgroup_size(1, 1, 1),
+  loom::workgroup_count(1, 1, 1)]]
+// ERROR@+3: LOWERING/059 "result predicates require a non-void ordinary callable"
+void kernel_result(unsigned value)
+    [[loom::where(loom::predicate::eq(
+        loom::predicate::result<unsigned>(), value))]] {}
+
+// ====
+// Signature predicates cannot silently change the transported value type.
+#include <loomcxx/predicate.h>
+// ERROR@+2: LOWERING/059 "function predicates cannot retain a value-changing implicit conversion; use a type-matched predicate helper"
+unsigned narrow(unsigned char value)
+    [[loom::where(value < 16)]] {
+  return value;
+}
+
+// ====
+// Every constrained redeclaration must describe the same conjunction.
+#include <loomcxx/predicate.h>
+unsigned conflict(unsigned value) [[loom::where(value > 0u)]];
+// ERROR@+1: LOWERING/059 "conflicting where contracts across redeclarations"
+unsigned conflict(unsigned value) [[loom::where(value > 1u)]] {
+  return value;
+}
+
+// ====
+// Target applicability has an exact parameterized-condition representation.
+#include <loomcxx/kernel.h>
+#include <loomcxx/target.h>
+// ERROR@+2: LOWERING/059 "target requirements require an exact equality comparison"
+LOOM_TEMPLATE_DECL("test.inexact") unsigned inexact(unsigned value)
+    [[loom::where(loom::target::subgroup::size() != 64u)]];
+
+// ====
+#include <loomcxx/kernel.h>
+#include <loomcxx/target.h>
+// ERROR@+2: LOWERING/059 "a target requirement must compare one query to one pure integer constant"
+LOOM_TEMPLATE_DECL("test.dynamic") unsigned dynamic(unsigned value)
+    [[loom::where(loom::target::subgroup::size() == value)]];
+
+// ====
+#include <loomcxx/kernel.h>
+#include <loomcxx/target.h>
+// ERROR@+2: LOWERING/059 "target.subgroup.size requires a nonzero unsigned 32-bit constant"
+LOOM_TEMPLATE_DECL("test.zero") unsigned zero(unsigned value)
+    [[loom::where(loom::target::subgroup::size() == 0u)]];
+
+// ====
+// Ordinary callables have no target applicability field in Loom IR.
+#include <loomcxx/kernel.h>
+#include <loomcxx/target.h>
+// ERROR@+1: LOWERING/059 "target requirements require a template family or definition"
+unsigned ordinary(unsigned value)
+    [[loom::where(loom::target::subgroup::size() == 64u)]] {
+  return value;
+}
+
+// ====
+#include <loomcxx/kernel.h>
+#include <loomcxx/target.h>
+// ERROR@+1: LOWERING/059 "target requirements require a template family or definition"
+[[loom::kernel, loom::workgroup_size(1, 1, 1),
+  loom::workgroup_count(1, 1, 1)]]
+void kernel_requirement(unsigned value)
+    [[loom::where(loom::target::subgroup::size() == 64u)]] {}
+
+// ====
+#include <loomcxx/kernel.h>
+#include <loomcxx/target.h>
+// ERROR@+2: LOWERING/059 "target.subgroup.size requires a nonzero unsigned 32-bit constant"
+LOOM_TEMPLATE_DECL("test.too_wide") unsigned too_wide(unsigned value)
+    [[loom::where(loom::target::subgroup::size() == 4294967296ull)]];
+
+// ====
+// Requirement order is irrelevant, but every redeclaration must name the same
+// target facts and value predicates.
+#include <loomcxx/kernel.h>
+#include <loomcxx/target.h>
+LOOM_TEMPLATE_DECL("test.conflicting_target")
+unsigned conflicting_target(unsigned value)
+    [[loom::where(loom::target::subgroup::size() == 64u && value > 0u)]];
+// ERROR@+2: LOWERING/059 "conflicting where contracts across redeclarations"
+unsigned conflicting_target(unsigned renamed)
+    [[loom::where(renamed > 0u && loom::target::subgroup::size() == 32u)]];

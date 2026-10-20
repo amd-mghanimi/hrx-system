@@ -10,7 +10,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "iree/async/frontier.h"
 #include "iree/base/api.h"
+#include "iree/hal/atomic.h"
+#include "iree/hal/memory/asan_pool.h"
 #include "iree/hal/queue.h"
 #include "iree/hal/resource.h"
 
@@ -18,8 +21,10 @@
 extern "C" {
 #endif  // __cplusplus
 
-typedef struct iree_hal_allocator_t iree_hal_allocator_t;
+typedef struct iree_hal_buffer_allocation_vtable_t
+    iree_hal_buffer_allocation_vtable_t;
 typedef struct iree_hal_device_t iree_hal_device_t;
+typedef struct iree_hal_memory_contract_t iree_hal_memory_contract_t;
 
 //===----------------------------------------------------------------------===//
 // Types and Enums
@@ -137,9 +142,11 @@ IREE_API_EXPORT iree_status_t iree_hal_memory_type_parse(
 IREE_API_EXPORT iree_string_view_t iree_hal_memory_type_format(
     iree_hal_memory_type_t value, iree_bitfield_string_temp_t* out_temp);
 
-// A bitfield specifying how memory will be accessed in a mapped memory region.
+// Permissions for accessing buffer contents. Alignment is a property of the
+// storage and operation-specific mapping promises use
+// iree_hal_buffer_map_flags_t.
 enum iree_hal_memory_access_bits_t {
-  // Memory is not mapped.
+  // No access is permitted or required.
   IREE_HAL_MEMORY_ACCESS_NONE = 0u,
   // Memory will be read.
   // If a buffer is only mapped for reading it may still be possible to write to
@@ -150,34 +157,10 @@ enum iree_hal_memory_access_bits_t {
   // from it but the results will be undefined or incredibly slow (as it may
   // be mapped by the driver as uncached).
   IREE_HAL_MEMORY_ACCESS_WRITE = 1u << 1,
-  // Memory will be discarded prior to mapping.
-  // The existing contents will be undefined after mapping and must be written
-  // to ensure validity.
-  IREE_HAL_MEMORY_ACCESS_DISCARD = 1u << 2,
-  // Memory will be discarded and completely overwritten in a single operation.
-  IREE_HAL_MEMORY_ACCESS_DISCARD_WRITE =
-      IREE_HAL_MEMORY_ACCESS_WRITE | IREE_HAL_MEMORY_ACCESS_DISCARD,
-  // A flag that can be applied to any access type to indicate that the buffer
-  // storage being accessed may alias with other accesses occurring concurrently
-  // within or across operations. The lack of the flag indicates that the access
-  // is guaranteed not to alias (ala C's `restrict` keyword).
-  IREE_HAL_MEMORY_ACCESS_MAY_ALIAS = 1u << 3,
-  // A flag that can be applied to any access type to indicate that the buffer
-  // storage may not be aligned.
-  IREE_HAL_MEMORY_ACCESS_UNALIGNED = 1u << 4,
-  // Memory access may perform any operation and should not be validated.
-  // Used upon access to bypass access verification at the API boundary and
-  // effectively provides a `void*`.
-  // This should only be used by device-side code where it is known-safe to
-  // bypass the access verification.
-  IREE_HAL_MEMORY_ACCESS_ANY = 1u << 5,
-  // Memory may have any operation performed on it.
-  // Note that this explicitly includes 'DISCARD', which means that the
-  // mapped memory will have undefined contents. Do not use this access
-  // mode if you intend the existing contents to be accessible.
-  IREE_HAL_MEMORY_ACCESS_ALL = IREE_HAL_MEMORY_ACCESS_READ |
-                               IREE_HAL_MEMORY_ACCESS_WRITE |
-                               IREE_HAL_MEMORY_ACCESS_DISCARD,
+  // Memory may be read and written. Mapping with these permissions preserves
+  // existing contents unless DISCARD is explicitly requested as a map flag.
+  IREE_HAL_MEMORY_ACCESS_ALL =
+      IREE_HAL_MEMORY_ACCESS_READ | IREE_HAL_MEMORY_ACCESS_WRITE,
 };
 typedef uint16_t iree_hal_memory_access_t;
 
@@ -427,6 +410,28 @@ enum iree_hal_buffer_usage_bits_t {
 };
 typedef uint32_t iree_hal_buffer_usage_t;
 
+// Returns the aggregate read/write permission implied by |usage|. The result
+// describes HAL execution operations only; public host mapping permissions are
+// declared independently by iree_hal_pool_host_access_t.
+static inline iree_hal_memory_access_t iree_hal_buffer_usage_access(
+    iree_hal_buffer_usage_t usage) {
+  iree_hal_memory_access_t access = IREE_HAL_MEMORY_ACCESS_NONE;
+  if (iree_any_bit_set(usage,
+                       IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE |
+                           IREE_HAL_BUFFER_USAGE_STORAGE_READ |
+                           IREE_HAL_BUFFER_USAGE_DISPATCH_INDIRECT_PARAMETERS |
+                           IREE_HAL_BUFFER_USAGE_DISPATCH_UNIFORM_READ |
+                           IREE_HAL_BUFFER_USAGE_DISPATCH_IMAGE_READ)) {
+    access |= IREE_HAL_MEMORY_ACCESS_READ;
+  }
+  if (iree_any_bit_set(usage, IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET |
+                                  IREE_HAL_BUFFER_USAGE_STORAGE_WRITE |
+                                  IREE_HAL_BUFFER_USAGE_DISPATCH_IMAGE_WRITE)) {
+    access |= IREE_HAL_MEMORY_ACCESS_WRITE;
+  }
+  return access;
+}
+
 // Parses a buffer usage bitfield from a string.
 // See iree_bitfield_parse for usage.
 IREE_API_EXPORT iree_status_t iree_hal_buffer_usage_parse(
@@ -447,8 +452,6 @@ typedef enum iree_hal_buffer_overlap_e {
   IREE_HAL_BUFFER_OVERLAP_COMPLETE,
 } iree_hal_buffer_overlap_t;
 
-typedef uint32_t iree_hal_buffer_compatibility_t;
-
 // Determines buffer mapping behavior.
 enum iree_hal_mapping_mode_bits_t {
   // Buffers are mapped as part of a scoped map-access-unmap sequence.
@@ -466,114 +469,162 @@ enum iree_hal_mapping_mode_bits_t {
 };
 typedef uint32_t iree_hal_mapping_mode_t;
 
-//===----------------------------------------------------------------------===//
-// External buffers
-//===----------------------------------------------------------------------===//
+// Operation-specific mapping promises, independent of buffer permissions.
+enum iree_hal_buffer_map_flag_bits_e {
+  IREE_HAL_BUFFER_MAP_FLAG_NONE = 0u,
 
-// Defines the type of an external buffer handle.
-// Each type may only be usable in a subset of implementations and platforms and
-// may even vary based on the runtime device properties or buffer instance.
-//
-// See the notes on each type for requirements; compatibility often requires
-// the handle to check and trying to import/export is the most reliable way to
-// check for support.
-//
-// The Vulkan documentation on external memory covers a lot of the design
-// decisions made here:
-// https://www.khronos.org/registry/vulkan/specs/1.3-extensions/man/html/VK_KHR_external_memory.html
-typedef enum iree_hal_external_buffer_type_e {
-  IREE_HAL_EXTERNAL_BUFFER_TYPE_NONE = 0,
+  // Existing contents of the mapped range need not be preserved. Requires
+  // WRITE access. Bytes must be initialized before they are read again. This
+  // neither waits for prior accesses nor discards bytes outside the range.
+  IREE_HAL_BUFFER_MAP_FLAG_DISCARD = 1u << 0,
 
-  // A host pointer allocated from an external allocator.
-  // This is a borrowed pointer: the caller keeps the source allocation live
-  // while an imported buffer or exported pointer is in use.
-  //
-  // CPU:
-  //  When using the default heap allocator this is just a host pointer.
-  //
-  // Vulkan:
-  //  Requires VK_EXT_external_memory_host.
-  //  Uses VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT.
-  IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION,
-
-  // A device pointer allocated from an external allocator.
-  // This is a borrowed pointer: the caller keeps the source allocation live
-  // while an imported buffer or exported pointer is in use.
-  //
-  // CPU:
-  //  When using the default heap allocator this is just a host pointer.
-  //
-  // Vulkan:
-  //  Requires VK_KHR_buffer_device_address.
-  //  Treats the pointer as VkDeviceAddress.
-  IREE_HAL_EXTERNAL_BUFFER_TYPE_DEVICE_ALLOCATION,
-
-  // A driver/device-specific POSIX file descriptor handle.
-  // The handle supports dup, dup2, close, and transport using the SCM_RIGHTS
-  // control message. All other usage with system APIs is undefined.
-  // An imported/exported handle owns a reference to the underlying allocator
-  // memory. May only be shared with the same underlying driver and device.
-  //
-  // Vulkan:
-  //  Requires device support.
-  //  Uses VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT.
-  IREE_HAL_EXTERNAL_BUFFER_TYPE_OPAQUE_FD,
-
-  // A driver/device-specific Win32 HANDLE.
-  // The handle supports DuplicateHandle, CompareObjectHandles, CloseHandle, and
-  // Get/SetHandleInformation. All other usage with system APIs is undefined.
-  // An imported/exported handle owns a reference to the underlying allocator
-  // memory. Must only be shared with the same underlying driver and device.
-  //
-  // Vulkan:
-  //  Requires device support.
-  //  Uses VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT.
-  IREE_HAL_EXTERNAL_BUFFER_TYPE_OPAQUE_WIN32,
-} iree_hal_external_buffer_type_t;
-
-// Flags for controlling iree_hal_external_buffer_t implementation details.
-enum iree_hal_external_buffer_flag_bits_t {
-  IREE_HAL_EXTERNAL_BUFFER_FLAG_NONE = 0u,
+  // Mapped accesses may alias other accesses occurring concurrently within or
+  // across operations. Without this flag accesses carry a C restrict-like
+  // non-aliasing promise. This supplies no synchronization, extends no memory
+  // lifetime, and does not make overlapping copies valid.
+  IREE_HAL_BUFFER_MAP_FLAG_MAY_ALIAS = 1u << 1,
 };
-typedef uint32_t iree_hal_external_buffer_flags_t;
+typedef uint16_t iree_hal_buffer_map_flags_t;
 
-// Handle to a typed external buffer.
-// The caller manages its lifetime according to iree_hal_external_buffer_type_t.
-// Pointer values borrow the source allocation; native handles may own a
-// reference to its backing. Neither extends a queue allocation's lifetime:
-// queue_dealloca must be ordered after all external uses of the allocation.
-typedef struct iree_hal_external_buffer_t {
-  // Type of the resource used to interpret the handle.
-  iree_hal_external_buffer_type_t type;
-  // Flags indicating buffer compatibility.
-  iree_hal_external_buffer_flags_t flags;
-  // Size of the external resource view in bytes.
-  iree_device_size_t size;
-  // Native representation selected by |type|.
-  union {
-    // IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION.
-    struct {
-      // Host memory pointer.
-      void* ptr;
-    } host_allocation;
-    // IREE_HAL_EXTERNAL_BUFFER_TYPE_DEVICE_ALLOCATION.
-    struct {
-      // Device memory pointer. Pointer width may vary across devices so it is
-      // always treated as a 64-bit integer here.
-      uint64_t ptr;
-    } device_allocation;
-    // IREE_HAL_EXTERNAL_BUFFER_TYPE_OPAQUE_FD.
-    struct {
-      // POSIX file descriptor referencing the backing memory.
-      int fd;
-    } opaque_fd;
-    // IREE_HAL_EXTERNAL_BUFFER_TYPE_OPAQUE_WIN32.
-    struct {
-      // Win32 handle referencing the backing memory.
-      void* handle;
-    } opaque_win32;
-  } handle;
-} iree_hal_external_buffer_t;
+//===----------------------------------------------------------------------===//
+// External storage
+//===----------------------------------------------------------------------===//
+
+// A byte range in one storage coordinate system.
+typedef struct iree_hal_buffer_range_t {
+  // Offset of the first logical byte in the storage.
+  iree_device_size_t byte_offset;
+  // Number of logical bytes in the range.
+  iree_device_size_t byte_length;
+} iree_hal_buffer_range_t;
+
+// Constructs a buffer range. IREE_HAL_WHOLE_BUFFER is accepted as |byte_length|
+// by APIs that resolve ranges against a known containing extent.
+static inline iree_hal_buffer_range_t iree_hal_make_buffer_range(
+    iree_device_size_t byte_offset, iree_device_size_t byte_length) {
+  return (iree_hal_buffer_range_t){
+      /*.byte_offset=*/byte_offset,
+      /*.byte_length=*/byte_length,
+  };
+}
+
+// Host cache behavior established by the owner of a mapped storage extent.
+// Device coherence is an independent property of each device access path.
+typedef enum iree_hal_host_cacheability_e {
+  IREE_HAL_HOST_CACHEABILITY_UNKNOWN = 0,
+  IREE_HAL_HOST_CACHEABILITY_WRITE_BACK = 1,
+  IREE_HAL_HOST_CACHEABILITY_WRITE_COMBINED = 2,
+  IREE_HAL_HOST_CACHEABILITY_UNCACHED = 3,
+} iree_hal_host_cacheability_t;
+
+// Native representation carried by an external storage value. Equal payload
+// bits with different types are different transports and are never silently
+// reinterpreted.
+typedef enum iree_hal_external_storage_type_e {
+  // No payload. The all-zero external storage value has this type.
+  IREE_HAL_EXTERNAL_STORAGE_TYPE_NONE = 0,
+  // Host virtual address with a caller-defined lifetime.
+  IREE_HAL_EXTERNAL_STORAGE_TYPE_HOST_POINTER = 1,
+  // Device virtual address in the exact domain named by provenance.
+  IREE_HAL_EXTERNAL_STORAGE_TYPE_DEVICE_ADDRESS = 2,
+  // Linux DMA-BUF file descriptor.
+  IREE_HAL_EXTERNAL_STORAGE_TYPE_DMA_BUF_FD = 3,
+  // File descriptor whose interpretation is identified by provenance.
+  IREE_HAL_EXTERNAL_STORAGE_TYPE_OPAQUE_FD = 4,
+  // Vulkan opaque Win32 memory handle identified by provenance.
+  IREE_HAL_EXTERNAL_STORAGE_TYPE_VULKAN_OPAQUE_WIN32 = 5,
+  // NT handle to a committed D3D12 buffer resource.
+  IREE_HAL_EXTERNAL_STORAGE_TYPE_D3D12_RESOURCE = 6,
+} iree_hal_external_storage_type_t;
+
+// Exact native interpretation of an external storage payload. Portable,
+// self-describing transports use an all-zero provenance identity. Opaque
+// handles and raw device addresses require the importing pool to advertise the
+// same nonzero identity.
+typedef struct iree_hal_external_storage_class_t {
+  // Native payload representation.
+  iree_hal_external_storage_type_t type;
+  // Provider-defined interpretation identity.
+  uint64_t provenance[2];
+} iree_hal_external_storage_class_t;
+
+// Constructs a portable or process-local storage class without opaque
+// provider provenance.
+static inline iree_hal_external_storage_class_t
+iree_hal_make_external_storage_class(iree_hal_external_storage_type_t type) {
+  return (iree_hal_external_storage_class_t){
+      /*.type=*/type,
+      /*.provenance=*/{0, 0},
+  };
+}
+
+// Returns whether two storage classes have the same exact native
+// interpretation.
+static inline bool iree_hal_external_storage_class_equal(
+    iree_hal_external_storage_class_t lhs,
+    iree_hal_external_storage_class_t rhs) {
+  return lhs.type == rhs.type && lhs.provenance[0] == rhs.provenance[0] &&
+         lhs.provenance[1] == rhs.provenance[1];
+}
+
+// Opaque identity of live physical backing within one provider instance.
+// Equal nonzero identities prove that two attachments name the same physical
+// bytes. An all-zero identity means that the exporter cannot establish
+// identity. This is never a native handle and is meaningful only while the
+// provider that produced it remains live.
+typedef struct iree_hal_physical_memory_id_t {
+  // Provider-defined identity words.
+  uint64_t words[2];
+} iree_hal_physical_memory_id_t;
+
+// Payload selected by iree_hal_external_storage_class_t::type.
+typedef union iree_hal_external_storage_payload_t {
+  // First host byte of HOST_POINTER storage.
+  void* host_pointer;
+  // First device byte of DEVICE_ADDRESS storage.
+  uint64_t device_address;
+  // Nonnegative DMA_BUF_FD or OPAQUE_FD descriptor.
+  int64_t file_descriptor;
+  // VULKAN_OPAQUE_WIN32 or D3D12_RESOURCE handle.
+  void* win32_handle;
+} iree_hal_external_storage_payload_t;
+
+// Infallibly releases one external storage payload. The callback is thread-safe
+// and must not unwind across the C ABI.
+typedef void(IREE_API_PTR* iree_hal_external_storage_release_fn_t)(
+    void* user_data, iree_hal_external_storage_class_t storage_class,
+    iree_hal_external_storage_payload_t payload);
+
+// Move-owned transport for one physical storage extent. The all-zero value is
+// empty. A nonempty value with a null release callback borrows its payload;
+// the caller keeps the native owner alive through import or explicit release.
+// Copying a nonempty value does not duplicate ownership.
+//
+// Transport ownership does not extend a queue allocation epoch. Exporters of
+// asynchronously allocated memory order queue_dealloca after all foreign uses.
+typedef struct iree_hal_external_storage_t {
+  // Exact native interpretation of |payload|.
+  iree_hal_external_storage_class_t storage_class;
+  // Typed native payload.
+  iree_hal_external_storage_payload_t payload;
+  // Usable extent in this storage coordinate system.
+  iree_device_size_t byte_length;
+  // Source-established host mapping class for HOST_POINTER.
+  iree_hal_host_cacheability_t host_cacheability;
+  // Source-owned envelope available for cache maintenance and registration.
+  iree_hal_buffer_range_t maintenance_range;
+  // Physical identity established by the exporter, when available.
+  iree_hal_physical_memory_id_t physical_backing_id;
+  // Optional infallible payload release callback.
+  iree_hal_external_storage_release_fn_t release;
+  // Opaque value passed to |release|.
+  void* release_user_data;
+} iree_hal_external_storage_t;
+
+// Releases and zeros a move-owned external storage value. This does not wait,
+// flush, or extend the lifetime of a separately managed logical allocation.
+IREE_API_EXPORT void iree_hal_external_storage_release(
+    iree_hal_external_storage_t* storage);
 
 //===----------------------------------------------------------------------===//
 // iree_hal_buffer_placement_t
@@ -632,92 +683,6 @@ static inline bool iree_hal_buffer_placement_is_undefined(
 }
 
 //===----------------------------------------------------------------------===//
-// iree_hal_buffer_params_t
-//===----------------------------------------------------------------------===//
-
-// Parameters defining how a buffer should be allocated.
-//
-// Designed to be zero-initialized: any field with a 0 value will be assigned
-// a default as indicated in the field description.
-//
-// For ergonomics when used from C++ w/o named initializers the first field is
-// the most commonly used so that it can be initialized by location:
-//    some_fn(..., {IREE_HAL_BUFFER_USAGE_FOO}, ...)
-typedef struct iree_hal_buffer_params_t {
-  // Specifies the usage allowed by HAL APIs and aids in memory placement.
-  // Devices may have different memory types for different usage and require
-  // the intended usage to be declared upon allocation. It's always best to
-  // limit the allowed usage bits to precisely what the actual usage will be to
-  // avoid additional copies, synchronization, and expensive emulation.
-  //
-  // If 0 then the usage will default to all usage modes.
-  iree_hal_buffer_usage_t usage;
-
-  // Specifies the access allowed to the memory via the HAL APIs.
-  // For example, if the IREE_HAL_MEMORY_ACCESS_WRITE bit is not set then any
-  // API call that would write to the memory will fail (such as
-  // iree_hal_command_buffer_update_buffer). This does not limit any untrusted
-  // dispatch or external use of the buffer and should not be treated as a
-  // memory protection mechanism.
-  //
-  // If 0 then the access will be set as IREE_HAL_MEMORY_ACCESS_ALL.
-  iree_hal_memory_access_t access;
-
-  // Specifies the memory type properties used for selecting a memory space.
-  // This should often be IREE_HAL_MEMORY_TYPE_OPTIMAL to allow the allocator
-  // to place the allocation based on usage bits but can be specified if the
-  // exact memory type must be used for compatibility with external code.
-  //
-  // If 0 then the type will be set as IREE_HAL_MEMORY_TYPE_OPTIMAL.
-  iree_hal_memory_type_t type;
-
-  // Queue family affinity indicating which families may access this buffer.
-  // This can more tightly scope placement to memory visible from the selected
-  // families. Implementations may configure peering or replication to satisfy
-  // multi-family requests.
-  //
-  // If 0 then the buffer will be available to every queue family as if
-  // IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY was specified.
-  iree_hal_queue_family_affinity_t queue_family_affinity;
-
-  // Minimum alignment, in bytes, of the resulting allocation.
-  // The actual alignment may be any value greater-than-or-equal-to this value.
-  //
-  // If 0 then the alignment will be decided by the allocator based on optimal
-  // device parameters.
-  iree_device_size_t min_alignment;
-} iree_hal_buffer_params_t;
-
-// Canonicalizes |params| fields when zero initialization is used.
-static inline void iree_hal_buffer_params_canonicalize(
-    iree_hal_buffer_params_t* params) {
-  if (!params->usage) {
-    params->usage = IREE_HAL_BUFFER_USAGE_DEFAULT;
-  }
-  if (!params->access) {
-    params->access = IREE_HAL_MEMORY_ACCESS_ALL;
-  }
-  if (!params->type) {
-    params->type = IREE_HAL_MEMORY_TYPE_OPTIMAL;
-  }
-  if (!params->queue_family_affinity) {
-    params->queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY;
-  }
-}
-
-// Returns |params| with the given |usage| bits OR'ed in.
-static inline iree_hal_buffer_params_t iree_hal_buffer_params_with_usage(
-    const iree_hal_buffer_params_t params, iree_hal_buffer_usage_t usage) {
-  iree_hal_buffer_params_t result = params;
-  if (!result.usage) {
-    result.usage =
-        IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
-  }
-  result.usage |= usage;
-  return result;
-}
-
-//===----------------------------------------------------------------------===//
 // iree_hal_buffer_mapping_t
 //===----------------------------------------------------------------------===//
 
@@ -727,6 +692,8 @@ typedef struct iree_hal_buffer_mapping_impl_t {
   iree_device_size_t byte_offset;
   // Used for validation only.
   iree_hal_memory_access_t allowed_access;
+  // Operation flags captured when the mapping is prepared.
+  iree_hal_buffer_map_flags_t flags;
   // Tracking flags.
   uint32_t is_persistent : 1;
   uint32_t reserved_flags : 31;
@@ -824,12 +791,272 @@ iree_hal_buffer_release_callback_null(void) {
 // a reference to the parent buffer.
 typedef struct iree_hal_buffer_t iree_hal_buffer_t;
 
+typedef struct iree_async_notification_t iree_async_notification_t;
+typedef struct iree_async_frontier_tracker_t iree_async_frontier_tracker_t;
+
+// Native representation selected when an access contract is prepared. Ordinary
+// execution uses its backend's representation; storage usage alone does not
+// require a raw device address.
+typedef enum iree_hal_buffer_interface_e {
+  IREE_HAL_BUFFER_INTERFACE_HOST = 0,
+  IREE_HAL_BUFFER_INTERFACE_DEVICE_ADDRESS = 1,
+  IREE_HAL_BUFFER_INTERFACE_VULKAN_BUFFER = 2,
+  IREE_HAL_BUFFER_INTERFACE_XDNA_SHIM_DMA = 3,
+  IREE_HAL_BUFFER_INTERFACE_XDNA_FIRMWARE = 4,
+  IREE_HAL_BUFFER_INTERFACE_RDMA = 5,
+  IREE_HAL_BUFFER_INTERFACE_REGISTERED_IO = 6,
+  IREE_HAL_BUFFER_INTERFACE_REMOTE = 7,
+  IREE_HAL_BUFFER_INTERFACE_WEBGPU_BUFFER = 8,
+  // Native storage that can supply pages to a virtual reservation. Request
+  // this interface explicitly when constructing the source pool.
+  IREE_HAL_BUFFER_INTERFACE_MAPPING_SOURCE = 9,
+  IREE_HAL_BUFFER_INTERFACE_COUNT = 10,
+} iree_hal_buffer_interface_t;
+
+// Prepared native identity. The access contract fixes the payload for each
+// slot. Storage and native registrations are borrowed for the allocation epoch;
+// copying this value neither retains them nor grants public host mapping.
+typedef union iree_hal_buffer_native_binding_t {
+  // Host execution address, independent of application mapping permissions.
+  uint8_t* host_pointer;
+  // Address for DEVICE_ADDRESS or the selected XDNA address interface.
+  uint64_t device_address;
+  // Remappable storage prepared for one exact memory scope. The target
+  // reservation backend interprets the descriptor; it is not a device address.
+  struct {
+    // Borrowed native descriptor owned by the source allocation.
+    const void* descriptor;
+    // Native source offset/length alignment, in bytes; a nonzero power of two.
+    uint32_t granularity;
+    // Byte offset within the descriptor's native storage.
+    uint64_t offset;
+  } mapping_source;
+  // Vulkan resource identity and view position; buffer contains VkBuffer bits.
+  struct {
+    // Native VkBuffer handle.
+    uint64_t buffer;
+    // Byte offset within the native resource.
+    uint64_t offset;
+  } vulkan;
+  // WebGPU resource identity and view position.
+  struct {
+    // Native GPUBuffer bridge handle.
+    uint64_t buffer;
+    // Byte offset within the native resource.
+    uint64_t offset;
+  } webgpu;
+  // Registration prepared for one exact endpoint.
+  struct {
+    // IOVA of the view's first byte.
+    uint64_t address;
+    // Local registration key.
+    uint32_t local_key;
+    // Remote key when remote access was established.
+    uint32_t remote_key;
+  } rdma;
+  // Registration owned by a native I/O adapter.
+  struct {
+    // Borrowed adapter registration table.
+    const void* table;
+    // Prepared registration index.
+    uint32_t index;
+    // Byte offset within the registered storage.
+    uint64_t offset;
+  } registered_io;
+  // Identity in an external transport's object namespace.
+  struct {
+    // Object identifier scoped to its endpoint/session.
+    uint64_t object_id;
+    // Byte offset within the remote object.
+    uint64_t offset;
+  } remote;
+} iree_hal_buffer_native_binding_t;
+
+// A slot prepared for one memory contract and native interface. Slots from
+// unrelated contracts are not interchangeable, even in the same device group.
+typedef struct iree_hal_buffer_native_binding_slot_t {
+  // Dense index in the contract's binding array.
+  uint16_t index;
+  // Payload representation and offset arithmetic for this slot.
+  uint16_t type;
+} iree_hal_buffer_native_binding_slot_t;
+
+// Sentinel for an interface with no prepared native binding.
+#define IREE_HAL_BUFFER_NATIVE_BINDING_INDEX_NONE UINT16_MAX
+
+// Immutable native table format captured by the storage producer. Generic
+// bindings occupy the prefix; trailing backend facts are value data, aligned
+// no more strictly than a binding. Any referenced storage is borrowed from the
+// materialized backing. Copying a table never acquires native ownership.
+typedef struct iree_hal_buffer_binding_layout_t {
+  // Complete table size in bytes, including trailing backend facts.
+  uint32_t byte_length;
+  // Number of generic native binding entries at the start of the table.
+  uint16_t binding_count;
+  // Private host execution slot, or NATIVE_BINDING_INDEX_NONE.
+  uint16_t host_binding_index;
+  // Borrowed interface type per entry; determines native offset arithmetic.
+  const uint16_t* types;
+} iree_hal_buffer_binding_layout_t;
+
+// Native format used by coherent host buffers, independent of public maps.
+IREE_API_EXPORT const iree_hal_buffer_binding_layout_t*
+iree_hal_heap_buffer_binding_layout(void);
+
+// Native allocation lifecycle operations. Qualification happens when a child
+// allocator is constructed; accepted advice is infallible at caller-ordered
+// allocation and release execution boundaries.
+typedef struct iree_hal_buffer_range_advice_t {
+  // Borrowed native allocation state, covered by the backing's lifetime.
+  void* user_data;
+  // Qualifies sanitizer policy without changing the allocation.
+  iree_status_t (*validate_asan)(void* user_data,
+                                 const iree_hal_asan_pool_options_t* options);
+  // Prepares an exclusively owned, retired range in native coordinates.
+  // May touch its contents; bytes outside the range remain unchanged.
+  void (*prefault)(void* user_data, iree_device_size_t offset,
+                   iree_device_size_t length);
+  // Applies advice in native backing coordinates.
+  void (*advise_asan)(void* user_data, iree_device_size_t offset,
+                      iree_hal_asan_range_advice_flags_t flags,
+                      const iree_hal_asan_allocation_layout_t* layout);
+} iree_hal_buffer_range_advice_t;
+
+// Native allocation or registered page-cover geometry established by the
+// storage provider. A registration's cover may differ from the original source
+// allocation. This is informational and grants neither access to padding nor
+// an ownership claim.
+// Unknown geometry is zero; a host pointer alone does not establish its source
+// allocation extent. This excludes driver/allocator metadata, reserved virtual
+// address slack and residency accounting.
+typedef struct iree_hal_buffer_allocation_info_t {
+  // Complete native allocation payload extent, including known padding.
+  iree_device_size_t byte_length;
+  // Backing coordinate zero within the native allocation payload.
+  iree_device_size_t byte_offset;
+  // Native allocation-size granularity, or zero when not established.
+  iree_device_size_t granularity;
+} iree_hal_buffer_allocation_info_t;
+
+// Immutable cold facts embedded in the owner of prepared native storage.
+// This is borrowed value data, not another resource or an origin-pool link.
+// The sealed device group and the allocation epoch must outlive all consumers.
+// Virtual reservations publish alignment and progress services only; physical
+// facts remain unknown and range advice is unavailable until established by
+// an actual storage source. Mapped sources are queried independently.
+typedef struct iree_hal_buffer_backing_facts_t {
+  // Shared capacity notification on the allocation's progress owner.
+  iree_async_notification_t* notification;
+  // Sealed-group completion tracker for exact inherited reuse prerequisites.
+  iree_async_frontier_tracker_t* tracker;
+  // Native range lifecycle operations; NULL when unavailable.
+  const iree_hal_buffer_range_advice_t* advice;
+  // Source-owned envelope available for cache maintenance and registration in
+  // backing coordinates.
+  iree_hal_buffer_range_t maintenance_range;
+  // Source-established host cacheability of the backing storage.
+  iree_hal_host_cacheability_t host_cacheability;
+  // Physical identity established by the storage source, when available.
+  // Identity alone does not establish byte correspondence between attachments.
+  iree_hal_physical_memory_id_t physical_backing_id;
+  // Native payload geometry, independent of visible and maintenance ranges.
+  iree_hal_buffer_allocation_info_t native_allocation;
+  // Guaranteed power-of-two alignment of byte zero in native coordinates.
+  iree_device_size_t allocation_alignment;
+  // Minimum independently maintained byte granule; one for coherent storage.
+  iree_device_size_t maintenance_alignment;
+  // Atomic operations available on naturally aligned locations in this backing.
+  iree_hal_atomic_operation_capabilities_t atomic_operations;
+} iree_hal_buffer_backing_facts_t;
+
+// Prepared storage facts carried by a buffer independently of its native handle
+// representation. The visible length remains iree_hal_buffer_byte_length().
+typedef struct iree_hal_buffer_memory_view_t {
+  // Borrowed immutable access contract, flattened from the allocation owner.
+  // NULL for storage described solely by allocation parameters.
+  iree_hal_memory_contract_t* contract;
+  // Borrowed native binding array, or NULL without prepared native access.
+  // The array address is immutable; queue-ordered allocations publish its
+  // entries at commitment, before any caller-ordered execution access.
+  const iree_hal_buffer_native_binding_t* bindings;
+  // Visible byte zero in the binding array's native coordinates. Independent
+  // of the advice origin: a native resource may cover only part of a slab.
+  iree_device_size_t binding_offset;
+  // Borrowed immutable backing facts, or NULL before storage is prepared.
+  const iree_hal_buffer_backing_facts_t* backing;
+  // Visible byte zero in the backing's native advice/alignment coordinates.
+  iree_device_size_t offset;
+  // Exact prerequisite inherited by this allocation epoch, or NULL if empty.
+  // This does not track later user accesses and does not extend the epoch.
+  const iree_async_frontier_t* reuse_frontier;
+} iree_hal_buffer_memory_view_t;
+
+// Returns the prepared storage view. Plain subspans created before transient
+// allocation commitment resolve their retained root on this cold query;
+// prepared views carry their facts directly. Callers synchronize with
+// commitment.
+IREE_API_EXPORT iree_hal_buffer_memory_view_t
+iree_hal_buffer_memory_view(const iree_hal_buffer_t* buffer);
+
+// Loads a trusted contract-compatible slot and translates it to the prepared
+// memory view's byte zero. Allocation commitment and retirement are
+// caller-ordered. No mapping, registration, retain, parent traversal or
+// topology query occurs.
+IREE_API_EXPORT iree_hal_buffer_native_binding_t
+iree_hal_buffer_memory_native_binding(
+    const iree_hal_buffer_memory_view_t* memory,
+    iree_hal_buffer_native_binding_slot_t slot);
+
+// Loads a trusted contract-compatible slot and translates it to the buffer's
+// byte zero. Prepared buffer views carry their native facts directly.
+IREE_API_EXPORT iree_hal_buffer_native_binding_t
+iree_hal_buffer_native_binding(const iree_hal_buffer_t* buffer,
+                               iree_hal_buffer_native_binding_slot_t slot);
+
+// Publishes a complete source-qualified native table into stable wrapper
+// storage of at least layout->byte_length bytes. All entries are translated to
+// source byte zero; absent optional addresses stay absent. The layout and
+// source are trusted producer state. The caller orders publication before
+// native reads and retains source backing throughout the copied table's use.
+IREE_API_EXPORT void iree_hal_buffer_memory_copy_bindings(
+    const iree_hal_buffer_memory_view_t* source,
+    const iree_hal_buffer_binding_layout_t* layout,
+    iree_hal_buffer_native_binding_t* target);
+
+// Resolves a host execution span from an already-prepared native binding.
+// Used by CPU execution backends at the buffer-reference boundary. Fails if
+// the range is invalid or host execution access has not been prepared. This
+// does not establish a public mapping or perform cache maintenance. The caller
+// orders every access after allocation commitment and before retirement.
+IREE_API_EXPORT iree_status_t iree_hal_buffer_native_host_span(
+    const iree_hal_buffer_t* buffer, iree_device_size_t offset,
+    iree_device_size_t length, iree_byte_span_t* out_span);
+
+// Executes native maintenance through a prepared CPU execution binding.
+// These operations require READ or WRITE access respectively, independently of
+// public mapping permissions. The caller orders the operation after allocation
+// commitment and producer completion, and before backing retirement. Native
+// maintenance may block and must run on a host executor, not a proactor
+// callback. An explicit operation always reaches the native implementation,
+// including on CPU-coherent storage whose external protocol may still require
+// maintenance.
+IREE_API_EXPORT iree_status_t iree_hal_buffer_invalidate_host_range(
+    iree_hal_buffer_t* buffer, iree_device_size_t offset,
+    iree_device_size_t length);
+
+// Publishes writes through the prepared CPU execution binding. Follows the
+// execution and ownership contract of iree_hal_buffer_invalidate_host_range.
+IREE_API_EXPORT iree_status_t iree_hal_buffer_flush_host_range(
+    iree_hal_buffer_t* buffer, iree_device_size_t offset,
+    iree_device_size_t length);
+
 // Returns success iff the buffer was allocated with the given memory type.
 IREE_API_EXPORT iree_status_t iree_hal_buffer_validate_memory_type(
     iree_hal_memory_type_t actual_memory_type,
     iree_hal_memory_type_t expected_memory_type);
 
-// Returns success iff the buffer allows the requested access.
+// Returns success iff the buffer allows the requested nonempty READ/WRITE
+// access. NONE and undefined permission bits are invalid requests.
 IREE_API_EXPORT iree_status_t iree_hal_buffer_validate_access(
     iree_hal_memory_access_t allowed_memory_access,
     iree_hal_memory_access_t required_memory_access);
@@ -838,6 +1065,13 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_validate_access(
 IREE_API_EXPORT iree_status_t
 iree_hal_buffer_validate_usage(iree_hal_buffer_usage_t allowed_usage,
                                iree_hal_buffer_usage_t required_usage);
+
+// Returns success iff at least one of the given usage types is allowed.
+// Opaque storage bindings require storage capability without claiming both
+// READ and WRITE. Commands with known accesses use validate_usage instead.
+IREE_API_EXPORT iree_status_t
+iree_hal_buffer_validate_usage_any(iree_hal_buffer_usage_t allowed_usage,
+                                   iree_hal_buffer_usage_t required_usage);
 
 // Returns success iff the given byte range falls within the valid buffer.
 IREE_API_EXPORT iree_status_t iree_hal_buffer_validate_range(
@@ -1019,12 +1253,15 @@ IREE_API_EXPORT
 iree_hal_buffer_usage_t iree_hal_buffer_allowed_usage(
     const iree_hal_buffer_t* buffer);
 
-// Exports the logical view of |buffer| to an external buffer handle.
-// Pointer exports include the buffer's byte offset and report its byte length,
-// not the entire underlying allocation. See iree_hal_external_buffer_type_t for
-// ownership and driver/device compatibility requirements. The caller is
-// responsible for the exported value's lifetime, including keeping the source
-// allocation live while a borrowed pointer is in use.
+// Exports a view-relative |range| of |buffer| as typed external storage. The
+// returned |out_logical_range| locates the requested bytes in the exported
+// storage's coordinate system. Exporting nested or imported views accumulates
+// their offsets instead of discarding the source coordinates.
+//
+// See iree_hal_external_storage_type_t for ownership and driver/device
+// compatibility requirements. The caller is responsible for both the returned
+// transport and source allocation lifetimes. A borrowed pointer has no release
+// callback and requires the source allocation to remain live.
 //
 // Export does not synchronize, retain |buffer|, or preserve its pool
 // allocation. An asynchronously allocated buffer must be committed before
@@ -1035,11 +1272,13 @@ iree_hal_buffer_usage_t iree_hal_buffer_allowed_usage(
 // Fails with IREE_STATUS_UNAVAILABLE if the buffer cannot be represented by the
 // requested type, or IREE_STATUS_FAILED_PRECONDITION if its backing has not
 // been committed or has already been deallocated. On failure
-// |out_external_buffer| is empty. No ownership transfers on failure.
-IREE_API_EXPORT iree_status_t iree_hal_buffer_export(
-    iree_hal_buffer_t* buffer, iree_hal_external_buffer_type_t requested_type,
-    iree_hal_external_buffer_flags_t requested_flags,
-    iree_hal_external_buffer_t* out_external_buffer);
+// |out_storage| and |out_logical_range| are empty. No ownership transfers on
+// failure.
+IREE_API_EXPORT iree_status_t
+iree_hal_buffer_export(iree_hal_buffer_t* buffer, iree_hal_buffer_range_t range,
+                       iree_hal_external_storage_class_t requested_class,
+                       iree_hal_external_storage_t* out_storage,
+                       iree_hal_buffer_range_t* out_logical_range);
 
 // Sets a range of the buffer to binary zero.
 //
@@ -1072,6 +1311,7 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_fill(
 // Reads a block of data from the buffer at the given offset.
 //
 // Requires that the buffer has the IREE_HAL_BUFFER_USAGE_MAPPING bit set.
+// The source byte range will be invalidated before reading if needed.
 //
 // It is strongly recommended that buffer operations are performed on transfer
 // queues; using this synchronous function may incur additional cache flushes
@@ -1098,8 +1338,9 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_write(
 // Copies data from the provided |source_buffer| into the |target_buffer|.
 //
 // Requires that both buffers have the IREE_HAL_BUFFER_USAGE_MAPPING bit set.
-// The byte range in |target_buffer| will be flushed if needed. Both buffers
-// need not come from the same device.
+// The source byte range will be invalidated before copying and the target byte
+// range flushed afterward if needed. The buffers need not come from the same
+// device.
 //
 // It is strongly recommended that buffer operations are performed on transfer
 // queues; using this synchronous function may incur additional cache flushes
@@ -1116,14 +1357,17 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_copy(
 // Fails if the memory could not be mapped (invalid access type, invalid
 // range, or unsupported memory type).
 //
-// Requires that the buffer has the IREE_HAL_BUFFER_USAGE_MAPPING bit set.
+// |mapping_mode| must be SCOPED or PERSISTENT, with the corresponding
+// IREE_HAL_BUFFER_USAGE_MAPPING_* capability enabled on the buffer. Access
+// permissions and operation flags are independent: READ | WRITE preserves
+// contents unless |flags| explicitly includes DISCARD.
 // If the buffer is not IREE_HAL_MEMORY_TYPE_HOST_COHERENT then the caller must
 // invalidate the byte range they want to access to update the visibility of the
 // mapped memory.
 IREE_API_EXPORT iree_status_t iree_hal_buffer_map_range(
     iree_hal_buffer_t* buffer, iree_hal_mapping_mode_t mapping_mode,
-    iree_hal_memory_access_t memory_access, iree_device_size_t byte_offset,
-    iree_device_size_t byte_length,
+    iree_hal_memory_access_t memory_access, iree_hal_buffer_map_flags_t flags,
+    iree_device_size_t byte_offset, iree_device_size_t byte_length,
     iree_hal_buffer_mapping_t* out_buffer_mapping);
 
 // Prepares for mapping the buffer to be accessed as a host pointer into
@@ -1132,7 +1376,8 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_range(
 // start of the data. Fails if the memory could not be mapped (invalid access
 // type, invalid range, or unsupported memory type).
 //
-// Requires that the buffer has the IREE_HAL_BUFFER_USAGE_MAPPING bit set.
+// |mapping_mode| must be SCOPED or PERSISTENT, with the corresponding
+// IREE_HAL_BUFFER_USAGE_MAPPING_* capability enabled on the buffer.
 // If the buffer is not IREE_HAL_MEMORY_TYPE_HOST_COHERENT then the caller must
 // invalidate the byte range they want to access to update the visibility of the
 // mapped memory.
@@ -1149,21 +1394,20 @@ IREE_API_EXPORT iree_status_t iree_hal_buffer_map_range(
 //
 // Example usage:
 //  iree_hal_buffer_prepare_map_range(..., &mapping);
-//  if (maybe) iree_hal_buffer_commit_map_range(..., &mapping);
+//  if (maybe) iree_hal_buffer_commit_map_range(&mapping);
 //  iree_hal_buffer_unmap_range(&mapping);
 IREE_API_EXPORT iree_status_t iree_hal_buffer_prepare_map_range(
     iree_hal_buffer_t* buffer, iree_hal_mapping_mode_t mapping_mode,
-    iree_hal_memory_access_t memory_access, iree_device_size_t byte_offset,
-    iree_device_size_t byte_length,
+    iree_hal_memory_access_t memory_access, iree_hal_buffer_map_flags_t flags,
+    iree_device_size_t byte_offset, iree_device_size_t byte_length,
     iree_hal_buffer_mapping_t* out_buffer_mapping);
 
 // Commits a mapping operation from iree_hal_buffer_prepare_map_range.
 // May fail for internal reasons but not any of those previously validated
-// during preparation.
-IREE_API_EXPORT iree_status_t iree_hal_buffer_commit_map_range(
-    iree_hal_buffer_t* buffer, iree_hal_mapping_mode_t mapping_mode,
-    iree_hal_memory_access_t memory_access,
-    iree_hal_buffer_mapping_t* buffer_mapping);
+// during preparation. Uses the access, mode, flags and range captured by
+// prepare; the caller must not modify that prepared state before commit.
+IREE_API_EXPORT iree_status_t
+iree_hal_buffer_commit_map_range(iree_hal_buffer_mapping_t* buffer_mapping);
 
 // Unmaps the buffer as was previously mapped to |buffer_mapping|.
 //
@@ -1246,8 +1490,9 @@ IREE_API_EXPORT iree_status_t iree_hal_subspan_buffer_create_with_callback(
 // Wraps an existing host allocation in a buffer.
 // When the buffer is destroyed the provided |release_callback| will be called.
 //
-// The buffer must be aligned to at least IREE_HAL_HEAP_BUFFER_ALIGNMENT and if
-// it is not the call will fail with IREE_STATUS_OUT_OF_RANGE.
+// |data| may have byte alignment. Operations requiring stronger alignment must
+// validate the actual address they access. This wrapper neither copies the
+// contents nor changes the alignment of the supplied storage.
 //
 // |out_buffer| must be released by the caller. |data| must be kept live for the
 // lifetime of the wrapping buffer.
@@ -1262,9 +1507,11 @@ iree_status_t iree_hal_heap_buffer_wrap(
 // iree_hal_buffer_t implementation details
 //===----------------------------------------------------------------------===//
 
+typedef struct iree_hal_virtual_buffer_view_t iree_hal_virtual_buffer_view_t;
+typedef struct iree_hal_memory_mapping_update_t
+    iree_hal_memory_mapping_update_t;
+
 typedef struct iree_hal_buffer_vtable_t {
-  // Must be iree_hal_buffer_recycle.
-  void(IREE_API_PTR* recycle)(iree_hal_buffer_t* buffer);
   void(IREE_API_PTR* destroy)(iree_hal_buffer_t* buffer);
 
   // Exports an allocation-relative range already resolved from the caller's
@@ -1274,13 +1521,14 @@ typedef struct iree_hal_buffer_vtable_t {
   iree_status_t(IREE_API_PTR* export_range)(
       iree_hal_buffer_t* buffer, iree_device_size_t local_byte_offset,
       iree_device_size_t local_byte_length,
-      iree_hal_external_buffer_type_t requested_type,
-      iree_hal_external_buffer_flags_t requested_flags,
-      iree_hal_external_buffer_t* out_external_buffer);
+      iree_hal_external_storage_class_t requested_class,
+      iree_hal_external_storage_t* out_storage,
+      iree_hal_buffer_range_t* out_logical_range);
 
   iree_status_t(IREE_API_PTR* map_range)(iree_hal_buffer_t* buffer,
                                          iree_hal_mapping_mode_t mapping_mode,
                                          iree_hal_memory_access_t memory_access,
+                                         iree_hal_buffer_map_flags_t flags,
                                          iree_device_size_t local_byte_offset,
                                          iree_device_size_t local_byte_length,
                                          iree_hal_buffer_mapping_t* mapping);
@@ -1297,10 +1545,31 @@ typedef struct iree_hal_buffer_vtable_t {
   iree_status_t(IREE_API_PTR* flush_range)(
       iree_hal_buffer_t* buffer, iree_device_size_t local_byte_offset,
       iree_device_size_t local_byte_length);
+  // Resolves storage facts for a committed transient allocation. NULL for
+  // buffers whose prepared memory view is immutable after publication. This
+  // cold query is used when constructing a child allocator, never at
+  // submission.
+  iree_hal_buffer_memory_view_t(IREE_API_PTR* query_memory)(
+      const iree_hal_buffer_t* buffer);
+  // Borrowed committed mapping target and its view offset. NULL for dense
+  // storage; transient and instrumentation buffers forward the current view.
+  iree_hal_virtual_buffer_view_t(IREE_API_PTR* query_virtual)(
+      const iree_hal_buffer_t* buffer);
+  // Completes a trusted resolved native mapping vector on the cold execution
+  // owner. NULL when publication requires a native queue implementation.
+  iree_status_t(IREE_API_PTR* update_mappings)(
+      iree_hal_buffer_t* buffer, uint32_t projection,
+      iree_host_size_t update_count,
+      const iree_hal_memory_mapping_update_t* updates);
+  // Checked full native-group removal preserving the buffer's addresses and
+  // prior failure. Called after all affected work retires, including on error.
+  // Instrumentation observes the operation before forwarding to native storage.
+  iree_status_t(IREE_API_PTR* detach_mappings)(iree_hal_buffer_t* buffer,
+                                               uint32_t scope_id);
+  // Static queue allocation lifecycle, or NULL for ordinary buffer storage.
+  const iree_hal_buffer_allocation_vtable_t* allocation;
 } iree_hal_buffer_vtable_t;
-static_assert(offsetof(iree_hal_buffer_vtable_t, recycle) == 0,
-              "iree_hal_resource_vtable_t expects destroy at offset 0, we want "
-              "to recycle instead");
+IREE_HAL_ASSERT_VTABLE_LAYOUT(iree_hal_buffer_vtable_t);
 
 // NOTE: this shared data structure may be a mistake. If vtables were free we
 // would not provide this and rely on each buffer implementation to implement
@@ -1328,17 +1597,12 @@ struct iree_hal_buffer_t {
   // logical length exposed to users.
   iree_device_size_t byte_length;
 
+  // Prepared native storage facts, independent of the native handle offset.
+  iree_hal_buffer_memory_view_t memory;
+
   // Placement of the buffer on a device/queue set. Captured only for allocated
   // buffers.
   iree_hal_buffer_placement_t placement;
-
-  // Hacky back reference to an allocator that should be notified when the
-  // buffer is released. This is a hack to support interception of buffers by
-  // pooling layers and is slated for removal.
-  //
-  // TODO(#19159): remove iree_hal_allocator_deallocate_buffer when pooling no
-  // longer requires the pooling_allocator on iree_hal_buffer_t.
-  iree_hal_allocator_t* pooling_allocator;
 
   // A counter indicating the number of active preservation requests.
   // This roughly translates to the number of logical "owners" of the allocation
@@ -1354,9 +1618,9 @@ struct iree_hal_buffer_t {
   iree_hal_buffer_usage_t allowed_usage;
   iree_hal_memory_access_t allowed_access;
 
-  // Unused padding that more flags or identifiers can be placed in, such as
-  // which implementation pool owns the buffer.
-  uint16_t reserved;
+  // Prepared host execution slot, or NATIVE_BINDING_INDEX_NONE. Public mapping
+  // permission remains independent.
+  uint16_t host_binding_index;
 
   // Implementation-defined flags used for additional bookkeeping or routing
   // by the buffer implementation.
@@ -1371,21 +1635,7 @@ IREE_API_EXPORT void iree_hal_buffer_initialize(
     iree_hal_buffer_usage_t allowed_usage,
     const iree_hal_buffer_vtable_t* vtable, iree_hal_buffer_t* buffer);
 
-// TODO(#19159): remove iree_hal_allocator_deallocate_buffer when pooling no
-// longer requires the pooling_allocator on iree_hal_buffer_t. When buffers can
-// use their normal destroy callback to return themselves to pools then we won't
-// need this extra recycle thunk.
-//
-// Recycles |buffer| by releasing it to the origin it is associated with via the
-// release callback (or destroying it, if none was specified).
-// The |buffer| pointer may remain valid if it is returned to a pool but callers
-// must assume its contents are undefined as if it had been freed.
-IREE_API_EXPORT void iree_hal_buffer_recycle(iree_hal_buffer_t* buffer);
-
 // Destroys |buffer| and frees its memory.
-// Implementations must use iree_hal_buffer_recycle in their vtables for the
-// common iree_hal_resource_t destroy callback as this is only to be used by
-// release callbacks that want to free the buffer.
 IREE_API_EXPORT void iree_hal_buffer_destroy(iree_hal_buffer_t* buffer);
 
 #ifdef __cplusplus

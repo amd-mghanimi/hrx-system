@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "iree/testing/gtest.h"
+#include "loomc/compile.h"
 #include "loomc/link.h"
 #include "test/util.h"
 
@@ -24,10 +25,11 @@ using WorkspacePtr = HandlePtr<loomc_workspace_t, loomc_workspace_release>;
 using SourcePtr = HandlePtr<loomc_source_t, loomc_source_release>;
 using ModulePtr = HandlePtr<loomc_module_t, loomc_module_release>;
 using ResultPtr = HandlePtr<loomc_result_t, loomc_result_release>;
+using PreamblePtr = HandlePtr<loomc_cxx_preamble_t, loomc_cxx_preamble_release>;
 using CompilerPtr = HandlePtr<loomc_compiler_t, loomc_compiler_release>;
 using PassPtr = HandlePtr<loomc_pass_program_t, loomc_pass_program_release>;
 using LinkBuilderPtr =
-    HandlePtr<loomc_link_index_builder_t, loomc_link_index_builder_release>;
+    HandlePtr<loomc_link_index_builder_t, loomc_link_index_builder_free>;
 using LinkIndexPtr = HandlePtr<loomc_link_index_t, loomc_link_index_release>;
 using LinkerPtr = HandlePtr<loomc_linker_t, loomc_linker_release>;
 
@@ -44,10 +46,11 @@ std::string Contents(const loomc_source_t* source) {
 }
 
 SourcePtr Source(const char* name, const char* text) {
-  loomc_source_options_t options = {};
-  options.identifier = loomc_make_cstring_view(name);
-  options.contents = loomc_make_byte_span(text, strlen(text));
-  options.storage = LOOMC_SOURCE_STORAGE_COPY;
+  loomc_source_options_t options = {
+      .identifier = loomc_make_cstring_view(name),
+      .contents = loomc_make_byte_span(text, strlen(text)),
+      .storage = LOOMC_SOURCE_STORAGE_COPY,
+  };
   loomc_source_t* source = nullptr;
   LOOMC_EXPECT_OK(
       loomc_source_create(&options, loomc_allocator_system(), &source));
@@ -157,9 +160,10 @@ TEST_F(CxxTest, SourceAndWorkspaceCanBeReleasedBeforeCompilation) {
 TEST_F(CxxTest, RejectedSourceRetainsBorrowedContentsAndAllowsReuse) {
   std::string text = "int entry() { return absent_name; }";
   const std::string expected = text;
-  loomc_source_options_t source_options = {};
-  source_options.identifier = loomc_make_cstring_view("broken.cpp");
-  source_options.contents = loomc_make_byte_span(text.data(), text.size());
+  loomc_source_options_t source_options = {
+      .identifier = loomc_make_cstring_view("broken.cpp"),
+      .contents = loomc_make_byte_span(text.data(), text.size()),
+  };
   loomc_source_t* source = nullptr;
   LOOMC_ASSERT_OK(
       loomc_source_create(&source_options, loomc_allocator_system(), &source));
@@ -189,8 +193,7 @@ TEST_F(CxxTest, RenamedExportsLinkWithTheirTypesAfterSourceRelease) {
     )");
     LOOMC_ASSERT_OK(Import(source.get()));
     ExpectSuccess(result_.get());
-    loomc_module_serialize_options_t serialization = {};
-    serialization.format = format;
+    loomc_module_serialize_options_t serialization = {.format = format};
     loomc_source_t* library = nullptr;
     LOOMC_ASSERT_OK(loomc_module_serialize_to_source(
         module_.get(), &serialization, loomc_allocator_system(), &library));
@@ -212,11 +215,12 @@ TEST_F(CxxTest, RenamedExportsLinkWithTheirTypesAfterSourceRelease) {
           ")\n  func.return %result : " + result_type + "\n}\n";
       auto caller = Source("caller.loom", caller_text.c_str());
       loomc_link_index_builder_t* builder = nullptr;
-      LOOMC_ASSERT_OK(loomc_link_index_builder_create(
+      LOOMC_ASSERT_OK(loomc_link_index_builder_allocate(
           context_.get(), nullptr, loomc_allocator_system(), &builder));
       LinkBuilderPtr builder_owner(builder);
-      loomc_link_index_source_options_t provider = {};
-      provider.role = LOOMC_LINK_PROVIDER_ROLE_LIBRARY;
+      loomc_link_index_source_options_t provider = {
+          .role = LOOMC_LINK_PROVIDER_ROLE_LIBRARY,
+      };
       LOOMC_ASSERT_OK(loomc_link_index_builder_add_source(builder, library,
                                                           &provider, nullptr));
       provider.role = LOOMC_LINK_PROVIDER_ROLE_INPUT;
@@ -236,10 +240,11 @@ TEST_F(CxxTest, RenamedExportsLinkWithTheirTypesAfterSourceRelease) {
       LOOMC_ASSERT_OK(loomc_linker_create(context_.get(), nullptr,
                                           loomc_allocator_system(), &linker));
       LinkerPtr linker_owner(linker);
-      loomc_link_options_t options = {};
-      options.link_index = index;
-      options.mode = LOOMC_LINK_MODE_LINK;
-      options.flags = LOOMC_LINK_FLAG_INCLUDE_INPUT_EXPORTS;
+      loomc_link_options_t options = {
+          .link_index = index,
+          .mode = LOOMC_LINK_MODE_LINK,
+          .flags = LOOMC_LINK_FLAG_INCLUDE_INPUT_EXPORTS,
+      };
       loomc_module_t* linked = nullptr;
       LOOMC_ASSERT_OK(loomc_link_module(linker, workspace_.get(), &options,
                                         &linked, &result));
@@ -286,6 +291,117 @@ struct HeaderCache {
   }
 };
 
+struct PrefixSourcePathMapper {
+  // Storage reused after the importer has copied each callback result.
+  std::string identifier;
+
+  static loomc_status_t Map(void* user_data, loomc_string_view_t path,
+                            loomc_string_view_t* out_identifier) {
+    auto& self = *static_cast<PrefixSourcePathMapper*>(user_data);
+    self.identifier = "/logical";
+    if (path.size == 0 || path.data[0] != '/') {
+      self.identifier += '/';
+    }
+    self.identifier += ToString(path);
+    *out_identifier =
+        loomc_make_string_view(self.identifier.data(), self.identifier.size());
+    return loomc_ok_status();
+  }
+};
+
+TEST_F(CxxTest, RetainedPreambleRestoresAfterCreationInputsAreReleased) {
+  loomc_context_t* raw_producer_context = nullptr;
+  LOOMC_ASSERT_OK(loomc_context_create(nullptr, loomc_allocator_system(),
+                                       &raw_producer_context));
+  ContextPtr producer_context(raw_producer_context);
+  HeaderCache cache;
+  auto producer = Source("producer.cpp",
+                         "#include <helper.h>\n"
+                         "int entry(int x) { return helper<7>(x); }");
+  const auto include_path = loomc_make_cstring_view("/headers");
+  loomc_cxx_import_options_t options = {
+      .flags = LOOMC_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES,
+      .source_provider = {HeaderCache::Resolve, &cache},
+      .system_include_paths = &include_path,
+      .system_include_path_count = 1,
+  };
+  loomc_cxx_preamble_t* raw_preamble = nullptr;
+  loomc_result_t* raw_result = nullptr;
+  LOOMC_ASSERT_OK(loomc_cxx_preamble_create(
+      producer_context.get(), producer.get(), &options,
+      loomc_allocator_system(), &raw_preamble, &raw_result));
+  PreamblePtr publishing_reference(raw_preamble);
+  ResultPtr create_result(raw_result);
+  ASSERT_NE(publishing_reference, nullptr);
+  ExpectSuccess(create_result.get());
+  EXPECT_EQ(cache.hits, 1u);
+
+  loomc_cxx_preamble_retain(publishing_reference.get());
+  PreamblePtr retained(publishing_reference.get());
+  publishing_reference.reset();
+  producer_context.reset();
+  producer.reset();
+  cache.header.reset();
+  auto consumer = Source("consumer.cpp",
+                         "#include <helper.h>\n"
+                         "int entry(int x) { return helper<7>(x); }");
+  options.preamble = retained.get();
+  LOOMC_ASSERT_OK(Import(consumer.get(), &options));
+  retained.reset();
+  ExpectSuccess(result_.get());
+  EXPECT_EQ(cache.hits, 1u);
+  ASSERT_NE(module_, nullptr);
+  const auto text = Print(module_.get());
+  EXPECT_NE(text.find("func.def public @entry"), std::string::npos);
+  EXPECT_NE(text.find("scalar.constant 7"), std::string::npos);
+}
+
+TEST_F(CxxTest, PreambleRejectionRetainsMappedHeaderDiagnostic) {
+  HeaderCache cache;
+  const std::string header = "static int broken() { return missing; }";
+  cache.header = Source("/headers/helper.h", header.c_str());
+  auto source = Source("unit.cpp", "#include <helper.h>\nint entry();");
+  const auto include_path = loomc_make_cstring_view("/headers");
+  PrefixSourcePathMapper mapper;
+  const loomc_cxx_import_options_t options = {
+      .flags = LOOMC_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES,
+      .source_provider = {HeaderCache::Resolve, &cache},
+      .source_path_mapper = {PrefixSourcePathMapper::Map, &mapper},
+      .system_include_paths = &include_path,
+      .system_include_path_count = 1,
+  };
+  loomc_cxx_preamble_t* raw_preamble = nullptr;
+  loomc_result_t* raw_result = nullptr;
+  LOOMC_ASSERT_OK(loomc_cxx_preamble_create(context_.get(), source.get(),
+                                            &options, loomc_allocator_system(),
+                                            &raw_preamble, &raw_result));
+  PreamblePtr preamble(raw_preamble);
+  ResultPtr result(raw_result);
+  source.reset();
+  cache.header.reset();
+
+  EXPECT_EQ(preamble, nullptr);
+  ASSERT_NE(result, nullptr);
+  ASSERT_FALSE(loomc_result_succeeded(result.get()));
+  ASSERT_GT(loomc_result_diagnostic_count(result.get()), 0u);
+  const auto* diagnostic = loomc_result_diagnostic_at(result.get(), 0);
+  EXPECT_EQ(ToString(loomc_source_identifier(diagnostic->range.source)),
+            "/logical/headers/helper.h");
+  EXPECT_EQ(Contents(diagnostic->range.source), header);
+}
+
+TEST_F(CxxTest, PreambleRequiresAReusableIncludePrefix) {
+  auto source = Source("unit.cpp", "int value() { return 42; }");
+  loomc_cxx_preamble_t* preamble = nullptr;
+  loomc_result_t* result = nullptr;
+  LOOMC_ASSERT_STATUS_IS(
+      LOOMC_STATUS_FAILED_PRECONDITION,
+      loomc_cxx_preamble_create(context_.get(), source.get(), nullptr,
+                                loomc_allocator_system(), &preamble, &result));
+  EXPECT_EQ(preamble, nullptr);
+  EXPECT_EQ(result, nullptr);
+}
+
 TEST_F(CxxTest, OptionsAndSharedIncludeProviderAcrossWorkers) {
   HeaderCache cache;
   auto source = Source("unit.cpp",
@@ -296,15 +412,16 @@ TEST_F(CxxTest, OptionsAndSharedIncludeProviderAcrossWorkers) {
   const auto root = loomc_make_cstring_view("first");
   const loomc_cxx_define_t define = {loomc_make_cstring_view("FACTOR"),
                                      loomc_make_cstring_view("7")};
-  loomc_cxx_import_options_t options = {};
-  options.source_provider = {HeaderCache::Resolve, &cache};
-  options.system_include_paths = &include_path;
-  options.system_include_path_count = 1;
-  options.roots = &root;
-  options.root_count = 1;
-  options.defines = &define;
-  options.define_count = 1;
-  options.flags = LOOMC_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES;
+  loomc_cxx_import_options_t options = {
+      .flags = LOOMC_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES,
+      .source_provider = {HeaderCache::Resolve, &cache},
+      .system_include_paths = &include_path,
+      .system_include_path_count = 1,
+      .defines = &define,
+      .define_count = 1,
+      .roots = &root,
+      .root_count = 1,
+  };
   std::array<ModulePtr, 2> modules;
   std::array<std::thread, 2> workers;
   for (size_t i = 0; i < workers.size(); ++i) {
@@ -347,10 +464,11 @@ TEST_F(CxxTest, HeaderDiagnosticSurvivesProviderDestruction) {
                        "#include <helper.h>\n"
                        "int entry() { return broken(); }");
   auto path = loomc_make_cstring_view("/headers");
-  loomc_cxx_import_options_t options = {};
-  options.source_provider = {HeaderCache::Resolve, &cache};
-  options.include_paths = &path;
-  options.include_path_count = 1;
+  loomc_cxx_import_options_t options = {
+      .source_provider = {HeaderCache::Resolve, &cache},
+      .include_paths = &path,
+      .include_path_count = 1,
+  };
   LOOMC_ASSERT_OK(Import(source.get(), &options));
   source.reset();
   cache.header.reset();
@@ -362,10 +480,60 @@ TEST_F(CxxTest, HeaderDiagnosticSurvivesProviderDestruction) {
   EXPECT_EQ(Contents(diagnostic->range.source), expected);
 }
 
+TEST_F(CxxTest, SourcePathMapperPreservesPhysicalIncludeLookup) {
+  HeaderCache cache;
+  const std::string expected = "static int broken() { return missing; }";
+  cache.header = Source("/headers/helper.h", expected.c_str());
+  auto source = Source("unit.cpp",
+                       "#include <helper.h>\n"
+                       "int entry() { return broken(); }");
+  auto path = loomc_make_cstring_view("/headers");
+  PrefixSourcePathMapper mapper;
+  loomc_cxx_import_options_t options = {
+      .source_provider = {HeaderCache::Resolve, &cache},
+      .source_path_mapper = {PrefixSourcePathMapper::Map, &mapper},
+      .include_paths = &path,
+      .include_path_count = 1,
+  };
+  LOOMC_ASSERT_OK(Import(source.get(), &options));
+  ASSERT_FALSE(loomc_result_succeeded(result_.get()));
+  ASSERT_GT(loomc_result_diagnostic_count(result_.get()), 0u);
+  const auto* diagnostic = loomc_result_diagnostic_at(result_.get(), 0);
+  EXPECT_EQ(ToString(loomc_source_identifier(diagnostic->range.source)),
+            "/logical/headers/helper.h");
+  EXPECT_EQ(Contents(diagnostic->range.source), expected);
+  EXPECT_EQ(cache.hits, 1u);
+}
+
+TEST_F(CxxTest, SourcePathMapperCannotMergeDistinctSources) {
+  HeaderCache cache;
+  cache.header =
+      Source("/headers/helper.h", "static int helper() { return 1; }");
+  auto source = Source("unit.cpp",
+                       "#include <helper.h>\n"
+                       "int entry() { return helper(); }");
+  auto path = loomc_make_cstring_view("/headers");
+  loomc_cxx_import_options_t options = {
+      .source_provider = {HeaderCache::Resolve, &cache},
+  };
+  options.source_path_mapper.fn = [](void*, loomc_string_view_t,
+                                     loomc_string_view_t* out_identifier) {
+    *out_identifier = loomc_make_cstring_view("merged.cpp");
+    return loomc_ok_status();
+  };
+  options.include_paths = &path;
+  options.include_path_count = 1;
+  LOOMC_ASSERT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
+                         Import(source.get(), &options));
+  EXPECT_EQ(module_, nullptr);
+  EXPECT_EQ(result_, nullptr);
+}
+
 TEST_F(CxxTest, InvalidOptionsClearOutputs) {
   auto source = Source("unit.cpp", "int value() { return 42; }");
-  loomc_cxx_import_options_t options = {};
-  options.standard = {nullptr, 1};
+  loomc_cxx_import_options_t options = {
+      .standard = {nullptr, 1},
+  };
   LOOMC_ASSERT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
                          Import(source.get(), &options));
   options = {};
@@ -383,11 +551,30 @@ TEST_F(CxxTest, InvalidOptionsClearOutputs) {
   LOOMC_ASSERT_STATUS_IS(LOOMC_STATUS_UNIMPLEMENTED,
                          Import(source.get(), &options));
   options = {};
+  options.fp_model = (loomc_cxx_fp_model_t)99;
+  LOOMC_ASSERT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
+                         Import(source.get(), &options));
+  options = {};
   options.flags = 1u << 31;
   LOOMC_ASSERT_STATUS_IS(LOOMC_STATUS_INVALID_ARGUMENT,
                          Import(source.get(), &options));
   EXPECT_EQ(result_, nullptr);
   EXPECT_EQ(module_, nullptr);
+}
+
+TEST_F(CxxTest, FloatingPointModelBecomesExplicitOperationPermissions) {
+  auto source = Source("unit.cpp", R"(
+    float entry(float left, float right) { return left * right + left; }
+  )");
+  loomc_cxx_import_options_t options = {
+      .fp_model = LOOMC_CXX_FP_MODEL_FAST,
+  };
+  LOOMC_ASSERT_OK(Import(source.get(), &options));
+  auto text = Print(module_.get());
+  EXPECT_NE(text.find("scalar.mulf<reassoc|nnan|ninf|nsz|arcp|contract|afn>"),
+            std::string::npos);
+  EXPECT_NE(text.find("scalar.addf<reassoc|nnan|ninf|nsz|arcp|contract|afn>"),
+            std::string::npos);
 }
 
 TEST_F(CxxTest, LaunchRangesUseNormalCompilationConfigValidation) {
@@ -423,9 +610,10 @@ TEST_F(CxxTest, LaunchRangesUseNormalCompilationConfigValidation) {
     ModulePtr config_owner(config);
     ResultPtr config_result(result);
     ExpectSuccess(result);
-    loomc_compile_options_t options = {};
-    options.config_module = config;
-    options.config_flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED;
+    loomc_compile_options_t options = {
+        .config_flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+        .config_module = config,
+    };
     LOOMC_ASSERT_OK(loomc_compile_module(compiler, workspace_.get(), passes,
                                          module_.get(), &options,
                                          loomc_allocator_system(), &result));
@@ -513,9 +701,10 @@ TEST_F(CxxTest, ConfigProvidersSpecializeFreshBytecodeAfterImportRelease) {
                                    std::to_string(factor)),
               std::string::npos);
 
-    loomc_compile_options_t options = {};
-    options.config_module = provider;
-    options.config_flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED;
+    loomc_compile_options_t options = {
+        .config_flags = LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED,
+        .config_module = provider,
+    };
     LOOMC_ASSERT_OK(loomc_compile_module(compiler, workspace, passes, module,
                                          &options, loomc_allocator_system(),
                                          &result));
@@ -572,9 +761,10 @@ TEST_F(CxxTest, AllocationFailuresLeaveNoPartialOutputs) {
        {"int entry() { return 42; }", "int entry() { return unknown; }"}) {
     auto source = Source("unit.cpp", text);
     auto path = loomc_make_cstring_view("/headers");
-    loomc_cxx_import_options_t options = {};
-    options.include_paths = &path;
-    options.include_path_count = 1;
+    loomc_cxx_import_options_t options = {
+        .include_paths = &path,
+        .include_path_count = 1,
+    };
     FailingAllocator baseline = {LOOMC_HOST_SIZE_MAX};
     LOOMC_ASSERT_OK(
         Import(source.get(), &options, {&baseline, FailingAllocator::Control}));

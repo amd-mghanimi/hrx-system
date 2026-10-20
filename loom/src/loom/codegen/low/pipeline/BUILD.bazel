@@ -21,29 +21,18 @@ _LOW_PASS_ENVIRONMENT_VISIBILITY = [
     "//loom/src/loom/pass:__pkg__",
     "//loom/src/loom/target/arch/amdgpu:__pkg__",
     "//loom/src/loom/target/arch/amdgpu/hal:__pkg__",
+    "//loom/src/loom/target/arch/x86:__pkg__",
     "//loom/src/loom/transforms/cleanup:__pkg__",
     "//loom/src/loom/transforms/kernel:__pkg__",
     "//loom/src/loom/transforms/vector:__pkg__",
-    "//loom/src/loom/tooling/compile:__pkg__",
     "//loom/src/loom/tools/loom-check:__pkg__",
     "//loom/src/loom/tools/loom-opt:__pkg__",
-]
-
-_LOW_PASS_REQUIREMENTS_VISIBILITY = [
-    "//loom/src/loom/pass:__pkg__",
-    "//loom/src/loom/target/arch/amdgpu:__pkg__",
 ]
 
 _LOW_PIPELINE_VISIBILITY = [
     "//loom/src/loom/codegen/low/testing:__pkg__",
     "//loom/src/loom/target:__pkg__",
 ]
-
-loom_cc_library(
-    name = "pass_requirements",
-    hdrs = ["pass_requirements.h"],
-    visibility = _LOW_PASS_REQUIREMENTS_VISIBILITY,
-)
 
 loom_cc_library(
     name = "legalizer_registry",
@@ -53,6 +42,10 @@ loom_cc_library(
     deps = [
         "//loom/src/loom/target:legalization",
         "//loom/src/loom/transforms/buffer:target_legalization",
+        "//loom/src/loom/transforms/conversion:target_legalization",
+        "//loom/src/loom/transforms/index:target_legalization",
+        "//loom/src/loom/transforms/kernel:target_legalization",
+        "//loom/src/loom/transforms/math:legalize",
         "//loom/src/loom/transforms/scalar:target_legalization",
         "//loom/src/loom/transforms/vector:target_legalization",
         "//loom/src/loom/transforms/view:target_legalization",
@@ -66,6 +59,8 @@ loom_cc_test(
     deps = [
         ":legalizer_registry",
         "//loom/src/loom/ops/buffer",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/kernel",
         "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/vector",
         "//loom/src/loom/ops/view",
@@ -81,10 +76,12 @@ loom_cc_library(
     hdrs = ["pass_environment.h"],
     visibility = _LOW_PASS_ENVIRONMENT_VISIBILITY,
     deps = [
-        ":pass_requirements",
         "//loom/src/loom/codegen/low:descriptors",
+        "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ir",
         "//loom/src/loom/pass:environment",
         "//loom/src/loom/pass:types",
+        "//loom/src/loom/target:facts",
         "//runtime/src/iree/base",
     ],
 )

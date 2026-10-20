@@ -1,0 +1,136 @@
+// A single publisher owns the SDMA v1 byte-indexed ring. Source, destination,
+// completion and the borrowed mapping stay live through queue retirement.
+// The previous copy is consumed before this call; no other publisher exists.
+// Word count is positive and within the COPY limit. Capacity is a power of two
+// in [4096, 2^32] bytes. Cache flags select queried USER_GCR acquire/release.
+//
+// RPTR retires command bytes. Separately, FENCE and the final system acquire
+// make copied payload available to the caller. The returned frontier includes
+// tail padding. This serial operation is not a batched reservation primitive.
+
+template.decl @sdma_copy(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %source: i64, %target: i64, %completion_address: i64, %capacity: offset, %frontier: i64, %generation: i32, %word_count: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) -> (i64)
+
+template.def<@sdma_copy> @serial_sdma_copy(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %source: i64, %target: i64, %completion_address: i64, %capacity: offset, %frontier: i64, %generation: i32, %word_count: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) -> (i64) {
+  %ring_aligned = buffer.assume.alignment %ring {minimum_alignment = 4} : buffer
+  %read_aligned = buffer.assume.alignment %read_index {minimum_alignment = 8} : buffer
+  %write_aligned = buffer.assume.alignment %write_index {minimum_alignment = 8} : buffer
+  %notification_aligned = buffer.assume.alignment %notification {minimum_alignment = 8} : buffer
+  %completion_aligned = buffer.assume.alignment %completion {minimum_alignment = 64} : buffer
+  %origin = index.constant 0 : offset
+  %first = index.constant 0 : index
+  %step = index.constant 1 : index
+  %read_word = buffer.view %read_aligned[%origin] : buffer -> view<1xi64>
+  %write_word = buffer.view %write_aligned[%origin] : buffer -> view<1xi64>
+  %notification_word = buffer.view %notification_aligned[%origin] : buffer -> view<1xi64>
+  %completion_word = buffer.view %completion_aligned[%origin] : buffer -> view<1xi32>
+  %capacity_bounded = index.assume %capacity [range(%capacity, 4096, 4294967296)] : offset
+  %capacity_bytes = index.cast %capacity_bounded : offset to i64
+  %zero = scalar.constant 0 : i32
+  %one = scalar.constant 1 : i32
+  %two = scalar.constant 2 : i32
+  %zero64 = scalar.constant 0 : i64
+  %one64 = scalar.constant 1 : i64
+  %two64 = scalar.constant 2 : i64
+  %gcr_bytes = scalar.constant 20 : i64
+  %copy_bytes = scalar.constant 28 : i64
+  %minimum_bytes = scalar.constant 44 : i64
+  %high_shift = scalar.constant 32 : i64
+  %gcr_header = scalar.constant 273 : i32
+  // USER_GCR DWORD 2: 0xc3c00000 acquire and 0x80400000 release.
+  %gcr_acquire = scalar.constant -1010827264 : i32
+  %gcr_release = scalar.constant -2143289344 : i32
+  %acquire_bit = scalar.andi %cache_flags, %one : i32
+  %release_bit = scalar.andi %cache_flags, %two : i32
+  %needs_acquire = scalar.cmpi ne, %acquire_bit, %zero : i32
+  %needs_release = scalar.cmpi ne, %release_bit, %zero : i32
+  %acquire_bytes = scf.select %needs_acquire, %gcr_bytes, %zero64 : i64
+  %release_bytes = scf.select %needs_release, %gcr_bytes, %zero64 : i64
+  %leading_bytes = scalar.addi %minimum_bytes, %acquire_bytes : i64
+  %chain_bytes = scalar.addi %leading_bytes, %release_bytes : i64
+  %ring_mask = scalar.subi %capacity_bytes, %one64 : i64
+  %completion_low = scalar.trunci %completion_address : i64 to i32
+  %completion_high64 = scalar.shrui %completion_address, %high_shift : i64
+  %completion_high = scalar.trunci %completion_high64 : i64 to i32
+  %byte_count = scalar.shli %word_count, %two : i32
+  %encoded_byte_count = scalar.subi %byte_count, %one : i32
+  %source_low = scalar.trunci %source : i64 to i32
+  %source_high64 = scalar.shrui %source, %high_shift : i64
+  %source_high = scalar.trunci %source_high64 : i64 to i32
+  %target_low = scalar.trunci %target : i64 to i32
+  %target_high64 = scalar.shrui %target, %high_shift : i64
+  %target_high = scalar.trunci %target_high64 : i64 to i32
+  // One completed publication at a time keeps capacity and payload credits
+  // separate. Waiting for RPTR permits rewriting the ring, not reading data.
+  %consumed = scf.while(%seen = %zero64 : i64) -> (i64) {
+    %pending = scalar.cmpi ne, %seen, %frontier : i64
+    scf.condition %pending, %seen : i1, i64
+  } do(%seen: i64) {
+    %observed = view.atomic.load %read_word[0] {ordering = acquire, scope = system} : view<1xi64> -> i64
+    scf.yield %observed : i64
+  }
+  %ring_offset = scalar.andi %frontier, %ring_mask : i64
+  %tail_bytes = scalar.subi %capacity_bytes, %ring_offset : i64
+  %wraps = scalar.cmpi ult, %tail_bytes, %chain_bytes : i64
+  %padding_bytes = scf.select %wraps, %tail_bytes, %zero64 : i64
+  %padding_words64 = scalar.shrui %padding_bytes, %two64 : i64
+  // A padded tail is shorter than the at-most-21-DWORD complete chain.
+  %padding_count_input = index.cast %padding_words64 : i64 to offset
+  %padding_count_bounded = index.assume %padding_count_input [range(%padding_count_input, 0, 20)] : offset
+  %padding_count = index.cast %padding_count_bounded : offset to index
+  %padding_offset = index.cast %ring_offset : i64 to offset
+  %padding = buffer.view %ring_aligned[%padding_offset] : buffer -> view<[%padding_count]xi32>
+  scf.for %position = [%first to %padding_count step %step] {
+    view.store %zero, %padding[%position] : i32, view<[%padding_count]xi32>
+  }
+  %start = scf.select %wraps, %zero64, %ring_offset : i64
+  %start_offset = index.cast %start : i64 to offset
+  scf.if %needs_acquire {
+    %acquire = buffer.view %ring_aligned[%start_offset] : buffer -> view<5xi32>
+    view.store %gcr_header, %acquire[0] : i32, view<5xi32>
+    view.store %zero, %acquire[1] : i32, view<5xi32>
+    view.store %gcr_acquire, %acquire[2] : i32, view<5xi32>
+    view.store %zero, %acquire[3] : i32, view<5xi32>
+    view.store %zero, %acquire[4] : i32, view<5xi32>
+  }
+  %copy_start = scalar.addi %start, %acquire_bytes : i64
+  %copy_offset = index.cast %copy_start : i64 to offset
+  %copy = buffer.view %ring_aligned[%copy_offset] : buffer -> view<7xi32>
+  view.store %one, %copy[0] : i32, view<7xi32>
+  view.store %encoded_byte_count, %copy[1] : i32, view<7xi32>
+  view.store %copy_control, %copy[2] : i32, view<7xi32>
+  view.store %source_low, %copy[3] : i32, view<7xi32>
+  view.store %source_high, %copy[4] : i32, view<7xi32>
+  view.store %target_low, %copy[5] : i32, view<7xi32>
+  view.store %target_high, %copy[6] : i32, view<7xi32>
+  %release_start = scalar.addi %copy_start, %copy_bytes : i64
+  %release_offset = index.cast %release_start : i64 to offset
+  scf.if %needs_release {
+    %release = buffer.view %ring_aligned[%release_offset] : buffer -> view<5xi32>
+    view.store %gcr_header, %release[0] : i32, view<5xi32>
+    view.store %zero, %release[1] : i32, view<5xi32>
+    view.store %gcr_release, %release[2] : i32, view<5xi32>
+    view.store %zero, %release[3] : i32, view<5xi32>
+    view.store %zero, %release[4] : i32, view<5xi32>
+  }
+  %fence_start = scalar.addi %release_start, %release_bytes : i64
+  %fence_offset = index.cast %fence_start : i64 to offset
+  %fence = buffer.view %ring_aligned[%fence_offset] : buffer -> view<4xi32>
+  view.store %fence_header, %fence[0] : i32, view<4xi32>
+  view.store %completion_low, %fence[1] : i32, view<4xi32>
+  view.store %completion_high, %fence[2] : i32, view<4xi32>
+  view.store %generation, %fence[3] : i32, view<4xi32>
+  %padded_frontier = scalar.addi %frontier, %padding_bytes : i64
+  %next_frontier = scalar.addi %padded_frontier, %chain_bytes : i64
+  view.atomic.store %next_frontier, %write_word[0] {ordering = release, scope = system} : i64, view<1xi64>
+  view.atomic.store %next_frontier, %notification_word[0] {ordering = release, scope = system} : i64, view<1xi64>
+
+  %copied = scf.while(%seen = %zero : i32) -> (i32) {
+    %pending = scalar.cmpi ne, %seen, %generation : i32
+    scf.condition %pending, %seen : i1, i32
+  } do(%seen: i32) {
+    %observed = view.atomic.load %completion_word[0] {ordering = relaxed, scope = system} : view<1xi32> -> i32
+    scf.yield %observed : i32
+  }
+  buffer.fence scope(system) ordering(acquire)
+  template.return %next_frontier : i64
+}

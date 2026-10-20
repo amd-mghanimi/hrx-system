@@ -1,0 +1,88 @@
+kernel.decl @cooperative_paged_attention_serial(%workload_instance_count: index) launch(%launch_instance_count: index, %lengths: buffer, %query: buffer, %page_table: buffer, %keys: buffer, %values: buffer, %final_state: buffer, %output: buffer)
+
+kernel.decl @cooperative_paged_attention_pipelined(%workload_instance_count: index) launch(%launch_instance_count: index, %lengths: buffer, %query: buffer, %page_table: buffer, %keys: buffer, %values: buffer, %final_state: buffer, %output: buffer)
+
+// Twelve benchmark samples cover serial and pipelined policies, 128- and
+// 1024-token prefixes, and 1, 16, and 256 instances. Values are generated at
+// runtime so one product serves each policy. Zero queries make every score zero
+// while retaining the full randomized page-table and cache footprint.
+func.def @cooperative_paged_attention_benchmark_config(%trial: index) -> (index, i32) {
+  %samples_per_length = index.constant 3 : index
+  %instance_ordinal = index.rem %trial, %samples_per_length : index
+  %length_ordinal = index.div %trial, %samples_per_length : index
+  %instances = scf.switch %instance_ordinal -> (index) {
+    case 0 {
+      %value = index.constant 1 : index
+      scf.yield %value : index
+    }
+    case 1 {
+      %value = index.constant 16 : index
+      scf.yield %value : index
+    }
+    default {
+      %value = index.constant 256 : index
+      scf.yield %value : index
+    }
+  }
+  %length = scf.switch %length_ordinal -> (i32) {
+    case 0 {
+      %value = scalar.constant 128 : i32
+      scf.yield %value : i32
+    }
+    default {
+      %value = scalar.constant 1024 : i32
+      scf.yield %value : i32
+    }
+  }
+  func.return %instances, %length : index, i32
+}
+
+func.def @cooperative_paged_attention_benchmark_lengths(%instance_count: index, %length: i32, %lengths_buffer: buffer) {
+  %instances = index.assume %instance_count [range(%instance_count, 1, 256)] : index
+  %base = index.constant 0 : offset
+  %lengths = buffer.view %lengths_buffer[%base] : buffer -> view<[%instances]xi32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  scf.for %instance = [%begin to %instances step %step] {
+    view.store %length, %lengths[%instance] : i32, view<[%instances]xi32>
+  }
+  func.return
+}
+
+check.scenario @cooperative_paged_attention_serial_benchmark {
+  check.trial[6](%trial: index, %entropy: check.entropy) {
+    %instances, %length = check.generate<@cooperative_paged_attention_benchmark_config>(%trial) : (index) -> (index, i32)
+    %seed = check.literal value(7401) : i64
+    %lengths = check.generate.fill value(0) : tensor<[%instances]xi32>
+    check.generate<@cooperative_paged_attention_benchmark_lengths>(%instances, %length, %lengths) : (index, i32, tensor<[%instances]xi32>) -> ()
+    %query = check.generate.fill value(0.0) : tensor<[%instances]x128xf32>
+    %pages = check.generate.random.uniform seed(%seed) range(0 to 255) : tensor<[%instances]x64xi32>
+    %keys = check.generate.iota offset(-0.5) step(0.00390625) period(257) : tensor<4096x128xf32>
+    %values = check.generate.iota offset(-4.0) step(0.0625) period(128) : tensor<4096x128xf32>
+    %state = check.generate.fill value(-10000.0) : tensor<[%instances]x2xf32>
+    %output = check.generate.fill value(-20000.0) : tensor<[%instances]x128xf32>
+    check.invoke<@cooperative_paged_attention_serial>[%instances](%instances, %lengths, %query, %pages, %keys, %values, %state, %output) : [index](index, tensor<[%instances]xi32>, tensor<[%instances]x128xf32>, tensor<[%instances]x64xi32>, tensor<4096x128xf32>, tensor<4096x128xf32>, tensor<[%instances]x2xf32>, tensor<[%instances]x128xf32>) -> ()
+  }
+  check.return
+}
+
+check.benchmark<@cooperative_paged_attention_serial_benchmark> @cooperative_paged_attention_serial_workloads
+
+check.scenario @cooperative_paged_attention_pipelined_benchmark {
+  check.trial[6](%trial: index, %entropy: check.entropy) {
+    %instances, %length = check.generate<@cooperative_paged_attention_benchmark_config>(%trial) : (index) -> (index, i32)
+    %seed = check.literal value(7401) : i64
+    %lengths = check.generate.fill value(0) : tensor<[%instances]xi32>
+    check.generate<@cooperative_paged_attention_benchmark_lengths>(%instances, %length, %lengths) : (index, i32, tensor<[%instances]xi32>) -> ()
+    %query = check.generate.fill value(0.0) : tensor<[%instances]x128xf32>
+    %pages = check.generate.random.uniform seed(%seed) range(0 to 255) : tensor<[%instances]x64xi32>
+    %keys = check.generate.iota offset(-0.5) step(0.00390625) period(257) : tensor<4096x128xf32>
+    %values = check.generate.iota offset(-4.0) step(0.0625) period(128) : tensor<4096x128xf32>
+    %state = check.generate.fill value(-10000.0) : tensor<[%instances]x2xf32>
+    %output = check.generate.fill value(-20000.0) : tensor<[%instances]x128xf32>
+    check.invoke<@cooperative_paged_attention_pipelined>[%instances](%instances, %lengths, %query, %pages, %keys, %values, %state, %output) : [index](index, tensor<[%instances]xi32>, tensor<[%instances]x128xf32>, tensor<[%instances]x64xi32>, tensor<4096x128xf32>, tensor<4096x128xf32>, tensor<[%instances]x2xf32>, tensor<[%instances]x128xf32>) -> ()
+  }
+  check.return
+}
+
+check.benchmark<@cooperative_paged_attention_pipelined_benchmark> @cooperative_paged_attention_pipelined_workloads

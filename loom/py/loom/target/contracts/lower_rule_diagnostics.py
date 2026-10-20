@@ -15,7 +15,6 @@ from loom.error.target import (
     ERR_TARGET_005,
     ERR_TARGET_006,
     ERR_TARGET_007,
-    ERR_TARGET_008,
 )
 from loom.target.contracts.diagnostics import (
     DiagnosticRef,
@@ -27,6 +26,7 @@ from loom.target.contracts.diagnostics import (
 )
 from loom.target.contracts.guards import Guard, GuardKind
 from loom.target.contracts.lower_rule_bindings import _f64_bits
+from loom.target.contracts.lower_rule_tables import SourceMemoryRejectionReason
 from loom.target.contracts.patterns import TypePattern
 from loom.target.contracts.source_memory import (
     SourceMemoryAddressMaterializer,
@@ -82,6 +82,17 @@ def _enum_attr_diagnostic(field: str, enum_keyword: str) -> DiagnosticRef:
     )
 
 
+def _enum_attr_set_diagnostic(
+    field: str,
+    enum_keywords: tuple[str, ...],
+) -> DiagnosticRef:
+    return _named_constraint_diagnostic(
+        "field",
+        field,
+        "enum_set." + ".".join(enum_keywords),
+    )
+
+
 def _i64_attr_range_diagnostic(
     field: str,
     minimum: int,
@@ -89,6 +100,18 @@ def _i64_attr_range_diagnostic(
 ) -> DiagnosticRef:
     return _range_constraint_diagnostic(
         "field", field, "i64_attr_range", minimum, maximum
+    )
+
+
+def _i64_attrs_sum_diagnostic(
+    field: str,
+    other_field: str,
+    value: int,
+) -> DiagnosticRef:
+    return _named_constraint_diagnostic(
+        "fields",
+        f"{field}+{other_field}",
+        f"i64_attrs_sum_equals.{value}",
     )
 
 
@@ -227,8 +250,8 @@ def _exact_power_of_two_integer_diagnostic(field: str, addend: int) -> Diagnosti
     )
 
 
-def _u32_divisor_magic_is_add_diagnostic(field: str, *, is_add: bool) -> DiagnosticRef:
-    suffix = "add" if is_add else "no_add"
+def _u32_divisor_magic_kind_diagnostic(field: str, kind: int) -> DiagnosticRef:
+    suffix = ("multiply", "multiply_shift", "multiply_add_shift")[kind]
     return _named_constraint_diagnostic(
         "value_fact",
         field,
@@ -236,8 +259,60 @@ def _u32_divisor_magic_is_add_diagnostic(field: str, *, is_add: bool) -> Diagnos
     )
 
 
+def _i32_divisor_magic_kind_diagnostic(field: str, kind: int) -> DiagnosticRef:
+    suffix = (
+        "multiply",
+        "multiply_shift",
+        "multiply_add",
+        "multiply_add_shift",
+        "multiply_subtract",
+        "multiply_subtract_shift",
+    )[kind]
+    return _named_constraint_diagnostic(
+        "value_fact",
+        field,
+        f"i32_divisor_magic.{suffix}",
+    )
+
+
 def _exact_float_diagnostic(field: str) -> DiagnosticRef:
     return _named_constraint_diagnostic("value_fact", field, "exact_float")
+
+
+def _exact_float_type_diagnostic(field: str, type_field: str) -> DiagnosticRef:
+    return _named_constraint_diagnostic(
+        "value_fact", field, f"finite_exactly_representable_as_{type_field}"
+    )
+
+
+def _exact_power_of_two_float_diagnostic(
+    field: str,
+    minimum_exponent: int,
+    maximum_exponent: int,
+) -> DiagnosticRef:
+    return _range_constraint_diagnostic(
+        "value_fact",
+        field,
+        "exact_power_of_two_float_exponent",
+        minimum_exponent,
+        maximum_exponent,
+    )
+
+
+def _not_nan_diagnostic(field: str) -> DiagnosticRef:
+    return _named_constraint_diagnostic("value_fact", field, "not_nan")
+
+
+def _not_subnormal_or_flag_diagnostic(
+    value_field: str,
+    flags_field: str,
+    flag_keyword: str,
+) -> DiagnosticRef:
+    return _named_constraint_diagnostic(
+        "value_fact",
+        value_field,
+        f"not_subnormal_or_{flags_field}_{flag_keyword}",
+    )
 
 
 def _integer_range_diagnostic(
@@ -273,8 +348,20 @@ def _storage_element_format_diagnostic(field: str) -> DiagnosticRef:
     return _named_constraint_diagnostic("value", field, "storage_schema.element_format")
 
 
+def _storage_operand_schema_diagnostic(field: str) -> DiagnosticRef:
+    return _named_constraint_diagnostic(
+        "value", field, "storage_schema.encoded_operand"
+    )
+
+
 def _value_no_uses_diagnostic(field: str) -> DiagnosticRef:
     return _named_constraint_diagnostic("value", field, "no_ordinary_uses")
+
+
+def _value_no_uses_after_diagnostic(field: str) -> DiagnosticRef:
+    return _named_constraint_diagnostic(
+        "value", field, "no_ordinary_uses_after_source_op"
+    )
 
 
 def _instance_flags_diagnostic(
@@ -285,54 +372,42 @@ def _instance_flags_diagnostic(
 
 def _source_memory_diagnostic(
     constraint: SourceMemoryConstraint,
+    reason: SourceMemoryRejectionReason,
+    materializer: SourceMemoryAddressMaterializer | None,
 ) -> DiagnosticRef:
-    if constraint.diagnostic is not None:
-        ref = constraint.diagnostic.ref
+    override = None
+    if reason == SourceMemoryRejectionReason.MINIMUM_ALIGNMENT:
+        override = constraint.alignment_diagnostic
+    elif reason == SourceMemoryRejectionReason.BYTE_OFFSET_WIDTH:
+        override = constraint.byte_offset_diagnostic
+    elif reason == SourceMemoryRejectionReason.ADDRESS_LAYOUT:
+        override = constraint.address_layout_diagnostic
+    elif reason == SourceMemoryRejectionReason.ADDRESS_MATERIALIZATION:
+        override = materializer.diagnostic if materializer is not None else None
+    if override is None:
+        override = constraint.diagnostic
+    if override is not None:
+        ref = override.ref
         if ref is None:
-            raise ValueError("source-memory diagnostic is missing an error ref")
+            raise ValueError(
+                f"source-memory {reason.value} diagnostic is missing an error ref"
+            )
         return ref
-    return target_diagnostic(
-        ERR_TARGET_008,
-        string_param("operation_kind", constraint.operation.value),
+    return _named_constraint_diagnostic(
+        "source-memory",
+        "access",
+        reason.value,
     )
 
 
-def _source_memory_dynamic_offset_diagnostic(
-    constraint: SourceMemoryConstraint,
-) -> DiagnosticRef:
-    if constraint.dynamic_offset_diagnostic is not None:
-        ref = constraint.dynamic_offset_diagnostic.ref
-        if ref is None:
-            raise ValueError(
-                "source-memory dynamic-offset diagnostic is missing an error ref"
-            )
-        return ref
-    return _source_memory_diagnostic(constraint)
-
-
-def _source_memory_address_layout_diagnostic(
-    constraint: SourceMemoryConstraint,
-) -> DiagnosticRef:
-    if constraint.address_layout_diagnostic is not None:
-        ref = constraint.address_layout_diagnostic.ref
-        if ref is None:
-            raise ValueError(
-                "source-memory address-layout diagnostic is missing an error ref"
-            )
-        return ref
-    return _source_memory_diagnostic(constraint)
-
-
-def _source_memory_address_diagnostic(
+def _source_memory_diagnostics(
     constraint: SourceMemoryConstraint,
     materializer: SourceMemoryAddressMaterializer | None,
-) -> DiagnosticRef:
-    if materializer is not None and materializer.diagnostic is not None:
-        ref = materializer.diagnostic.ref
-        if ref is None:
-            raise ValueError("source-memory address diagnostic is missing an error ref")
-        return ref
-    return _source_memory_diagnostic(constraint)
+) -> tuple[DiagnosticRef, ...]:
+    return tuple(
+        _source_memory_diagnostic(constraint, reason, materializer)
+        for reason in SourceMemoryRejectionReason
+    )
 
 
 def _attr_diagnostic(field: str, attr_type: str) -> DiagnosticRef:

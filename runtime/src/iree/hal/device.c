@@ -48,6 +48,23 @@ IREE_API_EXPORT iree_status_t iree_hal_device_create_params_verify(
   return iree_ok_status();
 }
 
+IREE_API_EXPORT iree_status_t
+iree_hal_device_create_params_verify_runtime_features(
+    const iree_hal_device_create_params_t* params,
+    iree_hal_device_runtime_feature_flags_t supported_runtime_features) {
+  IREE_RETURN_IF_ERROR(iree_hal_device_create_params_verify(params));
+  const iree_hal_device_runtime_feature_flags_t unsupported_features =
+      params->runtime_features & ~supported_runtime_features;
+  if (IREE_UNLIKELY(unsupported_features)) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "HAL backend does not support requested runtime feature flags "
+        "0x%" PRIx64,
+        unsupported_features);
+  }
+  return iree_ok_status();
+}
+
 IREE_API_EXPORT iree_string_view_t
 iree_hal_device_id(iree_hal_device_t* device) {
   IREE_ASSERT_ARGUMENT(device);
@@ -221,43 +238,11 @@ iree_hal_device_query_semaphore_compatibility(iree_hal_device_t* device,
                                                                  semaphore);
 }
 
-IREE_API_EXPORT iree_status_t iree_hal_device_query_queue_pool_backend(
-    iree_hal_device_t* device, const iree_hal_queue_family_t* queue_family,
-    iree_hal_queue_pool_backend_t* out_backend) {
-  IREE_ASSERT_ARGUMENT(device);
-  IREE_ASSERT_ARGUMENT(queue_family);
-  IREE_ASSERT_ARGUMENT(out_backend);
-  const iree_hal_queue_family_ordinal_t queue_family_ordinal =
-      iree_hal_queue_family_ordinal(queue_family);
-  const iree_hal_device_queue_spec_t* queue_spec =
-      iree_hal_device_spec_queues(iree_hal_device_spec(device));
-  if (IREE_UNLIKELY(queue_family_ordinal >= queue_spec->family_count)) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "pool queue family ordinal %u is invalid",
-                            queue_family_ordinal);
-  }
-  if (IREE_UNLIKELY(iree_hal_device_queue_family(
-                        device, queue_family_ordinal) != queue_family)) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "pool queue family %u must be borrowed from the device",
-        queue_family_ordinal);
-  }
-  const iree_hal_device_topology_info_t* topology_info =
-      iree_hal_device_topology_info(device);
-  if (!topology_info->topology || !topology_info->frontier.tracker) {
-    return iree_make_status(
-        IREE_STATUS_FAILED_PRECONDITION,
-        "device queue pool backends are unavailable before the device is "
-        "assigned to a device group");
-  }
-  iree_hal_queue_pool_backend_t backend = {0};
-  iree_status_t status = _VTABLE_DISPATCH(device, query_queue_pool_backend)(
-      device, queue_family, &backend);
-  if (iree_status_is_ok(status)) {
-    *out_backend = backend;
-  }
-  return status;
+IREE_API_EXPORT const iree_hal_memory_backend_t* iree_hal_device_memory_backend(
+    iree_hal_device_t* device) {
+  return _VTABLE_DISPATCH(device, memory_backend)
+             ? _VTABLE_DISPATCH(device, memory_backend)(device)
+             : NULL;
 }
 
 IREE_API_EXPORT iree_status_t iree_hal_device_wait_semaphores(

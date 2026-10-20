@@ -113,7 +113,7 @@ static iree_status_t loom_value_replacement_leaf_type(
     result.encoding_id = (uint16_t)replacement->new_id;
     changed = true;
   }
-  if (loom_type_is_shaped(type) || loom_type_is_pool(type)) {
+  if (loom_type_has_dimensions(type)) {
     const uint8_t rank = loom_type_rank(type);
     if (loom_type_has_inline_dims(type)) {
       for (uint8_t i = 0; i < rank; ++i) {
@@ -177,7 +177,7 @@ static iree_status_t loom_type_remap_lookup_leaf_type(
       changed = true;
     }
   }
-  if (loom_type_is_shaped(type) || loom_type_is_pool(type)) {
+  if (loom_type_has_dimensions(type)) {
     const uint8_t rank = loom_type_rank(type);
     if (loom_type_has_inline_dims(type)) {
       for (uint8_t i = 0; i < rank; ++i) {
@@ -470,6 +470,7 @@ static iree_status_t loom_replacement_request_attribute(
     case LOOM_ATTR_I64:
     case LOOM_ATTR_F64:
     case LOOM_ATTR_STRING:
+    case LOOM_ATTR_STRING_ARRAY:
     case LOOM_ATTR_BOOL:
     case LOOM_ATTR_ENUM:
     case LOOM_ATTR_SCOPED_ENUM:

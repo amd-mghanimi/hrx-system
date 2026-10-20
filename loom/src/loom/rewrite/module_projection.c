@@ -97,6 +97,7 @@ iree_status_t loom_ir_module_projection_clone(
           .remap_symbol = loom_ir_remap_symbol_callback_make(
               loom_ir_module_projection_remap_symbol, (void*)projection),
           .value_map_kind = LOOM_IR_REMAP_VALUE_MAP_SOURCE_INDEXED,
+          .clone_observer = projection->clone_observer,
           .op_projection =
               {
                   .entries = projection->operations.entries,
@@ -152,7 +153,6 @@ iree_status_t loom_ir_module_clone(
           : loom_string_table_get(&source_module->strings,
                                   source_module->name_id);
   const loom_module_size_hints_t hints = {
-      .value_count = 0,
       .string_count = target_string_capacity,
       .type_count = source_module->types.count,
       .encoding_count = source_module->encodings.count,
@@ -202,6 +202,7 @@ iree_status_t loom_ir_module_clone(
         source_module, target_module, target_symbols,
         source_module->symbols.count, out_projection);
   }
+  out_projection->clone_observer = clone_options.clone_observer;
   if (iree_status_is_ok(status) && clone_options.operations.count != 0) {
     status = loom_ir_module_projection_track_operations(
         out_projection, clone_options.operations.entries,

@@ -138,12 +138,23 @@ iree_status_t loom_amdgpu_select_vector_transform_plan(
   return iree_ok_status();
 }
 
+iree_status_t loom_amdgpu_finalize_vector_transform_plan(
+    loom_low_lower_context_t* context,
+    const loom_amdgpu_vector_transform_plan_t* plan) {
+  const loom_type_t result_type =
+      plan->slice_extent == 1
+          ? loom_low_lower_value_binding_type(context, plan->source)
+          : loom_low_register_type(
+                loom_low_lower_context_descriptor_set(context)->stable_id,
+                LOOM_AMDGPU_REG_CLASS_ID_VGPR, plan->lane_count);
+  return loom_low_lower_plan_value_type(context, plan->result, result_type);
+}
+
 iree_status_t loom_amdgpu_lower_vector_transform(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_vector_transform_plan_t* plan) {
-  loom_value_id_t low_source = LOOM_VALUE_ID_INVALID;
-  IREE_RETURN_IF_ERROR(
-      loom_low_lower_lookup_value(context, plan->source, &low_source));
+  loom_value_id_t low_source =
+      loom_low_lower_lookup_value(context, plan->source);
 
   const loom_module_t* module = loom_low_lower_context_module(context);
   loom_type_t source_lane_type =

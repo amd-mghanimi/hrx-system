@@ -16,6 +16,7 @@
 
 #include "iree/base/api.h"
 #include "loom/codegen/low/descriptors.h"
+#include "loom/ir/types.h"
 #include "loom/pass/environment.h"
 #include "loom/pass/types.h"
 
@@ -23,17 +24,37 @@
 extern "C" {
 #endif
 
+// Pass requirement satisfied when the pass environment provides a target-low
+// descriptor registry for low-codegen passes.
+#define LOOM_LOW_PASS_REQUIREMENT_TARGET_LOW_DESCRIPTOR_REGISTRY \
+  "target.low-descriptor-registry"
+
+// Pass requirement satisfied when the pass environment provides a
+// source-to-target-low lowering policy registry.
+#define LOOM_LOW_PASS_REQUIREMENT_TARGET_LOW_LOWER_POLICY_REGISTRY \
+  "target.low-lower-policy-registry"
+
+// Pass requirement satisfied when the pass environment provides a dense
+// source legalizer registry.
+#define LOOM_LOW_PASS_REQUIREMENT_TARGET_LEGALIZER_REGISTRY \
+  "target.legalizer-registry"
+
 // Capability type for loom_low_pass_capability_t.
 extern const loom_pass_environment_capability_type_t
     loom_low_pass_capability_type;
 
 typedef struct loom_low_lower_policy_registry_t
     loom_low_lower_policy_registry_t;
+typedef struct loom_module_t loom_module_t;
+typedef struct loom_target_facts_t loom_target_facts_t;
+typedef struct loom_target_vector_packet_policy_t
+    loom_target_vector_packet_policy_t;
 typedef struct loom_target_low_legality_provider_list_t
     loom_target_low_legality_provider_list_t;
 typedef struct loom_target_legalizer_registry_t
     loom_target_legalizer_registry_t;
 typedef struct loom_target_compile_report_t loom_target_compile_report_t;
+typedef struct loom_value_fact_table_t loom_value_fact_table_t;
 
 typedef struct loom_low_pass_capability_t {
   // Base capability header. Must remain the first field.
@@ -91,6 +112,33 @@ loom_low_pass_capability_legalizer_registry(
 // Returns the optional compile report selected by |capability|, or NULL.
 loom_target_compile_report_t* loom_low_pass_capability_compile_report(
     const loom_low_pass_capability_t* capability);
+
+// Selects the vector packet policy for |target_facts|, or NULL when the pass
+// environment or selected target has no packet policy.
+const loom_target_vector_packet_policy_t*
+loom_low_pass_capability_vector_packet_policy(
+    const loom_low_pass_capability_t* capability,
+    const loom_target_facts_t* target_facts);
+
+// Returns whether |type| has a direct source-operation carrier for the target
+// selected by |target_facts|. Missing target or carrier policies reject the
+// query; a selected policy with no callback admits the type. Concrete values
+// retain their |value_id| and available |fact_table|. Hypothetical packet types
+// use LOOM_VALUE_ID_INVALID and NULL facts.
+bool loom_low_pass_capability_source_vector_carrier_supported(
+    const loom_low_pass_capability_t* capability,
+    const loom_target_facts_t* target_facts, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t type);
+
+// Returns whether |type| has a direct callable carrier for the target selected
+// by |target_facts|. Missing callable callbacks use the source-operation
+// carrier contract.
+bool loom_low_pass_capability_source_function_vector_carrier_supported(
+    const loom_low_pass_capability_t* capability,
+    const loom_target_facts_t* target_facts, const loom_module_t* module,
+    const loom_value_fact_table_t* fact_table, loom_value_id_t value_id,
+    loom_type_t type);
 
 #ifdef __cplusplus
 }  // extern "C"

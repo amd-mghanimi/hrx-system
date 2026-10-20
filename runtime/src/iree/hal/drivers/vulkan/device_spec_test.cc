@@ -6,7 +6,9 @@
 
 #include "iree/hal/drivers/vulkan/device_spec.h"
 
+#include <algorithm>
 #include <cstring>
+#include <tuple>
 #include <vector>
 
 #include "iree/hal/drivers/vulkan/atomic.h"
@@ -20,33 +22,36 @@ namespace {
 
 static iree_hal_vulkan_device_spec_t MakeTestSpec() {
   return {
-      /*.api_version=*/VK_MAKE_API_VERSION(0, 1, 3, 0),
-      /*.driver_version=*/1234,
-      /*.physical_device_type=*/VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
-      /*.enabled_features=*/
-      {
-          /*.general=*/IREE_HAL_VULKAN_FEATURE_REQUIRED_BASELINE |
-              IREE_HAL_VULKAN_FEATURE_ENABLE_SHADER_FLOAT16 |
-              IREE_HAL_VULKAN_FEATURE_ENABLE_SUBGROUP_SIZE_CONTROL,
-          /*.atomics=*/
-          IREE_HAL_VULKAN_SHADER_ATOMIC_FEATURE_SHARED_FLOAT64_ADD,
-      },
-      /*.flags=*/IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_NONE,
+      .api_version = VK_MAKE_API_VERSION(0, 1, 3, 0),
+      .driver_version = 1234,
+      .physical_device_type = VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU,
+      .enabled_features =
+          {
+              .general = IREE_HAL_VULKAN_FEATURE_REQUIRED_BASELINE |
+                         IREE_HAL_VULKAN_FEATURE_ENABLE_SHADER_FLOAT16 |
+                         IREE_HAL_VULKAN_FEATURE_ENABLE_SUBGROUP_SIZE_CONTROL,
+              .atomics =
+                  IREE_HAL_VULKAN_SHADER_ATOMIC_FEATURE_SHARED_FLOAT64_ADD,
+          },
+      .flags = IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_NONE,
+      .subgroup_supported_operations =
+          VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT,
+      .maximum_workgroup_subgroup_count = 32,
   };
 }
 
 TEST(DeviceSpecTest, EncodesAndDecodesPayload) {
   iree_hal_vulkan_device_spec_t source = MakeTestSpec();
   iree_hal_vulkan_cooperative_matrix_property_t source_property = {
-      /*.m_size=*/16,
-      /*.n_size=*/8,
-      /*.k_size=*/16,
-      /*.a_type=*/1,
-      /*.b_type=*/2,
-      /*.c_type=*/3,
-      /*.result_type=*/4,
-      /*.saturating_accumulation=*/1,
-      /*.scope=*/5,
+      .m_size = 16,
+      .n_size = 8,
+      .k_size = 16,
+      .a_type = 1,
+      .b_type = 2,
+      .c_type = 3,
+      .result_type = 4,
+      .saturating_accumulation = 1,
+      .scope = 5,
   };
   iree_host_size_t payload_size = 0;
   IREE_ASSERT_OK(
@@ -66,6 +71,9 @@ TEST(DeviceSpecTest, EncodesAndDecodesPayload) {
   EXPECT_EQ(decoded.enabled_features.general, source.enabled_features.general);
   EXPECT_EQ(decoded.enabled_features.atomics, source.enabled_features.atomics);
   EXPECT_EQ(decoded.flags, source.flags);
+  EXPECT_EQ(decoded.subgroup_supported_operations,
+            source.subgroup_supported_operations);
+  EXPECT_EQ(decoded.maximum_workgroup_subgroup_count, 32u);
   ASSERT_EQ(decoded.cooperative_matrix.count, 1);
   iree_hal_vulkan_cooperative_matrix_property_t decoded_property = {};
   ASSERT_TRUE(iree_hal_vulkan_device_spec_read_cooperative_matrix_property(
@@ -76,6 +84,123 @@ TEST(DeviceSpecTest, EncodesAndDecodesPayload) {
   EXPECT_EQ(decoded_property.scope, source_property.scope);
   EXPECT_FALSE(iree_hal_vulkan_device_spec_read_cooperative_matrix_property(
       &decoded, 1, &decoded_property));
+}
+
+TEST(DeviceSpecTest, CanonicalPropertyOrderSupportsBinaryLookup) {
+  for (size_t count : {0u, 1u, 2u, 3u, 64u, 1024u}) {
+    SCOPED_TRACE(count);
+    std::vector<iree_hal_vulkan_cooperative_matrix_property_t> properties;
+    for (size_t i = 0; i < count; ++i) {
+      // Include repeated keys with different saturation modes. Multiplication
+      // permutes the rows so neither input order nor unique keys are assumed.
+      const uint32_t ordinal = static_cast<uint32_t>((i * 37) % count);
+      properties.push_back({
+          .m_size = ordinal / 4 + 1,
+          .n_size = 16,
+          .k_size = 16,
+          .a_type = VK_COMPONENT_TYPE_SINT8_KHR,
+          .b_type = VK_COMPONENT_TYPE_SINT8_KHR,
+          .c_type = VK_COMPONENT_TYPE_SINT32_KHR,
+          .result_type = VK_COMPONENT_TYPE_SINT32_KHR,
+          .saturating_accumulation = ordinal % 2,
+          .scope = VK_SCOPE_SUBGROUP_KHR,
+      });
+    }
+    iree_hal_vulkan_device_spec_t source = MakeTestSpec();
+    iree_host_size_t payload_size = 0;
+    IREE_ASSERT_OK(iree_hal_vulkan_device_spec_calculate_payload_size(
+        properties.size(), &payload_size));
+    std::vector<uint8_t> payload(payload_size);
+    IREE_ASSERT_OK(iree_hal_vulkan_device_spec_encode(
+        &source, properties.size(), properties.data(),
+        iree_make_byte_span(payload.data(), payload.size())));
+    iree_hal_vulkan_device_spec_t decoded = {};
+    IREE_ASSERT_OK(iree_hal_vulkan_device_spec_decode(
+        iree_make_const_byte_span(payload.data(), payload.size()), &decoded));
+    for (const auto& property : properties) {
+      EXPECT_TRUE(iree_hal_vulkan_device_spec_supports_cooperative_matrix(
+          &decoded, &property));
+    }
+    const auto key = [](const auto& property) {
+      return std::tie(property.m_size, property.n_size, property.k_size,
+                      property.a_type, property.b_type, property.c_type,
+                      property.result_type, property.scope,
+                      property.saturating_accumulation);
+    };
+    std::sort(properties.begin(), properties.end(),
+              [&](auto& lhs, auto& rhs) { return key(lhs) < key(rhs); });
+    for (size_t i = 0; i < properties.size(); ++i) {
+      iree_hal_vulkan_cooperative_matrix_property_t actual = {};
+      ASSERT_TRUE(iree_hal_vulkan_device_spec_read_cooperative_matrix_property(
+          &decoded, i, &actual));
+      EXPECT_EQ(key(actual), key(properties[i]));
+    }
+    const iree_hal_vulkan_cooperative_matrix_property_t absent = {
+        .m_size = static_cast<uint32_t>(count + 1),
+    };
+    EXPECT_FALSE(iree_hal_vulkan_device_spec_supports_cooperative_matrix(
+        &decoded, &absent));
+
+    if (count > 1) {
+      // Keep the public envelope intact while breaking the ordering invariant.
+      const size_t offset =
+          decoded.cooperative_matrix.encoded_data.data - payload.data();
+      const size_t row_size =
+          decoded.cooperative_matrix.encoded_data.data_length / count;
+      std::swap_ranges(payload.begin() + offset,
+                       payload.begin() + offset + row_size,
+                       payload.begin() + offset + (count - 1) * row_size);
+      IREE_EXPECT_STATUS_IS(
+          IREE_STATUS_INVALID_ARGUMENT,
+          iree_hal_vulkan_device_spec_decode(
+              iree_make_const_byte_span(payload.data(), payload.size()),
+              &decoded));
+      EXPECT_EQ(decoded.cooperative_matrix.count, 0u);
+    }
+  }
+}
+
+TEST(DeviceSpecTest, PropertyLookupChecksEveryRequirement) {
+  const iree_hal_vulkan_device_spec_t source = MakeTestSpec();
+  for (uint32_t saturation_mode : {0u, 1u}) {
+    const iree_hal_vulkan_cooperative_matrix_property_t property = {
+        .m_size = 16,
+        .n_size = 8,
+        .k_size = 16,
+        .a_type = VK_COMPONENT_TYPE_SINT8_KHR,
+        .b_type = VK_COMPONENT_TYPE_SINT8_KHR,
+        .c_type = VK_COMPONENT_TYPE_SINT32_KHR,
+        .result_type = VK_COMPONENT_TYPE_SINT32_KHR,
+        .saturating_accumulation = saturation_mode,
+        .scope = VK_SCOPE_SUBGROUP_KHR,
+    };
+    iree_host_size_t payload_size = 0;
+    IREE_ASSERT_OK(
+        iree_hal_vulkan_device_spec_calculate_payload_size(1, &payload_size));
+    std::vector<uint8_t> payload(payload_size);
+    IREE_ASSERT_OK(iree_hal_vulkan_device_spec_encode(
+        &source, 1, &property,
+        iree_make_byte_span(payload.data(), payload.size())));
+    iree_hal_vulkan_device_spec_t decoded = {};
+    IREE_ASSERT_OK(iree_hal_vulkan_device_spec_decode(
+        iree_make_const_byte_span(payload.data(), payload.size()), &decoded));
+    for (uint32_t requires_saturation : {0u, 1u}) {
+      auto requirement = property;
+      requirement.saturating_accumulation = requires_saturation;
+      EXPECT_EQ(iree_hal_vulkan_device_spec_supports_cooperative_matrix(
+                    &decoded, &requirement),
+                requires_saturation == saturation_mode);
+    }
+    using Property = iree_hal_vulkan_cooperative_matrix_property_t;
+    for (auto member : {&Property::m_size, &Property::n_size, &Property::k_size,
+                        &Property::a_type, &Property::b_type, &Property::c_type,
+                        &Property::result_type, &Property::scope}) {
+      auto requirement = property;
+      ++(requirement.*member);
+      EXPECT_FALSE(iree_hal_vulkan_device_spec_supports_cooperative_matrix(
+          &decoded, &requirement));
+    }
+  }
 }
 
 TEST(DeviceSpecTest, RejectsMalformedPayloads) {
@@ -130,15 +255,15 @@ TEST(DeviceSpecTest, RejectsMalformedPayloads) {
 TEST(DeviceSpecTest, AddsAndFindsCoreFacet) {
   iree_hal_vulkan_device_spec_t source = MakeTestSpec();
   iree_hal_vulkan_cooperative_matrix_property_t source_property = {
-      /*.m_size=*/16,
-      /*.n_size=*/16,
-      /*.k_size=*/8,
-      /*.a_type=*/1,
-      /*.b_type=*/1,
-      /*.c_type=*/2,
-      /*.result_type=*/2,
-      /*.saturating_accumulation=*/0,
-      /*.scope=*/3,
+      .m_size = 16,
+      .n_size = 16,
+      .k_size = 8,
+      .a_type = 1,
+      .b_type = 1,
+      .c_type = 2,
+      .result_type = 2,
+      .saturating_accumulation = 0,
+      .scope = 3,
   };
 
   iree_hal_device_spec_builder_t builder;
@@ -157,6 +282,8 @@ TEST(DeviceSpecTest, AddsAndFindsCoreFacet) {
   EXPECT_EQ(decoded.enabled_features.general, source.enabled_features.general);
   EXPECT_EQ(decoded.enabled_features.atomics, source.enabled_features.atomics);
   EXPECT_EQ(decoded.physical_device_type, source.physical_device_type);
+  EXPECT_EQ(decoded.subgroup_supported_operations,
+            source.subgroup_supported_operations);
   ASSERT_EQ(decoded.cooperative_matrix.count, 1);
 
   iree_hal_device_spec_release(device_spec);
@@ -165,10 +292,11 @@ TEST(DeviceSpecTest, AddsAndFindsCoreFacet) {
 
 TEST(DeviceSpecTest, AtomicCapabilitiesRequireExactFeatures) {
   const iree_hal_vulkan_features_t required_features = {
-      /*.general=*/IREE_HAL_VULKAN_FEATURE_ENABLE_BUFFER_DEVICE_ADDRESSES |
+      .general =
+          IREE_HAL_VULKAN_FEATURE_ENABLE_BUFFER_DEVICE_ADDRESSES |
           IREE_HAL_VULKAN_FEATURE_ENABLE_VULKAN_MEMORY_MODEL |
           IREE_HAL_VULKAN_FEATURE_ENABLE_VULKAN_MEMORY_MODEL_DEVICE_SCOPE,
-      /*.atomics=*/0,
+      .atomics = 0,
   };
   const iree_hal_vulkan_general_features_t required_feature_bits[] = {
       IREE_HAL_VULKAN_FEATURE_ENABLE_BUFFER_DEVICE_ADDRESSES,
@@ -210,13 +338,72 @@ TEST(DeviceSpecTest, AtomicCapabilitiesRequireExactFeatures) {
             IREE_HAL_ATOMIC_OPERATION_FLAG_NONE);
 }
 
+TEST(DeviceSpecTest, SparseGeometryUsesAddressLimitsBeyondDescriptorRanges) {
+  iree_hal_allocator_t* allocator = nullptr;
+  IREE_ASSERT_OK(
+      iree_hal_allocator_create_heap(iree_allocator_system(), &allocator));
+  iree_hal_vulkan_physical_device_snapshot_t physical_device = {};
+  physical_device.properties2.properties.limits.maxStorageBufferRange = 1u
+                                                                        << 27;
+  physical_device.properties2.properties.limits.sparseAddressSpaceSize =
+      UINT64_C(1) << 40;
+  physical_device.maintenance4_properties.maxBufferSize = UINT64_C(1) << 38;
+  physical_device.properties11.maxMemoryAllocationSize = UINT64_C(1) << 34;
+  const iree_hal_vulkan_device_plan_t device_plan = {};
+  iree_hal_vulkan_device_spec_params_t params = {
+      .logical_device_id = IREE_SV("vulkan://0"),
+      .physical_device = &physical_device,
+      .device_plan = &device_plan,
+      .device_allocator = allocator,
+  };
+  for (const VkDeviceSize alignment : {VkDeviceSize{0}, VkDeviceSize{65536}}) {
+    params.sparse_buffer_requirements.alignment = alignment;
+    iree_hal_device_spec_t* spec = nullptr;
+    IREE_ASSERT_OK(iree_hal_vulkan_device_spec_create(
+        &params, iree_allocator_system(), &spec));
+    const auto* memory = iree_hal_device_spec_virtual_memory(spec);
+    ASSERT_NE(memory, nullptr);
+    if (!alignment) {
+      EXPECT_EQ(0u, memory->class_count);
+    } else {
+      ASSERT_EQ(1u, memory->class_count);
+      const auto& memory_class = memory->classes[0];
+      EXPECT_EQ(alignment, memory_class.minimum_page_size);
+      EXPECT_EQ(alignment, memory_class.recommended_page_size);
+      EXPECT_EQ(UINT64_C(1) << 38, memory_class.maximum_reservation_size);
+      EXPECT_EQ(UINT64_C(1) << 34,
+                memory_class.maximum_physical_allocation_size);
+      EXPECT_FALSE(
+          iree_any_bit_set(memory_class.operation_flags,
+                           IREE_HAL_VIRTUAL_MEMORY_OPERATION_FLAG_ADVISE));
+    }
+    iree_hal_device_spec_release(spec);
+  }
+  iree_hal_allocator_release(allocator);
+}
+
+struct FloatWidthSupport {
+  // Whether the control is supported for F16.
+  VkBool32 f16;
+  // Whether the control is supported for F32.
+  VkBool32 f32;
+  // Whether the control is supported for F64.
+  VkBool32 f64;
+};
+
 struct FloatControlsCase {
-  // Whether f32 preservation is supported by the physical device.
-  VkBool32 supported;
+  // Per-width denormal-preservation support.
+  FloatWidthSupport denorm_preserve;
   // Widths whose denormal modes can be controlled independently.
-  VkShaderFloatControlsIndependence independence;
-  // Whether the device facet can promise independent f32 preservation.
-  bool expected;
+  VkShaderFloatControlsIndependence denorm_independence;
+  // Per-width round-to-nearest-even support.
+  FloatWidthSupport rounding_rte;
+  // Widths whose rounding modes can be controlled independently.
+  VkShaderFloatControlsIndependence rounding_independence;
+  // Per-width signed-zero, infinity, and NaN preservation support.
+  FloatWidthSupport signed_zero_inf_nan_preserve;
+  // Float-control promises retained by the device facet.
+  iree_hal_vulkan_device_spec_flags_t expected_flags;
 };
 
 class DeviceSpecFloatControlsTest
@@ -225,15 +412,36 @@ class DeviceSpecFloatControlsTest
 TEST_P(DeviceSpecFloatControlsTest, CreatesSpecFromParams) {
   iree_hal_allocator_t* allocator = NULL;
   IREE_ASSERT_OK(
-      iree_hal_allocator_create_heap(IREE_SV("test"), iree_allocator_system(),
-                                     iree_allocator_system(), &allocator));
+      iree_hal_allocator_create_heap(iree_allocator_system(), &allocator));
 
-  iree_hal_vulkan_physical_device_snapshot_t physical_device = {};
-  physical_device.ordinal = 3;
+  iree_hal_vulkan_physical_device_snapshot_t physical_device = {
+      .ordinal = 3,
+  };
+  physical_device.float_controls_properties.shaderDenormPreserveFloat16 =
+      GetParam().denorm_preserve.f16;
   physical_device.float_controls_properties.shaderDenormPreserveFloat32 =
-      GetParam().supported;
+      GetParam().denorm_preserve.f32;
+  physical_device.float_controls_properties.shaderDenormPreserveFloat64 =
+      GetParam().denorm_preserve.f64;
   physical_device.float_controls_properties.denormBehaviorIndependence =
-      GetParam().independence;
+      GetParam().denorm_independence;
+  physical_device.float_controls_properties.shaderRoundingModeRTEFloat16 =
+      GetParam().rounding_rte.f16;
+  physical_device.float_controls_properties.shaderRoundingModeRTEFloat32 =
+      GetParam().rounding_rte.f32;
+  physical_device.float_controls_properties.shaderRoundingModeRTEFloat64 =
+      GetParam().rounding_rte.f64;
+  physical_device.float_controls_properties.roundingModeIndependence =
+      GetParam().rounding_independence;
+  physical_device.float_controls_properties
+      .shaderSignedZeroInfNanPreserveFloat16 =
+      GetParam().signed_zero_inf_nan_preserve.f16;
+  physical_device.float_controls_properties
+      .shaderSignedZeroInfNanPreserveFloat32 =
+      GetParam().signed_zero_inf_nan_preserve.f32;
+  physical_device.float_controls_properties
+      .shaderSignedZeroInfNanPreserveFloat64 =
+      GetParam().signed_zero_inf_nan_preserve.f64;
   std::strncpy(physical_device.properties2.properties.deviceName,
                "Vulkan test device",
                sizeof(physical_device.properties2.properties.deviceName) - 1);
@@ -267,28 +475,33 @@ TEST_P(DeviceSpecFloatControlsTest, CreatesSpecFromParams) {
   physical_device.properties11.maxMemoryAllocationSize = 1ull << 32;
   physical_device.id_properties.deviceUUID[0] = 0x11;
   physical_device.subgroup_properties.subgroupSize = 32;
+  physical_device.subgroup_properties.supportedOperations =
+      VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT;
   physical_device.subgroup_size_control_properties.minSubgroupSize = 32;
   physical_device.subgroup_size_control_properties.maxSubgroupSize = 64;
+  physical_device.subgroup_size_control_properties
+      .maxComputeWorkgroupSubgroups = 16;
   physical_device.calibrated_timestamp_time_domains =
       IREE_HAL_VULKAN_TIME_DOMAIN_DEVICE |
       IREE_HAL_VULKAN_TIME_DOMAIN_CLOCK_MONOTONIC;
-  VkCooperativeMatrixPropertiesKHR cooperative_matrix_property = {};
-  cooperative_matrix_property.sType =
-      VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR;
-  cooperative_matrix_property.MSize = 16;
-  cooperative_matrix_property.NSize = 16;
-  cooperative_matrix_property.KSize = 16;
-  cooperative_matrix_property.AType = VK_COMPONENT_TYPE_FLOAT16_KHR;
-  cooperative_matrix_property.BType = VK_COMPONENT_TYPE_FLOAT16_KHR;
-  cooperative_matrix_property.CType = VK_COMPONENT_TYPE_FLOAT32_KHR;
-  cooperative_matrix_property.ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR;
-  cooperative_matrix_property.scope = VK_SCOPE_SUBGROUP_KHR;
+  VkCooperativeMatrixPropertiesKHR cooperative_matrix_property = {
+      .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+      .MSize = 16,
+      .NSize = 16,
+      .KSize = 16,
+      .AType = VK_COMPONENT_TYPE_FLOAT16_KHR,
+      .BType = VK_COMPONENT_TYPE_FLOAT16_KHR,
+      .CType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+      .ResultType = VK_COMPONENT_TYPE_FLOAT32_KHR,
+      .scope = VK_SCOPE_SUBGROUP_KHR,
+  };
   physical_device.cooperative_matrix_property_count = 1;
   physical_device.cooperative_matrix_property_rows =
       &cooperative_matrix_property;
 
-  iree_hal_vulkan_device_plan_t device_plan = {};
-  device_plan.request_flags = IREE_HAL_VULKAN_REQUEST_FLAG_TRACING;
+  iree_hal_vulkan_device_plan_t device_plan = {
+      .request_flags = IREE_HAL_VULKAN_REQUEST_FLAG_TRACING,
+  };
   device_plan.enabled_features.general =
       IREE_HAL_VULKAN_FEATURE_REQUIRED_BASELINE |
       IREE_HAL_VULKAN_FEATURE_ENABLE_BUFFER_DEVICE_ADDRESSES |
@@ -303,33 +516,33 @@ TEST_P(DeviceSpecFloatControlsTest, CreatesSpecFromParams) {
   uint32_t queue_indices[] = {0, 1, 0};
   iree_hal_vulkan_queue_family_plan_t queue_families[] = {
       {
-          /*.native_family_index=*/2,
-          /*.flags=*/VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
-          /*.timestamp_valid_bits=*/64,
-          /*.queue_count=*/2,
-          /*.queue_offset=*/0,
+          .native_family_index = 2,
+          .flags = VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT,
+          .timestamp_valid_bits = 64,
+          .queue_count = 2,
+          .queue_offset = 0,
       },
       {
-          /*.native_family_index=*/5,
-          /*.flags=*/VK_QUEUE_TRANSFER_BIT,
-          /*.timestamp_valid_bits=*/48,
-          /*.queue_count=*/1,
-          /*.queue_offset=*/2,
+          .native_family_index = 5,
+          .flags = VK_QUEUE_TRANSFER_BIT,
+          .timestamp_valid_bits = 48,
+          .queue_count = 1,
+          .queue_offset = 2,
       },
   };
   device_plan.queue_inventory = {
-      /*.family_count=*/IREE_ARRAYSIZE(queue_families),
-      /*.families=*/queue_families,
-      /*.queue_count=*/IREE_ARRAYSIZE(queue_indices),
-      /*.queue_indices=*/queue_indices,
+      .family_count = IREE_ARRAYSIZE(queue_families),
+      .families = queue_families,
+      .queue_count = IREE_ARRAYSIZE(queue_indices),
+      .queue_indices = queue_indices,
   };
 
   iree_hal_vulkan_device_spec_params_t params = {
-      /*.logical_device_id=*/IREE_SV("vulkan://0"),
-      /*.display_name=*/IREE_SV("Vulkan test logical device"),
-      /*.physical_device=*/&physical_device,
-      /*.device_plan=*/&device_plan,
-      /*.device_allocator=*/allocator,
+      .logical_device_id = IREE_SV("vulkan://0"),
+      .display_name = IREE_SV("Vulkan test logical device"),
+      .physical_device = &physical_device,
+      .device_plan = &device_plan,
+      .device_allocator = allocator,
   };
   iree_hal_device_spec_t* device_spec = NULL;
   IREE_ASSERT_OK(iree_hal_vulkan_device_spec_create(
@@ -416,6 +629,8 @@ TEST_P(DeviceSpecFloatControlsTest, CreatesSpecFromParams) {
   EXPECT_EQ(dispatch->launch.maximum_workgroup_invocations, 1024);
   EXPECT_EQ(dispatch->launch.maximum_workgroup_size[2], 64);
   EXPECT_EQ(dispatch->subgroup.default_size, 32);
+  EXPECT_EQ(dispatch->subgroup.minimum_size, 32);
+  EXPECT_EQ(dispatch->subgroup.maximum_size, 32);
   EXPECT_EQ(dispatch->subgroup.supported_size_mask, 1ull << 32);
   EXPECT_EQ(dispatch->execution.maximum_workgroup_local_memory_size, 64 * 1024);
   EXPECT_EQ(dispatch->addressing.minimum_buffer_device_address_alignment, 16);
@@ -433,10 +648,10 @@ TEST_P(DeviceSpecFloatControlsTest, CreatesSpecFromParams) {
       iree_hal_device_spec_executables(device_spec);
   ASSERT_NE(executables, nullptr);
   iree_hal_executable_target_selection_t target_selection = {
-      /*.family=*/IREE_SV("spirv"),
-      /*.target_key=*/IREE_SV("vulkan1.3+bda"),
-      /*.kind_flags=*/IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_GENERIC,
-      /*.physical_device_affinity=*/0,
+      .family = IREE_SV("spirv"),
+      .target_key = IREE_SV("vulkan1.3+bda"),
+      .kind_flags = IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_GENERIC,
+      .physical_device_affinity = 0,
   };
   const iree_hal_executable_target_selection_result_t selection_result =
       iree_hal_device_spec_select_executable_target(device_spec,
@@ -451,15 +666,15 @@ TEST_P(DeviceSpecFloatControlsTest, CreatesSpecFromParams) {
   iree_hal_vulkan_device_spec_t decoded = {};
   IREE_ASSERT_OK(iree_hal_vulkan_device_spec_decode_facet(facet, &decoded));
   EXPECT_EQ(decoded.api_version, VK_MAKE_API_VERSION(0, 1, 3, 0));
-  EXPECT_EQ(iree_any_bit_set(
-                decoded.flags,
-                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_DENORM_PRESERVE),
-            GetParam().expected);
+  EXPECT_EQ(decoded.flags, GetParam().expected_flags);
   EXPECT_EQ(decoded.enabled_features.general,
             device_plan.enabled_features.general);
   EXPECT_EQ(decoded.enabled_features.atomics,
             device_plan.enabled_features.atomics);
   EXPECT_EQ(decoded.physical_device_type, VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+  EXPECT_EQ(decoded.subgroup_supported_operations,
+            physical_device.subgroup_properties.supportedOperations);
+  EXPECT_EQ(decoded.maximum_workgroup_subgroup_count, 16u);
   ASSERT_EQ(decoded.cooperative_matrix.count, 1);
   iree_hal_vulkan_cooperative_matrix_property_t decoded_property = {};
   ASSERT_TRUE(iree_hal_vulkan_device_spec_read_cooperative_matrix_property(
@@ -469,22 +684,111 @@ TEST_P(DeviceSpecFloatControlsTest, CreatesSpecFromParams) {
   EXPECT_EQ(decoded_property.scope, cooperative_matrix_property.scope);
 
   iree_hal_device_spec_release(device_spec);
+  physical_device.subgroup_size_control_properties.requiredSubgroupSizeStages =
+      VK_SHADER_STAGE_COMPUTE_BIT;
+  IREE_ASSERT_OK(iree_hal_vulkan_device_spec_create(
+      &params, iree_allocator_system(), &device_spec));
+  dispatch = iree_hal_device_spec_dispatch(device_spec);
+  ASSERT_NE(dispatch, nullptr);
+  EXPECT_EQ(dispatch->subgroup.minimum_size, 32);
+  EXPECT_EQ(dispatch->subgroup.maximum_size, 64);
+  iree_hal_device_spec_release(device_spec);
+
+  device_plan.enabled_features.general &=
+      ~IREE_HAL_VULKAN_FEATURE_ENABLE_SUBGROUP_SIZE_CONTROL;
+  IREE_ASSERT_OK(iree_hal_vulkan_device_spec_create(
+      &params, iree_allocator_system(), &device_spec));
+  dispatch = iree_hal_device_spec_dispatch(device_spec);
+  ASSERT_NE(dispatch, nullptr);
+  EXPECT_EQ(dispatch->subgroup.minimum_size, 32);
+  EXPECT_EQ(dispatch->subgroup.maximum_size, 32);
+  iree_hal_device_spec_release(device_spec);
   iree_hal_allocator_release(allocator);
 }
 
 INSTANTIATE_TEST_SUITE_P(
     FloatControls, DeviceSpecFloatControlsTest,
     ::testing::Values(
-        FloatControlsCase{VK_FALSE, VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
-                          false},
-        FloatControlsCase{VK_FALSE, VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
-                          false},
-        FloatControlsCase{VK_TRUE, VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
-                          false},
+        FloatControlsCase{{VK_FALSE, VK_FALSE, VK_FALSE},
+                          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
+                          {VK_FALSE, VK_FALSE, VK_FALSE},
+                          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
+                          {VK_FALSE, VK_FALSE, VK_FALSE},
+                          IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_NONE},
+        FloatControlsCase{{VK_TRUE, VK_TRUE, VK_TRUE},
+                          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
+                          {VK_TRUE, VK_TRUE, VK_TRUE},
+                          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
+                          {VK_FALSE, VK_FALSE, VK_FALSE},
+                          IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_NONE},
         FloatControlsCase{
-            VK_TRUE, VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY, true},
-        FloatControlsCase{VK_TRUE, VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
-                          true}));
+            {VK_FALSE, VK_TRUE, VK_FALSE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_FALSE, VK_TRUE, VK_FALSE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_FALSE, VK_TRUE, VK_FALSE},
+            IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_ROUNDING_RTE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE},
+        FloatControlsCase{
+            {VK_TRUE, VK_FALSE, VK_FALSE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_TRUE, VK_FALSE, VK_FALSE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_TRUE, VK_FALSE, VK_FALSE},
+            IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE},
+        FloatControlsCase{
+            {VK_TRUE, VK_FALSE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_TRUE, VK_FALSE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_TRUE, VK_FALSE, VK_TRUE},
+            IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_ROUNDING_RTE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE},
+        FloatControlsCase{
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE},
+        FloatControlsCase{
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_FALSE, VK_FALSE, VK_FALSE},
+            IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_ROUNDING_RTE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_ROUNDING_RTE},
+        FloatControlsCase{
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_32_BIT_ONLY,
+            {VK_FALSE, VK_FALSE, VK_FALSE},
+            IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_ROUNDING_RTE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_ROUNDING_RTE},
+        FloatControlsCase{
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
+            {VK_TRUE, VK_TRUE, VK_TRUE},
+            IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_DENORM_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_ROUNDING_RTE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_ROUNDING_RTE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE |
+                IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE}));
 
 }  // namespace
 }  // namespace iree::hal::vulkan

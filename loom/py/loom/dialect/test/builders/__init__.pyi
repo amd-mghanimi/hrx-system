@@ -1161,3 +1161,36 @@ class TestBuilder(DialectBuilder):
         result_names: Sequence[str] | None = ...,
         location_id: int | None = ...,
     ) -> list[ValueRef]: ...
+    def block_arg_groups(
+        self,
+        *,
+        actual_args: Sequence[tuple[str, Type]] = ...,
+        expected_args: Sequence[tuple[str, Type]] = ...,
+        body: Region | None = ...,
+        location_id: int | None = ...,
+    ) -> None: ...
+    def signature_sink(
+        self,
+        *,
+        operands: list[ValueRef] = ...,
+        results: list[Type | TiedResultSpec],
+        location_id: int | None = ...,
+    ) -> None: ...
+    def fact_exact_float_types(
+        self,
+        *,
+        value: ValueRef,
+        results: list[Type | TiedResultSpec],
+        name: str | None = ...,
+        names: Sequence[str] | None = ...,
+        result_names: Sequence[str] | None = ...,
+        location_id: int | None = ...,
+    ) -> ValueRef: ...
+    def string_array_attrs(
+        self,
+        *,
+        required_values: Sequence[str],
+        optional_values: Sequence[str] | None = ...,
+        dict: Mapping[str, Any] | None = ...,
+        location_id: int | None = ...,
+    ) -> None: ...

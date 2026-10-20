@@ -1,10 +1,6 @@
-// RUN: with-checks pass-report @measure
+// RUN: pass cfg-simplify
 
-// Exact substitutions share one scan before the analysis refresh.
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
-}
-
+// The dominating condition folds the repeated predicates without changing sums.
 func.def @fold_independent_comparisons(%x: i32, %y: i32, %value: i32) -> (i32) {
   %gate = scalar.cmpi slt, %x, %y : i32
   cfg.cond_br %gate, ^selected, ^other
@@ -27,17 +23,31 @@ func.def @fold_independent_comparisons(%x: i32, %y: i32, %value: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"iterations":2,*
-CHECK: *"branches-folded":0,*
-
-// ====
-// RUN: with-checks pass-report @measure
-
-// Exact substitutions share one scan before the analysis refresh.
-pass.pipeline<func> @measure pipeline {
-  cfg-simplify
+func.def @fold_independent_comparisons(%x: i32, %y: i32, %value: i32) -> (i32) {
+  %gate = scalar.cmpi slt, %x, %y : i32
+  cfg.cond_br %gate, ^selected, ^other
+^selected:
+  %predicate_0 = scalar.constant true : i1
+  %bit_0 = scalar.extui %predicate_0 : i1 to i32
+  %sum_0 = scalar.addi %value, %bit_0 : i32
+  %predicate_1 = scalar.constant true : i1
+  %bit_1 = scalar.extui %predicate_1 : i1 to i32
+  %sum_1 = scalar.addi %sum_0, %bit_1 : i32
+  %predicate_2 = scalar.constant true : i1
+  %bit_2 = scalar.extui %predicate_2 : i1 to i32
+  %sum_2 = scalar.addi %sum_1, %bit_2 : i32
+  %predicate_3 = scalar.constant true : i1
+  %bit_3 = scalar.extui %predicate_3 : i1 to i32
+  %sum_3 = scalar.addi %sum_2, %bit_3 : i32
+  func.return %sum_3 : i32
+^other:
+  func.return %value : i32
 }
 
+// ====
+// RUN: pass cfg-simplify
+
+// The dominating condition folds the repeated predicates without changing sums.
 func.def @fold_dependent_conjunctions(%x: i32, %y: i32, %value: i32) -> (i32) {
   %gate = scalar.cmpi slt, %x, %y : i32
   cfg.cond_br %gate, ^selected, ^other
@@ -60,8 +70,26 @@ func.def @fold_dependent_conjunctions(%x: i32, %y: i32, %value: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"iterations":2,*
-CHECK: *"branches-folded":0,*
+func.def @fold_dependent_conjunctions(%x: i32, %y: i32, %value: i32) -> (i32) {
+  %gate = scalar.cmpi slt, %x, %y : i32
+  cfg.cond_br %gate, ^selected, ^other
+^selected:
+  %predicate_0 = scalar.constant true : i1
+  %bit_0 = scalar.extui %predicate_0 : i1 to i32
+  %sum_0 = scalar.addi %value, %bit_0 : i32
+  %predicate_1 = scalar.constant true : i1
+  %bit_1 = scalar.extui %predicate_1 : i1 to i32
+  %sum_1 = scalar.addi %sum_0, %bit_1 : i32
+  %predicate_2 = scalar.constant true : i1
+  %bit_2 = scalar.extui %predicate_2 : i1 to i32
+  %sum_2 = scalar.addi %sum_1, %bit_2 : i32
+  %predicate_3 = scalar.constant true : i1
+  %bit_3 = scalar.extui %predicate_3 : i1 to i32
+  %sum_3 = scalar.addi %sum_2, %bit_3 : i32
+  func.return %sum_3 : i32
+^other:
+  func.return %value : i32
+}
 
 // ====
 // RUN: pass cfg-simplify
@@ -110,7 +138,6 @@ func.def @fold_opposite_entry_facts(%x: i32, %y: i32, %value: i32) -> (i32) {
 
 // ----
 func.def @fold_opposite_entry_facts(%x: i32, %y: i32, %value: i32) -> (i32) {
-  %truth = scalar.constant true : i1
   %gate = scalar.cmpi slt, %x, %y : i32
   cfg.cond_br %gate, ^less, ^otherwise
 ^otherwise:
@@ -162,7 +189,6 @@ func.def @fold_branch_payload(%x: i32, %y: i32, %value: i32) -> (i32) {
   %gate = scalar.cmpi slt, %x, %y : i32
   cfg.cond_br %gate, ^forward, ^other
 ^forward:
-  %still_same = scalar.constant true : i1
   %combined = scalar.constant true : i1
   %bit = scalar.extui %combined : i1 to i32
   %result = scalar.addi %value, %bit : i32

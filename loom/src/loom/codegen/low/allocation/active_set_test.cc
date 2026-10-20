@@ -20,23 +20,25 @@ loom_low_allocation_assignment_t Assignment(loom_value_id_t value_id,
                                             uint32_t end_point,
                                             uint32_t location_base,
                                             uint32_t unit_point_start) {
-  loom_low_allocation_assignment_t assignment = {};
-  assignment.value_id = value_id;
-  assignment.descriptor_reg_class_id = 0;
-  assignment.start_point = start_point;
-  assignment.end_point = end_point;
-  assignment.unit_count = 1;
-  assignment.location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER;
-  assignment.location_base = location_base;
-  assignment.location_count = 1;
-  assignment.unit_point_start = unit_point_start;
+  loom_low_allocation_assignment_t assignment = {
+      .value_id = value_id,
+      .descriptor_reg_class_id = 0,
+      .start_point = start_point,
+      .end_point = end_point,
+      .unit_count = 1,
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .location_base = location_base,
+      .location_count = 1,
+      .unit_point_start = unit_point_start,
+  };
   return assignment;
 }
 
 loom_low_descriptor_set_t DescriptorSet(const loom_low_reg_class_t* reg_classes,
                                         iree_host_size_t reg_class_count) {
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.reg_classes = reg_classes;
+  loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = reg_classes,
+  };
   descriptor_set.reg_class_count = reg_class_count;
   return descriptor_set;
 }
@@ -52,9 +54,10 @@ TEST(LowAllocationActiveSetTest, ExpiresAndRemovesIndexedUnits) {
   const loom_low_descriptor_set_t descriptor_set =
       DescriptorSet(reg_classes, IREE_ARRAYSIZE(reg_classes));
   uint32_t unit_end_points[] = {10, 5, 9};
-  loom_low_allocation_unit_liveness_t unit_liveness = {};
-  unit_liveness.end_points = unit_end_points;
-  unit_liveness.point_count = IREE_ARRAYSIZE(unit_end_points);
+  loom_low_allocation_unit_liveness_t unit_liveness = {
+      .end_points = unit_end_points,
+      .point_count = IREE_ARRAYSIZE(unit_end_points),
+  };
   const loom_low_allocation_assignment_t assignments[] = {
       Assignment(/*value_id=*/1, /*start_point=*/0, /*end_point=*/10,
                  /*location_base=*/4, /*unit_point_start=*/0),
@@ -64,7 +67,7 @@ TEST(LowAllocationActiveSetTest, ExpiresAndRemovesIndexedUnits) {
 
   loom_low_allocation_active_set_t active_set = {};
   IREE_ASSERT_OK(loom_low_allocation_active_set_initialize(
-      IREE_ARRAYSIZE(assignments),
+      &descriptor_set, &unit_liveness, IREE_ARRAYSIZE(assignments),
       /*program_point_count=*/11, /*unit_capacity=*/32, &arena, &active_set));
   loom_low_allocation_active_set_insert(
       &active_set, &descriptor_set, assignments, IREE_ARRAYSIZE(assignments),
@@ -132,18 +135,24 @@ TEST(LowAllocationActiveSetTest,
   constexpr uint32_t kFirstEndPoint = kAssignmentCount + 1;
   constexpr uint32_t kLastEndPoint = kFirstEndPoint + kAssignmentCount / 2;
   std::vector<loom_low_allocation_assignment_t> assignments;
+  std::vector<uint32_t> unit_end_points;
   for (uint32_t i = 0; i < kAssignmentCount; ++i) {
     assignments.push_back(Assignment(
         /*value_id=*/i + 1, /*start_point=*/i,
         /*end_point=*/kFirstEndPoint + (kAssignmentCount - i) / 2,
-        /*location_base=*/i, /*unit_point_start=*/UINT32_MAX));
+        /*location_base=*/i, /*unit_point_start=*/i));
+    unit_end_points.push_back(assignments.back().end_point);
   }
+  const loom_low_allocation_unit_liveness_t unit_liveness = {
+      .end_points = unit_end_points.data(),
+      .point_count = unit_end_points.size(),
+  };
   const loom_low_reg_class_t reg_classes[1] = {};
   const loom_low_descriptor_set_t descriptor_set =
       DescriptorSet(reg_classes, IREE_ARRAYSIZE(reg_classes));
   loom_low_allocation_active_set_t active_set = {};
   IREE_ASSERT_OK(loom_low_allocation_active_set_initialize(
-      kAssignmentCount, kLastEndPoint + 1,
+      &descriptor_set, &unit_liveness, kAssignmentCount, kLastEndPoint + 1,
       /*unit_capacity=*/kAssignmentCount, &arena, &active_set));
   const iree_host_size_t initialized_bytes = arena.used_allocation_size;
   for (uint32_t i = 0; i < kAssignmentCount; ++i) {
@@ -202,12 +211,13 @@ TEST(LowAllocationActiveSetTest, ReusesStorageBeforeRemovedLifetimeExpires) {
                    /*location_base=*/0, /*unit_point_start=*/2),
     };
     uint32_t unit_end_points[] = {4, 6, 8, 5};
-    loom_low_allocation_unit_liveness_t unit_liveness = {};
-    unit_liveness.end_points = unit_end_points;
-    unit_liveness.point_count = IREE_ARRAYSIZE(unit_end_points);
+    loom_low_allocation_unit_liveness_t unit_liveness = {
+        .end_points = unit_end_points,
+        .point_count = IREE_ARRAYSIZE(unit_end_points),
+    };
     loom_low_allocation_active_set_t active_set = {};
     IREE_ASSERT_OK(loom_low_allocation_active_set_initialize(
-        IREE_ARRAYSIZE(assignments),
+        &descriptor_set, &unit_liveness, IREE_ARRAYSIZE(assignments),
         /*program_point_count=*/9, unit_capacity, &arena, &active_set));
     loom_low_allocation_active_set_insert(
         &active_set, &descriptor_set, assignments, IREE_ARRAYSIZE(assignments),
@@ -254,6 +264,101 @@ TEST(LowAllocationActiveSetTest, ReusesStorageBeforeRemovedLifetimeExpires) {
   }
 }
 
+TEST(LowAllocationActiveSetTest, ConsumesSparseHistoryAcrossTheSweep) {
+  for (iree_host_size_t unit_capacity : {0u, 32u}) {
+    iree_arena_block_pool_t block_pool;
+    iree_arena_block_pool_initialize(
+        /*block_size=*/4096, iree_allocator_system(), &block_pool);
+    iree_arena_allocator_t arena;
+    iree_arena_initialize(&block_pool, &arena);
+
+    const loom_low_reg_class_t reg_classes[1] = {};
+    const loom_low_descriptor_set_t descriptor_set =
+        DescriptorSet(reg_classes, IREE_ARRAYSIZE(reg_classes));
+    std::vector<loom_liveness_segment_t> segments;
+    for (uint32_t i = 0; i < 64; ++i) {
+      segments.push_back({i * 4, i * 4 + 1});
+    }
+    segments.push_back({128, 129});
+    segments.push_back({252, 253});
+    segments.push_back({258, 259});
+
+    loom_low_allocation_assignment_t assignments[] = {
+        Assignment(/*value_id=*/1, /*start_point=*/0, /*end_point=*/300,
+                   /*location_base=*/4, /*unit_point_start=*/0),
+    };
+    assignments[0].liveness_segments = {0, 64};
+    uint32_t unit_end_points[] = {300, 0};
+    loom_low_allocation_unit_liveness_t unit_liveness = {
+        .end_points = unit_end_points,
+        .point_count = IREE_ARRAYSIZE(unit_end_points),
+    };
+    unit_liveness.storage_segments.entries = segments.data();
+
+    loom_low_allocation_active_set_t active_set = {};
+    IREE_ASSERT_OK(loom_low_allocation_active_set_initialize(
+        &descriptor_set, &unit_liveness, IREE_ARRAYSIZE(assignments),
+        /*program_point_count=*/301, unit_capacity, &arena, &active_set));
+    loom_low_allocation_active_set_insert(
+        &active_set, &descriptor_set, assignments, IREE_ARRAYSIZE(assignments),
+        /*assignment_index=*/0);
+
+    loom_low_allocation_assignment_t candidate =
+        Assignment(/*value_id=*/2, /*start_point=*/128, /*end_point=*/129,
+                   /*location_base=*/4, /*unit_point_start=*/1);
+    candidate.liveness_segments = {64, 1};
+    unit_end_points[1] = candidate.end_point;
+    loom_low_allocation_active_set_expire(&active_set, assignments,
+                                          IREE_ARRAYSIZE(assignments),
+                                          candidate.start_point);
+    EXPECT_TRUE(loom_low_allocation_active_set_conflicts(
+        &active_set, &descriptor_set, &unit_liveness, assignments,
+        IREE_ARRAYSIZE(assignments), &candidate,
+        /*ignored_value_ids=*/nullptr, /*ignored_value_count=*/0));
+    EXPECT_EQ(active_set.live_range_sweep.segment_starts_by_assignment_index[0],
+              32u);
+    EXPECT_TRUE(loom_low_allocation_active_set_conflicts(
+        &active_set, &descriptor_set, &unit_liveness, assignments,
+        IREE_ARRAYSIZE(assignments), &candidate,
+        /*ignored_value_ids=*/nullptr, /*ignored_value_count=*/0));
+    EXPECT_EQ(active_set.live_range_sweep.segment_starts_by_assignment_index[0],
+              32u);
+
+    candidate.start_point = 252;
+    candidate.end_point = 253;
+    candidate.liveness_segments = {65, 1};
+    unit_end_points[1] = candidate.end_point;
+    loom_low_allocation_active_set_expire(&active_set, assignments,
+                                          IREE_ARRAYSIZE(assignments),
+                                          candidate.start_point);
+    EXPECT_TRUE(loom_low_allocation_active_set_conflicts(
+        &active_set, &descriptor_set, &unit_liveness, assignments,
+        IREE_ARRAYSIZE(assignments), &candidate,
+        /*ignored_value_ids=*/nullptr, /*ignored_value_count=*/0));
+    EXPECT_EQ(active_set.live_range_sweep.segment_starts_by_assignment_index[0],
+              63u);
+
+    candidate.start_point = 258;
+    candidate.end_point = 259;
+    candidate.liveness_segments = {66, 1};
+    unit_end_points[1] = candidate.end_point;
+    loom_low_allocation_active_set_expire(&active_set, assignments,
+                                          IREE_ARRAYSIZE(assignments),
+                                          candidate.start_point);
+    EXPECT_FALSE(loom_low_allocation_active_set_conflicts(
+        &active_set, &descriptor_set, &unit_liveness, assignments,
+        IREE_ARRAYSIZE(assignments), &candidate,
+        /*ignored_value_ids=*/nullptr, /*ignored_value_count=*/0));
+    EXPECT_EQ(active_set.live_range_sweep.segment_starts_by_assignment_index[0],
+              64u);
+    EXPECT_EQ(assignments[0].liveness_segments.start, 0u);
+    EXPECT_EQ(assignments[0].liveness_segments.count, 64u);
+
+    iree_arena_deinitialize(&arena);
+    iree_arena_block_pool_deinitialize(&block_pool);
+  }
+}
+
 TEST(LowAllocationActiveSetTest, ProjectsSparseScalarConflictsAcrossAliases) {
   iree_arena_block_pool_t block_pool;
   iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
@@ -281,14 +386,16 @@ TEST(LowAllocationActiveSetTest, ProjectsSparseScalarConflictsAcrossAliases) {
   uint32_t unit_start_points[] = {0, 0, 6, 0, 0, 0, 4};
   uint32_t unit_end_points[] = {12, 5, 12, 12, 12, 12, 6};
   const loom_liveness_segment_t segments[] = {{0, 3}, {8, 12}, {4, 6}, {9, 10}};
-  loom_low_allocation_unit_liveness_t unit_liveness = {};
-  unit_liveness.start_points = unit_start_points;
-  unit_liveness.end_points = unit_end_points;
-  unit_liveness.point_count = IREE_ARRAYSIZE(unit_end_points);
+  loom_low_allocation_unit_liveness_t unit_liveness = {
+      .start_points = unit_start_points,
+      .end_points = unit_end_points,
+      .point_count = IREE_ARRAYSIZE(unit_end_points),
+  };
   unit_liveness.storage_segments.entries = segments;
   loom_low_allocation_active_set_t active_set = {};
   IREE_ASSERT_OK(loom_low_allocation_active_set_initialize(
-      IREE_ARRAYSIZE(assignments), /*program_point_count=*/13,
+      &descriptor_set, &unit_liveness, IREE_ARRAYSIZE(assignments),
+      /*program_point_count=*/13,
       /*unit_capacity=*/32, &arena, &active_set));
   for (uint32_t i = 0; i < IREE_ARRAYSIZE(assignments); ++i) {
     loom_low_allocation_active_set_insert(&active_set, &descriptor_set,
@@ -303,7 +410,7 @@ TEST(LowAllocationActiveSetTest, ProjectsSparseScalarConflictsAcrossAliases) {
   const uint64_t high_bit = UINT64_C(1) << 63;
   EXPECT_EQ(loom_low_allocation_active_set_conflicting_locations(
                 &active_set, &descriptor_set, &unit_liveness, assignments,
-                &candidate),
+                IREE_ARRAYSIZE(assignments), &candidate),
             high_bit | (UINT64_C(1) << 2));
   candidate.start_point = 6;
   candidate.end_point = 8;
@@ -311,7 +418,7 @@ TEST(LowAllocationActiveSetTest, ProjectsSparseScalarConflictsAcrossAliases) {
   unit_end_points[6] = 8;
   EXPECT_EQ(loom_low_allocation_active_set_conflicting_locations(
                 &active_set, &descriptor_set, &unit_liveness, assignments,
-                &candidate),
+                IREE_ARRAYSIZE(assignments), &candidate),
             high_bit | (UINT64_C(1) << 3));
 
   // Future sparse reservations count even when the candidate starts in a gap.
@@ -323,7 +430,7 @@ TEST(LowAllocationActiveSetTest, ProjectsSparseScalarConflictsAcrossAliases) {
   EXPECT_EQ(
       loom_low_allocation_active_set_conflicting_locations(
           &active_set, &descriptor_set, &unit_liveness, assignments,
-          &candidate),
+          IREE_ARRAYSIZE(assignments), &candidate),
       high_bit | (UINT64_C(1) << 0) | (UINT64_C(1) << 2) | (UINT64_C(1) << 3));
   // The adjacent location lies outside the word and still needs a full query.
   candidate.location_base = 64;

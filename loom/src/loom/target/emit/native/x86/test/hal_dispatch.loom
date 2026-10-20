@@ -1,0 +1,81 @@
+x86.target<avx2> @cpu
+
+// One invocation per workgroup. The host chooses the XYZ dispatch dimensions;
+// the worker observes them through the task entry ABI. Bindings and constants
+// remain ordinary source arguments, and library/query glue is compiler-owned.
+kernel.def target(@cpu) export("grid") @grid(%groups_x: index, %groups_y: index, %groups_z: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%groups_x, %groups_y, %groups_z) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer, %bias: i32) {
+  %x = kernel.workgroup.id<x> : index
+  %y = kernel.workgroup.id<y> : index
+  %z = kernel.workgroup.id<z> : index
+  %count_x = kernel.workgroup.count<x> : index
+  %count_y = kernel.workgroup.count<y> : index
+  %count_z = kernel.workgroup.count<z> : index
+  %row = index.madd %z, %count_y, %y : index
+  %position = index.madd %row, %count_x, %x : index
+  %index = index.cast %position : index to i32
+  // Addressable invocation-local state survives the call to an ordinary helper.
+  %bytes = index.constant 8 : offset
+  %buffer_base = index.constant 0 : offset
+  %storage = buffer.alloca<private> align(64) %bytes : buffer
+  %inputs = buffer.view %storage[%buffer_base] : buffer -> view<2xi32>
+  view.store %index, %inputs[0] : i32, view<2xi32>
+  view.store %bias, %inputs[1] : i32, view<2xi32>
+  %value = func.call noinline @mix(%inputs) : (view<2xi32>) -> (i32)
+  %view = buffer.view %output[%buffer_base] : buffer -> view<[%count_z]x[%count_y]x[%count_x]xi32>
+  %previous = view.load %view[%z, %y, %x] : view<[%count_z]x[%count_y]x[%count_x]xi32> -> i32
+  %sum = scalar.addi %previous, %value : i32
+  view.store %sum, %view[%z, %y, %x] : i32, view<[%count_z]x[%count_y]x[%count_x]xi32>
+  kernel.return
+}
+
+func.def noinline @mix(%inputs: view<2xi32>) -> (i32) {
+  %index = view.load %inputs[0] : view<2xi32> -> i32
+  %bias = view.load %inputs[1] : view<2xi32> -> i32
+  %factor = scalar.constant 17 : i32
+  %product = scalar.muli %index, %factor : i32
+  %result = scalar.addi %product, %bias : i32
+  func.return %result : i32
+}
+
+// The global invocation coordinate is the workgroup coordinate on the CPU.
+// The constant segment contains exactly one byte, with no host word padding.
+kernel.def export("fill_byte") @fill_byte(%groups: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer, %value: i8) {
+  %position = kernel.workitem.dispatch.id<x> : index
+  %count = kernel.workgroup.count<x> : index
+  %buffer_base = index.constant 0 : offset
+  %view = buffer.view %output[%buffer_base] : buffer -> view<[%count]xi8>
+  view.store %value, %view[%position] : i8, view<[%count]xi8>
+  kernel.return
+}
+
+// Constants retain their logical scalar, vector, and predicate values while
+// crossing the byte-addressed task ABI into XMM and YMM carriers.
+kernel.def export("constant_carriers") @constant_carriers() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer, %single: f32, %double: f64, %xmm: vector<2xf64>, %ymm: vector<8xf32>, %predicate: vector<8xi1>) {
+  %single_offset = index.constant 0 : offset
+  %double_offset = index.constant 8 : offset
+  %xmm_offset = index.constant 16 : offset
+  %ymm_offset = index.constant 32 : offset
+  %selected_offset = index.constant 64 : offset
+  %single_output = buffer.view %output[%single_offset] : buffer -> view<1xf32>
+  %double_output = buffer.view %output[%double_offset] : buffer -> view<1xf64>
+  %xmm_output = buffer.view %output[%xmm_offset] : buffer -> view<2xf64>
+  %ymm_output = buffer.view %output[%ymm_offset] : buffer -> view<8xf32>
+  %selected_output = buffer.view %output[%selected_offset] : buffer -> view<8xf32>
+  %inactive = vector.constant 0.0 : vector<8xf32>
+  %selected = vector.select %predicate, %ymm, %inactive : vector<8xf32>
+  view.store %single, %single_output[0] : f32, view<1xf32>
+  view.store %double, %double_output[0] : f64, view<1xf64>
+  vector.store %xmm, %xmm_output[0] : vector<2xf64>, view<2xf64>
+  vector.store %ymm, %ymm_output[0] : vector<8xf32>, view<8xf32>
+  vector.store %selected, %selected_output[0] : vector<8xf32>, view<8xf32>
+  kernel.return
+}

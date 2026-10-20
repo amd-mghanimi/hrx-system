@@ -9,10 +9,241 @@ func.def target(@target) @i32x4_arith(%lhs: vector<4xi32>, %rhs: vector<4xi32>) 
 }
 
 // ----
-low.func.def target<x86.avx2.core>(@target) abi(object_function) @i32x4_arith(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi32>, vector<4xi32>) -> (vector<4xi32>)}) @i32x4_arith(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
   %sum = vpaddd.xmm %lhs, %rhs
   %product = vpmulld.xmm %sum, %rhs
   return %product
+}
+
+// ====
+
+// Returning a predicate uses the stable callable carrier even when the native
+// comparison produces a wider mask.
+x86.target<avx2> @target
+
+func.def target(@target) @i32x8_compare_return(%lhs: vector<8xi32>, %rhs: vector<8xi32>) -> (vector<8xi1>) {
+  %result = vector.cmpi slt, %lhs, %rhs : vector<8xi32> -> vector<8xi1>
+  func.return %result : vector<8xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi32>, vector<8xi32>) -> (vector<8xi1>)}) @i32x8_compare_return(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>) -> (reg<x86.xmm>) asm {
+  %7 = vpcmpgtd.ymm %rhs, %lhs
+  %8 = vextractf128.xmm %7, 0
+  %9 = vextractf128.xmm %7, 1
+  %result = vpackssdw.xmm %8, %9
+  return %result
+}
+
+// ====
+
+// Predicate arguments use the same stable callable carrier and widen only at
+// a consumer that needs 32-bit mask lanes.
+x86.target<avx2> @target
+
+func.def target(@target) @f32x8_select_argument(%condition: vector<8xi1>, %true_value: vector<8xf32>, %false_value: vector<8xf32>) -> (vector<8xf32>) {
+  %result = vector.select %condition, %true_value, %false_value : vector<8xf32>
+  func.return %result : vector<8xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi1>, vector<8xf32>, vector<8xf32>) -> (vector<8xf32>)}) @f32x8_select_argument(%condition: reg<x86.xmm>, %true_value: reg<x86.ymm>, %false_value: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  %9 = vpmovsxwd.ymm %condition
+  %result = vpblendvb.ymm %false_value, %true_value, %9
+  return %result
+}
+
+// ====
+
+// CFG transport retains the native compare representation selected by its
+// eventual consumer.
+x86.target<avx2> @target
+
+func.def target(@target) @f32x8_compare_cfg_select(%lhs: vector<8xi32>, %rhs: vector<8xi32>, %true_value: vector<8xf32>, %false_value: vector<8xf32>) -> (vector<8xf32>) {
+  %condition = vector.cmpi slt, %lhs, %rhs : vector<8xi32> -> vector<8xi1>
+  cfg.br ^select(%condition: vector<8xi1>)
+^select(%carried: vector<8xi1>):
+  %result = vector.select %carried, %true_value, %false_value : vector<8xf32>
+  func.return %result : vector<8xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi32>, vector<8xi32>, vector<8xf32>, vector<8xf32>) -> (vector<8xf32>)}) @f32x8_compare_cfg_select(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>, %true_value: reg<x86.ymm>, %false_value: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  %condition = vpcmpgtd.ymm %rhs, %lhs
+  %result = vpblendvb.ymm %false_value, %true_value, %condition
+  return %result
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @i32x8_bitwise(%lhs: vector<8xi32>, %rhs: vector<8xi32>) -> (vector<8xi32>) {
+  %masked = vector.andi %lhs, %rhs : vector<8xi32>
+  %mixed = vector.xori %masked, %rhs : vector<8xi32>
+  func.return %mixed : vector<8xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi32>, vector<8xi32>) -> (vector<8xi32>)}) @i32x8_bitwise(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  %masked = vpand.ymm %lhs, %rhs
+  %mixed = vpxor.ymm %masked, %rhs
+  return %mixed
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @i32x8_iota(%base: i32, %step: i32) -> (vector<8xi32>, vector<8xi32>) {
+  %unit_step = scalar.constant 1 : i32
+  %consecutive = vector.iota %base step %unit_step : vector<8xi32>
+  %strided = vector.iota %base step %step : vector<8xi32>
+  func.return %consecutive, %strided : vector<8xi32>, vector<8xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i32, i32) -> (vector<8xi32>, vector<8xi32>)}) @i32x8_iota(%base: reg<x86.gpr32>, %step: reg<x86.gpr32>) -> (reg<x86.ymm>, reg<x86.ymm>) asm {
+  %11 = mov.imm64 506097522914230528
+  %12 = vmovq.xmm.gpr64 %11
+  %13 = vpmovzxbd.ymm %12
+  %14 = vmovd.xmm.gpr32 %base
+  %15 = vpbroadcastd.ymm %14
+  %consecutive = vpaddd.ymm %15, %13
+  %20 = vmovd.xmm.gpr32 %step
+  %21 = vpbroadcastd.ymm %20
+  %22 = vpmulld.ymm %13, %21
+  %strided = vpaddd.ymm %15, %22
+  return %consecutive, %strided
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @masked_scale(%base: i32, %limit: i32, %values: vector<8xf32>, %scale: f32) -> (vector<8xf32>) {
+  %step = scalar.constant 1 : i32
+  %lanes = vector.iota %base step %step : vector<8xi32>
+  %limits = vector.splat %limit : vector<8xi32>
+  %active = vector.cmpi slt, %lanes, %limits : vector<8xi32> -> vector<8xi1>
+  %scales = vector.splat %scale : vector<8xf32>
+  %scaled = vector.mulf %values, %scales : vector<8xf32>
+  %inactive_values = vector.constant 0.0 : vector<8xf32>
+  %result = vector.select %active, %scaled, %inactive_values : vector<8xf32>
+  func.return %result : vector<8xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i32, i32, vector<8xf32>, f32) -> (vector<8xf32>)}) @masked_scale(%base: reg<x86.gpr32>, %limit: reg<x86.gpr32>, %values: reg<x86.ymm>, %scale: reg<x86.xmm>) -> (reg<x86.ymm>) asm {
+  %18 = mov.imm64 506097522914230528
+  %19 = vmovq.xmm.gpr64 %18
+  %20 = vpmovzxbd.ymm %19
+  %21 = vmovd.xmm.gpr32 %base
+  %22 = vpbroadcastd.ymm %21
+  %lanes = vpaddd.ymm %22, %20
+  %24 = vmovd.xmm.gpr32 %limit
+  %limits = vpbroadcastd.ymm %24
+  %active = vpcmpgtd.ymm %limits, %lanes
+  %scales = vbroadcastss.ymm %scale
+  %scaled = vmulps.ymm %values, %scales
+  %inactive_values = vxorps.zero.ymm
+  %result = vpblendvb.ymm %inactive_values, %scaled, %active
+  return %result
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @integer_vector_logic(%narrow_lhs: vector<4xi32>, %narrow_rhs: vector<4xi32>, %wide_lhs: vector<8xi32>, %wide_rhs: vector<8xi32>) -> (vector<4xi32>, vector<8xi32>) {
+  %narrow_masked = vector.andi %narrow_lhs, %narrow_rhs : vector<4xi32>
+  %narrow_shifted = vector.shli %narrow_masked, %narrow_rhs : vector<4xi32>
+  %narrow_result = vector.ori %narrow_shifted, %narrow_lhs : vector<4xi32>
+  %wide_result = vector.shrui %wide_lhs, %wide_rhs : vector<8xi32>
+  func.return %narrow_result, %wide_result : vector<4xi32>, vector<8xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi32>, vector<4xi32>, vector<8xi32>, vector<8xi32>) -> (vector<4xi32>, vector<8xi32>)}) @integer_vector_logic(%narrow_lhs: reg<x86.xmm>, %narrow_rhs: reg<x86.xmm>, %wide_lhs: reg<x86.ymm>, %wide_rhs: reg<x86.ymm>) -> (reg<x86.xmm>, reg<x86.ymm>) asm {
+  %narrow_masked = vpand.xmm %narrow_lhs, %narrow_rhs
+  %narrow_shifted = vpsllvd.xmm %narrow_masked, %narrow_rhs
+  %narrow_result = vpor.xmm %narrow_shifted, %narrow_lhs
+  %wide_result = vpsrlvd.ymm %wide_lhs, %wide_rhs
+  return %narrow_result, %wide_result
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @f32x8_arithmetic(%lhs: vector<8xf32>, %rhs: vector<8xf32>) -> (vector<8xf32>) {
+  %sum = vector.addf %lhs, %rhs : vector<8xf32>
+  %difference = vector.subf %sum, %rhs : vector<8xf32>
+  %product = vector.mulf %difference, %rhs : vector<8xf32>
+  func.return %product : vector<8xf32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xf32>, vector<8xf32>) -> (vector<8xf32>)}) @f32x8_arithmetic(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  %sum = vaddps.ymm %lhs, %rhs
+  %difference = vsubps.ymm %sum, %rhs
+  %product = vmulps.ymm %difference, %rhs
+  return %product
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @f32x8_dot(%lhs: vector<8xf32>, %rhs: vector<8xf32>, %init: f32) -> (f32) {
+  %result = vector.dotf %lhs, %rhs, %init : vector<8xf32>, vector<8xf32>, f32
+  func.return %result : f32
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xf32>, vector<8xf32>, f32) -> (f32)}) @f32x8_dot(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>, %init: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %9 = vextractf128.xmm %lhs, 0
+  %10 = vextractf128.xmm %lhs, 1
+  %11 = vextractf128.xmm %rhs, 0
+  %12 = vextractf128.xmm %rhs, 1
+  %13 = copy %init : reg<x86.xmm> -> reg<x86.xmm>
+  %14 = vfmadd231ss.xmm %13, %9, %11
+  %15 = vpermilps.xmm %9, 1
+  %16 = vpermilps.xmm %11, 1
+  %17 = vfmadd231ss.xmm %14, %15, %16
+  %18 = vpermilps.xmm %9, 2
+  %19 = vpermilps.xmm %11, 2
+  %20 = vfmadd231ss.xmm %17, %18, %19
+  %21 = vpermilps.xmm %9, 3
+  %22 = vpermilps.xmm %11, 3
+  %23 = vfmadd231ss.xmm %20, %21, %22
+  %24 = vfmadd231ss.xmm %23, %10, %12
+  %25 = vpermilps.xmm %10, 1
+  %26 = vpermilps.xmm %12, 1
+  %27 = vfmadd231ss.xmm %24, %25, %26
+  %28 = vpermilps.xmm %10, 2
+  %29 = vpermilps.xmm %12, 2
+  %30 = vfmadd231ss.xmm %27, %28, %29
+  %31 = vpermilps.xmm %10, 3
+  %32 = vpermilps.xmm %12, 3
+  %result = vfmadd231ss.xmm %30, %31, %32
+  return %result
+}
+
+// ====
+
+x86.target<avx2> @target
+
+func.def target(@target) @i32x4_splat(%value: i32) -> (vector<4xi32>) {
+  %splat = vector.splat %value : vector<4xi32>
+  func.return %splat : vector<4xi32>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i32) -> (vector<4xi32>)}) @i32x4_splat(%value: reg<x86.gpr32>) -> (reg<x86.xmm>) asm {
+  %5 = vmovd.xmm.gpr32 %value
+  %splat = avx2.vpbroadcastd.xmm %5
+  return %splat
 }
 
 // ====
@@ -27,7 +258,7 @@ func.def target(@target) @f32x4_scalar_lane(%v: vector<4xf32>, %x: f32, %bias: f
 }
 
 // ----
-low.func.def target<x86.avx2.core>(@target) abi(object_function) @f32x4_scalar_lane(%v: reg<x86.xmm>, %x: reg<x86.xmm>, %bias: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf32>, f32, f32) -> (f32)}) @f32x4_scalar_lane(%v: reg<x86.xmm>, %x: reg<x86.xmm>, %bias: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
   %lane = vpermilps.xmm %v, 2
   %sum = vaddss.xmm %lane, %x
   %13 = copy %bias : reg<x86.xmm> -> reg<x86.xmm>
@@ -46,41 +277,15 @@ func.def target(@target) @i32x4_shuffle_reduce(%v: vector<4xi32>, %init: i32) ->
 }
 
 // ----
-low.func.def target<x86.avx2.core>(@target) abi(object_function) @i32x4_shuffle_reduce(%v: reg<x86.xmm>, %init: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi32>, i32) -> (i32)}) @i32x4_shuffle_reduce(%v: reg<x86.xmm>, %init: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   %shuffled = vpshufd.xmm %v, 27
-  %9 = vpextrd.xmm %shuffled, 0
-  %10 = copy %init : reg<x86.gpr32> -> reg<x86.gpr32>
-  %11 = add.gpr32 %10, %9
-  %12 = vpextrd.xmm %shuffled, 1
-  %13 = copy %11 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %14 = add.gpr32 %13, %12
-  %15 = vpextrd.xmm %shuffled, 2
-  %16 = copy %14 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %17 = add.gpr32 %16, %15
-  %18 = vpextrd.xmm %shuffled, 3
-  %19 = copy %17 : reg<x86.gpr32> -> reg<x86.gpr32>
-  %sum = add.gpr32 %19, %18
-  return %sum
-}
-
-// ====
-
-x86.target<avx2> @target
-
-func.def target(@target) @f32x4_shuffle_reduce(%v: vector<4xf32>, %init: f32) -> (f32) {
-  %shuffled = vector.shuffle<[3, 1, 2, 0]> %v : vector<4xf32>
-  %sum = vector.reduce<addf> %shuffled, %init : vector<4xf32>, f32
-  func.return %sum : f32
-}
-
-// ----
-low.func.def target<x86.avx2.core>(@target) abi(object_function) @f32x4_shuffle_reduce(%v: reg<x86.xmm>, %init: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
-  %shuffled = vpermilps.xmm %v, 39
-  %9 = vpermilps.xmm %shuffled, 78
-  %10 = vaddps.xmm %shuffled, %9
-  %11 = vpermilps.xmm %10, 177
-  %12 = vaddps.xmm %10, %11
-  %sum = vaddss.xmm %init, %12
+  %9 = vpsrldq.xmm %shuffled, 8
+  %10 = vpaddd.xmm %shuffled, %9
+  %11 = vpsrldq.xmm %10, 4
+  %12 = vpaddd.xmm %10, %11
+  %13 = vmovd.xmm.gpr32 %init
+  %14 = vpaddd.xmm %12, %13
+  %sum = vpextrd.xmm %14, 0
   return %sum
 }
 
@@ -145,9 +350,9 @@ func.def target(@target) @i32x4_index_madd_scaled_bias_memory(%input: buffer, %o
 
 // ----
 low.func.def target<x86.avx2.core>(@target) abi(object_function) @i32x4_index_madd_scaled_bias_memory(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>, %row: reg<x86.gpr64>) asm {
-  %15 = lea.scale %row {disp32 = 1, scale = 4}
-  %loaded = vmovdqu32.load.indexed.xmm %input, %15 {disp32 = 0, scale = 4}
-  vmovdqu32.store.indexed.xmm %loaded, %output, %15 {disp32 = 0, scale = 4}
+  %14 = lea.scale %row {disp32 = 1, scale = 4}
+  %loaded = vmovdqu32.load.indexed.xmm %input, %14 {disp32 = 0, scale = 4}
+  vmovdqu32.store.indexed.xmm %loaded, %output, %14 {disp32 = 0, scale = 4}
   return
 }
 

@@ -12,9 +12,16 @@ package(
     licenses = ["notice"],
 )
 
-_COMPATIBLE_WITH = loom_config_compatible_with([
+_IMPORT_COMPATIBLE_WITH = loom_config_compatible_with([
     "//loom/config/import:cxx",
     "//loom/config/import/cxx:embed_includes_enabled",
+])
+
+_AMDGPU_TARGET_COMPATIBLE_WITH = _IMPORT_COMPATIBLE_WITH + loom_config_compatible_with([
+    "//loom/config/target/arch:amdgpu",
+])
+
+_AMDGPU_COMPATIBLE_WITH = _IMPORT_COMPATIBLE_WITH + loom_config_compatible_with([
     "//loom/config/emit:amdgpu",
 ])
 
@@ -22,21 +29,62 @@ iree_c_embed_data(
     name = "kernels",
     testonly = True,
     srcs = [
+        ":nvfp4_matrix_benchmark.cxx",
         "//loom/src/loom/import/cxx/test:aiter_swiglu_f16.cxx",
+        "//loom/src/loom/import/cxx/test:collective_scans.cxx",
+        "//loom/src/loom/import/cxx/test:configured_workgroup_storage.cxx",
         "//loom/src/loom/import/cxx/test:flash_attention.cxx",
         "//loom/src/loom/import/cxx/test:llama_rms_norm.cxx",
+        "//loom/src/loom/import/cxx/test:mxfp_group_dot.cxx",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:iq4xs_gate_up.cxx",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:nvfp4_matrix.cxx",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:nvfp4_matrix.h",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:nvfp4_matrix_providers.cxx",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:q4k_q8_swiglu.cxx",
     ],
     c_file_output = "kernels.c",
     flatten = True,
     h_file_output = "kernels.h",
     identifier = "loomc_cxx_benchmark_kernels",
-    target_compatible_with = _COMPATIBLE_WITH,
+    target_compatible_with = _AMDGPU_COMPATIBLE_WITH,
+)
+
+iree_c_embed_data(
+    name = "q8s32_sources",
+    testonly = True,
+    srcs = [
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:q8s32_specialization.cxx",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:q8s32_specialization.h",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:q8s32_specialization_providers.cxx",
+        "//loom/src/loom/tooling/target/amdgpu/test/cxx:q8s32_specialization_providers.loom",
+    ],
+    c_file_output = "q8s32_sources.c",
+    flatten = True,
+    h_file_output = "q8s32_sources.h",
+    identifier = "loomc_cxx_benchmark_q8s32_sources",
+    target_compatible_with = _IMPORT_COMPATIBLE_WITH,
+)
+
+loom_cc_benchmark(
+    name = "q8s32_selection_benchmark",
+    srcs = ["q8s32_selection_benchmark.cc"],
+    target_compatible_with = _AMDGPU_TARGET_COMPATIBLE_WITH,
+    deps = [
+        ":q8s32_sources",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/benchmark:compile_throughput_benchmark_harness",
+        "//loom/binding/c/import/cxx",
+        "//loom/binding/c/target/amdgpu",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:benchmark_main",
+    ],
 )
 
 loom_cc_benchmark(
     name = "source_to_hsaco_benchmark",
     srcs = ["source_to_hsaco_benchmark.cc"],
-    target_compatible_with = _COMPATIBLE_WITH,
+    args = ["--benchmark_min_time=1x"],
+    target_compatible_with = _AMDGPU_COMPATIBLE_WITH,
     deps = [
         ":kernels",
         "//loom/binding/c:loomc",
@@ -51,11 +99,9 @@ loom_cc_benchmark(
 loom_cc_benchmark(
     name = "source_to_module_benchmark",
     srcs = ["source_to_module_benchmark.cc"],
-    target_compatible_with = loom_config_compatible_with([
-        "//loom/config/import:cxx",
-        "//loom/config/import/cxx:embed_includes_enabled",
-    ]),
+    target_compatible_with = _IMPORT_COMPATIBLE_WITH,
     deps = [
+        ":q8s32_sources",
         "//loom/binding/c:loomc",
         "//loom/binding/c/benchmark:compile_throughput_benchmark_harness",
         "//loom/binding/c/import/cxx",

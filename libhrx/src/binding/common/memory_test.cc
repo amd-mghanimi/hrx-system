@@ -11,40 +11,29 @@
 #include <cstring>
 #include <thread>
 
-#include "common/internal.h"
+#include "common/context.h"
+#include "common/device.h"
+#include "common/hrx_bridge.h"
+#include "common/stream.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
+#include "libhrx/src/libhrx/device.h"
 
 #if defined(IREE_PLATFORM_LINUX)
 static std::atomic<bool> g_fail_next_memory_barrier = false;
 
-extern "C" iree_status_t __real_iree_hal_command_buffer_execution_barrier(
+extern "C" iree_status_t __real_iree_hal_command_buffer_barrier(
     iree_hal_command_buffer_t* command_buffer,
-    iree_hal_execution_stage_t source_stage_mask,
-    iree_hal_execution_stage_t target_stage_mask,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers);
+    const iree_hal_barrier_t* barrier);
 
-extern "C" iree_status_t __wrap_iree_hal_command_buffer_execution_barrier(
+extern "C" iree_status_t __wrap_iree_hal_command_buffer_barrier(
     iree_hal_command_buffer_t* command_buffer,
-    iree_hal_execution_stage_t source_stage_mask,
-    iree_hal_execution_stage_t target_stage_mask,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers) {
+    const iree_hal_barrier_t* barrier) {
   if (g_fail_next_memory_barrier.exchange(false, std::memory_order_acq_rel)) {
     return iree_make_status(IREE_STATUS_ABORTED,
                             "injected post-copy barrier failure");
   }
-  return __real_iree_hal_command_buffer_execution_barrier(
-      command_buffer, source_stage_mask, target_stage_mask, flags,
-      memory_barrier_count, memory_barriers, buffer_barrier_count,
-      buffer_barriers);
+  return __real_iree_hal_command_buffer_barrier(command_buffer, barrier);
 }
 
 #endif  // IREE_PLATFORM_LINUX
@@ -75,10 +64,11 @@ iree_status_t InjectedFlushQueueBarrier(
     iree_hal_queue_t* base_queue,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
+    const iree_hal_queue_barriers_t* barriers,
     iree_hal_queue_barrier_flags_t flags) {
   return iree_hal_queue_barrier(CastInjectedFlushQueue(base_queue)->target,
                                 wait_semaphore_list, signal_semaphore_list,
-                                flags);
+                                barriers, flags);
 }
 
 iree_status_t InjectedFlushQueueExecute(
@@ -107,9 +97,9 @@ iree_status_t InjectedFlushQueueExecute(
   wait_semaphores[wait_semaphore_list.count] = queue->execute_gate;
   wait_values[wait_semaphore_list.count] = queue->execute_gate_value;
   const iree_hal_semaphore_list_t gated_waits = {
-      /*.count=*/wait_semaphore_list.count + 1,
-      /*.semaphores=*/wait_semaphores.data(),
-      /*.payload_values=*/wait_values.data(),
+      .count = wait_semaphore_list.count + 1,
+      .semaphores = wait_semaphores.data(),
+      .payload_values = wait_values.data(),
   };
   iree_status_t status =
       iree_hal_queue_execute(queue->target, gated_waits, signal_semaphore_list,
@@ -133,22 +123,22 @@ iree_status_t InjectedFlushQueueFlush(iree_hal_queue_t* base_queue) {
 }
 
 const iree_hal_queue_vtable_t kInjectedFlushQueueVtable = {
-    /*.destroy=*/DestroyInjectedFlushQueue,
-    /*.barrier=*/InjectedFlushQueueBarrier,
-    /*.execute=*/InjectedFlushQueueExecute,
-    /*.host_call=*/nullptr,
-    /*.query_dispatch_concurrency=*/nullptr,
-    /*.dispatch=*/nullptr,
-    /*.atomic_wait=*/nullptr,
-    /*.atomic_store=*/nullptr,
-    /*.atomic_rmw=*/nullptr,
-    /*.timestamp=*/nullptr,
-    /*.flush=*/InjectedFlushQueueFlush,
-    /*.alloca=*/nullptr,
-    /*.dealloca=*/nullptr,
-    /*.transfer=*/nullptr,
-    /*.read=*/nullptr,
-    /*.write=*/nullptr,
+    .destroy = DestroyInjectedFlushQueue,
+    .barrier = InjectedFlushQueueBarrier,
+    .execute = InjectedFlushQueueExecute,
+    .host_call = nullptr,
+    .query_dispatch_concurrency = nullptr,
+    .dispatch = nullptr,
+    .atomic_wait = nullptr,
+    .atomic_store = nullptr,
+    .atomic_rmw = nullptr,
+    .timestamp = nullptr,
+    .flush = InjectedFlushQueueFlush,
+    .alloca = nullptr,
+    .dealloca = nullptr,
+    .transfer = nullptr,
+    .read = nullptr,
+    .write = nullptr,
 };
 
 void InitializeInjectedFlushQueue(iree_hal_queue_t* target,
@@ -214,8 +204,9 @@ class CpuStreamingMemoryTest : public ::testing::Test {
                                      iree_allocator_system(),
                                      &device_entry_.block_pool);
 
-    iree_hal_streaming_context_flags_t context_flags = {};
-    context_flags.scheduling_mode = IREE_HAL_STREAMING_SCHEDULING_MODE_AUTO;
+    iree_hal_streaming_context_flags_t context_flags = {
+        .scheduling_mode = IREE_HAL_STREAMING_SCHEDULING_MODE_AUTO,
+    };
     IREE_ASSERT_OK(iree_hal_streaming_context_create(
         &device_entry_, context_flags, iree_allocator_system(), &context_));
     IREE_ASSERT_OK(iree_hal_streaming_stream_create(
@@ -386,9 +377,9 @@ TEST_F(CpuStreamingMemoryTest,
   uint64_t second_initial_pending = 0;
   for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(streams); ++i) {
     const iree_hal_semaphore_list_t gate_wait = {
-        /*.count=*/1,
-        /*.semaphores=*/&gate,
-        /*.payload_values=*/&gate_values[i],
+        .count = 1,
+        .semaphores = &gate,
+        .payload_values = &gate_values[i],
     };
     IREE_ASSERT_OK(
         iree_hal_streaming_stream_wait_semaphores(streams[i], gate_wait));

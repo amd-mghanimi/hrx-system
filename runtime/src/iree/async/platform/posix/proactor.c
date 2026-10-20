@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -165,6 +166,9 @@ iree_status_t iree_async_proactor_create_posix_with_backend(
   IREE_RETURN_AND_END_ZONE_IF_ERROR(
       z0, iree_allocator_malloc(allocator, total_size, (void**)&proactor));
   memset(proactor, 0, total_size);
+  // Teardown can run before wake initialization when an earlier setup fails.
+  proactor->wake.read_fd = -1;
+  proactor->wake.write_fd = -1;
 
   // Initialize base proactor.
   iree_async_proactor_initialize(&iree_async_proactor_posix_vtable,
@@ -251,16 +255,14 @@ iree_status_t iree_async_proactor_create_posix_with_backend(
                                             proactor->wake.read_fd, POLLIN);
   }
 
-  // Initialize workers. Each worker creates its own thread.
-  if (iree_status_is_ok(status)) {
-    for (iree_host_size_t i = 0; i < worker_count; ++i) {
-      status = iree_async_posix_worker_initialize(proactor, i, allocator,
-                                                  &proactor->workers[i]);
-      if (!iree_status_is_ok(status)) {
-        break;
-      }
-      ++proactor->initialized_workers;
-    }
+  // Include each attempted worker in cleanup, including a worker whose thread
+  // failed to start after its synchronization resources were initialized.
+  for (; iree_status_is_ok(status) &&
+         proactor->initialized_workers < worker_count;
+       ++proactor->initialized_workers) {
+    status = iree_async_posix_worker_initialize(
+        proactor, proactor->initialized_workers, options.worker_affinity,
+        allocator, &proactor->workers[proactor->initialized_workers]);
   }
 
   // Single exit point: assign output on success, release on failure.
@@ -341,6 +343,14 @@ static void iree_async_proactor_posix_destroy(
   iree_async_posix_wake_deinitialize(&proactor->wake);
   iree_async_posix_fd_map_deinitialize(&proactor->fd_map);
   iree_async_posix_event_set_free(proactor->event_set);
+
+  // Closing the event set proves no native readiness can reach sources that
+  // failed individual removal or remained active through final release.
+  while (proactor->event_sources) {
+    iree_async_event_source_t* source = proactor->event_sources;
+    proactor->event_sources = source->next;
+    iree_allocator_free(source->allocator, source);
+  }
 
   // Pools use external storage (in our allocation), just reset state.
   iree_async_posix_completion_pool_deinitialize(&proactor->completion_pool);
@@ -1093,7 +1103,7 @@ static void iree_async_proactor_posix_commit_semaphore_wait(
       .user_data = proactor,
   };
   iree_async_semaphore_wait_tracker_t* tracker = NULL;
-  iree_status_t status = iree_async_semaphore_wait_tracker_create(
+  iree_status_t status = iree_async_semaphore_wait_tracker_allocate(
       &proactor->semaphore_wait_context, wait_op, enqueue_callback,
       proactor->base.allocator, &tracker);
   if (!iree_status_is_ok(status)) {
@@ -3168,6 +3178,7 @@ static iree_host_size_t iree_async_proactor_posix_drain_pending_cancellations(
 static iree_status_t iree_async_proactor_posix_poll(
     iree_async_proactor_t* base_proactor, iree_timeout_t timeout,
     iree_host_size_t* out_completed_count) {
+  IREE_TRACE_ZONE_BEGIN_NAMED(z0, "iree_async_proactor_posix_prepare");
   iree_convert_timeout_to_absolute(&timeout);
   iree_async_proactor_posix_t* proactor =
       iree_async_proactor_posix_cast(base_proactor);
@@ -3178,7 +3189,8 @@ static iree_status_t iree_async_proactor_posix_poll(
 
   if (iree_atomic_load(&proactor->shutdown_requested,
                        iree_memory_order_acquire)) {
-    return iree_make_status(IREE_STATUS_ABORTED, "proactor is shutting down");
+    IREE_RETURN_AND_END_ZONE(
+        z0, iree_make_status(IREE_STATUS_ABORTED, "proactor is shutting down"));
   }
 
   // Drain pending_queue first: register newly submitted operations with
@@ -3212,6 +3224,7 @@ static iree_status_t iree_async_proactor_posix_poll(
     if (out_completed_count) {
       *out_completed_count = completed_count;
     }
+    IREE_TRACE_ZONE_END(z0);
     return progress_status;
   }
 
@@ -3231,6 +3244,7 @@ static iree_status_t iree_async_proactor_posix_poll(
     if (out_completed_count) {
       *out_completed_count = completed_count;
     }
+    IREE_TRACE_ZONE_END(z0);
     return cancel_status;
   }
 
@@ -3245,6 +3259,7 @@ static iree_status_t iree_async_proactor_posix_poll(
   // Poll for ready fds.
   iree_host_size_t ready_count = 0;
   bool timed_out = false;
+  IREE_TRACE_ZONE_END(z0);
   iree_status_t poll_status = iree_async_posix_event_set_wait(
       proactor->event_set, timeout_ms, &ready_count, &timed_out);
   if (!iree_status_is_ok(poll_status)) {
@@ -3253,6 +3268,7 @@ static iree_status_t iree_async_proactor_posix_poll(
     }
     return poll_status;
   }
+  IREE_TRACE_ZONE_BEGIN_NAMED(z1, "iree_async_proactor_posix_dispatch");
   if (timed_out) {
     iree_async_posix_wake_drain(&proactor->wake);
 
@@ -3282,6 +3298,7 @@ static iree_status_t iree_async_proactor_posix_poll(
     if (out_completed_count) {
       *out_completed_count = completed_count;
     }
+    IREE_TRACE_ZONE_END(z1);
     if (completed_count > 0) {
       return iree_ok_status();
     }
@@ -3405,6 +3422,7 @@ static iree_status_t iree_async_proactor_posix_poll(
   }
   // A native interruption yields control even when no descriptor was ready.
   // The event set explicitly distinguishes this from an expired wait.
+  IREE_TRACE_ZONE_END(z1);
   return iree_ok_status();
 }
 
@@ -3905,15 +3923,28 @@ static void iree_async_proactor_posix_unregister_event_source(
   iree_async_proactor_posix_t* proactor =
       iree_async_proactor_posix_cast(base_proactor);
 
-  // Native removal must complete before returning borrowed handle ownership.
+  // Close callback admission before attempting native removal. Poll and
+  // unregistration share one owner thread, so no callback can be executing.
+  event_source->callback = iree_async_event_source_callback_null();
+
+  // Native removal must complete before returning borrowed ownership. A
+  // failed removal leaves the source linked for final event-set destruction.
   iree_status_t status =
       iree_async_posix_event_set_remove(proactor->event_set, event_source->fd);
-  if (!iree_status_is_ok(status)) {
-    iree_status_abort(status);
-  }
   // Ready batches carry descriptors, not source pointers. Map removal prevents
-  // any previously collected readiness from reaching this callback context.
+  // any previously collected readiness from reaching this source even when
+  // native event-set removal fails.
   iree_async_posix_fd_map_remove(&proactor->fd_map, event_source->fd);
+  if (!iree_status_is_ok(status)) {
+    if (callback.fn) {
+      callback.fn(callback.user_data, status);
+    } else {
+      iree_status_fprint(stderr, status);
+      iree_status_free(status);
+    }
+    IREE_TRACE_ZONE_END(z0);
+    return;
+  }
 
   // Unlink from the proactor's event source list.
   if (event_source->prev) {
@@ -3931,7 +3962,7 @@ static void iree_async_proactor_posix_unregister_event_source(
   iree_allocator_free(allocator, event_source);
 
   if (callback.fn) {
-    callback.fn(callback.user_data);
+    callback.fn(callback.user_data, iree_ok_status());
   }
   IREE_TRACE_ZONE_END(z0);
 }

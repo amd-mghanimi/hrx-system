@@ -4,10 +4,9 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-#include "test/target/iree_hal_execution.h"
-
 #include <array>
 #include <cstdint>
+#include <cstring>
 
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
@@ -15,6 +14,7 @@
 #include "loomc/loomc.h"
 #include "loomc/target/amdgpu.h"
 #include "loomc/target/amdgpu/iree_hal.h"
+#include "test/target/iree_hal_execution_test_util.h"
 #include "test/util.h"
 
 namespace {
@@ -24,7 +24,7 @@ kernel.def @double_i32_at_byte_offset() {
   %unit = index.constant 1 : index
   kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
 } launch(%input: buffer, %output: buffer, %byte_offset: offset) {
-  %byte_offset_aligned = index.assume %byte_offset [mul(%byte_offset, 4)] : offset
+  %byte_offset_aligned = index.assume %byte_offset [multiple_of(%byte_offset, 4)] : offset
   %input_aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
   %output_aligned = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
   %input_view = buffer.view %input_aligned[%byte_offset_aligned] : buffer -> view<1xi32>
@@ -32,6 +32,41 @@ kernel.def @double_i32_at_byte_offset() {
   %doubled = scalar.addi %loaded, %loaded : i32
   %output_view = buffer.view %output_aligned[%byte_offset_aligned] : buffer -> view<1xi32>
   view.store %doubled, %output_view[0] : i32, view<1xi32>
+  kernel.return
+}
+)";
+
+constexpr char kVectorArgumentSourceText[] = R"(
+kernel.def @select_vector_arguments() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %values: vector<20xi32>, %predicates: vector<4xi1>, %scalar_predicate: i1) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input[%base] : buffer -> view<4xi32>
+  %output_view = buffer.view %output[%base] : buffer -> view<9xi32>
+  %fallback0 = view.load %input_view[0] : view<4xi32> -> i32
+  %fallback1 = view.load %input_view[1] : view<4xi32> -> i32
+  %fallback2 = view.load %input_view[2] : view<4xi32> -> i32
+  %fallback3 = view.load %input_view[3] : view<4xi32> -> i32
+  %value0 = vector.extract %values[0] : vector<20xi32> -> i32
+  %value15 = vector.extract %values[15] : vector<20xi32> -> i32
+  %value16 = vector.extract %values[16] : vector<20xi32> -> i32
+  %value19 = vector.extract %values[19] : vector<20xi32> -> i32
+  %predicate0 = vector.extract %predicates[0] : vector<4xi1> -> i1
+  %predicate1 = vector.extract %predicates[1] : vector<4xi1> -> i1
+  %predicate2 = vector.extract %predicates[2] : vector<4xi1> -> i1
+  %predicate3 = vector.extract %predicates[3] : vector<4xi1> -> i1
+  %selected0 = scf.select %predicate0, %value0, %fallback0 : i32
+  %selected1 = scf.select %predicate1, %value15, %fallback1 : i32
+  %selected2 = scf.select %predicate2, %value16, %fallback2 : i32
+  %selected3 = scf.select %predicate3, %value19, %fallback3 : i32
+  %scalar_selected = scf.select %scalar_predicate, %value19, %fallback3 : i32
+  %predicate_word0 = scalar.extui %predicate0 : i1 to i32
+  %predicate_word1 = scalar.extui %predicate1 : i1 to i32
+  %predicate_word2 = scalar.extui %predicate2 : i1 to i32
+  %predicate_word3 = scalar.extui %predicate3 : i1 to i32
+  %result = vector.from_elements %selected0, %selected1, %selected2, %selected3, %predicate_word0, %predicate_word1, %predicate_word2, %predicate_word3, %scalar_selected : vector<9xi32>
+  vector.store %result, %output_view[0] : vector<9xi32>, view<9xi32>
   kernel.return
 }
 )";
@@ -63,6 +98,10 @@ kernel.def @double_i32_at_byte_offset() {
 // clang-format off
 constexpr char kWideScaledSourceText[] =
     "template.decl @spill_offset(%words: vector<2xi32>) -> (vector<2xi32>)\n"
+#if defined(LOOM_AMDGPU_DESCRIPTOR_SET_CDNA2_CORE)
+    AMDGPU_SPILL_OFFSET_PROVIDER(gfx90a, "gfx90a",
+                                "amdgpu.cdna2.core")
+#endif
 #if defined(LOOM_AMDGPU_DESCRIPTOR_SET_CDNA3_CORE)
     AMDGPU_SPILL_OFFSET_PROVIDER(gfx940, "gfx940",
                                 "amdgpu.cdna3.core")
@@ -171,159 +210,180 @@ loomc_status_t ValidateAmdgpuProfile(loomc_target_profile_t* target_profile,
   return loomc_amdgpu_target_profile_query_identity(target_profile, &identity);
 }
 
-loomc_status_t EmitAmdgpuModule(loomc_target_environment_t* target_environment,
-                                loomc_workspace_t* workspace,
-                                loomc_module_t* module,
-                                loomc_string_view_t artifact_format,
-                                loomc_string_view_t artifact_identifier,
-                                loomc_result_t** out_result) {
-  const loomc_amdgpu_emit_options_t amdgpu_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_AMDGPU_EMIT_OPTIONS,
-      /*.structure_size=*/sizeof(amdgpu_options),
-      /*.next=*/nullptr,
-      /*.runtime_globals=*/LOOMC_AMDGPU_RUNTIME_GLOBAL_NONE,
-  };
-  const loomc_emit_options_t emit_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_EMIT_OPTIONS,
-      /*.structure_size=*/sizeof(emit_options),
-      /*.next=*/&amdgpu_options,
-      /*.artifact_format=*/artifact_format,
-      /*.identifier=*/artifact_identifier,
-      /*.artifact_flags=*/LOOMC_EMIT_ARTIFACT_FLAG_PRIMARY,
-  };
-  return loomc_emit_module(target_environment, workspace, module, &emit_options,
-                           loomc_allocator_system(), out_result);
-}
-
 loomc::testing::target::IreeHalKernelExecutionTarget MakeExecutionTarget(
     const char* source_text, const char* kernel_export_name) {
-  static const loomc_iree_hal_profile_provider_t* const profile_providers[] = {
-      loomc_amdgpu_iree_hal_profile_provider(),
+  static const loomc_iree_hal_target_provider_t* const target_providers[] = {
+      loomc_amdgpu_iree_hal_target_provider(),
   };
 
-  loomc::testing::target::IreeHalKernelExecutionTarget target = {};
-  target.label = "AMDGPU";
-  target.device_uri = IREE_SV("amdgpu");
-  target.target_profile_identifier = loomc_make_cstring_view("live-amdgpu");
-  target.source_identifier = loomc_make_cstring_view("live_amdgpu.loom");
-  target.source_text = loomc_make_cstring_view(source_text);
-  target.module_name = loomc_make_cstring_view("live_amdgpu_execution_test");
-  target.kernel_export_name = loomc_make_cstring_view(kernel_export_name);
-  target.target_pipeline_identifier =
-      loomc_make_cstring_view("live-amdgpu-prepared-low");
-  target.target_pipeline_kind = LOOMC_TARGET_PIPELINE_KIND_PREPARED_LOW;
-  target.control_flow_lowering = LOOMC_TARGET_CONTROL_FLOW_LOWERING_CFG;
-  target.source_to_low_max_errors = 20;
-  target.artifact_format =
-      loomc_make_cstring_view(LOOMC_ARTIFACT_FORMAT_AMDGPU_HSACO);
-  target.artifact_identifier = loomc_make_cstring_view("live_amdgpu.hsaco");
-  target.executable_target_selection = {
-      /*.family=*/IREE_SV("amdgpu"),
-      /*.target_key=*/iree_string_view_empty(),
-      /*.kind_flags=*/IREE_HAL_EXECUTABLE_TARGET_KIND_FLAG_EXACT,
-      /*.physical_device_affinity=*/0,
+  loomc::testing::target::IreeHalKernelExecutionTarget target = {
+      .label = "AMDGPU",
+      .device_uri = IREE_SV("amdgpu"),
+      .target_profile_identifier = loomc_make_cstring_view("live-amdgpu"),
+      .source_identifier = loomc_make_cstring_view("live_amdgpu.loom"),
+      .source_text = loomc_make_cstring_view(source_text),
+      .kernel_export_name = loomc_make_cstring_view(kernel_export_name),
+      .target_pipeline_identifier =
+          loomc_make_cstring_view("live-amdgpu-prepared-low"),
+      .target_pipeline_kind = LOOMC_TARGET_PIPELINE_KIND_PREPARED_LOW,
+      .control_flow_lowering = LOOMC_TARGET_CONTROL_FLOW_LOWERING_CFG,
+      .source_to_low_max_errors = 20,
+      .artifact_format =
+          loomc_make_cstring_view(LOOMC_ARTIFACT_FORMAT_AMDGPU_HSACO),
+      .artifact_identifier = loomc_make_cstring_view("live_amdgpu.hsaco"),
+      .target_providers = target_providers,
+      .target_provider_count = 1,
+      .create_target_environment = CreateAmdgpuTargetEnvironment,
+      .validate_target_profile = ValidateAmdgpuProfile,
   };
-  target.profile_providers = profile_providers;
-  target.profile_provider_count = 1;
-  target.create_target_environment = CreateAmdgpuTargetEnvironment;
-  target.validate_target_profile = ValidateAmdgpuProfile;
-  target.emit_module = EmitAmdgpuModule;
   return target;
 }
 
-// Backs the first page and the page at 4 GiB with distinct physical memory.
+// Backs the first page and the page at 4 GiB with distinct physical pages.
 // A truncated address remains mapped and produces an observable wrong result.
 class SparseTestBuffer {
  public:
   static constexpr iree_device_size_t kHighPageOffset = uint64_t{1} << 32;
 
-  SparseTestBuffer(iree_hal_allocator_t* allocator,
-                   iree_device_size_t page_size)
-      : allocator_(allocator), page_size_(page_size) {}
+  SparseTestBuffer() = default;
   SparseTestBuffer(const SparseTestBuffer&) = delete;
   SparseTestBuffer& operator=(const SparseTestBuffer&) = delete;
 
   ~SparseTestBuffer() {
-    for (iree_host_size_t i = 0; i < mapped_page_count_; ++i) {
-      IREE_EXPECT_OK(iree_hal_allocator_virtual_memory_unmap(
-          allocator_, buffer_, i * kHighPageOffset, page_size_));
-    }
-    for (auto* physical_memory : physical_memory_) {
-      if (physical_memory) {
-        IREE_EXPECT_OK(iree_hal_allocator_physical_memory_free(
-            allocator_, physical_memory));
-      }
-    }
-    if (buffer_) {
-      IREE_EXPECT_OK(
-          iree_hal_allocator_virtual_memory_release(allocator_, buffer_));
-    }
-  }
-
-  iree_status_t Initialize(iree_hal_buffer_params_t params) {
-    IREE_RETURN_IF_ERROR(iree_hal_allocator_virtual_memory_reserve(
-        allocator_, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
-        kHighPageOffset + page_size_, &buffer_));
     iree_status_t status = iree_ok_status();
-    for (iree_host_size_t i = 0; i < 2 && iree_status_is_ok(status); ++i) {
-      status = iree_hal_allocator_physical_memory_allocate(
-          allocator_, params, page_size_, iree_allocator_system(),
-          &physical_memory_[i]);
-      if (iree_status_is_ok(status)) {
-        status = iree_hal_allocator_virtual_memory_map(
-            allocator_, buffer_, i * kHighPageOffset, physical_memory_[i],
-            /*physical_offset=*/0, page_size_);
-      }
-      if (iree_status_is_ok(status)) {
-        ++mapped_page_count_;
-        status = iree_hal_allocator_virtual_memory_protect(
-            allocator_, buffer_, i * kHighPageOffset, page_size_,
-            IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
-            IREE_HAL_VIRTUAL_MEMORY_ACCESS_SCOPE_DEVICE,
-            IREE_HAL_MEMORY_PROTECTION_READ_WRITE);
+    if (reservation_) {
+      const iree_hal_memory_scope_t scope = {
+          reservation_->memory.contract->domain, IREE_HAL_MEMORY_SCOPE_ANY};
+      status = iree_hal_virtual_buffer_detach(reservation_, scope);
+    }
+    iree_hal_buffer_release(reservation_);
+    if (iree_status_is_ok(status)) {
+      for (auto* backing : backing_) {
+        iree_hal_buffer_release(backing);
       }
     }
-    return status;
+    IREE_EXPECT_OK(status);
   }
 
-  iree_hal_buffer_t* get() const { return buffer_; }
+  iree_status_t Initialize(iree_hal_device_group_t* group,
+                           iree_hal_pool_scope_t scope,
+                           iree_hal_pool_t* source_pool,
+                           iree_hal_queue_t* queue,
+                           iree_device_size_t page_size) {
+    const iree_hal_virtual_buffer_options_t options = {
+        .byte_length = kHighPageOffset + page_size,
+        .mapping_granularity = page_size,
+    };
+    IREE_RETURN_IF_ERROR(iree_hal_virtual_buffer_create(
+        group, scope, &options, iree_allocator_system(), &reservation_));
+    iree_status_t status = iree_ok_status();
+    for (size_t i = 0; i < backing_.size() && iree_status_is_ok(status); ++i) {
+      status = iree_hal_pool_allocate_buffer(
+          source_pool,
+          iree_hal_make_pool_reservation_request(page_size, page_size),
+          iree_infinite_timeout(), &backing_[i]);
+    }
+    IREE_RETURN_IF_ERROR(status);
+    iree_hal_semaphore_t* semaphore = nullptr;
+    IREE_RETURN_IF_ERROR(iree_hal_semaphore_create(
+        iree_hal_queue_family_device(iree_hal_queue_family(queue)),
+        IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY, 0, IREE_HAL_SEMAPHORE_FLAG_DEFAULT,
+        &semaphore));
+    loomc::testing::HandlePtr<iree_hal_semaphore_t, iree_hal_semaphore_release>
+        semaphore_ptr(semaphore);
+    uint64_t value = 1;
+    const iree_hal_semaphore_list_t signal = {1, &semaphore, &value};
+    std::array<iree_hal_memory_mapping_t, 2> mappings;
+    for (size_t i = 0; i < mappings.size(); ++i) {
+      mappings[i] = {
+          .target = reservation_,
+          .scope =
+              {
+                  .domain = iree_hal_device_group_memory_domain(group),
+                  .id = IREE_HAL_MEMORY_SCOPE_ANY,
+              },
+          .target_range =
+              iree_hal_make_buffer_range(i * kHighPageOffset, page_size),
+          .source = backing_[i],
+          .access = IREE_HAL_MEMORY_ACCESS_ALL,
+          .operation = IREE_HAL_MEMORY_MAPPING_OPERATION_BIND,
+      };
+    }
+    IREE_RETURN_IF_ERROR(iree_hal_queue_map(
+        queue, iree_hal_semaphore_list_empty(), signal, mappings.size(),
+        mappings.data(), IREE_HAL_QUEUE_MAP_FLAG_NONE));
+    return iree_hal_semaphore_list_wait(signal, iree_infinite_timeout(),
+                                        IREE_ASYNC_WAIT_FLAG_NONE);
+  }
+
+  iree_hal_buffer_t* get() const { return reservation_; }
 
  private:
-  // Borrowed allocator, which outlives the reservation and physical storage.
-  iree_hal_allocator_t* allocator_;
-  // Minimum mapping granularity in bytes, queried from the live allocator.
-  iree_device_size_t page_size_;
-  // Owned virtual reservation, released after all pages have been unmapped.
-  iree_hal_buffer_t* buffer_ = nullptr;
-  // Owned whole-page allocations, one per mapping as required by ROCr VMM.
-  std::array<iree_hal_physical_memory_t*, 2> physical_memory_ = {};
-  // Successfully mapped pages requiring teardown, including failed protection.
-  iree_host_size_t mapped_page_count_ = 0;
+  // Virtual buffer retaining the address interval until final release.
+  iree_hal_buffer_t* reservation_ = nullptr;
+  // Separate source allocations preserve distinct low/high contents on devices
+  // whose native mappings require whole allocations.
+  std::array<iree_hal_buffer_t*, 2> backing_ = {};
 };
 
 void RunSparseByteOffsetExecution(
     const loomc::testing::target::IreeHalKernelExecution& execution,
     iree_const_byte_span_t constants,
     const std::array<int32_t, 4>& expected_high_output) {
-  iree_hal_allocator_t* allocator = iree_hal_device_allocator(execution.device);
-  if (!iree_hal_allocator_supports_virtual_memory(allocator)) {
-    GTEST_SKIP() << "live allocator does not support sparse virtual memory";
+  std::array<iree_hal_pool_family_access_t, 2> families = {{
+      {
+          .family = iree_hal_queue_family(execution.transfer_queue),
+          .usage =
+              IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_STORAGE,
+      },
+      {
+          .family = iree_hal_queue_family(execution.dispatch_queue),
+          .usage =
+              IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_STORAGE,
+      },
+  }};
+  const iree_hal_pool_scope_t scope = {
+      .family_count = families[0].family == families[1].family ? 1u : 2u,
+      .families = families.data(),
+  };
+  iree_hal_virtual_buffer_capabilities_t capabilities;
+  IREE_ASSERT_OK(iree_hal_virtual_buffer_query_capabilities(
+      execution.device_group, scope, iree_allocator_system(), &capabilities));
+  if (!capabilities.max_byte_length) {
+    GTEST_SKIP() << "live device group does not support sparse virtual memory";
   }
-  iree_hal_buffer_params_t params = {};
-  params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
-  params.usage = IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
-  iree_device_size_t page_size = 0;
-  iree_device_size_t recommended_page_size = 0;
-  IREE_ASSERT_OK(iree_hal_allocator_virtual_memory_query_granularity(
-      allocator, params, &page_size, &recommended_page_size));
+  for (auto& family : families) {
+    family.interfaces = UINT64_C(1) << IREE_HAL_BUFFER_INTERFACE_MAPPING_SOURCE;
+  }
+  iree_hal_slab_pool_options_t source_options;
+  iree_hal_slab_pool_options_initialize(&source_options);
+  iree_hal_pool_t* source_pool = nullptr;
+  IREE_ASSERT_OK(
+      iree_hal_slab_pool_create(execution.device_group, scope, &source_options,
+                                iree_allocator_system(), &source_pool));
+  loomc::testing::HandlePtr<iree_hal_pool_t, iree_hal_pool_release>
+      source_pool_ptr(source_pool);
+  const auto requirements =
+      iree_hal_pool_query_mapping_requirements(source_pool);
+  const iree_device_size_t page_size =
+      iree_max(capabilities.reservation_granularity,
+               iree_max(capabilities.mapping_granularity,
+                        requirements.minimum_granularity));
   ASSERT_GT(page_size, 0u);
   ASSERT_LE(page_size, 2 * 1024 * 1024u);
   ASSERT_EQ(SparseTestBuffer::kHighPageOffset % page_size, 0u);
+  for (auto& family : families) {
+    family.interfaces = 0;
+  }
 
-  SparseTestBuffer input_buffer(allocator, page_size);
-  SparseTestBuffer output_buffer(allocator, page_size);
-  IREE_ASSERT_OK(input_buffer.Initialize(params));
-  IREE_ASSERT_OK(output_buffer.Initialize(params));
+  SparseTestBuffer input_buffer;
+  SparseTestBuffer output_buffer;
+  IREE_ASSERT_OK(input_buffer.Initialize(execution.device_group, scope,
+                                         source_pool, execution.transfer_queue,
+                                         page_size));
+  IREE_ASSERT_OK(output_buffer.Initialize(execution.device_group, scope,
+                                          source_pool, execution.transfer_queue,
+                                          page_size));
 
   std::array<std::array<int32_t, 4>, 2> input = {
       {{5, 7, 11, 13}, {13, 17, 19, 23}}};
@@ -367,7 +427,7 @@ void RunSparseByteOffsetExecution(
   uint64_t completion_value = 0;
   iree_status_t status = iree_hal_queue_transfer(
       execution.transfer_queue, iree_hal_semaphore_list_empty(), upload_signal,
-      IREE_ARRAYSIZE(uploads), uploads);
+      IREE_ARRAYSIZE(uploads), uploads, /*barriers=*/NULL);
   if (iree_status_is_ok(status)) {
     completion_value = upload_value;
     status = loomc::testing::target::DispatchIreeHalKernel(
@@ -378,7 +438,7 @@ void RunSparseByteOffsetExecution(
     completion_value = dispatch_value;
     status = iree_hal_queue_transfer(execution.transfer_queue, dispatch_signal,
                                      download_signal, IREE_ARRAYSIZE(downloads),
-                                     downloads);
+                                     downloads, /*barriers=*/NULL);
   }
   if (iree_status_is_ok(status)) {
     completion_value = download_value;
@@ -399,6 +459,34 @@ TEST(LoomcAmdgpuIreeHalExecutionTest,
   loomc::testing::target::RunIreeHalKernelExecutionTest(
       MakeExecutionTarget(kSourceText, "double_i32_at_byte_offset"),
       loomc::testing::target::RunIreeHalByteOffsetExecution);
+}
+
+TEST(LoomcAmdgpuIreeHalExecutionTest, VectorArgumentsCrossNativeKernarg) {
+  loomc::testing::target::RunIreeHalKernelExecutionTest(
+      MakeExecutionTarget(kVectorArgumentSourceText, "select_vector_arguments"),
+      [](const loomc::testing::target::IreeHalKernelExecution& execution) {
+        EXPECT_EQ(execution.launch_config.workgroup_size.x, 1u);
+        EXPECT_EQ(execution.launch_config.workgroup_size.y, 1u);
+        EXPECT_EQ(execution.launch_config.workgroup_size.z, 1u);
+        std::array<uint32_t, 21> constant_words = {};
+        for (size_t i = 0; i < 20; ++i) {
+          constant_words[i] = 101 + static_cast<uint32_t>(i);
+        }
+        constant_words[20] = 0x00010001;
+        std::array<uint8_t, sizeof(constant_words) + 1> constants = {};
+        std::memcpy(constants.data(), constant_words.data(),
+                    sizeof(constant_words));
+        constants.back() = 1;
+        const std::array<int32_t, 4> input = {-1, -2, -3, -4};
+        std::array<int32_t, 9> output = {};
+        loomc::testing::target::ExecuteIreeHalKernelWithBuffers(
+            execution,
+            iree_make_const_byte_span(constants.data(), sizeof(constants)),
+            iree_make_const_byte_span(input.data(), sizeof(input)),
+            iree_make_byte_span(output.data(), sizeof(output)));
+        EXPECT_EQ(output,
+                  (std::array<int32_t, 9>{101, -2, 117, -4, 1, 0, 1, 0, 120}));
+      });
 }
 
 TEST(LoomcAmdgpuIreeHalExecutionTest, UniformByteOffsetBeyond4GiB) {

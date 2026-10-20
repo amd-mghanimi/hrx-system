@@ -12,7 +12,6 @@
 #include "loom/ops/func_symbol_facts.h"
 #include "loom/ops/op_defs.h"
 #include "loom/ops/target/facts.h"
-#include "loom/ops/target/ops.h"
 #include "loom/target/facts_builder.h"
 #include "loom/target/function_contract.h"
 #include "loom/target/provider.h"
@@ -69,40 +68,6 @@ typedef struct loom_target_resolved_declaration_binding_t {
   const loom_target_provider_t* target_provider;
 } loom_target_resolved_declaration_binding_t;
 
-static iree_string_view_t loom_target_specialization_normalize_symbol_name(
-    iree_string_view_t symbol_name) {
-  symbol_name = iree_string_view_trim(symbol_name);
-  (void)iree_string_view_consume_prefix_char(&symbol_name, '@');
-  return iree_string_view_trim(symbol_name);
-}
-
-static iree_status_t loom_target_specialization_resolve_profile(
-    const loom_target_environment_t* environment,
-    const loom_target_profile_t* target_profile, const char* request_kind,
-    iree_host_size_t request_ordinal,
-    const loom_target_provider_t** out_target_provider) {
-  *out_target_provider = NULL;
-  if (target_profile == NULL || target_profile->type == NULL ||
-      target_profile->target_bundle == NULL) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "%s %" PRIhsz " has no complete target profile",
-                            request_kind, request_ordinal);
-  }
-  const loom_target_provider_t* target_provider =
-      loom_target_environment_lookup_profile_provider(environment,
-                                                      target_profile->type);
-  if (target_provider == NULL) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "%s %" PRIhsz
-        " uses profile family '%.*s' not linked into the target environment",
-        request_kind, request_ordinal, (int)target_profile->type->name.size,
-        target_profile->type->name.data);
-  }
-  *out_target_provider = target_provider;
-  return iree_ok_status();
-}
-
 static iree_status_t loom_target_specialization_lookup_target(
     const loom_module_t* module, loom_symbol_fact_table_t* fact_table,
     loom_symbol_ref_t target_ref, iree_string_view_t* out_target_name,
@@ -122,29 +87,12 @@ static iree_status_t loom_target_specialization_lookup_target(
 
 static iree_status_t loom_target_specialization_resolve_function_symbol(
     loom_module_t* module, loom_symbol_id_t function_symbol_id,
-    iree_bitmap_t specialized_symbols, loom_symbol_fact_table_t* fact_table,
+    loom_symbol_fact_table_t* fact_table,
     loom_target_resolved_specialization_t* out_specialization) {
   loom_symbol_t* function_symbol = &module->symbols.entries[function_symbol_id];
   const loom_string_id_t function_name_id = function_symbol->name_id;
-  const iree_string_view_t function_name =
-      loom_string_table_get(&module->strings, function_name_id);
-  if (iree_bitmap_test(specialized_symbols, function_symbol_id)) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "target specialization function '@%.*s' was assigned more than once",
-        (int)function_name.size, function_name.data);
-  }
-
   loom_func_like_t function =
       loom_func_like_cast(module, function_symbol->defining_op);
-  if (!loom_func_like_isa(function) ||
-      function.vtable->target_attr_index == LOOM_ATTR_INDEX_NONE) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "target specialization symbol '@%.*s' is not a target-assignable "
-        "function",
-        (int)function_name.size, function_name.data);
-  }
 
   const loom_symbol_facts_base_t* function_base_facts = NULL;
   IREE_RETURN_IF_ERROR(loom_symbol_fact_table_lookup(
@@ -175,88 +123,6 @@ static iree_status_t loom_target_specialization_resolve_function_symbol(
       .targetless_context_ordinal = LOOM_TARGET_CONTEXT_ORDINAL_INVALID,
       .target_context_ordinal = LOOM_TARGET_CONTEXT_ORDINAL_INVALID,
   };
-  iree_bitmap_set(specialized_symbols, function_symbol_id);
-  return iree_ok_status();
-}
-
-static iree_status_t loom_target_specialization_resolve_function_name(
-    loom_module_t* module, iree_string_view_t requested_name,
-    iree_bitmap_t specialized_symbols, loom_symbol_fact_table_t* fact_table,
-    loom_target_resolved_specialization_t* out_specialization) {
-  const iree_string_view_t function_name =
-      loom_target_specialization_normalize_symbol_name(requested_name);
-  if (iree_string_view_is_empty(function_name)) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "target specialization function name is empty");
-  }
-
-  const loom_string_id_t function_name_id =
-      loom_module_lookup_string(module, function_name);
-  const loom_symbol_id_t function_symbol_id =
-      function_name_id != LOOM_STRING_ID_INVALID
-          ? loom_module_find_symbol(module, function_name_id)
-          : LOOM_SYMBOL_ID_INVALID;
-  if (function_symbol_id == LOOM_SYMBOL_ID_INVALID) {
-    return iree_make_status(
-        IREE_STATUS_NOT_FOUND,
-        "target specialization function '@%.*s' does not exist",
-        (int)function_name.size, function_name.data);
-  }
-  return loom_target_specialization_resolve_function_symbol(
-      module, function_symbol_id, specialized_symbols, fact_table,
-      out_specialization);
-}
-
-static iree_status_t loom_target_specialization_resolve_declaration_binding(
-    const loom_target_environment_t* environment, loom_module_t* module,
-    const loom_target_declaration_binding_t* binding,
-    iree_host_size_t binding_ordinal,
-    loom_target_resolved_declaration_binding_t** bindings_by_target_symbol,
-    loom_target_resolved_declaration_binding_t* out_binding) {
-  const iree_string_view_t target_name =
-      loom_target_specialization_normalize_symbol_name(binding->target_name);
-  if (iree_string_view_is_empty(target_name)) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "target declaration binding %" PRIhsz
-                            " has an empty symbol name",
-                            binding_ordinal);
-  }
-
-  const loom_string_id_t target_name_id =
-      loom_module_lookup_string(module, target_name);
-  const loom_symbol_id_t target_symbol_id =
-      target_name_id != LOOM_STRING_ID_INVALID
-          ? loom_module_find_symbol(module, target_name_id)
-          : LOOM_SYMBOL_ID_INVALID;
-  if (target_symbol_id == LOOM_SYMBOL_ID_INVALID) {
-    return iree_make_status(
-        IREE_STATUS_NOT_FOUND,
-        "target declaration binding symbol '@%.*s' does not exist",
-        (int)target_name.size, target_name.data);
-  }
-  if (!loom_target_decl_isa(
-          module->symbols.entries[target_symbol_id].defining_op)) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "target declaration binding symbol '@%.*s' is not a target.decl",
-        (int)target_name.size, target_name.data);
-  }
-  if (bindings_by_target_symbol[target_symbol_id] != NULL) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "target declaration '@%.*s' was bound more than once",
-        (int)target_name.size, target_name.data);
-  }
-
-  const loom_target_provider_t* target_provider = NULL;
-  IREE_RETURN_IF_ERROR(loom_target_specialization_resolve_profile(
-      environment, binding->target_profile, "target declaration binding",
-      binding_ordinal, &target_provider));
-  *out_binding = (loom_target_resolved_declaration_binding_t){
-      .target_profile = binding->target_profile,
-      .target_provider = target_provider,
-  };
-  bindings_by_target_symbol[target_symbol_id] = out_binding;
   return iree_ok_status();
 }
 
@@ -303,7 +169,7 @@ static iree_status_t loom_target_specialization_prepare_versions(
     loom_target_resolved_specialization_t* specializations,
     iree_host_size_t specialization_count,
     iree_diagnostic_emitter_t diagnostic_emitter, iree_arena_allocator_t* arena,
-    uint32_t* out_error_count) {
+    iree_host_size_t first_target_context_ordinal, uint32_t* out_error_count) {
   *out_error_count = 0;
 
   for (iree_host_size_t i = 0; i < specialization_count; ++i) {
@@ -327,7 +193,7 @@ static iree_status_t loom_target_specialization_prepare_versions(
     }
   }
 
-  iree_host_size_t next_target_context_ordinal = 0;
+  iree_host_size_t next_target_context_ordinal = first_target_context_ordinal;
   for (iree_host_size_t i = 0; i < specialization_count; ++i) {
     loom_target_resolved_specialization_t* specialization = &specializations[i];
     const loom_target_facts_t* projected_profile_facts =
@@ -449,24 +315,16 @@ iree_status_t loom_target_specialize_functions(
     const loom_target_environment_t* environment, loom_module_t* module,
     loom_target_specialization_request_list_t requests,
     loom_target_declaration_binding_list_t bindings,
-    iree_diagnostic_emitter_t diagnostic_emitter, iree_arena_allocator_t* arena,
-    loom_target_specialization_result_t* out_result) {
+    iree_diagnostic_emitter_t diagnostic_emitter,
+    loom_function_version_owner_t* inout_function_versions,
+    uint32_t* out_error_count) {
   IREE_ASSERT_ARGUMENT(environment);
   IREE_ASSERT_ARGUMENT(module);
-  IREE_ASSERT_ARGUMENT(arena);
-  IREE_ASSERT_ARGUMENT(out_result);
-  *out_result = (loom_target_specialization_result_t){0};
-  loom_function_version_owner_initialize(arena, &out_result->function_versions);
-  if (requests.count != 0 && requests.values == NULL) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "target specialization request count is nonzero but values is NULL");
-  }
-  if (bindings.count != 0 && bindings.values == NULL) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "target declaration binding count is nonzero but values is NULL");
-  }
+  IREE_ASSERT_ARGUMENT(inout_function_versions);
+  IREE_ASSERT_ARGUMENT(inout_function_versions->arena);
+  IREE_ASSERT_ARGUMENT(out_error_count);
+  *out_error_count = 0;
+  iree_arena_allocator_t* arena = inout_function_versions->arena;
   if (requests.count == 0 && bindings.count == 0) {
     return iree_ok_status();
   }
@@ -484,10 +342,14 @@ iree_status_t loom_target_specialize_functions(
       bindings_by_target_symbol[i] = NULL;
     }
     for (iree_host_size_t i = 0; i < bindings.count; ++i) {
-      IREE_RETURN_IF_ERROR(
-          loom_target_specialization_resolve_declaration_binding(
-              environment, module, &bindings.values[i], i,
-              bindings_by_target_symbol, &resolved_bindings[i]));
+      const loom_target_declaration_binding_t* binding = &bindings.values[i];
+      resolved_bindings[i] = (loom_target_resolved_declaration_binding_t){
+          .target_profile = binding->target_profile,
+          .target_provider = loom_target_environment_lookup_profile_provider(
+              environment, binding->target_profile->type),
+      };
+      bindings_by_target_symbol[binding->target_ref.symbol_id] =
+          &resolved_bindings[i];
     }
   }
 
@@ -510,37 +372,26 @@ iree_status_t loom_target_specialize_functions(
     return iree_ok_status();
   }
 
+  loom_target_function_version_snapshot_t previous_versions = {0};
+  IREE_RETURN_IF_ERROR(loom_target_function_version_snapshot_build(
+      module, &inout_function_versions->list, arena, &previous_versions));
+
   loom_target_resolved_specialization_t* specializations = NULL;
   IREE_RETURN_IF_ERROR(iree_arena_allocate_array(arena, specialization_count,
                                                  sizeof(*specializations),
                                                  (void**)&specializations));
-  const iree_host_size_t specialized_symbol_word_count =
-      iree_bitmap_calculate_words(module->symbols.count);
-  uint64_t* specialized_symbol_words = NULL;
-  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-      arena, specialized_symbol_word_count, sizeof(*specialized_symbol_words),
-      (void**)&specialized_symbol_words));
-  for (iree_host_size_t i = 0; i < specialized_symbol_word_count; ++i) {
-    specialized_symbol_words[i] = 0;
-  }
-  const iree_bitmap_t specialized_symbols = {
-      .bit_count = module->symbols.count,
-      .words = specialized_symbol_words,
-  };
   loom_symbol_fact_table_t fact_table = {0};
   loom_symbol_fact_table_initialize(&fact_table, arena);
 
   for (iree_host_size_t i = 0; i < requests.count; ++i) {
     const loom_target_specialization_request_t* request = &requests.values[i];
-    const loom_target_provider_t* target_provider = NULL;
-    IREE_RETURN_IF_ERROR(loom_target_specialization_resolve_profile(
-        environment, request->target_profile, "target specialization request",
-        i, &target_provider));
-    IREE_RETURN_IF_ERROR(loom_target_specialization_resolve_function_name(
-        module, request->function_name, specialized_symbols, &fact_table,
+    IREE_RETURN_IF_ERROR(loom_target_specialization_resolve_function_symbol(
+        module, request->function_ref.symbol_id, &fact_table,
         &specializations[i]));
     specializations[i].target_profile = request->target_profile;
-    specializations[i].resolved_target.provider = target_provider;
+    specializations[i].resolved_target.provider =
+        loom_target_environment_lookup_profile_provider(
+            environment, request->target_profile->type);
   }
 
   iree_host_size_t next_specialization_ordinal = requests.count;
@@ -555,7 +406,7 @@ iree_status_t loom_target_specialize_functions(
       continue;
     }
     IREE_RETURN_IF_ERROR(loom_target_specialization_resolve_function_symbol(
-        module, symbol_id, specialized_symbols, &fact_table,
+        module, symbol_id, &fact_table,
         &specializations[next_specialization_ordinal]));
     specializations[next_specialization_ordinal].target_profile =
         binding->target_profile;
@@ -569,22 +420,56 @@ iree_status_t loom_target_specialize_functions(
   IREE_RETURN_IF_ERROR(iree_arena_allocate_array(arena, specialization_count,
                                                  sizeof(*target_versions),
                                                  (void**)&target_versions));
-  IREE_RETURN_IF_ERROR(loom_function_version_owner_reserve(
-      &out_result->function_versions, specialization_count));
   for (iree_host_size_t i = 0; i < specialization_count; ++i) {
     specializations[i].version = &target_versions[i];
   }
 
   IREE_RETURN_IF_ERROR(loom_target_specialization_prepare_versions(
       module, specializations, specialization_count, diagnostic_emitter, arena,
-      &out_result->error_count));
-  if (out_result->error_count != 0) {
+      previous_versions.target_context_capacity, out_error_count));
+  if (*out_error_count != 0) {
     return iree_ok_status();
   }
 
+  iree_host_size_t appended_count = specialization_count;
+  if (inout_function_versions->list.count != 0) {
+    appended_count = 0;
+    for (iree_host_size_t i = 0; i < specialization_count; ++i) {
+      const loom_symbol_id_t symbol_id =
+          loom_func_like_callee(target_versions[i].base.function).symbol_id;
+      if (loom_target_function_version_snapshot_handle_at(&previous_versions,
+                                                          symbol_id) == NULL) {
+        ++appended_count;
+      }
+    }
+  }
+  iree_host_size_t required_capacity = 0;
+  if (!iree_host_size_checked_add(inout_function_versions->list.count,
+                                  appended_count, &required_capacity)) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "function-version count overflow");
+  }
+  IREE_RETURN_IF_ERROR(loom_function_version_owner_reserve(
+      inout_function_versions, required_capacity));
+
   for (iree_host_size_t i = 0; i < specialization_count; ++i) {
-    IREE_RETURN_IF_ERROR(loom_function_version_owner_append(
-        &out_result->function_versions, &target_versions[i].base));
+    loom_target_function_version_t* replacement = &target_versions[i];
+    const loom_symbol_id_t symbol_id =
+        loom_func_like_callee(replacement->base.function).symbol_id;
+    loom_target_function_version_t* existing =
+        loom_target_function_version_cast(
+            loom_target_function_version_snapshot_handle_at(&previous_versions,
+                                                            symbol_id));
+    if (existing == NULL) {
+      IREE_RETURN_IF_ERROR(loom_function_version_owner_append(
+          inout_function_versions, &replacement->base));
+      continue;
+    }
+    replacement->base.flags |= existing->base.flags;
+    replacement->loop_pipelines = existing->loop_pipelines;
+    replacement->memory_accesses = existing->memory_accesses;
+    replacement->loop_execution = existing->loop_execution;
+    *existing = *replacement;
   }
   return iree_ok_status();
 }

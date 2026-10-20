@@ -31,7 +31,7 @@ func.def public @entry(%arg: i32) -> (i32) {
 // contracts.
 // RUN: pass select-templates{mode=final}
 
-template.decl @demo.exact(%m: index) -> (index) where [mul(%m, 16)]
+template.decl @demo.exact(%m: index) -> (index) where [multiple_of(%m, 16)]
 
 template.def<@demo.exact> @exact_implementation(%m: index) -> (index) {
   template.return %m : index
@@ -239,7 +239,7 @@ func.def public @entry(%n: index, %arg: tensor<[%n]xf32>) -> (tensor<[%n]xf32>) 
 
 template.decl @demo.maybe(%m: index, %arg: tensor<[%m]xf32>) -> (tensor<[%m]xf32>)
 
-template.def<@demo.maybe> priority(10) @predicated(%m: index, %arg: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [mul(%m, 16)] {
+template.def<@demo.maybe> priority(10) @predicated(%m: index, %arg: tensor<[%m]xf32>) -> (tensor<[%m]xf32>) where [multiple_of(%m, 16)] {
   template.return %arg : tensor<[%m]xf32>
 }
 
@@ -258,7 +258,7 @@ func.def public @entry(%n: index, %arg: tensor<[%n]xf32>) -> (tensor<[%n]xf32>) 
 
 template.decl @demo.predicates(%m: index) -> (index)
 
-template.def<@demo.predicates> priority(10) @aligned(%m: index) -> (index) where [range(%m, 64, 64), mul(%m, 16)] {
+template.def<@demo.predicates> priority(10) @aligned(%m: index) -> (index) where [range(%m, 64, 64), multiple_of(%m, 16)] {
   template.return %m : index
 }
 
@@ -267,7 +267,7 @@ template.def<@demo.predicates> priority(1) @fallback(%m: index) -> (index) {
 }
 
 func.def public @entry(%n: index) -> (index) {
-  %aligned = index.assume %n [range(%n, 64, 64), mul(%n, 16)] : index
+  %aligned = index.assume %n [range(%n, 64, 64), multiple_of(%n, 16)] : index
   %result = template.apply<@demo.predicates>(%aligned) : (index) -> (index)
   func.return %result : index
 }
@@ -275,12 +275,12 @@ func.def public @entry(%n: index) -> (index) {
 // ----
 template.decl @demo.predicates(%m: index) -> (index)
 
-template.def<@demo.predicates> priority(10) @aligned(%m: index) -> (index) where [range(%m, 64, 64), mul(%m, 16)] {
+template.def<@demo.predicates> priority(10) @aligned(%m: index) -> (index) where [range(%m, 64, 64), multiple_of(%m, 16)] {
   template.return %m : index
 }
 
 func.def public @entry(%n: index) -> (index) {
-  %aligned = index.assume %n [range(%n, 64, 64), mul(%n, 16)] : index
+  %aligned = index.assume %n [range(%n, 64, 64), multiple_of(%n, 16)] : index
   %result = template.call @aligned(%aligned) : (index) -> (index)
   func.return %result : index
 }
@@ -293,7 +293,7 @@ func.def public @entry(%n: index) -> (index) {
 
 template.decl @demo.function_where_fact_seed(%m: index) -> (index)
 
-template.def<@demo.function_where_fact_seed> priority(10) @aligned(%m: index) -> (index) where [mul(%m, 16)] {
+template.def<@demo.function_where_fact_seed> priority(10) @aligned(%m: index) -> (index) where [multiple_of(%m, 16)] {
   template.return %m : index
 }
 
@@ -301,7 +301,7 @@ template.def<@demo.function_where_fact_seed> priority(1) @fallback(%m: index) ->
   template.return %m : index
 }
 
-func.def public @entry(%n: index) -> (index) where [mul(%n, 16)] {
+func.def public @entry(%n: index) -> (index) where [multiple_of(%n, 16)] {
   %result = template.apply<@demo.function_where_fact_seed>(%n) : (index) -> (index)
   func.return %result : index
 }
@@ -309,11 +309,11 @@ func.def public @entry(%n: index) -> (index) where [mul(%n, 16)] {
 // ----
 template.decl @demo.function_where_fact_seed(%m: index) -> (index)
 
-template.def<@demo.function_where_fact_seed> priority(10) @aligned(%m: index) -> (index) where [mul(%m, 16)] {
+template.def<@demo.function_where_fact_seed> priority(10) @aligned(%m: index) -> (index) where [multiple_of(%m, 16)] {
   template.return %m : index
 }
 
-func.def public @entry(%n: index) -> (index) where [mul(%n, 16)] {
+func.def public @entry(%n: index) -> (index) where [multiple_of(%n, 16)] {
   %result = template.call @aligned(%n) : (index) -> (index)
   func.return %result : index
 }
@@ -324,7 +324,7 @@ func.def public @entry(%n: index) -> (index) where [mul(%n, 16)] {
 
 template.decl @demo.rejected_predicate(%m: index) -> (index)
 
-template.def<@demo.rejected_predicate> priority(10) @aligned(%m: index) -> (index) where [mul(%m, 16)] {
+template.def<@demo.rejected_predicate> priority(10) @aligned(%m: index) -> (index) where [multiple_of(%m, 16)] {
   template.return %m : index
 }
 
@@ -681,7 +681,7 @@ kernel.def @implicit_export() {
 template.decl @demo.workgroup_reduce(%value: f32) -> (f32)
 
 template.def<@demo.workgroup_reduce> @reduce_provider(%value: f32) -> (f32) {
-  // ERROR@+1: STRUCTURE/029 "kernel.workgroup.reduce" "required" "kernel.def" "func.def"
+  // ERROR@+1: STRUCTURE/029 "kernel.workgroup.reduce" "one-of-required" "kernel.def or pipeline.strand" "func.def"
   %sum = kernel.workgroup.reduce<addf> %value : f32
   template.return %sum : f32
 }

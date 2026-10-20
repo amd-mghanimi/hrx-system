@@ -16,7 +16,7 @@ loom_cc_library(
     "low_asm.h"
   DEPS
     iree::base
-    loom::error::error_defs
+    loom::error::parameter
     loom::format::low_repr
     loom::ir
     loom::ops::op_defs
@@ -99,7 +99,7 @@ loom_cc_benchmark(
     loom::ops::test
     loom::util::stream
   ARGS
-    "--benchmark_filter=BM_((ScalarType|LocationTag)Classify.*|(Parse|Print)(ScalarTypes|ShapedTypes|TaggedLocations)/16)"
+    "--benchmark_filter=BM_((ScalarType|LocationTag)Classify.*|Predicate(Classify|Name).*|(Parse|Print)(ScalarTypes|ShapedTypes|TaggedLocations)/16)"
   TESTONLY
 )
 

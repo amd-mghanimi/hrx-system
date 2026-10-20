@@ -1,0 +1,555 @@
+// Each tile publishes two stripes through one workgroup allocation. Mirrored
+// reads cross subgroup boundaries, and the same storage is reused next tile.
+// The full inner unroll exposes global loads without moving the ordered stores.
+template.decl @ordered_read_ahead_rows(%input: buffer, %output: buffer, %end: index, %depth: index, %factor: index)
+
+template.def<@ordered_read_ahead_rows> @ordered_read_ahead_rows_impl(%input: buffer, %output: buffer, %end: index, %depth: index, %factor: index) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c2 = index.constant 2 : index
+  %width = index.constant 128 : index
+  %tile = index.constant 256 : index
+  %last = index.constant 127 : index
+  %origin = index.constant 0 : offset
+  %stage_bytes = index.constant 1024 : offset
+  %lane = kernel.workitem.id<x> : index
+  %peer = index.sub %last, %lane : index
+  %source = buffer.view %input[%origin] : buffer -> view<1024xi32>
+  %destination = buffer.view %output[%origin] : buffer -> view<128xi32>
+  %scratch = buffer.alloca<workgroup> align(4) %stage_bytes : buffer
+  %published = buffer.view %scratch[%origin] : buffer -> view<256xi32>
+  %consumed = buffer.view %scratch[%origin] : buffer -> view<256xi32>
+  %identity = scalar.constant 0 : i32
+  %result = scf.for %row = [%c0 to %end step %c1](%sum = %identity : i32) -> (i32) pipeline(%depth) unroll(%factor) {
+    scf.for %stripe = [%c0 to %c2 step %c1] unroll {
+      %slot = index.madd %stripe, %width, %lane : index
+      %address = index.madd %row, %tile, %slot : index
+      %value = view.load %source[%address] : view<1024xi32> -> i32
+      view.store %value, %published[%slot] : i32, view<256xi32>
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    %observed = view.load %consumed[%peer] : view<256xi32> -> i32
+    %second_peer = index.add %peer, %width : index
+    %second = view.load %consumed[%second_peer] : view<256xi32> -> i32
+    %pair = scalar.addi %observed, %second : i32
+    %next = scalar.addi %sum, %pair : i32
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %next : i32
+  }
+  view.store %result, %destination[%lane] : i32, view<128xi32>
+  template.return
+}
+
+// Reconstructs each lane's mirrored stripe reads in serial row order without
+// shared storage, barriers, pipelining, or unrolling.
+func.def @ordered_read_ahead_rows_oracle(%input: buffer, %output: buffer, %end: index) {
+  %bounded_end = index.assume %end [range(%end, 0, 4)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %width = index.constant 128 : index
+  %tile = index.constant 256 : index
+  %last = index.constant 127 : index
+  %origin = index.constant 0 : offset
+  %source = buffer.view %input[%origin] : buffer -> view<1024xi32>
+  %destination = buffer.view %output[%origin] : buffer -> view<128xi32>
+  %identity = scalar.constant 0 : i32
+  scf.for %lane = [%c0 to %width step %c1] {
+    %peer = index.sub %last, %lane : index
+    %second_peer = index.add %peer, %width : index
+    %result = scf.for %row = [%c0 to %bounded_end step %c1](%sum = %identity : i32) -> (i32) {
+      %row_base = index.mul %row, %tile : index
+      %first_address = index.add %row_base, %peer : index
+      %second_address = index.add %row_base, %second_peer : index
+      %first = view.load %source[%first_address] : view<1024xi32> -> i32
+      %second = view.load %source[%second_address] : view<1024xi32> -> i32
+      %pair = scalar.addi %first, %second : i32
+      %next = scalar.addi %sum, %pair : i32
+      scf.yield %next : i32
+    }
+    view.store %result, %destination[%lane] : i32, view<128xi32>
+  }
+  func.return
+}
+
+func.def @ordered_rows_0_oracle(%input: buffer, %output: buffer) {
+  %end = index.constant 0 : index
+  func.call @ordered_read_ahead_rows_oracle(%input, %output, %end) : (buffer, buffer, index)
+  func.return
+}
+
+func.def @ordered_rows_1_oracle(%input: buffer, %output: buffer) {
+  %end = index.constant 1 : index
+  func.call @ordered_read_ahead_rows_oracle(%input, %output, %end) : (buffer, buffer, index)
+  func.return
+}
+
+func.def @ordered_rows_2_oracle(%input: buffer, %output: buffer) {
+  %end = index.constant 2 : index
+  func.call @ordered_read_ahead_rows_oracle(%input, %output, %end) : (buffer, buffer, index)
+  func.return
+}
+
+func.def @ordered_rows_3_oracle(%input: buffer, %output: buffer) {
+  %end = index.constant 3 : index
+  func.call @ordered_read_ahead_rows_oracle(%input, %output, %end) : (buffer, buffer, index)
+  func.return
+}
+
+func.def @ordered_rows_4_oracle(%input: buffer, %output: buffer) {
+  %end = index.constant 4 : index
+  func.call @ordered_read_ahead_rows_oracle(%input, %output, %end) : (buffer, buffer, index)
+  func.return
+}
+
+kernel.def @ordered_rows_0_depth_2() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 0 : index
+  %depth = index.constant 2 : index
+  %factor = index.constant 1 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_0_depth_2_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_0_depth_2, @ordered_rows_0_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}
+
+// Each runtime mask selects whole rows uniformly for all workitems. Both the
+// scalar recurrence and the convergent reduction consume workgroup storage
+// inside the guard, between publication and reuse barriers. Sixteen-lane
+// clusters have the same reference on wave32 and wave64 targets.
+template.decl @ordered_guarded_then_rows(%mask: index, %input: buffer, %output: buffer, %depth: index)
+
+template.def<@ordered_guarded_then_rows> @ordered_guarded_then_rows_impl(%mask: index, %input: buffer, %output: buffer, %depth: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %end = index.constant 4 : index
+  %stripes = index.constant 2 : index
+  %width = index.constant 128 : index
+  %tile = index.constant 256 : index
+  %last = index.constant 127 : index
+  %base = index.constant 0 : offset
+  %stage_bytes = index.constant 1024 : offset
+  %lane = kernel.workitem.id<x> : index
+  %peer = index.sub %last, %lane : index
+  %second_peer = index.add %peer, %width : index
+  %source = buffer.view %input[%base] : buffer -> view<1024xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<2x128xi32>
+  %scratch = buffer.alloca<workgroup> align(4) %stage_bytes : buffer
+  %published = buffer.view %scratch[%base] : buffer -> view<256xi32>
+  %consumed = buffer.view %scratch[%base] : buffer -> view<256xi32>
+  %identity = scalar.constant 0 : i32
+  %multiplier = scalar.constant 3 : i32
+  %scalar_result, %reduced_result = scf.for %row = [%begin to %end step %step](%sum = %identity : i32, %reduced_sum = %identity : i32) -> (i32, i32) pipeline(%depth) {
+    scf.for %stripe = [%begin to %stripes step %step] unroll {
+      %slot = index.madd %stripe, %width, %lane : index
+      %address = index.madd %row, %tile, %slot : index
+      %value = view.load %source[%address] : view<1024xi32> -> i32
+      view.store %value, %published[%slot] : i32, view<256xi32>
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    %row_bits = index.shrui %mask, %row : index
+    %selected_bit = index.andi %row_bits, %step : index
+    %active = index.cmp ne, %selected_bit, %begin : index
+    %next, %next_reduced = scf.if %active -> (i32, i32) {
+      %first = view.load %consumed[%peer] : view<256xi32> -> i32
+      %second = view.load %consumed[%second_peer] : view<256xi32> -> i32
+      %pair = scalar.addi %first, %second : i32
+      %cluster = kernel.subgroup.reduce<addi> %pair {cluster_size = 16} : i32
+      %scaled = scalar.muli %sum, %multiplier : i32
+      %scaled_reduced = scalar.muli %reduced_sum, %multiplier : i32
+      %updated = scalar.addi %scaled, %pair : i32
+      %updated_reduced = scalar.addi %scaled_reduced, %cluster : i32
+      scf.yield %updated, %updated_reduced : i32, i32
+    } else {
+      scf.yield %sum, %reduced_sum : i32, i32
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %next, %next_reduced : i32, i32
+  }
+  view.store %scalar_result, %destination[0, %lane] : i32, view<2x128xi32>
+  view.store %reduced_result, %destination[1, %lane] : i32, view<2x128xi32>
+  template.return
+}
+
+template.decl @ordered_guarded_else_rows(%mask: index, %input: buffer, %output: buffer, %depth: index)
+
+template.def<@ordered_guarded_else_rows> @ordered_guarded_else_rows_impl(%mask: index, %input: buffer, %output: buffer, %depth: index) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %end = index.constant 4 : index
+  %stripes = index.constant 2 : index
+  %width = index.constant 128 : index
+  %tile = index.constant 256 : index
+  %last = index.constant 127 : index
+  %base = index.constant 0 : offset
+  %stage_bytes = index.constant 1024 : offset
+  %lane = kernel.workitem.id<x> : index
+  %peer = index.sub %last, %lane : index
+  %second_peer = index.add %peer, %width : index
+  %source = buffer.view %input[%base] : buffer -> view<1024xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<2x128xi32>
+  %scratch = buffer.alloca<workgroup> align(4) %stage_bytes : buffer
+  %published = buffer.view %scratch[%base] : buffer -> view<256xi32>
+  %consumed = buffer.view %scratch[%base] : buffer -> view<256xi32>
+  %identity = scalar.constant 0 : i32
+  %multiplier = scalar.constant 3 : i32
+  %scalar_result, %reduced_result = scf.for %row = [%begin to %end step %step](%sum = %identity : i32, %reduced_sum = %identity : i32) -> (i32, i32) pipeline(%depth) {
+    scf.for %stripe = [%begin to %stripes step %step] unroll {
+      %slot = index.madd %stripe, %width, %lane : index
+      %address = index.madd %row, %tile, %slot : index
+      %value = view.load %source[%address] : view<1024xi32> -> i32
+      view.store %value, %published[%slot] : i32, view<256xi32>
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    %row_bits = index.shrui %mask, %row : index
+    %selected_bit = index.andi %row_bits, %step : index
+    %inactive = index.cmp eq, %selected_bit, %begin : index
+    %next, %next_reduced = scf.if %inactive -> (i32, i32) {
+      scf.yield %sum, %reduced_sum : i32, i32
+    } else {
+      %first = view.load %consumed[%peer] : view<256xi32> -> i32
+      %second = view.load %consumed[%second_peer] : view<256xi32> -> i32
+      %pair = scalar.addi %first, %second : i32
+      %cluster = kernel.subgroup.reduce<addi> %pair {cluster_size = 16} : i32
+      %scaled = scalar.muli %sum, %multiplier : i32
+      %scaled_reduced = scalar.muli %reduced_sum, %multiplier : i32
+      %updated = scalar.addi %scaled, %pair : i32
+      %updated_reduced = scalar.addi %scaled_reduced, %cluster : i32
+      scf.yield %updated, %updated_reduced : i32, i32
+    }
+    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    scf.yield %next, %next_reduced : i32, i32
+  }
+  view.store %scalar_result, %destination[0, %lane] : i32, view<2x128xi32>
+  view.store %reduced_result, %destination[1, %lane] : i32, view<2x128xi32>
+  template.return
+}
+
+kernel.def @ordered_guarded_then_depth_2() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%mask: index, %input: buffer, %output: buffer) {
+  %depth = index.constant 2 : index
+  template.apply<@ordered_guarded_then_rows>(%mask, %input, %output, %depth) : (index, buffer, buffer, index)
+  kernel.return
+}
+
+kernel.def @ordered_guarded_then_depth_3() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%mask: index, %input: buffer, %output: buffer) {
+  %depth = index.constant 3 : index
+  template.apply<@ordered_guarded_then_rows>(%mask, %input, %output, %depth) : (index, buffer, buffer, index)
+  kernel.return
+}
+
+kernel.def @ordered_guarded_else_depth_2() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%mask: index, %input: buffer, %output: buffer) {
+  %depth = index.constant 2 : index
+  template.apply<@ordered_guarded_else_rows>(%mask, %input, %output, %depth) : (index, buffer, buffer, index)
+  kernel.return
+}
+
+kernel.def @ordered_guarded_else_depth_3() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%mask: index, %input: buffer, %output: buffer) {
+  %depth = index.constant 3 : index
+  template.apply<@ordered_guarded_else_rows>(%mask, %input, %output, %depth) : (index, buffer, buffer, index)
+  kernel.return
+}
+
+// This reference evaluates each output lane independently. Cluster sums use
+// serial global reads instead of subgroup operations or workgroup storage.
+func.def @ordered_guarded_oracle(%mask: index, %input: buffer, %output: buffer) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %rows = index.constant 4 : index
+  %width = index.constant 128 : index
+  %last = index.constant 127 : index
+  %cluster_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %source = buffer.view %input[%base] : buffer -> view<4x2x128xi32>
+  %destination = buffer.view %output[%base] : buffer -> view<2x128xi32>
+  %identity = scalar.constant 0 : i32
+  %multiplier = scalar.constant 3 : i32
+  scf.for %lane = [%begin to %width step %step] {
+    %peer = index.sub %last, %lane : index
+    %cluster = index.div %lane, %cluster_width : index
+    %cluster_begin = index.mul %cluster, %cluster_width : index
+    %cluster_end = index.add %cluster_begin, %cluster_width : index
+    %scalar_result, %reduced_result = scf.for %row = [%begin to %rows step %step](%sum = %identity : i32, %reduced_sum = %identity : i32) -> (i32, i32) {
+      %row_bits = index.shrui %mask, %row : index
+      %selected_bit = index.andi %row_bits, %step : index
+      %active = index.cmp ne, %selected_bit, %begin : index
+      %next, %next_reduced = scf.if %active -> (i32, i32) {
+        %first = view.load %source[%row, 0, %peer] : view<4x2x128xi32> -> i32
+        %second = view.load %source[%row, 1, %peer] : view<4x2x128xi32> -> i32
+        %pair = scalar.addi %first, %second : i32
+        %cluster_sum = scf.for %member = [%cluster_begin to %cluster_end step %step](%total = %identity : i32) -> (i32) {
+          %source_lane = index.sub %last, %member : index
+          %first_member = view.load %source[%row, 0, %source_lane] : view<4x2x128xi32> -> i32
+          %second_member = view.load %source[%row, 1, %source_lane] : view<4x2x128xi32> -> i32
+          %member_pair = scalar.addi %first_member, %second_member : i32
+          %next_total = scalar.addi %total, %member_pair : i32
+          scf.yield %next_total : i32
+        }
+        %scaled = scalar.muli %sum, %multiplier : i32
+        %scaled_reduced = scalar.muli %reduced_sum, %multiplier : i32
+        %updated = scalar.addi %scaled, %pair : i32
+        %updated_reduced = scalar.addi %scaled_reduced, %cluster_sum : i32
+        scf.yield %updated, %updated_reduced : i32, i32
+      } else {
+        scf.yield %sum, %reduced_sum : i32, i32
+      }
+      scf.yield %next, %next_reduced : i32, i32
+    }
+    view.store %scalar_result, %destination[0, %lane] : i32, view<2x128xi32>
+    view.store %reduced_result, %destination[1, %lane] : i32, view<2x128xi32>
+  }
+  func.return
+}
+
+check.scenario @ordered_read_ahead_guarded_consumers {
+  // All sixteen masks cover none, all, alternating, and startup/drain-only
+  // consumers without ever changing the loop's exact four-row bound.
+  check.trial[16](%mask: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%mask] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-1024 to 1024) : tensor<1024xi32>
+    %output = check.generate.fill value(37) : tensor<2x128xi32>
+    check.compare<@ordered_guarded_then_depth_2, @ordered_guarded_oracle>(%mask, %input, %output) : (index, tensor<1024xi32>, tensor<2x128xi32>) -> () {
+      check.expect.equal actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.equal actual(%output) expected(%output) : tensor<2x128xi32>
+    }
+  }
+  check.trial[16](%mask: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%mask] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-1024 to 1024) : tensor<1024xi32>
+    %output = check.generate.fill value(37) : tensor<2x128xi32>
+    check.compare<@ordered_guarded_then_depth_3, @ordered_guarded_oracle>(%mask, %input, %output) : (index, tensor<1024xi32>, tensor<2x128xi32>) -> () {
+      check.expect.equal actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.equal actual(%output) expected(%output) : tensor<2x128xi32>
+    }
+  }
+  check.trial[16](%mask: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%mask] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-1024 to 1024) : tensor<1024xi32>
+    %output = check.generate.fill value(37) : tensor<2x128xi32>
+    check.compare<@ordered_guarded_else_depth_2, @ordered_guarded_oracle>(%mask, %input, %output) : (index, tensor<1024xi32>, tensor<2x128xi32>) -> () {
+      check.expect.equal actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.equal actual(%output) expected(%output) : tensor<2x128xi32>
+    }
+  }
+  check.trial[16](%mask: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%mask] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-1024 to 1024) : tensor<1024xi32>
+    %output = check.generate.fill value(37) : tensor<2x128xi32>
+    check.compare<@ordered_guarded_else_depth_3, @ordered_guarded_oracle>(%mask, %input, %output) : (index, tensor<1024xi32>, tensor<2x128xi32>) -> () {
+      check.expect.equal actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.equal actual(%output) expected(%output) : tensor<2x128xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @ordered_rows_1_depth_3() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 1 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 1 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_1_depth_3_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_1_depth_3, @ordered_rows_1_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @ordered_rows_2_depth_2() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 2 : index
+  %depth = index.constant 2 : index
+  %factor = index.constant 1 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_2_depth_2_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_2_depth_2, @ordered_rows_2_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @ordered_rows_2_depth_3() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 2 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 1 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_2_depth_3_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_2_depth_3, @ordered_rows_2_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @ordered_rows_3_depth_3() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 3 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 1 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_3_depth_3_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_3_depth_3, @ordered_rows_3_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @ordered_rows_4_depth_1() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 4 : index
+  %depth = index.constant 1 : index
+  %factor = index.constant 1 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_4_depth_1_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_4_depth_1, @ordered_rows_4_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @ordered_rows_4_depth_2() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 4 : index
+  %depth = index.constant 2 : index
+  %factor = index.constant 1 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_4_depth_2_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_4_depth_2, @ordered_rows_4_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}
+
+kernel.def @ordered_rows_4_depth_3_unroll_2() {
+  %unit = index.constant 1 : index
+  %width = index.constant 128 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %end = index.constant 4 : index
+  %depth = index.constant 3 : index
+  %factor = index.constant 2 : index
+  template.apply<@ordered_read_ahead_rows>(%input, %output, %end, %depth, %factor) : (buffer, buffer, index, index, index)
+  kernel.return
+}
+
+check.scenario @ordered_rows_4_depth_3_unroll_2_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-2147483648 to 2147483647) : tensor<1024xi32>
+    %output_storage = check.generate.fill value(-123) : tensor<136xi32>
+    %output = check.tensor.view %output_storage offset(16) : tensor<136xi32> -> tensor<128xi32>
+    check.compare<@ordered_rows_4_depth_3_unroll_2, @ordered_rows_4_oracle>(%input, %output) : (tensor<1024xi32>, tensor<128xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1024xi32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<136xi32>
+    }
+  }
+  check.return
+}

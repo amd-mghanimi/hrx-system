@@ -11,6 +11,7 @@
 #include <stdint.h>
 
 #include "iree/base/internal/math.h"
+#include "loom/ir/float_facts.h"
 #include "loom/ops/kernel/launch_config.h"
 #include "loom/ops/kernel/ops.h"
 #include "loom/target/types.h"
@@ -452,6 +453,32 @@ static loom_value_facts_t loom_kernel_launch_workgroup_size_facts(
   return loom_kernel_intersect_integer_facts(launch_facts, target_facts);
 }
 
+static bool loom_kernel_context_has_dense_subgroup_partition(
+    const loom_fact_context_t* context, const loom_module_t* module) {
+  const loom_target_bundle_t* bundle = loom_kernel_target_bundle(context);
+  if (!bundle) {
+    return false;
+  }
+  if (bundle->snapshot->subgroup_partition ==
+      LOOM_TARGET_SUBGROUP_PARTITION_DENSE) {
+    return true;
+  }
+  const uint32_t subgroup_size =
+      loom_kernel_context_fixed_subgroup_size(context);
+  if (subgroup_size == 1) {
+    return true;
+  }
+  if (bundle->snapshot->subgroup_partition !=
+          LOOM_TARGET_SUBGROUP_PARTITION_WORKGROUP_X_ALIGNED ||
+      subgroup_size == 0) {
+    return false;
+  }
+  const loom_value_facts_t workgroup_x =
+      loom_kernel_launch_workgroup_size_facts(context, module,
+                                              LOOM_KERNEL_DIMENSION_X);
+  return loom_value_facts_divisible_by(workgroup_x, subgroup_size);
+}
+
 static loom_value_facts_t loom_kernel_launch_workgroup_count_facts(
     const loom_fact_context_t* context, const loom_module_t* module,
     loom_kernel_dimension_t dimension) {
@@ -563,14 +590,24 @@ static loom_value_facts_t loom_kernel_launch_workitem_dispatch_id_facts(
       loom_kernel_launch_workgroup_size_facts(context, module, dimension);
 
   int64_t upper_bound = 0;
-  if (!iree_checked_mul_i64(count_facts.range_hi, size_facts.range_hi,
-                            &upper_bound) ||
-      upper_bound < 1) {
-    return target_facts;
+  if (iree_checked_mul_i64(count_facts.range_hi, size_facts.range_hi,
+                           &upper_bound) &&
+      upper_bound >= 1) {
+    const loom_value_facts_t launch_facts =
+        loom_value_facts_make(0, upper_bound - 1, 1);
+    target_facts =
+        loom_kernel_intersect_integer_facts(launch_facts, target_facts);
   }
-  const loom_value_facts_t launch_facts =
-      loom_value_facts_make(0, upper_bound - 1, 1);
-  return loom_kernel_intersect_integer_facts(launch_facts, target_facts);
+  // A unit-size axis makes the dispatch coordinate exactly the workgroup
+  // coordinate, even when the other axes contain several invocations.
+  int64_t size = 0;
+  if (loom_value_facts_as_exact_i64(size_facts, &size) && size == 1) {
+    loom_value_facts_mark_workgroup_uniform(&target_facts);
+    loom_kernel_mark_workgroup_topology_domain(dimension, &target_facts);
+  } else {
+    loom_value_facts_mark_lane_varying(&target_facts);
+  }
+  return target_facts;
 }
 
 static uint32_t loom_kernel_max_subgroup_size(
@@ -587,6 +624,9 @@ static uint32_t loom_kernel_max_subgroup_size(
 static uint32_t loom_kernel_max_subgroup_lane_count(
     const loom_fact_context_t* context, const loom_module_t* module) {
   uint32_t max_lane_count = loom_kernel_max_subgroup_size(context);
+  if (!loom_kernel_context_has_dense_subgroup_partition(context, module)) {
+    return max_lane_count;
+  }
   const uint32_t max_flat_workgroup_size =
       loom_kernel_context_max_flat_workgroup_size(context, module);
   if (max_flat_workgroup_size != 0) {
@@ -604,7 +644,8 @@ static uint32_t loom_kernel_max_subgroup_count(
   }
   const uint32_t fixed_subgroup_size =
       loom_kernel_context_fixed_subgroup_size(context);
-  if (fixed_subgroup_size != 0) {
+  if (fixed_subgroup_size != 0 &&
+      loom_kernel_context_has_dense_subgroup_partition(context, module)) {
     return loom_kernel_ceil_div_u32(max_flat_workgroup_size,
                                     fixed_subgroup_size);
   }
@@ -617,7 +658,8 @@ static bool loom_kernel_exact_subgroup_count(const loom_fact_context_t* context,
   *out_count = 0;
   const uint32_t fixed_subgroup_size =
       loom_kernel_context_fixed_subgroup_size(context);
-  if (fixed_subgroup_size == 0) {
+  if (fixed_subgroup_size == 0 ||
+      !loom_kernel_context_has_dense_subgroup_partition(context, module)) {
     return false;
   }
   uint32_t flat_workgroup_size = 0;
@@ -784,7 +826,6 @@ iree_status_t loom_kernel_workitem_dispatch_id_facts(
   (void)operand_facts;
   result_facts[0] = loom_kernel_launch_workitem_dispatch_id_facts(
       context, module, loom_kernel_workitem_dispatch_id_dimension(op));
-  loom_value_facts_mark_lane_varying(&result_facts[0]);
   return iree_ok_status();
 }
 
@@ -1003,18 +1044,134 @@ iree_status_t loom_kernel_subgroup_broadcast_first_facts(
   return iree_ok_status();
 }
 
+// Bounds a sum of independently varying inputs, not a product of equal values.
+// Fixed-width overflow invalidates the interval and its divisibility proof.
+static loom_value_facts_t loom_kernel_integer_sum_facts(
+    const loom_module_t* module, loom_value_id_t result,
+    loom_value_facts_t input, uint32_t minimum_count, uint32_t maximum_count) {
+  loom_value_facts_t domain = {0};
+  if (!loom_kernel_value_integer_domain_facts(module, result, &domain)) {
+    return loom_value_facts_unknown();
+  }
+  if (maximum_count == 0) {
+    return loom_value_facts_exact_i64(0);
+  }
+  input =
+      loom_value_facts_clamp_domain(input, domain.range_lo, domain.range_hi);
+  int64_t lower_minimum = 0;
+  int64_t lower_maximum = 0;
+  int64_t upper_minimum = 0;
+  int64_t upper_maximum = 0;
+  if (!iree_checked_mul_i64(input.range_lo, minimum_count, &lower_minimum) ||
+      !iree_checked_mul_i64(input.range_lo, maximum_count, &lower_maximum) ||
+      !iree_checked_mul_i64(input.range_hi, minimum_count, &upper_minimum) ||
+      !iree_checked_mul_i64(input.range_hi, maximum_count, &upper_maximum)) {
+    return loom_value_facts_unknown();
+  }
+  const int64_t lower_bound = iree_min(lower_minimum, lower_maximum);
+  const int64_t upper_bound = iree_max(upper_minimum, upper_maximum);
+  if (lower_bound < domain.range_lo || upper_bound > domain.range_hi) {
+    return loom_value_facts_unknown();
+  }
+  return loom_value_facts_make(lower_bound, upper_bound, input.known_divisor);
+}
+
+// Active population is bounded by both execution width and workgroup size,
+// even when lane IDs are sparse and a dense subgroup partition is not promised.
+static uint32_t loom_kernel_max_active_subgroup_size(
+    const loom_fact_context_t* context, const loom_module_t* module,
+    int64_t cluster_size) {
+  uint32_t count = loom_kernel_max_subgroup_size(context);
+  const uint32_t workgroup_count =
+      loom_kernel_context_max_flat_workgroup_size(context, module);
+  if (workgroup_count != 0) {
+    count = iree_min(count, workgroup_count);
+  }
+  if (cluster_size > 0 && (uint64_t)cluster_size < count) {
+    count = (uint32_t)cluster_size;
+  }
+  return count;
+}
+
+// Extrema select an input value under both native and preserve contracts.
+// Idempotence alone is insufficient: bitwise combines need not select either
+// operand, and arithmetic combines may introduce new floating-point values.
+static bool loom_kernel_combining_is_float_extremum(
+    loom_combining_kind_t kind) {
+  return kind == LOOM_COMBINING_KIND_MINIMUMF ||
+         kind == LOOM_COMBINING_KIND_MAXIMUMF ||
+         kind == LOOM_COMBINING_KIND_MINNUMF ||
+         kind == LOOM_COMBINING_KIND_MAXNUMF;
+}
+
+static loom_value_facts_t loom_kernel_empty_prefix_element_facts(
+    loom_value_facts_t input, loom_value_facts_t seed) {
+  loom_value_facts_t result = loom_value_facts_unknown();
+  loom_value_facts_meet_float(&input, &seed, &result);
+  // Even uniform inputs can differ from the empty-prefix seed. Element
+  // extraction consumes this distribution independently of the outer vector.
+  loom_value_facts_mark_lane_varying(&result);
+  return result;
+}
+
+// An exclusive prefix is either empty or an extremum of authored inputs. Join
+// the typed seed without combining it into the nonempty result. Reuse the
+// existing bounded summaries rather than allocating facts per vector element.
+static iree_status_t loom_kernel_float_exclusive_scan_facts(
+    loom_fact_context_t* context, loom_type_t type, loom_combining_kind_t kind,
+    loom_value_facts_t input, loom_value_facts_t* out) {
+  double seed_value = 0.0;
+  (void)loom_combining_kind_float_scan_seed(kind, &seed_value);
+  const loom_value_facts_t seed =
+      loom_value_facts_exact_float(loom_type_element_type(type), seed_value);
+  *out = loom_kernel_empty_prefix_element_facts(input, seed);
+  if (loom_type_is_scalar(type)) {
+    return iree_ok_status();
+  }
+
+  loom_value_facts_t extension = loom_value_facts_unknown();
+  loom_value_fact_uniform_element_t uniform = {0};
+  loom_value_fact_small_static_lanes_t lanes = {0};
+  if (loom_value_facts_query_uniform_element(context, input, &uniform)) {
+    IREE_RETURN_IF_ERROR(loom_value_facts_make_uniform_element(
+        context, loom_kernel_empty_prefix_element_facts(uniform.element, seed),
+        &extension));
+  } else if (loom_value_facts_query_small_static_lanes(context, input,
+                                                       &lanes)) {
+    loom_value_facts_t joined[LOOM_VALUE_FACT_SMALL_STATIC_LANE_LIMIT];
+    for (iree_host_size_t i = 0; i < lanes.count; ++i) {
+      joined[i] = loom_kernel_empty_prefix_element_facts(lanes.lanes[i], seed);
+    }
+    IREE_RETURN_IF_ERROR(loom_value_facts_make_small_static_lanes(
+        context,
+        (loom_value_fact_small_static_lanes_t){.lanes = joined,
+                                               .count = lanes.count},
+        &extension));
+  }
+  out->extension_id = extension.extension_id;
+  return iree_ok_status();
+}
+
 iree_status_t loom_kernel_subgroup_reduce_facts(
     loom_fact_context_t* context, const loom_module_t* module,
     const loom_op_t* op, const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts) {
-  (void)context;
-  (void)module;
-  (void)operand_facts;
-  result_facts[0] = loom_value_facts_unknown();
   const bool has_cluster_size =
       loom_kernel_subgroup_reduce_has_cluster_size(op);
   const bool has_cluster_stride =
       loom_kernel_subgroup_reduce_has_cluster_stride(op);
+  const loom_combining_kind_t kind = loom_kernel_subgroup_reduce_kind(op);
+  result_facts[0] = loom_value_facts_unknown();
+  if (kind == LOOM_COMBINING_KIND_ADDI) {
+    const uint32_t maximum_count = loom_kernel_max_active_subgroup_size(
+        context, module,
+        has_cluster_size ? loom_kernel_subgroup_reduce_cluster_size(op) : 0);
+    result_facts[0] = loom_kernel_integer_sum_facts(
+        module, loom_kernel_subgroup_reduce_result(op), operand_facts[0], 1,
+        maximum_count);
+  } else if (loom_kernel_combining_is_float_extremum(kind)) {
+    result_facts[0] = operand_facts[0];
+  }
   if (!has_cluster_size && !has_cluster_stride) {
     loom_value_facts_mark_subgroup_uniform(&result_facts[0]);
   }
@@ -1025,12 +1182,31 @@ iree_status_t loom_kernel_workgroup_reduce_facts(
     loom_fact_context_t* context, const loom_module_t* module,
     const loom_op_t* op, const loom_value_facts_t* operand_facts,
     loom_value_facts_t* result_facts) {
-  (void)context;
-  (void)module;
-  (void)op;
-  (void)operand_facts;
-  result_facts[0] = loom_value_facts_unknown();
-  loom_value_facts_mark_workgroup_uniform(&result_facts[0]);
+  const loom_combining_kind_t kind = loom_kernel_workgroup_reduce_kind(op);
+  const bool is_float_extremum = loom_kernel_combining_is_float_extremum(kind);
+  const uint32_t maximum_count =
+      kind == LOOM_COMBINING_KIND_ADDI
+          ? loom_kernel_context_max_flat_workgroup_size(context, module)
+          : 0;
+  uint32_t exact_count = 0;
+  const uint32_t minimum_count =
+      maximum_count != 0 && loom_kernel_context_fixed_flat_workgroup_size(
+                                context, module, &exact_count)
+          ? exact_count
+          : 1;
+  const loom_value_slice_t results = loom_kernel_workgroup_reduce_results(op);
+  for (iree_host_size_t i = 0; i < results.count; ++i) {
+    if (is_float_extremum) {
+      result_facts[i] = operand_facts[i];
+    } else if (maximum_count != 0) {
+      result_facts[i] = loom_kernel_integer_sum_facts(
+          module, results.values[i], operand_facts[i], minimum_count,
+          maximum_count);
+    } else {
+      result_facts[i] = loom_value_facts_unknown();
+    }
+    loom_value_facts_mark_workgroup_uniform(&result_facts[i]);
+  }
   return iree_ok_status();
 }
 
@@ -1057,11 +1233,43 @@ iree_status_t loom_kernel_scan_facts(loom_fact_context_t* context,
                                      const loom_op_t* op,
                                      const loom_value_facts_t* operand_facts,
                                      loom_value_facts_t* result_facts) {
-  (void)context;
-  (void)operand_facts;
   result_facts[0] = loom_value_facts_unknown();
+  const bool subgroup = loom_kernel_subgroup_scan_isa(op);
+  const loom_combining_kind_t kind = subgroup
+                                         ? loom_kernel_subgroup_scan_kind(op)
+                                         : loom_kernel_workgroup_scan_kind(op);
+  const bool exclusive = subgroup
+                             ? loom_kernel_subgroup_scan_mode(op) ==
+                                   LOOM_KERNEL_SUBGROUP_SCAN_MODE_EXCLUSIVE
+                             : loom_kernel_workgroup_scan_mode(op) ==
+                                   LOOM_KERNEL_WORKGROUP_SCAN_MODE_EXCLUSIVE;
   const loom_type_t result_type =
       loom_module_value_type(module, loom_op_const_results(op)[0]);
+  if (kind == LOOM_COMBINING_KIND_ADDI) {
+    uint32_t maximum_count = 0;
+    if (subgroup) {
+      maximum_count = loom_kernel_max_active_subgroup_size(
+          context, module,
+          loom_kernel_subgroup_scan_has_cluster_size(op)
+              ? loom_kernel_subgroup_scan_cluster_size(op)
+              : 0);
+    } else {
+      maximum_count =
+          loom_kernel_context_max_flat_workgroup_size(context, module);
+    }
+    if (maximum_count != 0) {
+      result_facts[0] = loom_kernel_integer_sum_facts(
+          module, loom_op_const_results(op)[0], operand_facts[0],
+          exclusive ? 0 : 1, maximum_count - (exclusive ? 1 : 0));
+    }
+  } else if (loom_kernel_combining_is_float_extremum(kind)) {
+    if (exclusive) {
+      IREE_RETURN_IF_ERROR(loom_kernel_float_exclusive_scan_facts(
+          context, result_type, kind, operand_facts[0], &result_facts[0]));
+    } else {
+      result_facts[0] = operand_facts[0];
+    }
+  }
   if (loom_type_is_scalar(result_type) &&
       loom_type_element_type(result_type) == LOOM_SCALAR_TYPE_I1) {
     loom_value_facts_mark_lane_predicate(&result_facts[0]);

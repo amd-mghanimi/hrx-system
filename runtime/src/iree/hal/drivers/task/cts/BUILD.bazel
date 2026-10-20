@@ -40,7 +40,6 @@ iree_runtime_cc_library(
 
 iree_runtime_cc_test(
     name = "queue_dispatch_concurrency_tests",
-    srcs = ["//runtime/src/iree/hal/cts/util:test_main.cc"],
     deps = [
         ":backends",
         ":executable_testdata",
@@ -48,6 +47,41 @@ iree_runtime_cc_test(
         "//runtime/src/iree/hal/cts/queue:queue_dispatch_concurrency_test",
         "//runtime/src/iree/hal/cts/util:registry",
         "//runtime/src/iree/hal/cts/util:test_base",
+        "//runtime/src/iree/hal/cts/util:test_main",
+        "//runtime/src/iree/testing:gtest",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "buffer_access_tests",
+    srcs = ["buffer_access_test.cc"],
+    deps = [
+        ":backends",
+        ":executable_testdata",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/cts/util:registry",
+        "//runtime/src/iree/hal/cts/util:test_base",
+        "//runtime/src/iree/hal/cts/util:test_main",
+        "//runtime/src/iree/hal/memory:passthrough_pool",
+        "//runtime/src/iree/testing:gtest",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "slab_pool_tests",
+    srcs = ["slab_pool_test.cc"],
+    deps = [
+        ":backends",
+        ":executable_testdata",
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/cts/util:pool_test_util",
+        "//runtime/src/iree/hal/cts/util:registry",
+        "//runtime/src/iree/hal/cts/util:test_base",
+        "//runtime/src/iree/hal/cts/util:test_main",
+        "//runtime/src/iree/hal/memory:fixed_block_pool",
+        "//runtime/src/iree/hal/memory:slab_cache",
+        "//runtime/src/iree/hal/memory:tlsf_pool",
         "//runtime/src/iree/testing:gtest",
     ],
 )

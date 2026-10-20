@@ -111,9 +111,18 @@ hrx_status_t hrx_event_record(hrx_event_t event, hrx_stream_t stream) {
       .payload_values = sig_vals,
   };
 
+  // Event recording publishes only semaphore timepoints. Explicitly empty
+  // boundaries keep this on the queue's empty-barrier path; NULL would request
+  // conservative payload visibility and may serialize otherwise independent
+  // streams sharing one native queue.
+  const iree_hal_barrier_list_t empty_barrier_list = {0};
+  const iree_hal_queue_barriers_t empty_barriers = {
+      &empty_barrier_list,
+      &empty_barrier_list,
+  };
   iree_status_t iree_status =
       iree_hal_queue_barrier(stream->hal_queue, wait_list, signal_list,
-                             IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
+                             &empty_barriers, IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
   if (!iree_status_is_ok(iree_status)) {
     return hrx_status_from_iree(iree_status);
   }
@@ -231,9 +240,9 @@ hrx_status_t hrx_stream_wait_event(hrx_stream_t stream, hrx_event_t event) {
       .payload_values = &signal_value,
   };
 
-  iree_status_t iree_status =
-      iree_hal_queue_barrier(stream->hal_queue, wait_list, signal_list,
-                             IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
+  iree_status_t iree_status = iree_hal_queue_barrier(
+      stream->hal_queue, wait_list, signal_list, /*barriers=*/NULL,
+      IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
   if (!iree_status_is_ok(iree_status)) {
     return hrx_status_from_iree(iree_status);
   }

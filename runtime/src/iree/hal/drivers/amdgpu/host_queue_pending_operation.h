@@ -45,10 +45,10 @@ typedef enum iree_hal_amdgpu_pending_op_lifecycle_e {
   IREE_HAL_AMDGPU_PENDING_OP_LIFECYCLE_CANCELLING = 1,
   // The last wait callback claimed completion ownership.
   IREE_HAL_AMDGPU_PENDING_OP_LIFECYCLE_COMPLETING = 2,
-  // The issuing thread is registering a cold alloca memory-readiness wait.
-  // Cancellation only claims PENDING ops; the arming thread publishes PENDING
-  // after registration or observes a synchronous callback as COMPLETING.
-  IREE_HAL_AMDGPU_PENDING_OP_LIFECYCLE_ARMING_MEMORY_WAIT = 3,
+  // The producer owns capture and dependency registration. Cancellation only
+  // claims PENDING ops. Registration publishes PENDING or joins an early last
+  // callback that published COMPLETING before taking over completion.
+  IREE_HAL_AMDGPU_PENDING_OP_LIFECYCLE_ARMING = 3,
 } iree_hal_amdgpu_pending_op_lifecycle_t;
 
 // A deferred queue operation waiting for its waits to become satisfiable.
@@ -100,6 +100,9 @@ struct iree_hal_amdgpu_pending_op_t {
 
   // Operation payload selector.
   iree_hal_amdgpu_pending_op_type_t type;
+
+  // Captured direct-operation visibility, preserved across capacity retries.
+  iree_hal_amdgpu_queue_barriers_t payload_barriers;
 
   union {
     // Captured queue_fill payload.

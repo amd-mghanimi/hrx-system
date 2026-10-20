@@ -14,9 +14,11 @@
 #include "loom/codegen/low/allocation/assignment_map.h"
 #include "loom/codegen/low/allocation/move.h"
 #include "loom/codegen/low/allocation/move_sequence.h"
+#include "loom/codegen/low/allocation/storage_liveness_index.h"
 #include "loom/codegen/low/allocation/target_constraints.h"
 #include "loom/codegen/low/allocation/unit_liveness.h"
 #include "loom/codegen/low/descriptors.h"
+#include "loom/codegen/low/storage_layout.h"
 #include "loom/ir/ir.h"
 
 #ifdef __cplusplus
@@ -31,12 +33,14 @@ typedef struct loom_low_allocation_move_plan_context_t {
   const loom_low_descriptor_set_t* descriptor_set;
   // Mutable target storage constraints and diagnostic state.
   loom_low_allocation_target_constraints_t* target_constraints;
-  // Per-allocation-unit live end points.
+  // Per-allocation-unit physical storage lifetimes.
   const loom_low_allocation_unit_liveness_t* unit_liveness;
   // Completed assignment lookup map.
   loom_low_allocation_assignment_map_t assignment_map;
   // Accepted schedule used by assignment liveness, or NULL for source order.
   const struct loom_low_schedule_table_t* schedule;
+  // Spaces supported by synchronous final move emission.
+  loom_low_storage_space_set_t storage_spaces;
 } loom_low_allocation_move_plan_context_t;
 
 // Source-preorder traversal position for one structural move producer. A
@@ -56,6 +60,10 @@ typedef struct loom_low_allocation_move_plan_t {
   loom_low_allocation_move_plan_context_t context;
   // Arena retaining final move rows and cycle-scratch write indices.
   iree_arena_allocator_t* output_arena;
+  // Arena owning allocation-local indexes and sequencing workspace.
+  iree_arena_allocator_t* scratch_arena;
+  // Lazily built point-liveness index used only when a cycle needs scratch.
+  loom_low_allocation_storage_liveness_index_t storage_liveness_index;
   // Temporary liveness-row indices by top-level schedule node. NULL when no
   // schedule is supplied. Never retained in allocation tables.
   uint32_t* operation_indices_by_source_node;
@@ -74,6 +82,14 @@ typedef struct loom_low_allocation_move_plan_t {
   iree_host_size_t scratch_move_index_capacity;
   // Reusable caller-populated and solver scratch.
   loom_low_move_sequence_scratch_t sequence_scratch;
+  // Final invocation-owned cells allocated only for register-saturated cycles.
+  loom_low_move_storage_t* storage;
+  // Number of initialized cells.
+  iree_host_size_t storage_count;
+  // Capacity of the lazily grown cell array.
+  iree_host_size_t storage_capacity;
+  // Temporary direct index from descriptor class to cell, or UINT32_MAX.
+  uint32_t* storage_indices_by_class;
 } loom_low_allocation_move_plan_t;
 
 // Initializes a plan for at most |move_input_capacity| input rows across all
@@ -96,17 +112,28 @@ loom_low_allocation_move_plan_next_operation(
     const loom_low_allocation_move_plan_t* plan, const loom_op_t* op,
     loom_low_allocation_move_cursor_t* cursor);
 
-// Returns reusable storage for constructing one raw parallel move group.
-loom_low_move_t* loom_low_allocation_move_plan_raw_moves(
-    loom_low_allocation_move_plan_t* plan);
+// Appends transport for demanded destination units to the raw parallel group.
+// Empty destination lifetimes own no storage and must not be written. The
+// retained unit lifetimes include demand inherited through required aliases.
+void loom_low_allocation_move_plan_append_assignment(
+    loom_low_allocation_move_plan_t* plan,
+    const loom_low_allocation_assignment_t* source, uint32_t source_unit_offset,
+    const loom_low_allocation_assignment_t* destination,
+    uint32_t destination_unit_offset, uint32_t unit_count,
+    iree_host_size_t* inout_raw_move_count);
 
 // Sequences |raw_move_count| rows from the reusable raw storage and appends
 // the final rows to |plan|. Cycle scratch is resolved and indexed only when
-// required.
+// required. |owner_op| supplies the diagnostic location. |read_point| and
+// |write_point| are the accepted liveness positions at which the transfer reads
+// and writes storage; both are zero for invocation entry transport.
+// When non-NULL, |out_input_flags| reports the identity and active input rows
+// already classified by move sequencing.
 iree_status_t loom_low_allocation_move_plan_append_group(
-    loom_low_allocation_move_plan_t* plan,
-    const loom_liveness_operation_point_t* operation_point,
-    iree_host_size_t raw_move_count, loom_low_move_group_t* out_group);
+    loom_low_allocation_move_plan_t* plan, const loom_op_t* owner_op,
+    uint32_t read_point, uint32_t write_point, iree_host_size_t raw_move_count,
+    loom_low_move_group_t* out_group,
+    loom_low_move_sequence_input_flags_t* out_input_flags);
 
 #ifdef __cplusplus
 }  // extern "C"

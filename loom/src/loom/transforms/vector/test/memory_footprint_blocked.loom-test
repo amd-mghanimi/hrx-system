@@ -1,0 +1,649 @@
+// RUN: pass vector-memory-footprint
+
+// The final complete block is safe even when the view has a partial tail.
+// The packet offset is independent of the block/extent relation.
+func.def @complete_block_packets(%input: buffer, %extent_input: index, %block_input: index, %packet_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %packet = index.assume %packet_input [range(%packet_input, 0, 3)] : index
+  %block_width = index.constant 16 : index
+  %packet_width = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %packet_offset = index.mul %packet, %packet_width : index
+    %origin = index.madd %block, %block_width, %packet_offset : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @complete_block_packets(%input: buffer, %extent_input: index, %block_input: index, %packet_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %packet = index.assume %packet_input [range(%packet_input, 0, 3)] : index
+  %block_width = index.constant 16 : index
+  %packet_width = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %packet_offset = index.mul %packet, %packet_width : index
+    %origin = index.madd %block, %block_width, %packet_offset : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass canonicalize,scf-to-cfg,vector-memory-footprint
+
+// Source cleanup turns division into a shift; CFG lowering retains the guard.
+func.def @counted_blocks_after_cfg(%input: buffer, %extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %block_width = index.constant 16 : index
+  %packet_offset = index.constant 12 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+  scf.for %block = [%c0 to %count step %c1] {
+    %origin = index.madd %block, %block_width, %packet_offset : index
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @counted_blocks_after_cfg(%input: buffer, %extent_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %block_width = index.constant 16 : index
+  %packet_offset = index.constant 12 : index
+  %base = index.constant 0 : offset
+  %13 = index.constant 4 : index
+  %count = index.shrui %extent, %13 : index
+  %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+  cfg.br ^_bb1(%c0: index)
+^_bb1(%15: index):
+  %17 = index.cmp slt, %15, %count : index
+  cfg.cond_br %17, ^_bb2, ^_bb3
+^_bb2:
+  %block = index.assume %15 [range(%15, 0, 62), lt(%15, %count)] : index
+  %origin = index.madd %block, %block_width, %packet_offset : index
+  %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+  test.use %value : vector<4xi32>
+  %18 = index.add %block, %c1 : index
+  cfg.br ^_bb1(%18: index)
+^_bb3:
+  func.return
+}
+
+// ====
+// RUN: pass vector-memory-footprint
+
+// An inclusive block-end guard licenses the preceding packet, not the next.
+func.def @inclusive_block_end(%input: buffer, %extent_input: index, %block_end_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block_end = index.assume %block_end_input [range(%block_end_input, 1, 63)] : index
+  %block_width = index.constant 16 : index
+  %packet_width = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp sge, %count, %block_end : index
+  scf.if %in_bounds {
+    %end = index.mul %block_end, %block_width : index
+    %origin = index.sub %end, %packet_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @inclusive_block_end(%input: buffer, %extent_input: index, %block_end_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block_end = index.assume %block_end_input [range(%block_end_input, 1, 63)] : index
+  %block_width = index.constant 16 : index
+  %packet_width = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp sge, %count, %block_end : index
+  scf.if %in_bounds {
+    %end = index.mul %block_end, %block_width : index
+    %origin = index.sub %end, %packet_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+
+// A strict quotient guard proves the last element of its block is in bounds.
+func.def @coordinate_quotient_guard(%input: buffer, %coordinate_input: index, %count_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 1023)] : index
+  %count = index.assume %count_input [range(%count_input, 1, 64)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %block = index.div %coordinate, %block_width : index
+  %in_bounds = index.cmp sgt, %count, %block : index
+  scf.if %in_bounds {
+    %extent = index.mul %count, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%coordinate] : view<[%extent]xi32> -> vector<1xi32>
+    test.use %value : vector<1xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @coordinate_quotient_guard(%input: buffer, %coordinate_input: index, %count_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 1023)] : index
+  %count = index.assume %count_input [range(%count_input, 1, 64)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %block = index.div %coordinate, %block_width : index
+  %in_bounds = index.cmp sgt, %count, %block : index
+  scf.if %in_bounds {
+    %extent = index.mul %count, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%coordinate] : view<[%extent]xi32> -> vector<1xi32>
+    test.use %value : vector<1xi32>
+  }
+  func.return
+}
+
+// ====
+
+// Inclusive quotient guards include every element of the final block.
+func.def @inclusive_coordinate_quotient(%input: buffer, %coordinate_input: index, %last_block_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 1023)] : index
+  %last_block = index.assume %last_block_input [range(%last_block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %c1 = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %block = index.div %coordinate, %block_width : index
+  %in_bounds = index.cmp sle, %block, %last_block : index
+  scf.if %in_bounds {
+    %count = index.add %last_block, %c1 : index
+    %extent = index.mul %count, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%coordinate] : view<[%extent]xi32> -> vector<1xi32>
+    test.use %value : vector<1xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @inclusive_coordinate_quotient(%input: buffer, %coordinate_input: index, %last_block_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 1023)] : index
+  %last_block = index.assume %last_block_input [range(%last_block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %c1 = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %block = index.div %coordinate, %block_width : index
+  %in_bounds = index.cmp sle, %block, %last_block : index
+  scf.if %in_bounds {
+    %count = index.add %last_block, %c1 : index
+    %extent = index.mul %count, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%coordinate] : view<[%extent]xi32> -> vector<1xi32>
+    test.use %value : vector<1xi32>
+  }
+  func.return
+}
+
+// ====
+
+// floor(coordinate/4) < floor(extent/8) implies 2*coordinate+2 <= extent.
+func.def @different_quotient_scales(%input: buffer, %coordinate_input: index, %extent_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 511)] : index
+  %extent = index.assume %extent_input [range(%extent_input, 8, 1023)] : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %base = index.constant 0 : offset
+  %left = index.div %coordinate, %c4 : index
+  %right = index.div %extent, %c8 : index
+  %in_bounds = index.cmp slt, %left, %right : index
+  scf.if %in_bounds {
+    %origin = index.mul %coordinate, %c2 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<2xi32>
+    test.use %value : vector<2xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @different_quotient_scales(%input: buffer, %coordinate_input: index, %extent_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 511)] : index
+  %extent = index.assume %extent_input [range(%extent_input, 8, 1023)] : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %base = index.constant 0 : offset
+  %left = index.div %coordinate, %c4 : index
+  %right = index.div %extent, %c8 : index
+  %in_bounds = index.cmp slt, %left, %right : index
+  scf.if %in_bounds {
+    %origin = index.mul %coordinate, %c2 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<2xi32>
+    test.use %value : vector<2xi32>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass scf-to-cfg,vector-memory-footprint
+
+// CFG lowering retains arithmetic anchors for both quotient operands.
+func.def @different_quotient_scales_after_cfg(%input: buffer, %coordinate_input: index, %extent_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 511)] : index
+  %extent = index.assume %extent_input [range(%extent_input, 8, 1023)] : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %base = index.constant 0 : offset
+  %left = index.div %coordinate, %c4 : index
+  %right = index.div %extent, %c8 : index
+  %in_bounds = index.cmp slt, %left, %right : index
+  scf.if %in_bounds {
+    %origin = index.mul %coordinate, %c2 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<2xi32>
+    test.use %value : vector<2xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @different_quotient_scales_after_cfg(%input: buffer, %coordinate_input: index, %extent_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 511)] : index
+  %extent = index.assume %extent_input [range(%extent_input, 8, 1023)] : index
+  %c2 = index.constant 2 : index
+  %c4 = index.constant 4 : index
+  %c8 = index.constant 8 : index
+  %base = index.constant 0 : offset
+  %left = index.div %coordinate, %c4 : index
+  %right = index.div %extent, %c8 : index
+  %in_bounds = index.cmp slt, %left, %right : index
+  cfg.cond_br %in_bounds, ^_bb1, ^_bb2
+^_bb1:
+  %origin = index.mul %coordinate, %c2 : index
+  %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+  %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<2xi32>
+  test.use %value : vector<2xi32>
+  cfg.br ^_bb2
+^_bb2:
+  func.return
+}
+
+// ====
+// RUN: pass scf-to-cfg,vector-memory-footprint
+
+// Affine quotient numerators retain their source anchor after CFG lowering.
+func.def @affine_extent_quotient_after_cfg(%input: buffer, %rows_input: index, %block_input: index) {
+  %rows = index.assume %rows_input [range(%rows_input, 8, 255)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 127)] : index
+  %c2 = index.constant 2 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %extent = index.madd %rows, %c2, %c3 : index
+  %count = index.div %extent, %c4 : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %origin = index.mul %block, %c4 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @affine_extent_quotient_after_cfg(%input: buffer, %rows_input: index, %block_input: index) {
+  %rows = index.assume %rows_input [range(%rows_input, 8, 255)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 127)] : index
+  %c2 = index.constant 2 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %extent = index.madd %rows, %c2, %c3 : index
+  %count = index.div %extent, %c4 : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  cfg.cond_br %in_bounds, ^_bb1, ^_bb2
+^_bb1:
+  %origin = index.mul %block, %c4 : index
+  %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+  %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+  test.use %value : vector<4xi32>
+  cfg.br ^_bb2
+^_bb2:
+  func.return
+}
+
+// ====
+// RUN: pass scf-to-cfg,vector-memory-footprint
+
+// Retaining a remainder's source anchor does not turn it into a quotient.
+func.def @periodic_digit_is_not_a_quotient_after_cfg(%input: buffer, %extent_input: index, %block_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %remainder = index.rem %extent, %block_width : index
+  %in_bounds = index.cmp slt, %block, %remainder : index
+  scf.if %in_bounds {
+    %origin = index.mul %block, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    // ERROR@+1: SUBRANGE/010 {op_name="vector.load", vector_extent="4"}
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+// RUN: pass vector-memory-footprint
+
+// Equality bounds both the beginning and end of the quotient's input block.
+func.def @equal_quotient_bounds(%input: buffer, %extent_input: index, %count_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %count = index.assume %count_input [range(%count_input, 1, 63)] : index
+  %block_width = index.constant 16 : index
+  %packet_width = index.constant 4 : index
+  %c1 = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %quotient = index.div %extent, %block_width : index
+  %equal = index.cmp eq, %quotient, %count : index
+  scf.if %equal {
+    %end = index.mul %count, %block_width : index
+    %origin = index.sub %end, %packet_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %packet = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %packet : vector<4xi32>
+    %padded_count = index.add %count, %c1 : index
+    %padded_extent = index.mul %padded_count, %block_width : index
+    %padded_view = buffer.view %input[%base] : buffer -> view<[%padded_extent]xi32>
+    %last = vector.load %padded_view[%extent] : view<[%padded_extent]xi32> -> vector<1xi32>
+    test.use %last : vector<1xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @equal_quotient_bounds(%input: buffer, %extent_input: index, %count_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %count = index.assume %count_input [range(%count_input, 1, 63)] : index
+  %block_width = index.constant 16 : index
+  %packet_width = index.constant 4 : index
+  %c1 = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %quotient = index.div %extent, %block_width : index
+  %equal = index.cmp eq, %quotient, %count : index
+  scf.if %equal {
+    %end = index.mul %count, %block_width : index
+    %origin = index.sub %end, %packet_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %packet = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %packet : vector<4xi32>
+    %padded_count = index.add %count, %c1 : index
+    %padded_extent = index.mul %padded_count, %block_width : index
+    %padded_view = buffer.view %input[%base] : buffer -> view<[%padded_extent]xi32>
+    %last = vector.load %padded_view[%extent] : view<[%padded_extent]xi32> -> vector<1xi32>
+    test.use %last : vector<1xi32>
+  }
+  func.return
+}
+
+// ====
+
+// Affine numerators retain their scale and offset in the quotient proof.
+func.def @affine_extent_quotient(%input: buffer, %rows_input: index, %block_input: index) {
+  %rows = index.assume %rows_input [range(%rows_input, 8, 255)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 127)] : index
+  %c2 = index.constant 2 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %extent = index.madd %rows, %c2, %c3 : index
+  %count = index.div %extent, %c4 : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %origin = index.mul %block, %c4 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @affine_extent_quotient(%input: buffer, %rows_input: index, %block_input: index) {
+  %rows = index.assume %rows_input [range(%rows_input, 8, 255)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 127)] : index
+  %c2 = index.constant 2 : index
+  %c3 = index.constant 3 : index
+  %c4 = index.constant 4 : index
+  %base = index.constant 0 : offset
+  %extent = index.madd %rows, %c2, %c3 : index
+  %count = index.div %extent, %c4 : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %origin = index.mul %block, %c4 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+
+func.def @packet_crosses_complete_block(%input: buffer, %extent_input: index, %block_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %packet_offset = index.constant 13 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %origin = index.madd %block, %block_width, %packet_offset : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    // ERROR@+1: SUBRANGE/010 {op_name="vector.load", vector_extent="4"}
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+
+func.def @inclusive_guard_admits_next_block(%input: buffer, %extent_input: index, %block_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp sle, %block, %count : index
+  scf.if %in_bounds {
+    %origin = index.mul %block, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    // ERROR@+1: SUBRANGE/010 {op_name="vector.load", vector_extent="4"}
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+
+// The exact quotient relation remains usable without lifting its numerator.
+func.def @original_quotient_guard(%input: buffer, %extent_input: index, %block_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %view = buffer.view %input[%base] : buffer -> view<[%count]xi32>
+    %value = vector.load %view[%block] : view<[%count]xi32> -> vector<1xi32>
+    test.use %value : vector<1xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @original_quotient_guard(%input: buffer, %extent_input: index, %block_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %count = index.div %extent, %block_width : index
+  %in_bounds = index.cmp slt, %block, %count : index
+  scf.if %in_bounds {
+    %view = buffer.view %input[%base] : buffer -> view<[%count]xi32>
+    %value = vector.load %view[%block] : view<[%count]xi32> -> vector<1xi32>
+    test.use %value : vector<1xi32>
+  }
+  func.return
+}
+
+// ====
+
+// Fixed-width division carries the same projection through an index cast.
+func.def @fixed_width_block_guard(%input: buffer, %extent_input: i32, %block_input: i32) {
+  %extent = scalar.assume %extent_input [range(%extent_input, 12, 1023)] : i32
+  %block = scalar.assume %block_input [range(%block_input, 0, 85)] : i32
+  %block_width = scalar.constant 12 : i32
+  %count = scalar.divui %extent, %block_width : i32
+  %in_bounds = scalar.cmpi ult, %block, %count : i32
+  scf.if %in_bounds {
+    %origin = scalar.muli %block, %block_width : i32
+    %origin_index = index.cast %origin : i32 to index
+    %extent_index = index.cast %extent : i32 to index
+    %base = index.constant 0 : offset
+    %view = buffer.view %input[%base] : buffer -> view<[%extent_index]xi32>
+    %value = vector.load %view[%origin_index] : view<[%extent_index]xi32> -> vector<12xi32>
+    test.use %value : vector<12xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @fixed_width_block_guard(%input: buffer, %extent_input: i32, %block_input: i32) {
+  %extent = scalar.assume %extent_input [range(%extent_input, 12, 1023)] : i32
+  %block = scalar.assume %block_input [range(%block_input, 0, 85)] : i32
+  %block_width = scalar.constant 12 : i32
+  %count = scalar.divui %extent, %block_width : i32
+  %in_bounds = scalar.cmpi ult, %block, %count : i32
+  scf.if %in_bounds {
+    %origin = scalar.muli %block, %block_width : i32
+    %origin_index = index.cast %origin : i32 to index
+    %extent_index = index.cast %extent : i32 to index
+    %base = index.constant 0 : offset
+    %view = buffer.view %input[%base] : buffer -> view<[%extent_index]xi32>
+    %value = vector.load %view[%origin_index] : view<[%extent_index]xi32> -> vector<12xi32>
+    test.use %value : vector<12xi32>
+  }
+  func.return
+}
+
+// ====
+
+// A remainder guard cannot establish the number of complete blocks.
+func.def @periodic_digit_is_not_a_quotient(%input: buffer, %extent_input: index, %block_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %block = index.assume %block_input [range(%block_input, 0, 63)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %remainder = index.rem %extent, %block_width : index
+  %in_bounds = index.cmp slt, %block, %remainder : index
+  scf.if %in_bounds {
+    %origin = index.mul %block, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    // ERROR@+1: SUBRANGE/010 {op_name="vector.load", vector_extent="4"}
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+
+// Equal quotients do not make their numerators equal or license a tail packet.
+func.def @equal_quotient_does_not_cover_tail(%input: buffer, %extent_input: index, %count_input: index) {
+  %extent = index.assume %extent_input [range(%extent_input, 16, 1023)] : index
+  %count = index.assume %count_input [range(%count_input, 1, 63)] : index
+  %block_width = index.constant 16 : index
+  %base = index.constant 0 : offset
+  %quotient = index.div %extent, %block_width : index
+  %equal = index.cmp eq, %quotient, %count : index
+  scf.if %equal {
+    %origin = index.mul %count, %block_width : index
+    %view = buffer.view %input[%base] : buffer -> view<[%extent]xi32>
+    // ERROR@+1: SUBRANGE/010 {op_name="vector.load", vector_extent="4"}
+    %value = vector.load %view[%origin] : view<[%extent]xi32> -> vector<4xi32>
+    test.use %value : vector<4xi32>
+  }
+  func.return
+}
+
+// ====
+
+// Coprime divisors retain both cross multipliers without common-factor removal.
+func.def @coprime_quotient_scales(%input: buffer, %coordinate_input: index, %extent_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 511)] : index
+  %extent = index.assume %extent_input [range(%extent_input, 5, 1023)] : index
+  %c3 = index.constant 3 : index
+  %c5 = index.constant 5 : index
+  %base = index.constant 0 : offset
+  %left = index.div %coordinate, %c3 : index
+  %right = index.div %extent, %c5 : index
+  %in_bounds = index.cmp slt, %left, %right : index
+  scf.if %in_bounds {
+    %origin = index.mul %coordinate, %c5 : index
+    %view_extent = index.mul %extent, %c3 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%view_extent]xi32>
+    %value = vector.load %view[%origin] : view<[%view_extent]xi32> -> vector<5xi32>
+    test.use %value : vector<5xi32>
+  }
+  func.return
+}
+
+// ----
+func.def @coprime_quotient_scales(%input: buffer, %coordinate_input: index, %extent_input: index) {
+  %coordinate = index.assume %coordinate_input [range(%coordinate_input, 0, 511)] : index
+  %extent = index.assume %extent_input [range(%extent_input, 5, 1023)] : index
+  %c3 = index.constant 3 : index
+  %c5 = index.constant 5 : index
+  %base = index.constant 0 : offset
+  %left = index.div %coordinate, %c3 : index
+  %right = index.div %extent, %c5 : index
+  %in_bounds = index.cmp slt, %left, %right : index
+  scf.if %in_bounds {
+    %origin = index.mul %coordinate, %c5 : index
+    %view_extent = index.mul %extent, %c3 : index
+    %view = buffer.view %input[%base] : buffer -> view<[%view_extent]xi32>
+    %value = vector.load %view[%origin] : view<[%view_extent]xi32> -> vector<5xi32>
+    test.use %value : vector<5xi32>
+  }
+  func.return
+}

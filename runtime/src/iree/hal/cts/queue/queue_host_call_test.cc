@@ -38,7 +38,7 @@ static void DestroyHostCallResourceState(iree_hal_resource_t* base_resource) {
 }
 
 static const iree_hal_resource_vtable_t kHostCallResourceStateVtable = {
-    /*.destroy=*/DestroyHostCallResourceState,
+    .destroy = DestroyHostCallResourceState,
 };
 
 static HostCallResourceState* CreateHostCallResourceState(
@@ -451,7 +451,7 @@ TEST_P(AsyncQueueHostCallLifetimeTest,
                                           IREE_HAL_HOST_CALL_FLAG_NONE));
   IREE_ASSERT_OK(iree_hal_queue_download(
       transfer_queue_, producer_signal, terminal_signal, source_buffer,
-      /*source_offset=*/0, target, sizeof(target)));
+      /*source_offset=*/0, target, sizeof(target), /*barriers=*/NULL));
 
   IREE_ASSERT_OK(
       iree_hal_semaphore_list_signal(producer_wait, /*frontier=*/NULL));

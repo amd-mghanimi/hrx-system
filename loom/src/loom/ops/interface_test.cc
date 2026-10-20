@@ -54,7 +54,7 @@ class InterfaceTest : public ::testing::Test {
                                               IREE_SV("host_fn"), &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    func_ref_ = {/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    func_ref_ = {.module_id = 0, .symbol_id = symbol_id};
     IREE_ASSERT_OK(loom_test_func_build(&module_builder, 0, 0, 0, func_ref_,
                                         NULL, 0, NULL, 0, NULL, 0, NULL, 0,
                                         LOOM_LOCATION_UNKNOWN, &func_op_));
@@ -141,7 +141,7 @@ TEST_F(InterfaceTest, CallLikeCastReturnsValidForInvoke) {
   EXPECT_EQ(call.op, invoke_op);
   EXPECT_NE(call.vtable, nullptr);
   EXPECT_EQ(loom_call_like_kind(call), LOOM_CALL_LIKE_KIND_SEMANTIC);
-  EXPECT_EQ(loom_call_like_purity(call), 0);
+  EXPECT_EQ(loom_call_like_effect_contract(call), 0);
   EXPECT_EQ(loom_call_like_operand_offset(call), 0);
   EXPECT_EQ(loom_call_like_result_offset(call), 0);
   EXPECT_TRUE(loom_call_like_is_direct_semantic(call));
@@ -154,8 +154,8 @@ TEST_F(InterfaceTest, CallLikeCastReturnsValidForInvoke) {
   IREE_ASSERT_OK(loom_module_add_symbol(module_, replacement_name_id,
                                         &replacement_symbol_id));
   const loom_symbol_ref_t replacement_ref = {
-      /*.module_id=*/0,
-      /*.symbol_id=*/replacement_symbol_id,
+      .module_id = 0,
+      .symbol_id = replacement_symbol_id,
   };
   loom_call_like_set_callee(module_, call, replacement_ref);
   EXPECT_EQ(loom_call_like_callee(call).symbol_id, replacement_symbol_id);
@@ -273,8 +273,8 @@ TEST_F(InterfaceTest, FuncLikeBodyDescriptorReturnsNullForDeclaration) {
   uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
   IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
   const loom_symbol_ref_t symbol = {
-      /*.module_id=*/0,
-      /*.symbol_id=*/symbol_id,
+      .module_id = 0,
+      .symbol_id = symbol_id,
   };
   loom_op_t* declaration_op = nullptr;
   IREE_ASSERT_OK(loom_test_decl_build(
@@ -484,6 +484,12 @@ TEST_F(InterfaceTest, RegionBranchSelectorForBranch) {
   loom_region_branch_t branch = loom_region_branch_cast(module_, branch_op);
   ASSERT_TRUE(loom_region_branch_isa(branch));
   EXPECT_EQ(loom_region_branch_selector(branch), condition_id);
+  EXPECT_EQ(loom_region_branch_region_truth(branch, 0),
+            LOOM_REGION_BRANCH_TRUTH_TRUE);
+  EXPECT_EQ(loom_region_branch_region_truth(branch, 1),
+            LOOM_REGION_BRANCH_TRUTH_FALSE);
+  EXPECT_EQ(loom_region_branch_region_truth(branch, 2),
+            LOOM_REGION_BRANCH_TRUTH_UNKNOWN);
 }
 
 TEST_F(InterfaceTest, RegionBranchYieldOnlyOperandsForBranch) {
@@ -554,6 +560,35 @@ TEST_F(InterfaceTest, RegionBranchYieldOnlyRejectsBranchBody) {
       module_, branch, 0, 1, &yielded_values));
 }
 
+TEST_F(InterfaceTest, RegionBranchImplicitTerminatorYieldsEmptyTuple) {
+  loom_op_t* condition = build_i1(false);
+  loom_op_t* branch_op = nullptr;
+  IREE_ASSERT_OK(
+      loom_test_branch_build(&builder_, loom_op_results(condition)[0], nullptr,
+                             0, nullptr, 0, LOOM_LOCATION_UNKNOWN, &branch_op));
+  loom_region_branch_t branch = loom_region_branch_cast(module_, branch_op);
+  for (uint8_t region_index = 0; region_index < 2; ++region_index) {
+    loom_region_t* region =
+        loom_region_branch_region(module_, branch, region_index);
+    loom_builder_ip_t saved_ip =
+        loom_builder_enter_region(&builder_, branch_op, region);
+    loom_op_t* terminator = nullptr;
+    IREE_ASSERT_OK(loom_test_implicit_yield_build(
+        &builder_, LOOM_LOCATION_UNKNOWN, &terminator));
+    loom_builder_restore(&builder_, saved_ip);
+
+    EXPECT_EQ(
+        loom_region_branch_region_terminator(module_, branch, region_index),
+        terminator);
+    loom_value_slice_t yielded_values = {};
+    EXPECT_TRUE(loom_region_branch_region_yield_only_operands(
+        module_, branch, region_index, 0, &yielded_values));
+    EXPECT_EQ(yielded_values.count, 0);
+    EXPECT_FALSE(loom_region_branch_region_yield_only_operands(
+        module_, branch, region_index, 1, &yielded_values));
+  }
+}
+
 TEST_F(InterfaceTest, RegionBranchRegionsForRegionTable) {
   loom_op_t* selector = build_index(1);
   int64_t case_keys[2] = {0, 1};
@@ -572,6 +607,10 @@ TEST_F(InterfaceTest, RegionBranchRegionsForRegionTable) {
   loom_region_branch_t branch = loom_region_branch_cast(module_, table_op);
   ASSERT_TRUE(loom_region_branch_isa(branch));
   EXPECT_EQ(loom_region_branch_selector(branch), loom_op_results(selector)[0]);
+  EXPECT_EQ(loom_region_branch_region_truth(branch, 0),
+            LOOM_REGION_BRANCH_TRUTH_UNKNOWN);
+  EXPECT_EQ(loom_region_branch_region_truth(branch, 1),
+            LOOM_REGION_BRANCH_TRUTH_UNKNOWN);
   EXPECT_EQ(loom_region_branch_region(module_, branch, 0),
             loom_test_region_table_default_region(table_op));
   EXPECT_EQ(loom_region_branch_region(module_, branch, 1),

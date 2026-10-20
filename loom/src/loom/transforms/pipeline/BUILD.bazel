@@ -1,0 +1,102 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_library", "loom_cc_test")
+
+package(
+    default_visibility = ["//visibility:public"],
+    features = ["layering_check"],
+    licenses = ["notice"],
+)
+
+loom_cc_library(
+    name = "realization",
+    srcs = ["realization.c"],
+    hdrs = ["realization.h"],
+    deps = [
+        "//loom/src/loom/analysis:pipeline_resources",
+        "//loom/src/loom/analysis:pipeline_workers",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ir:symbol_map",
+        "//loom/src/loom/ops:special_values",
+        "//loom/src/loom/ops/func",
+        "//loom/src/loom/pass:types",
+        "//loom/src/loom/pass:value_facts",
+        "//loom/src/loom/rewrite:callable",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:function_contract",
+        "//loom/src/loom/target:function_version",
+        "//loom/src/loom/target:pass_environment",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "channel_materialization",
+    srcs = ["channel_materialization.c"],
+    hdrs = ["channel_materialization.h"],
+    deps = [
+        "//loom/src/loom/analysis:channel_plan",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/func",
+        "//loom/src/loom/rewrite:callable",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/util:cfg_graph",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "outline",
+    srcs = ["outline.c"],
+    hdrs = ["outline.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ir:symbol_map",
+        "//loom/src/loom/ops:func_symbol_facts",
+        "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/func",
+        "//loom/src/loom/ops/pipeline",
+        "//loom/src/loom/pass:types",
+        "//loom/src/loom/pass:value_facts",
+        "//loom/src/loom/rewrite:materialize",
+        "//loom/src/loom/rewrite:remap",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/target:facts_builder",
+        "//loom/src/loom/target:function_contract",
+        "//loom/src/loom/target:function_version",
+        "//loom/src/loom/target:pass_environment",
+        "//loom/src/loom/target:provider",
+        "//loom/src/loom/util:fact_table",
+        "//loom/src/loom/util:walk",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_test(
+    name = "channel_materialization_test",
+    srcs = ["channel_materialization_test.cc"],
+    deps = [
+        ":channel_materialization",
+        "//loom/src/loom/analysis:channel_plan",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:type_registry",
+        "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/channel",
+        "//loom/src/loom/ops/func",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/util:cfg_graph",
+        "//loom/src/loom/verify",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)

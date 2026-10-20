@@ -189,10 +189,29 @@ iree_status_t iree_async_proactor_create_io_uring(
   bool supports_sparse_buffer_table = iree_any_bit_set(
       proactor->kernel_capabilities, IREE_ASYNC_PROACTOR_CAPABILITY_MULTISHOT);
 
+  // Probe registration itself: an opcode from the same kernel release is not
+  // evidence that provided-buffer rings are usable under the current policy.
+  // Keep the probe page alive through destruction if its retirement fails.
+  void* buffer_ring_probe_page = NULL;
+  if (iree_status_is_ok(status) && supports_sparse_buffer_table) {
+    iree_host_size_t page_size = iree_memory_query_info().normal_page_size;
+    status = iree_allocator_malloc_aligned(allocator, page_size, page_size, 0,
+                                           &buffer_ring_probe_page);
+    if (iree_status_is_ok(status)) {
+      memset(buffer_ring_probe_page, 0, page_size);
+      status = iree_async_proactor_io_uring_probe_buffer_ring(
+          &proactor->ring, buffer_ring_probe_page,
+          &proactor->supports_buffer_ring);
+    }
+  }
+
   // Apply the allowed_capabilities mask from options.
   if (iree_status_is_ok(status)) {
     proactor->capabilities =
         proactor->kernel_capabilities & options.allowed_capabilities;
+    if (!proactor->supports_buffer_ring) {
+      proactor->capabilities &= ~IREE_ASYNC_PROACTOR_CAPABILITY_MULTISHOT;
+    }
   }
 
   // Create sparse buffer table on 5.19+ kernels for dynamic buffer
@@ -246,6 +265,7 @@ iree_status_t iree_async_proactor_create_io_uring(
   } else {
     iree_async_proactor_io_uring_destroy(&proactor->base);
   }
+  iree_allocator_free_aligned(allocator, buffer_ring_probe_page);
   IREE_TRACE_ZONE_END(z0);
   return status;
 }
@@ -811,8 +831,9 @@ static inline void iree_async_proactor_io_uring_complete_socket_recv_pool(
         region->buffer_size);
     recv_pool->lease.release = region->recycle;
     recv_pool->lease.buffer_index = (iree_async_buffer_index_t)buffer_index;
-    recv_pool->bytes_received = (iree_host_size_t)cqe->res;
   }
+  // Without buffer selection the lease was reserved before submission.
+  recv_pool->bytes_received = (iree_host_size_t)cqe->res;
 }
 
 // Handles SOCKET_RECVFROM completion: extracts sender address.
@@ -830,8 +851,12 @@ static iree_status_t iree_async_proactor_io_uring_complete_file_open(
     iree_async_file_open_operation_t* open_op) {
   int fd = cqe->res;
   iree_async_primitive_t primitive = iree_async_primitive_from_fd(fd);
-  iree_status_t status =
-      iree_async_file_import(&proactor->base, primitive, &open_op->opened_file);
+  iree_async_file_flags_t flags =
+      iree_any_bit_set(open_op->open_flags, IREE_ASYNC_FILE_OPEN_FLAG_DIRECT)
+          ? IREE_ASYNC_FILE_FLAG_DIRECT
+          : IREE_ASYNC_FILE_FLAG_NONE;
+  iree_status_t status = iree_async_file_import(&proactor->base, primitive,
+                                                flags, &open_op->opened_file);
   if (!iree_status_is_ok(status)) {
     // Import failed (e.g., allocation failure). Close the opened fd.
     close(fd);
@@ -1109,6 +1134,15 @@ iree_host_size_t iree_async_proactor_io_uring_process_cqe(
     if (iree_status_is_ok(status)) {
       status = iree_async_proactor_io_uring_populate_result(proactor, cqe,
                                                             operation);
+    } else if (operation->type == IREE_ASYNC_OPERATION_TYPE_SOCKET_RECV_POOL) {
+      iree_async_socket_recv_pool_operation_t* receive =
+          (iree_async_socket_recv_pool_operation_t*)operation;
+      if (iree_async_buffer_pool_region(receive->pool)
+              ->handles.iouring.buffer_group_id < 0) {
+        // The kernel has retired this one-shot receive, including cancellation.
+        // Only now may another operation acquire its destination buffer.
+        iree_async_buffer_lease_release(&receive->lease);
+      }
     }
     flags = iree_async_proactor_io_uring_completion_flags(cqe, operation);
   }
@@ -1183,6 +1217,7 @@ iree_status_t iree_async_proactor_io_uring_submit_pending_event_monitors(
 static iree_status_t iree_async_proactor_io_uring_poll(
     iree_async_proactor_t* base_proactor, iree_timeout_t timeout,
     iree_host_size_t* out_completed_count) {
+  IREE_TRACE_ZONE_BEGIN_NAMED(z0, "iree_async_proactor_io_uring_prepare");
   iree_async_proactor_io_uring_t* proactor =
       iree_async_proactor_io_uring_cast(base_proactor);
 
@@ -1193,7 +1228,8 @@ static iree_status_t iree_async_proactor_io_uring_poll(
   // Enable the ring on first poll. When created with R_DISABLED (which happens
   // automatically when SINGLE_ISSUER is in the setup flags), this call binds
   // the current thread as the exclusive submitter for all io_uring_enter calls.
-  IREE_RETURN_IF_ERROR(iree_io_uring_ring_enable(&proactor->ring));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(z0,
+                                    iree_io_uring_ring_enable(&proactor->ring));
 
   int32_t owner_tid = (int32_t)syscall(__NR_gettid);
   iree_atomic_store(&proactor->polling.owner_tid, owner_tid,
@@ -1209,20 +1245,21 @@ static iree_status_t iree_async_proactor_io_uring_poll(
   // Submit registrations and any SQEs queued before the first poll. This must
   // happen before arming the wake source: a full pre-poll SQ must not prevent
   // the poll owner from establishing its own wake path.
-  IREE_RETURN_IF_ERROR(
-      iree_async_proactor_io_uring_submit_pending_event_monitors(proactor));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_async_proactor_io_uring_submit_pending_event_monitors(proactor));
 
   // Arm the wake poll before potentially blocking.
-  IREE_RETURN_IF_ERROR(iree_async_proactor_io_uring_arm_wake(proactor));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_async_proactor_io_uring_arm_wake(proactor));
 
   // Flush the wake SQE and deferred completions. With DEFER_TASKRUN, the kernel
   // defers CQE generation for async notifications until we explicitly request
   // processing via GETEVENTS. This flush must happen even when CQEs are already
   // available because those completions may have triggered deferred task work.
-  IREE_RETURN_IF_ERROR(
-      iree_io_uring_ring_submit(&proactor->ring,
-                                /*min_complete=*/0,
-                                /*flags=*/IREE_IORING_ENTER_GETEVENTS));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_io_uring_ring_submit(&proactor->ring,
+                                    /*min_complete=*/0,
+                                    /*flags=*/IREE_IORING_ENTER_GETEVENTS));
 
   // Run poll-owner work before waiting for native completions.
   iree_host_size_t progress_count = 0;
@@ -1232,11 +1269,13 @@ static iree_status_t iree_async_proactor_io_uring_poll(
     if (out_completed_count) {
       *out_completed_count = progress_count;
     }
+    IREE_TRACE_ZONE_END(z0);
     return progress_status;
   }
   if (progress_count > 0 || base_proactor->progress_list) {
     is_immediate = true;
   }
+  IREE_TRACE_ZONE_END(z0);
 
   // If no CQEs are available after flushing and timeout allows blocking,
   // wait for completions.
@@ -1252,6 +1291,8 @@ static iree_status_t iree_async_proactor_io_uring_poll(
     }
     IREE_RETURN_IF_ERROR(wait_status);
   }
+
+  IREE_TRACE_ZONE_BEGIN_NAMED(z1, "iree_async_proactor_io_uring_dispatch");
 
   // Mark the poll thread as active. Submit paths check this to decide whether
   // to flush SQEs directly (poll thread) or defer to wake (cross-thread).
@@ -1396,6 +1437,7 @@ static iree_status_t iree_async_proactor_io_uring_poll(
     status = iree_status_from_code(IREE_STATUS_DEADLINE_EXCEEDED);
   }
 
+  IREE_TRACE_ZONE_END(z1);
   return status;
 }
 

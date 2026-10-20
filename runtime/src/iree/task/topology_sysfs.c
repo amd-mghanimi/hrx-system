@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 
 #include "iree/base/internal/math.h"
+#include "iree/base/internal/prng.h"
 #include "iree/base/internal/sysfs.h"
 #include "iree/task/topology.h"
 
@@ -322,6 +323,82 @@ iree_task_topology_node_id_t iree_task_topology_query_current_node(void) {
     return cluster_id;
   }
   return 0;  // Fallback to node 0.
+}
+
+// Tracks whether each worker's complete CPU affinity belongs to one NUMA node.
+typedef struct iree_sysfs_numa_coverage_t {
+  // Worker affinities being resolved at executor construction.
+  const iree_task_topology_t* topology;
+  // Bit 0 covers the primary CPU; bit 1 covers an optional SMT partner.
+  uint8_t covered[IREE_TASK_TOPOLOGY_MAX_GROUP_COUNT];
+} iree_sysfs_numa_coverage_t;
+
+static bool iree_sysfs_cover_numa_cpus(uint32_t start_cpu, uint32_t end_cpu,
+                                       void* user_data) {
+  iree_sysfs_numa_coverage_t* coverage = user_data;
+  for (iree_host_size_t i = 0; i < coverage->topology->group_count; ++i) {
+    iree_thread_affinity_t affinity =
+        coverage->topology->groups[i].ideal_thread_affinity;
+    if (affinity.group_any) {
+      continue;
+    }
+    if (affinity.id >= start_cpu && affinity.id < end_cpu) {
+      coverage->covered[i] |= 1;
+    }
+    if (affinity.smt && affinity.id + 1 >= start_cpu &&
+        affinity.id + 1 < end_cpu) {
+      coverage->covered[i] |= 2;
+    }
+  }
+  return true;
+}
+
+iree_numa_node_id_t iree_task_topology_query_numa_node(
+    const iree_task_topology_t* topology) {
+  if (topology->group_count == 0) {
+    return IREE_NUMA_NODE_ANY;
+  }
+  for (iree_host_size_t i = 0; i < topology->group_count; ++i) {
+    if (iree_thread_affinity_is_unspecified(
+            topology->groups[i].ideal_thread_affinity)) {
+      return IREE_NUMA_NODE_ANY;
+    }
+  }
+
+  iree_bitmap_t online_nodes = iree_numa_online_nodes();
+  for (iree_host_size_t node = 0; node < online_nodes.bit_count; ++node) {
+    if (!iree_bitmap_test(online_nodes, node)) {
+      continue;
+    }
+    char path[256];
+    iree_snprintf(path, sizeof(path), "%s/node/node%zu/cpulist",
+                  iree_sysfs_get_root_path(), node);
+    char buffer[4096];
+    iree_host_size_t length = 0;
+    if (!iree_sysfs_try_read_small_file(path, buffer, sizeof(buffer),
+                                        &length)) {
+      continue;
+    }
+    iree_sysfs_numa_coverage_t coverage = {.topology = topology};
+    if (!iree_sysfs_try_parse_cpu_list(iree_make_string_view(buffer, length),
+                                       iree_sysfs_cover_numa_cpus, &coverage)) {
+      continue;
+    }
+    bool all_covered = true;
+    for (iree_host_size_t i = 0; i < topology->group_count; ++i) {
+      iree_thread_affinity_t affinity =
+          topology->groups[i].ideal_thread_affinity;
+      if (affinity.group_any) {
+        all_covered &= affinity.group == node;
+      } else {
+        all_covered &= coverage.covered[i] == (affinity.smt ? 3 : 1);
+      }
+    }
+    if (all_covered) {
+      return (iree_numa_node_id_t)node;
+    }
+  }
+  return IREE_NUMA_NODE_ANY;
 }
 
 //===----------------------------------------------------------------------===//
@@ -722,7 +799,6 @@ iree_status_t iree_task_topology_initialize_from_physical_cores(
   if (processor_count == 0) {
     // Fallback to single-group topology.
     iree_task_topology_initialize_from_group_count(1, out_topology);
-    out_topology->node_id = node_id;
     return iree_ok_status();
   }
 
@@ -761,10 +837,33 @@ iree_status_t iree_task_topology_initialize_from_physical_cores(
 
   // Find unique cores by enumerating processors and grouping by core_id.
   // We build a simple map of core_id -> first processor in that core.
+  // Randomize the base so independent pools, including those created by the
+  // same thread, do not all bind to the lowest-numbered available processors.
+  // Time varies repeated calls and the address varies concurrent callers.
+  iree_prng_splitmix64_state_t placement_prng;
+  iree_prng_splitmix64_initialize(
+      (uint64_t)iree_time_now() ^ (uint64_t)(uintptr_t)out_topology,
+      &placement_prng);
+  const uint64_t placement = iree_prng_splitmix64_next(&placement_prng);
+  uint32_t first_cpu = placement % processor_count;
+  if (current_affinity_ptr) {
+    // Choose an allowed processor directly: starting inside an excluded gap
+    // would bias every such draw toward the first processor after that gap.
+    uint32_t remaining = placement % CPU_COUNT(current_affinity_ptr);
+    for (first_cpu = 0; first_cpu < processor_count; ++first_cpu) {
+      if (iree_sysfs_is_processor_available(first_cpu, current_affinity_ptr)) {
+        if (remaining == 0) {
+          break;
+        }
+        --remaining;
+      }
+    }
+  }
   uint32_t core_map[IREE_TASK_TOPOLOGY_MAX_GROUP_COUNT];
   iree_host_size_t core_count = 0;
-  for (uint32_t cpu = 0; cpu < processor_count && core_count < max_core_count;
-       ++cpu) {
+  for (uint32_t ordinal = 0;
+       ordinal < processor_count && core_count < max_core_count; ++ordinal) {
+    const uint32_t cpu = (first_cpu + ordinal) % processor_count;
     if (!iree_sysfs_is_processor_available(cpu, current_affinity_ptr)) {
       continue;
     }
@@ -895,8 +994,6 @@ iree_status_t iree_task_topology_initialize_from_physical_cores(
       group->ideal_thread_affinity.group = cluster_id;
     }
   }
-
-  out_topology->node_id = node_id;
 
   iree_status_t status =
       iree_task_topology_fixup_constructive_sharing_masks(out_topology);

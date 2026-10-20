@@ -1,0 +1,364 @@
+// RUN: emit source-low output=low
+
+// A callable V4 predicate narrows a native qword mask from YMM to dword lanes
+// in XMM. Unsigned i64 ordering uses sign-bit bias before signed comparison.
+x86.target<avx2> @target
+
+func.def target(@target) @i64x4_unsigned_compare_return(%lhs: vector<4xi64>, %rhs: vector<4xi64>) -> (vector<4xi1>) {
+  %result = vector.cmpi ule, %lhs, %rhs : vector<4xi64> -> vector<4xi1>
+  func.return %result : vector<4xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi64>, vector<4xi64>) -> (vector<4xi1>)}) @i64x4_unsigned_compare_return(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>) -> (reg<x86.xmm>) asm {
+  %7 = vpcmpeqq.ymm %lhs, %lhs
+  %8 = vpsllq.ymm %7, 63
+  %9 = vpxor.ymm %lhs, %8
+  %10 = vpxor.ymm %rhs, %8
+  %11 = vpcmpgtq.ymm %9, %10
+  %12 = vpxor.ymm %11, %7
+  %13 = vextractf128.xmm %12, 0
+  %14 = vextractf128.xmm %12, 1
+  %result = vshufps.xmm %13, %14, 136
+  return %result
+}
+
+// ====
+
+// Scalar comparisons materialize canonical GPR predicates only when the value
+// escapes. Same-width floating selects retain the packed comparison mask.
+x86.target<avx2> @target
+
+func.def target(@target) @scalar_float_comparisons(%f32_lhs: f32, %f32_rhs: f32, %f64_lhs: f64, %f64_rhs: f64) -> (i1, i1, f32, f64) {
+  %f32_result = scalar.cmpf olt, %f32_lhs, %f32_rhs : f32
+  %f64_result = scalar.cmpf uno, %f64_lhs, %f64_rhs : f64
+  %f32_condition = scalar.cmpf oge, %f32_lhs, %f32_rhs : f32
+  %f32_selected = scf.select %f32_condition, %f32_lhs, %f32_rhs : f32
+  %f64_condition = scalar.cmpf ule, %f64_lhs, %f64_rhs : f64
+  %f64_selected = scf.select %f64_condition, %f64_lhs, %f64_rhs : f64
+  func.return %f32_result, %f64_result, %f32_selected, %f64_selected : i1, i1, f32, f64
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (f32, f32, f64, f64) -> (i1, i1, f32, f64)}) @scalar_float_comparisons(%f32_lhs: reg<x86.xmm>, %f32_rhs: reg<x86.xmm>, %f64_lhs: reg<x86.xmm>, %f64_rhs: reg<x86.xmm>) -> (reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %22 = avx2.vcmpps.xmm %f32_lhs, %f32_rhs, 17
+  %23 = vmovd.gpr32.xmm %22
+  %f32_result = and.imm.gpr32 %23 {imm32 = 1}
+  %25 = avx2.vcmppd.xmm %f64_lhs, %f64_rhs, 3
+  %26 = vmovd.gpr32.xmm %25
+  %f64_result = and.imm.gpr32 %26 {imm32 = 1}
+  %28 = avx2.vcmpps.xmm %f32_lhs, %f32_rhs, 29
+  %f32_selected = vpblendvb.xmm %f32_rhs, %f32_lhs, %28
+  %30 = avx2.vcmppd.xmm %f64_lhs, %f64_rhs, 26
+  %f64_selected = vpblendvb.xmm %f64_rhs, %f64_lhs, %30
+  return %f32_result, %f64_result, %f32_selected, %f64_selected
+}
+
+// ====
+
+// A V16 predicate widens byte lanes in XMM to word lanes for a YMM payload.
+x86.target<avx2> @target
+
+func.def target(@target) @i8x16_unsigned_compare_i16x16_select(%lhs: vector<16xi8>, %rhs: vector<16xi8>, %true_value: vector<16xi16>, %false_value: vector<16xi16>) -> (vector<16xi16>) {
+  %condition = vector.cmpi ult, %lhs, %rhs : vector<16xi8> -> vector<16xi1>
+  %result = vector.select %condition, %true_value, %false_value : vector<16xi16>
+  func.return %result : vector<16xi16>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<16xi8>, vector<16xi8>, vector<16xi16>, vector<16xi16>) -> (vector<16xi16>)}) @i8x16_unsigned_compare_i16x16_select(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>, %true_value: reg<x86.ymm>, %false_value: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  %12 = vpminub.xmm %lhs, %rhs
+  %13 = vpcmpeqb.xmm %12, %lhs
+  %14 = vpcmpeqb.xmm %lhs, %rhs
+  %15 = vpcmpeqb.xmm %lhs, %lhs
+  %16 = vpxor.xmm %14, %15
+  %17 = vpand.xmm %13, %16
+  %condition = vpmovsxbw.ymm %17
+  %result = vpblendvb.ymm %false_value, %true_value, %condition
+  return %result
+}
+
+// ====
+
+// Floating compares use AVX predicate immediates and narrow qword masks for the
+// callable V4 representation.
+x86.target<avx2> @target
+
+func.def target(@target) @f64x4_compare_return(%lhs: vector<4xf64>, %rhs: vector<4xf64>) -> (vector<4xi1>) {
+  %result = vector.cmpf une, %lhs, %rhs : vector<4xf64> -> vector<4xi1>
+  func.return %result : vector<4xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xf64>, vector<4xf64>) -> (vector<4xi1>)}) @f64x4_compare_return(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>) -> (reg<x86.xmm>) asm {
+  %7 = avx2.vcmppd.ymm %lhs, %rhs, 4
+  %8 = vextractf128.xmm %7, 0
+  %9 = vextractf128.xmm %7, 1
+  %result = vshufps.xmm %8, %9, 136
+  return %result
+}
+
+// ====
+
+// V32 has one legal AVX2 representation and stays in YMM through compare,
+// predicate logic, and selection.
+x86.target<avx2> @target
+
+func.def target(@target) @i8x32_compare_logic_select(%lhs: vector<32xi8>, %rhs: vector<32xi8>, %true_value: vector<32xi8>, %false_value: vector<32xi8>) -> (vector<32xi8>) {
+  %less = vector.cmpi slt, %lhs, %rhs : vector<32xi8> -> vector<32xi1>
+  %equal = vector.cmpi eq, %lhs, %rhs : vector<32xi8> -> vector<32xi1>
+  %condition = vector.ori %less, %equal : vector<32xi1>
+  %result = vector.select %condition, %true_value, %false_value : vector<32xi8>
+  func.return %result : vector<32xi8>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<32xi8>, vector<32xi8>, vector<32xi8>, vector<32xi8>) -> (vector<32xi8>)}) @i8x32_compare_logic_select(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>, %true_value: reg<x86.ymm>, %false_value: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  %less = vpcmpgtb.ymm %rhs, %lhs
+  %equal = vpcmpeqb.ymm %lhs, %rhs
+  %condition = vpor.ymm %less, %equal
+  %result = vpblendvb.ymm %false_value, %true_value, %condition
+  return %result
+}
+
+// ====
+
+// Predicate constructors materialize the representation selected by their
+// callable or typed consumer boundary.
+x86.target<avx2> @target
+
+func.def target(@target) @construct_predicates(%condition_value: i1, %true_value: vector<16xi16>, %false_value: vector<16xi16>) -> (vector<2xi1>, vector<4xi1>, vector<16xi16>, vector<32xi1>) {
+  %false2 = vector.constant 0 : vector<2xi1>
+  %true4 = vector.constant 1 : vector<4xi1>
+  %condition16 = vector.splat %condition_value : vector<16xi1>
+  %selected = vector.select %condition16, %true_value, %false_value : vector<16xi16>
+  %true32 = vector.constant 1 : vector<32xi1>
+  func.return %false2, %true4, %selected, %true32 : vector<2xi1>, vector<4xi1>, vector<16xi16>, vector<32xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i1, vector<16xi16>, vector<16xi16>) -> (vector<2xi1>, vector<4xi1>, vector<16xi16>, vector<32xi1>)}) @construct_predicates(%condition_value: reg<x86.gpr32>, %true_value: reg<x86.ymm>, %false_value: reg<x86.ymm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.ymm>, reg<x86.ymm>) asm {
+  %false2 = vxorps.zero.xmm
+  %true4 = vpcmpeqd.xmm %false2, %false2
+  %23 = mov.imm32 0
+  %24 = sub.gpr32 %23, %condition_value
+  %25 = vmovd.xmm.gpr32 %24
+  %26 = vpbroadcastd.ymm %25
+  %selected = vpblendvb.ymm %false_value, %true_value, %26
+  %28 = vxorps.zero.ymm
+  %true32 = vpcmpeqb.ymm %28, %28
+  return %false2, %true4, %selected, %true32
+}
+
+// ====
+
+// Predicate lane access preserves the callable XMM carrier and normalizes the
+// extracted all-bits lane to scalar i1.
+x86.target<avx2> @target
+
+func.def target(@target) @predicate_lane_access(%value: i1, %source: vector<8xi1>) -> (i1, vector<8xi1>) {
+  %extracted = vector.extract %source[3] : vector<8xi1> -> i1
+  %inserted = vector.insert %value into %source[5] : i1, vector<8xi1>
+  func.return %extracted, %inserted : i1, vector<8xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (i1, vector<8xi1>) -> (i1, vector<8xi1>)}) @predicate_lane_access(%value: reg<x86.gpr32>, %source: reg<x86.xmm>) -> (reg<x86.gpr32>, reg<x86.xmm>) asm {
+  %10 = vpextrw.xmm %source, 3
+  %extracted = and.imm.gpr32 %10 {imm32 = 1}
+  %12 = mov.imm32 0
+  %13 = sub.gpr32 %12, %value
+  %inserted = vpinsrw.xmm %source, %13, 5
+  return %extracted, %inserted
+}
+
+// ====
+
+// The sole V32 carrier extracts the selected 128-bit half before its byte.
+x86.target<avx2> @target
+
+func.def target(@target) @predicate_lane_access_v32(%source: vector<32xi1>) -> (i1) {
+  %result = vector.extract %source[21] : vector<32xi1> -> i1
+  func.return %result : i1
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<32xi1>) -> (i1)}) @predicate_lane_access_v32(%source: reg<x86.ymm>) -> (reg<x86.gpr32>) asm {
+  %5 = vextractf128.xmm %source, 1
+  %6 = vpextrb.xmm %5, 5
+  %result = and.imm.gpr32 %6 {imm32 = 1}
+  return %result
+}
+
+// ====
+
+// A local V4 predicate stays in its native YMM comparison representation when
+// one lane is extracted, avoiding the more expensive whole-vector narrowing.
+x86.target<avx2> @target
+
+func.def target(@target) @predicate_lane_access_native_ymm(%lhs: vector<4xi64>, %rhs: vector<4xi64>) -> (i1) {
+  %condition = vector.cmpi slt, %lhs, %rhs : vector<4xi64> -> vector<4xi1>
+  %result = vector.extract %condition[3] : vector<4xi1> -> i1
+  func.return %result : i1
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi64>, vector<4xi64>) -> (i1)}) @predicate_lane_access_native_ymm(%lhs: reg<x86.ymm>, %rhs: reg<x86.ymm>) -> (reg<x86.gpr32>) asm {
+  %condition = vpcmpgtq.ymm %rhs, %lhs
+  %9 = vextractf128.xmm %condition, 1
+  %10 = vpextrq.xmm %9, 1
+  %11 = mov.trunc.gpr32.gpr64 %10
+  %result = and.imm.gpr32 %11 {imm32 = 1}
+  return %result
+}
+
+// ====
+
+// Packed 64-bit comparison masks widen to the stable 128-bit callable
+// predicate carriers according to their logical lane width.
+x86.target<avx2> @target
+
+func.def target(@target) @packed_compare_return(%lhs2: vector<2xi32>, %rhs2: vector<2xi32>, %lhs4: vector<4xi16>, %rhs4: vector<4xi16>, %lhs8: vector<8xi8>, %rhs8: vector<8xi8>) -> (vector<2xi1>, vector<4xi1>, vector<8xi1>) {
+  %result2 = vector.cmpi slt, %lhs2, %rhs2 : vector<2xi32> -> vector<2xi1>
+  %result4 = vector.cmpi slt, %lhs4, %rhs4 : vector<4xi16> -> vector<4xi1>
+  %result8 = vector.cmpi slt, %lhs8, %rhs8 : vector<8xi8> -> vector<8xi1>
+  func.return %result2, %result4, %result8 : vector<2xi1>, vector<4xi1>, vector<8xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<2xi32>, vector<2xi32>, vector<4xi16>, vector<4xi16>, vector<8xi8>, vector<8xi8>) -> (vector<2xi1>, vector<4xi1>, vector<8xi1>)}) @packed_compare_return(%lhs2: reg<x86.xmm>, %rhs2: reg<x86.xmm>, %lhs4: reg<x86.xmm>, %rhs4: reg<x86.xmm>, %lhs8: reg<x86.xmm>, %rhs8: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %21 = vpcmpgtd.xmm %rhs2, %lhs2
+  %result2 = vpmovsxdq.xmm %21
+  %23 = vpcmpgtw.xmm %rhs4, %lhs4
+  %result4 = vpmovsxwd.xmm %23
+  %25 = vpcmpgtb.xmm %rhs8, %lhs8
+  %result8 = vpmovsxbw.xmm %25
+  return %result2, %result4, %result8
+}
+
+// ====
+
+// Callable predicate arguments pack from their stable 128-bit carriers into
+// the 64-bit layouts required by narrow vector selects.
+x86.target<avx2> @target
+
+func.def target(@target) @packed_select_argument(%condition2: vector<2xi1>, %true2: vector<2xi32>, %false2: vector<2xi32>, %condition4: vector<4xi1>, %true4: vector<4xi16>, %false4: vector<4xi16>, %condition8: vector<8xi1>, %true8: vector<8xi8>, %false8: vector<8xi8>) -> (vector<2xi32>, vector<4xi16>, vector<8xi8>) {
+  %result2 = vector.select %condition2, %true2, %false2 : vector<2xi32>
+  %result4 = vector.select %condition4, %true4, %false4 : vector<4xi16>
+  %result8 = vector.select %condition8, %true8, %false8 : vector<8xi8>
+  func.return %result2, %result4, %result8 : vector<2xi32>, vector<4xi16>, vector<8xi8>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<2xi1>, vector<2xi32>, vector<2xi32>, vector<4xi1>, vector<4xi16>, vector<4xi16>, vector<8xi1>, vector<8xi8>, vector<8xi8>) -> (vector<2xi32>, vector<4xi16>, vector<8xi8>)}) @packed_select_argument(%condition2: reg<x86.xmm>, %true2: reg<x86.xmm>, %false2: reg<x86.xmm>, %condition4: reg<x86.xmm>, %true4: reg<x86.xmm>, %false4: reg<x86.xmm>, %condition8: reg<x86.xmm>, %true8: reg<x86.xmm>, %false8: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %27 = vshufps.xmm %condition2, %condition2, 136
+  %result2 = vpblendvb.xmm %false2, %true2, %27
+  %29 = vpackssdw.xmm %condition4, %condition4
+  %result4 = vpblendvb.xmm %false4, %true4, %29
+  %31 = vpacksswb.xmm %condition8, %condition8
+  %result8 = vpblendvb.xmm %false8, %true8, %31
+  return %result2, %result4, %result8
+}
+
+// ====
+
+// A packed comparison consumed by a matching select remains in its 64-bit
+// representation without a boundary conversion.
+x86.target<avx2> @target
+
+func.def target(@target) @packed_compare_select(%lhs: vector<8xi8>, %rhs: vector<8xi8>, %true_value: vector<8xi8>, %false_value: vector<8xi8>) -> (vector<8xi8>) {
+  %condition = vector.cmpi slt, %lhs, %rhs : vector<8xi8> -> vector<8xi1>
+  %result = vector.select %condition, %true_value, %false_value : vector<8xi8>
+  func.return %result : vector<8xi8>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<8xi8>, vector<8xi8>, vector<8xi8>, vector<8xi8>) -> (vector<8xi8>)}) @packed_compare_select(%lhs: reg<x86.xmm>, %rhs: reg<x86.xmm>, %true_value: reg<x86.xmm>, %false_value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %condition = vpcmpgtb.xmm %rhs, %lhs
+  %result = vpblendvb.xmm %false_value, %true_value, %condition
+  return %result
+}
+
+// ====
+
+// Predicates for two- and four-byte payloads occupy the low 16 or 32 bits of
+// XMM and remain packed from comparison through selection.
+x86.target<avx2> @target
+
+func.def target(@target) @subregister_compare_select(%lhs2: vector<2xi8>, %rhs2: vector<2xi8>, %true2: vector<2xi8>, %false2: vector<2xi8>, %lhs4: vector<4xi8>, %rhs4: vector<4xi8>, %true4: vector<4xi8>, %false4: vector<4xi8>) -> (vector<2xi8>, vector<4xi8>) {
+  %condition2 = vector.cmpi slt, %lhs2, %rhs2 : vector<2xi8> -> vector<2xi1>
+  %result2 = vector.select %condition2, %true2, %false2 : vector<2xi8>
+  %condition4 = vector.cmpi slt, %lhs4, %rhs4 : vector<4xi8> -> vector<4xi1>
+  %result4 = vector.select %condition4, %true4, %false4 : vector<4xi8>
+  func.return %result2, %result4 : vector<2xi8>, vector<4xi8>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<2xi8>, vector<2xi8>, vector<2xi8>, vector<2xi8>, vector<4xi8>, vector<4xi8>, vector<4xi8>, vector<4xi8>) -> (vector<2xi8>, vector<4xi8>)}) @subregister_compare_select(%lhs2: reg<x86.xmm>, %rhs2: reg<x86.xmm>, %true2: reg<x86.xmm>, %false2: reg<x86.xmm>, %lhs4: reg<x86.xmm>, %rhs4: reg<x86.xmm>, %true4: reg<x86.xmm>, %false4: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>) asm {
+  %condition2 = vpcmpgtb.xmm %rhs2, %lhs2
+  %result2 = vpblendvb.xmm %false2, %true2, %condition2
+  %condition4 = vpcmpgtb.xmm %rhs4, %lhs4
+  %result4 = vpblendvb.xmm %false4, %true4, %condition4
+  return %result2, %result4
+}
+
+// ====
+
+// Predicate extensions preserve the all-zero/all-one carrier through signed
+// lane conversion and normalize unsigned results without scalar lane access.
+x86.target<avx2> @target
+
+func.def target(@target) @predicate_integer_extensions(%predicate: vector<4xi1>) -> (vector<4xi8>, vector<4xi8>, vector<4xi16>, vector<4xi16>, vector<4xi32>, vector<4xi32>, vector<4xi64>, vector<4xi64>) {
+  %s8 = vector.extsi %predicate : vector<4xi1> to vector<4xi8>
+  %u8 = vector.extui %predicate : vector<4xi1> to vector<4xi8>
+  %s16 = vector.extsi %predicate : vector<4xi1> to vector<4xi16>
+  %u16 = vector.extui %predicate : vector<4xi1> to vector<4xi16>
+  %s32 = vector.extsi %predicate : vector<4xi1> to vector<4xi32>
+  %u32 = vector.extui %predicate : vector<4xi1> to vector<4xi32>
+  %s64 = vector.extsi %predicate : vector<4xi1> to vector<4xi64>
+  %u64 = vector.extui %predicate : vector<4xi1> to vector<4xi64>
+  func.return %s8, %u8, %s16, %u16, %s32, %u32, %s64, %u64 : vector<4xi8>, vector<4xi8>, vector<4xi16>, vector<4xi16>, vector<4xi32>, vector<4xi32>, vector<4xi64>, vector<4xi64>
+}
+
+func.def target(@target) @integer_predicate_truncations(%bytes: vector<4xi8>, %halves: vector<4xi16>, %words: vector<4xi32>, %wides: vector<4xi64>) -> (vector<4xi1>, vector<4xi1>, vector<4xi1>, vector<4xi1>) {
+  %p8 = vector.trunci %bytes : vector<4xi8> to vector<4xi1>
+  %p16 = vector.trunci %halves : vector<4xi16> to vector<4xi1>
+  %p32 = vector.trunci %words : vector<4xi32> to vector<4xi1>
+  %p64 = vector.trunci %wides : vector<4xi64> to vector<4xi1>
+  func.return %p8, %p16, %p32, %p64 : vector<4xi1>, vector<4xi1>, vector<4xi1>, vector<4xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi1>) -> (vector<4xi8>, vector<4xi8>, vector<4xi16>, vector<4xi16>, vector<4xi32>, vector<4xi32>, vector<4xi64>, vector<4xi64>)}) @predicate_integer_extensions(%predicate: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.ymm>, reg<x86.ymm>) asm {
+  %38 = avx2.vmovdqu.rodata.xmm @__low_rodata_9663ac4f
+  %s8 = vpshufb.xmm %predicate, %38
+  %42 = vxorps.zero.xmm
+  %u8 = vpsubb.xmm %42, %s8
+  %s16 = vpackssdw.xmm %predicate, %predicate
+  %u16 = vpsrlw.xmm %s16, 15
+  %s32 = copy %predicate : reg<x86.xmm> -> reg<x86.xmm>
+  %48 = copy %predicate : reg<x86.xmm> -> reg<x86.xmm>
+  %u32 = vpsrld.xmm %48, 31
+  %s64 = vpmovsxdq.ymm %predicate
+  %u64 = vpsrlq.ymm %s64, 63
+  return %s8, %u8, %s16, %u16, %s32, %u32, %s64, %u64
+}
+
+low.func.def target<x86.avx2.core>(@target) abi(object_function) abi_layout({signature = (vector<4xi8>, vector<4xi16>, vector<4xi32>, vector<4xi64>) -> (vector<4xi1>, vector<4xi1>, vector<4xi1>, vector<4xi1>)}) @integer_predicate_truncations(%bytes: reg<x86.xmm>, %halves: reg<x86.xmm>, %words: reg<x86.xmm>, %wides: reg<x86.ymm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %61 = vxorps.zero.xmm
+  %62 = vpsllw.xmm %bytes, 7
+  %63 = vpcmpgtb.xmm %61, %62
+  %p8 = vpmovsxbd.xmm %63
+  %66 = vpsllw.xmm %halves, 15
+  %67 = vpcmpgtw.xmm %61, %66
+  %p16 = vpmovsxwd.xmm %67
+  %70 = vpslld.xmm %words, 31
+  %p32 = vpcmpgtd.xmm %61, %70
+  %72 = vxorps.zero.ymm
+  %73 = vpsllq.ymm %wides, 63
+  %74 = vpcmpgtq.ymm %72, %73
+  %75 = vextractf128.xmm %74, 0
+  %76 = vextractf128.xmm %74, 1
+  %p64 = vshufps.xmm %75, %76, 136
+  return %p8, %p16, %p32, %p64
+}

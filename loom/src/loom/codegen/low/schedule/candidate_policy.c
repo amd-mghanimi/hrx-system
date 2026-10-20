@@ -12,6 +12,51 @@
 #define LOOM_LOW_SCHEDULE_READY_VIEW_SEARCH_COUNT 16
 #define LOOM_LOW_SCHEDULE_READY_VIEW_NOMINEE_COUNT 2
 #define LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY 24
+#define LOOM_LOW_SCHEDULE_READY_CRITICAL_PATH_BAND_CYCLES 1
+
+iree_status_t loom_low_schedule_candidate_policy_initialize(
+    const loom_low_schedule_build_state_t* state,
+    loom_low_schedule_candidate_policy_t* out_policy) {
+  *out_policy = (loom_low_schedule_candidate_policy_t){0};
+  if (!loom_low_schedule_strategy_uses_pressure(state->options->strategy)) {
+    return iree_ok_status();
+  }
+  out_policy->register_debt_word_count =
+      (state->target.descriptor_set->reg_class_count + 63) / 64;
+  return iree_arena_allocate_array(state->scratch_arena,
+                                   LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY *
+                                       out_policy->register_debt_word_count,
+                                   sizeof(*out_policy->nominee_register_debts),
+                                   (void**)&out_policy->nominee_register_debts);
+}
+
+static loom_low_schedule_register_debt_word_t*
+loom_low_schedule_candidate_policy_reset_register_debt(
+    const loom_low_schedule_candidate_policy_t* policy, uint8_t score_index) {
+  if (policy->register_debt_word_count == 0) {
+    return NULL;
+  }
+  loom_low_schedule_register_debt_word_t* row =
+      &policy->nominee_register_debts[score_index *
+                                      policy->register_debt_word_count];
+  memset(row, 0, policy->register_debt_word_count * sizeof(*row));
+  return row;
+}
+
+static bool loom_low_schedule_candidate_opens_other_register_debt(
+    const loom_low_schedule_build_state_t* state,
+    const loom_low_schedule_candidate_score_t* required,
+    const loom_low_schedule_candidate_score_t* alternative) {
+  const iree_host_size_t word_count =
+      (state->target.descriptor_set->reg_class_count + 63) / 64;
+  for (iree_host_size_t i = 0; i < word_count; ++i) {
+    if ((alternative->register_debt[i].banks &
+         ~required->register_debt[i].required_banks) != 0) {
+      return true;
+    }
+  }
+  return false;
+}
 
 typedef enum loom_low_schedule_candidate_compare_mode_e {
   LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT = 0,
@@ -62,39 +107,71 @@ static const loom_low_schedule_recovery_policy_t
             },
 };
 
+// A pinned completion may need several setup values before any consumer can
+// release its inputs. Advance that exact transaction while the setup fits;
+// cone membership alone cannot justify opening another register debt.
+static bool loom_low_schedule_candidate_advances_pinned_completion(
+    const loom_low_schedule_candidate_score_t* score) {
+  return score->active_unspillable_transaction_final_capacity != UINT32_MAX &&
+         !iree_any_bit_set(
+             score->flags,
+             LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_OPENS_REGISTER_DEBT |
+                 LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_EXCEEDS_UNSPILLABLE_CAPACITY);
+}
+
 // Returns true when |score| establishes a new live storage value without
-// reducing live units, exposing a storage step or descriptor, or advancing
-// a live constrained-storage completion.
+// reducing live units, exposing a storage step or descriptor, advancing a
+// feasible pinned completion, or releasing inputs along another completion.
 // Scheduling such setup early only transfers or grows liveness in its
 // destination register class and can hold scarce physical locations across
 // unrelated work. Alias establishment and storage compaction produce no value
 // or reduce live units, respectively, and remain immediately actionable.
 static bool loom_low_schedule_candidate_defers_storage_setup(
     const loom_low_schedule_candidate_score_t* score) {
-  const uint16_t actionable_flags =
-      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_UNLOCKS_DESCRIPTOR |
-      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_STORAGE |
-      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_CONSTRAINED_COMPLETION;
-  return score->produced_live_value_count != 0 &&
-         score->killed_live_units <= score->produced_live_units &&
-         iree_any_bit_set(score->flags,
-                          LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_STORAGE_SETUP) &&
-         !iree_any_bit_set(score->flags, actionable_flags);
-}
-
-// Defers operand-free materializations while completing a packing transaction.
-// Ordinary pressure relief already compares live growth and allocation debt:
-// suppressing every leaf there can postpone an operand needed to close a live
-// consumer chain while unrelated work grows pressure instead.
-static bool loom_low_schedule_candidate_defers_rematerializable_leaf(
-    loom_low_schedule_candidate_compare_mode_t compare_mode,
-    const loom_low_schedule_candidate_score_t* score) {
-  if (compare_mode != LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_PACKING_COMPLETION) {
+  if (!iree_any_bit_set(score->flags,
+                        LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_STORAGE_SETUP)) {
     return false;
   }
   const uint16_t actionable_flags =
-      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_STORAGE |
+      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_UNLOCKS_DESCRIPTOR |
+      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_STORAGE;
+  const bool advances_completion =
+      (iree_any_bit_set(
+           score->flags,
+           LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_REMATERIALIZABLE_LEAF) &&
+       loom_low_schedule_candidate_advances_pinned_completion(score)) ||
+      (score->killed_live_units != 0 &&
+       iree_any_bit_set(
+           score->flags,
+           LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_CONSTRAINED_COMPLETION));
+  return score->produced_live_value_count != 0 &&
+         score->killed_live_units <= score->produced_live_units &&
+         !iree_any_bit_set(score->flags, actionable_flags) &&
+         !advances_completion;
+}
+
+// A pinned completion can require several leaves before its consumer is ready.
+// Preserve that progress while their physical bank has headroom. Once a leaf
+// grows its bank beyond capacity, cone membership alone is insufficient: memory
+// or target-state ordering can still block its consumer behind earlier work.
+static bool loom_low_schedule_candidate_defers_rematerializable_leaf(
+    loom_low_schedule_candidate_compare_mode_t compare_mode,
+    const loom_low_schedule_candidate_score_t* score) {
+  if (compare_mode == LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT ||
+      loom_low_schedule_candidate_advances_pinned_completion(score)) {
+    return false;
+  }
+  uint16_t actionable_flags =
+      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_UNLOCKS_DESCRIPTOR |
       LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_EXACT_PACKING_COMPLETION;
+  // A private repair leaf can expose another setup without making its final
+  // consumer ready. Completion-path membership does not justify opening that
+  // live range when it incurs debt; retain its demand-driven placement.
+  if (score->pressure_risk != LOOM_LOW_SCHEDULE_PRESSURE_RISK_DEBT ||
+      !iree_any_bit_set(score->flags,
+                        LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_STORAGE_SETUP)) {
+    actionable_flags |= LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_STORAGE;
+  }
   return score->produced_live_value_count != 0 &&
          score->killed_live_units == 0 &&
          iree_any_bit_set(
@@ -122,6 +199,12 @@ static bool loom_low_schedule_candidate_exceeds_unspillable_capacity(
   return iree_any_bit_set(
       score->flags,
       LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_EXCEEDS_UNSPILLABLE_CAPACITY);
+}
+
+static uint32_t loom_low_schedule_candidate_unspillable_completion_capacity(
+    const loom_low_schedule_candidate_score_t* score) {
+  return iree_min(score->active_unspillable_completion_capacity,
+                  score->opened_unspillable_completion_capacity);
 }
 
 static int loom_low_schedule_compare_candidate_pressure(
@@ -252,6 +335,13 @@ static bool loom_low_schedule_candidate_score_less(
     loom_low_schedule_candidate_compare_mode_t compare_mode,
     const loom_low_schedule_candidate_score_t* lhs,
     const loom_low_schedule_candidate_score_t* rhs) {
+  const bool lhs_exceeds_unspillable_capacity =
+      loom_low_schedule_candidate_exceeds_unspillable_capacity(lhs);
+  const bool rhs_exceeds_unspillable_capacity =
+      loom_low_schedule_candidate_exceeds_unspillable_capacity(rhs);
+  if (lhs_exceeds_unspillable_capacity != rhs_exceeds_unspillable_capacity) {
+    return !lhs_exceeds_unspillable_capacity;
+  }
   const bool lhs_defers_materialization =
       loom_low_schedule_candidate_defers_materialization(compare_mode, lhs);
   const bool rhs_defers_materialization =
@@ -262,41 +352,45 @@ static bool loom_low_schedule_candidate_score_less(
   if (lhs_defers_materialization != rhs_defers_materialization) {
     return !lhs_defers_materialization;
   }
-  const bool lhs_exceeds_unspillable_capacity =
-      loom_low_schedule_candidate_exceeds_unspillable_capacity(lhs);
-  const bool rhs_exceeds_unspillable_capacity =
-      loom_low_schedule_candidate_exceeds_unspillable_capacity(rhs);
-  if (lhs_exceeds_unspillable_capacity != rhs_exceeds_unspillable_capacity) {
-    return !lhs_exceeds_unspillable_capacity;
-  }
-  // When both candidates exceed unspillable capacity, advance the tighter
-  // active completion. Otherwise a full register alone does not justify
-  // overriding pressure reduction in another storage class.
+  // Once hard-capacity feasibility ties, advance the tighter full bank's
+  // pending completion. Waiting until both candidates exceed capacity lets
+  // other chains consume the temporary storage that completion still needs.
   if (state->options->strategy == LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL &&
-      lhs_exceeds_unspillable_capacity &&
+      compare_mode != LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT) {
+    if (lhs->active_unspillable_transaction_final_capacity !=
+        rhs->active_unspillable_transaction_final_capacity) {
+      return lhs->active_unspillable_transaction_final_capacity <
+             rhs->active_unspillable_transaction_final_capacity;
+    }
+    const uint32_t lhs_completion_capacity =
+        loom_low_schedule_candidate_unspillable_completion_capacity(lhs);
+    const uint32_t rhs_completion_capacity =
+        loom_low_schedule_candidate_unspillable_completion_capacity(rhs);
+    if (lhs_completion_capacity != rhs_completion_capacity) {
+      return lhs_completion_capacity < rhs_completion_capacity;
+    }
+  }
+  // A pinned aggregate completion remains active when pressure recovery
+  // changes modes. Its retained identity keeps later packing transactions
+  // from taking storage needed to finish the current one.
+  if (state->options->strategy == LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL &&
       compare_mode != LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT &&
-      lhs->active_unspillable_completion_capacity !=
-          rhs->active_unspillable_completion_capacity) {
-    return lhs->active_unspillable_completion_capacity <
-           rhs->active_unspillable_completion_capacity;
-  }
-  if (state->options->strategy == LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL &&
-      compare_mode == LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_PACKING_COMPLETION &&
       lhs->active_register_packing_completion_capacity !=
           rhs->active_register_packing_completion_capacity) {
     return lhs->active_register_packing_completion_capacity <
            rhs->active_register_packing_completion_capacity;
   }
+  const bool lhs_advances_constrained_completion = iree_any_bit_set(
+      lhs->flags,
+      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_CONSTRAINED_COMPLETION);
+  const bool rhs_advances_constrained_completion = iree_any_bit_set(
+      rhs->flags,
+      LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_CONSTRAINED_COMPLETION);
   if (state->options->strategy == LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL &&
       compare_mode != LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT &&
-      iree_any_bit_set(
-          lhs->flags,
-          LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_CONSTRAINED_COMPLETION) &&
-      iree_any_bit_set(
-          rhs->flags,
-          LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_ADVANCES_CONSTRAINED_COMPLETION) &&
-      lhs->source_ordinal != rhs->source_ordinal) {
-    return lhs->source_ordinal < rhs->source_ordinal;
+      lhs_advances_constrained_completion !=
+          rhs_advances_constrained_completion) {
+    return lhs_advances_constrained_completion;
   }
   if (lhs_defers_materialization) {
     const bool lhs_unlocks_descriptor =
@@ -305,6 +399,29 @@ static bool loom_low_schedule_candidate_score_less(
         loom_low_schedule_candidate_unlocks_descriptor(rhs);
     if (lhs_unlocks_descriptor != rhs_unlocks_descriptor) {
       return lhs_unlocks_descriptor;
+    }
+  }
+  // Prefer repairable pressure over new required lifetimes within the same
+  // banks. Opening debt in another bank is not relief: repeatedly postponing
+  // a required reload can otherwise spill all of its consumers' setup there.
+  // Cross-bank alternatives keep the ordinary pressure/cost comparison.
+  if (state->options->strategy == LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL &&
+      compare_mode != LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT) {
+    const bool lhs_opens_required_debt = iree_any_bit_set(
+        lhs->flags,
+        LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_OPENS_REQUIRED_REGISTER_DEBT);
+    const bool rhs_opens_required_debt = iree_any_bit_set(
+        rhs->flags,
+        LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_OPENS_REQUIRED_REGISTER_DEBT);
+    if (lhs_opens_required_debt != rhs_opens_required_debt) {
+      const loom_low_schedule_candidate_score_t* required =
+          lhs_opens_required_debt ? lhs : rhs;
+      const loom_low_schedule_candidate_score_t* alternative =
+          lhs_opens_required_debt ? rhs : lhs;
+      if (!loom_low_schedule_candidate_opens_other_register_debt(
+              state, required, alternative)) {
+        return !lhs_opens_required_debt;
+      }
     }
   }
   if (lhs_defers_materialization &&
@@ -325,6 +442,25 @@ static bool loom_low_schedule_candidate_score_less(
       const bool rhs_makes_pressure_progress =
           rhs->pressure_progress_kind !=
           LOOM_LOW_SCHEDULE_PRESSURE_PROGRESS_NONE;
+      // Net live-unit reduction can exchange space in one register bank for
+      // debt in another. Compare physical headroom before aggregate progress
+      // when both candidates perform register work. Operations without any
+      // register activity retain the preference for actionable progress.
+      if ((lhs->killed_live_value_count != 0 ||
+           lhs->produced_live_value_count != 0) &&
+          (rhs->killed_live_value_count != 0 ||
+           rhs->produced_live_value_count != 0) &&
+          lhs->pressure_cliff_penalty != rhs->pressure_cliff_penalty) {
+        return lhs->pressure_cliff_penalty < rhs->pressure_cliff_penalty;
+      }
+      // Keep equally viable constrained transactions in source order without
+      // letting age override a physical register-bank cliff. Selected packing
+      // and unspillable completions were compared by identity above.
+      if (lhs_advances_constrained_completion &&
+          rhs_advances_constrained_completion &&
+          lhs->source_ordinal != rhs->source_ordinal) {
+        return lhs->source_ordinal < rhs->source_ordinal;
+      }
       if (lhs_makes_pressure_progress != rhs_makes_pressure_progress) {
         return lhs_makes_pressure_progress;
       }
@@ -355,6 +491,19 @@ static bool loom_low_schedule_candidate_score_less(
     }
     if (lhs->effective_stall_cycles != rhs->effective_stall_cycles) {
       return lhs->effective_stall_cycles < rhs->effective_stall_cycles;
+    }
+    // Pressure-equivalent candidates that cannot yet retire storage have no
+    // recovery benefit to justify opening a later live range. Preserve source
+    // order once their actual issue delay also ties; the split between data
+    // and resource stalls does not change when either candidate can issue.
+    if (compare_mode != LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT &&
+        lhs->pressure_progress_kind ==
+            LOOM_LOW_SCHEDULE_PRESSURE_PROGRESS_NONE &&
+        rhs->pressure_progress_kind ==
+            LOOM_LOW_SCHEDULE_PRESSURE_PROGRESS_NONE &&
+        pressure_efficiency_order == 0 && pressure_order == 0 &&
+        lhs->source_ordinal != rhs->source_ordinal) {
+      return lhs->source_ordinal < rhs->source_ordinal;
     }
     if (lhs->hazard_stall_cycles != rhs->hazard_stall_cycles) {
       return lhs->hazard_stall_cycles < rhs->hazard_stall_cycles;
@@ -547,12 +696,19 @@ static void loom_low_schedule_collect_recovery_nominees(
     const loom_low_schedule_build_state_t* state,
     const loom_low_schedule_ready_policy_t* ready_policy,
     const loom_low_schedule_recovery_policy_t* recovery_policy,
-    uint32_t* nominees, uint8_t* nominee_count) {
+    uint8_t nominee_capacity, uint32_t* nominees, uint8_t* nominee_count) {
   for (uint8_t i = 0; i < recovery_policy->ready_view_count; ++i) {
+    // Keep one slot for the pair nominee within the fixed scoring budget.
+    const uint8_t nominee_limit =
+        iree_min(LOOM_LOW_SCHEDULE_READY_VIEW_NOMINEE_COUNT,
+                 nominee_capacity - 1 - *nominee_count);
+    if (nominee_limit == 0) {
+      break;
+    }
     loom_low_schedule_add_ready_view_nominees(
         ready_policy, recovery_policy->ready_views[i],
-        LOOM_LOW_SCHEDULE_READY_VIEW_SEARCH_COUNT,
-        LOOM_LOW_SCHEDULE_READY_VIEW_NOMINEE_COUNT, nominees, nominee_count);
+        LOOM_LOW_SCHEDULE_READY_VIEW_SEARCH_COUNT, nominee_limit, nominees,
+        nominee_count);
   }
   (void)loom_low_schedule_add_ready_nominee(
       loom_low_schedule_ready_policy_pair_nominee(state, ready_policy),
@@ -561,6 +717,7 @@ static void loom_low_schedule_collect_recovery_nominees(
 
 void loom_low_schedule_candidate_policy_select(
     const loom_low_schedule_build_state_t* state,
+    const loom_low_schedule_candidate_policy_t* policy,
     loom_low_schedule_pressure_state_t* pressure_state,
     const loom_low_schedule_ready_policy_t* ready_policy,
     const uint32_t* indegrees, uint32_t ready_candidate_count,
@@ -582,15 +739,77 @@ void loom_low_schedule_candidate_policy_select(
   uint32_t nominees[LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY];
   loom_low_schedule_candidate_score_t
       nominee_scores[LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY];
-  uint8_t nominee_count =
+  const uint8_t source_view_nominee_count =
       loom_low_schedule_collect_source_nominees(ready_policy, nominees);
+  uint8_t nominee_count = source_view_nominee_count;
+  uint32_t graph_nominee = LOOM_LOW_SCHEDULE_NODE_NONE;
+  if (ready_candidate_count > nominee_count) {
+    // Add the best graph-ranked candidate to the bounded source nominees so
+    // equivalent dependency graphs do not select entirely from source order.
+    loom_low_schedule_add_ready_view_nominees(
+        ready_policy, LOOM_LOW_SCHEDULE_READY_VIEW_SCHEDULE,
+        /*search_count=*/1, /*nominee_limit=*/1, nominees, &nominee_count);
+    if (state->options->strategy == LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL) {
+      const uint8_t before_graph_count = nominee_count;
+      loom_low_schedule_add_ready_view_nominees(
+          ready_policy, LOOM_LOW_SCHEDULE_READY_VIEW_GRAPH,
+          /*search_count=*/1, /*nominee_limit=*/1, nominees, &nominee_count);
+      if (nominee_count > before_graph_count) {
+        graph_nominee = nominees[before_graph_count];
+      }
+    }
+  }
   IREE_ASSERT_NE(nominee_count, 0);
   for (uint8_t i = 0; i < nominee_count; ++i) {
-    loom_low_schedule_pressure_score_candidate(state, pressure_state,
-                                               ready_policy, indegrees,
-                                               nominees[i], &nominee_scores[i]);
+    loom_low_schedule_pressure_score_candidate(
+        state, pressure_state, ready_policy, indegrees, nominees[i],
+        loom_low_schedule_candidate_policy_reset_register_debt(policy, i),
+        &nominee_scores[i]);
   }
   out_selection->scored_candidate_count = nominee_count;
+  uint8_t rejected_nominee_count = 0;
+  if (nominee_count > source_view_nominee_count) {
+    // Graph ranking repairs source-window boundaries only within the current
+    // critical-path band. A growing path can remain graph ranked at each
+    // successive node, so it must also have enough modeled headroom for its
+    // downstream demand. Pressure and latency recovery below admit risky
+    // growing work when it makes concrete progress.
+    uint32_t maximum_source_critical_path_cycles = 0;
+    for (uint8_t i = 0; i < source_view_nominee_count; ++i) {
+      maximum_source_critical_path_cycles =
+          iree_max(maximum_source_critical_path_cycles,
+                   nominee_scores[i].critical_path_cycles);
+    }
+    uint8_t admitted_count = source_view_nominee_count;
+    for (uint8_t i = source_view_nominee_count; i < nominee_count; ++i) {
+      const loom_low_schedule_candidate_score_t* nominee_score =
+          &nominee_scores[i];
+      const bool grows_live_frontier =
+          nominee_score->produced_live_units > nominee_score->killed_live_units;
+      const bool exceeds_critical_path_band =
+          nominee_score->critical_path_cycles >
+              maximum_source_critical_path_cycles &&
+          nominee_score->critical_path_cycles -
+                  maximum_source_critical_path_cycles >
+              LOOM_LOW_SCHEDULE_READY_CRITICAL_PATH_BAND_CYCLES;
+      if (grows_live_frontier && (nominees[i] == graph_nominee ||
+                                  nominee_score->pressure_risk !=
+                                      LOOM_LOW_SCHEDULE_PRESSURE_RISK_NONE ||
+                                  exceeds_critical_path_band)) {
+        // Keep the two possible rejected ordinary scores beyond recovery's
+        // array budget. A recovery view may nominate the same node under a
+        // different admission rule; its exact score has not changed.
+        const uint8_t cached_index = LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY -
+                                     1 - rejected_nominee_count++;
+        nominees[cached_index] = nominees[i];
+        nominee_scores[cached_index] = nominee_scores[i];
+        continue;
+      }
+      nominees[admitted_count] = nominees[i];
+      nominee_scores[admitted_count++] = nominee_scores[i];
+    }
+    nominee_count = admitted_count;
+  }
   const loom_low_schedule_candidate_compare_mode_t compare_mode =
       loom_low_schedule_choose_candidate_compare_mode(
           nominee_scores, nominee_count,
@@ -638,6 +857,8 @@ void loom_low_schedule_candidate_policy_select(
     return;
   }
   const uint8_t source_nominee_count = nominee_count;
+  const loom_low_schedule_candidate_score_t latency_window_source_score =
+      out_selection->chosen_score;
   const uint16_t minimum_recovery_latency_cycles =
       recover_latency_window
           ? out_selection->chosen_score.dependency_latency_cycles
@@ -647,13 +868,31 @@ void loom_low_schedule_candidate_policy_select(
           [compare_mode == LOOM_LOW_SCHEDULE_CANDIDATE_COMPARE_DEFAULT
                ? LOOM_LOW_SCHEDULE_RECOVERY_POLICY_DEFAULT
                : LOOM_LOW_SCHEDULE_RECOVERY_POLICY_PRESSURE];
+  // Admission rejects candidates after scoring. Their work still consumes
+  // the fixed scoring budget even though their array slots can be reused.
+  const uint8_t recovery_nominee_capacity =
+      LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY - rejected_nominee_count;
   loom_low_schedule_collect_recovery_nominees(
-      state, ready_policy, recovery_policy, nominees, &nominee_count);
+      state, ready_policy, recovery_policy, recovery_nominee_capacity, nominees,
+      &nominee_count);
   for (uint8_t i = source_nominee_count; i < nominee_count; ++i) {
-    loom_low_schedule_pressure_score_candidate(state, pressure_state,
-                                               ready_policy, indegrees,
-                                               nominees[i], &nominee_scores[i]);
-    ++out_selection->scored_candidate_count;
+    uint8_t cached_index = recovery_nominee_capacity;
+    while (cached_index < LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY &&
+           nominees[cached_index] != nominees[i]) {
+      ++cached_index;
+    }
+    if (cached_index < LOOM_LOW_SCHEDULE_READY_NOMINEE_CAPACITY) {
+      nominee_scores[i] = nominee_scores[cached_index];
+    } else {
+      // Scores move when nominees are compacted or cached. Their debt rows
+      // remain owned by the original scoring ordinal until selection ends.
+      loom_low_schedule_pressure_score_candidate(
+          state, pressure_state, ready_policy, indegrees, nominees[i],
+          loom_low_schedule_candidate_policy_reset_register_debt(
+              policy, out_selection->scored_candidate_count),
+          &nominee_scores[i]);
+      ++out_selection->scored_candidate_count;
+    }
     // Latency-window recovery must either replace the entire window that the
     // source nominee would consume or immediately expose an equally long
     // descriptor without growing its live frontier. Other cheap operations let
@@ -664,6 +903,11 @@ void loom_low_schedule_candidate_policy_select(
         minimum_recovery_latency_cycles;
     if (nominee_scores[i].latency_cycles < minimum_recovery_latency_cycles &&
         !replenishes_non_growing_latency_window) {
+      continue;
+    }
+    if (recover_latency_window &&
+        loom_low_schedule_compare_candidate_pressure(
+            &nominee_scores[i], &latency_window_source_score) > 0) {
       continue;
     }
     if (iree_any_bit_set(

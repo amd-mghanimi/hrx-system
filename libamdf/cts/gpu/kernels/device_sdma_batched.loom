@@ -1,0 +1,313 @@
+// One cooperative workitem publishes batches while SDMA executes asynchronously.
+// Command reservation obeys end - acquired RPTR < capacity, including padding.
+// A distinct consumed ordinal returns a destination credit after actual reads.
+// Completion generations may be skipped by polling and therefore use >=.
+// Batch seeds derive from the preceding batch's copied data, while scheduling
+// timing affects only the recorded reservation evidence, never expected data.
+//
+// Credits are a power of two in [1, 128]. Each 512-byte destination slot has a
+// 256-byte payload at byte 64; eight source pages have the same layout. Every
+// 80-word row contains selection, consumer state, observed completion,
+// generation, padding, reserved end, sampled RPTR, preceding published WPTR,
+// live credit count, consumed ordinal, then all 64 payload words.
+// The 12-word statistics block records
+// publications, ring/credit admission blocks, peak live credits/reserved bytes,
+// batch count, final state, consumed count, completion, appends with live payloads,
+// and the final 64-bit command frontier. All counters are finite, without wrap.
+
+kernel.def export("device_sdma_batched") @device_sdma_batched() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %destinations: buffer, %completion: buffer, %records: buffer, %statistics: buffer, %source_address: i64, %destination_address: i64, %completion_address: i64, %capacity: offset, %round_count: i32, %batch_size: i32, %credit_count: i32, %seed: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) {
+  %ring_aligned = buffer.assume.alignment %ring {minimum_alignment = 4} : buffer
+  %read_aligned = buffer.assume.alignment %read_index {minimum_alignment = 8} : buffer
+  %write_aligned = buffer.assume.alignment %write_index {minimum_alignment = 8} : buffer
+  %notification_aligned = buffer.assume.alignment %notification {minimum_alignment = 8} : buffer
+  %destinations_aligned = buffer.assume.alignment %destinations {minimum_alignment = 64} : buffer
+  %completion_aligned = buffer.assume.alignment %completion {minimum_alignment = 64} : buffer
+  %records_aligned = buffer.assume.alignment %records {minimum_alignment = 64} : buffer
+  %origin = index.constant 0 : offset
+  %first = index.constant 0 : index
+  %step = index.constant 1 : index
+  %payload_words = index.constant 64 : index
+  %record_header_words = index.constant 16 : index
+  %record_stride = index.constant 320 : offset
+  %read_word = buffer.view %read_aligned[%origin] : buffer -> view<1xi64>
+  %write_word = buffer.view %write_aligned[%origin] : buffer -> view<1xi64>
+  %notification_word = buffer.view %notification_aligned[%origin] : buffer -> view<1xi64>
+  %completion_word = buffer.view %completion_aligned[%origin] : buffer -> view<1xi32>
+  %capacity_bounded = index.assume %capacity [range(%capacity, 4096, 4294967296)] : offset
+  %capacity_bytes = index.cast %capacity_bounded : offset to i64
+  %zero = scalar.constant 0 : i32
+  %one = scalar.constant 1 : i32
+  %two = scalar.constant 2 : i32
+  %seven = scalar.constant 7 : i32
+  %eight = scalar.constant 8 : i32
+  %six_bits = scalar.constant 63 : i32
+  %mix = scalar.constant -1640531535 : i32
+  %zero64 = scalar.constant 0 : i64
+  %one64 = scalar.constant 1 : i64
+  %two64 = scalar.constant 2 : i64
+  %gcr_bytes = scalar.constant 20 : i64
+  %copy_bytes = scalar.constant 28 : i64
+  %minimum_bytes = scalar.constant 44 : i64
+  %payload_offset = scalar.constant 64 : i64
+  %slot_stride = scalar.constant 512 : i64
+  %high_shift = scalar.constant 32 : i64
+  %gcr_header = scalar.constant 273 : i32
+  // USER_GCR DWORD 2: 0xc3c00000 acquire and 0x80400000 release.
+  %gcr_acquire = scalar.constant -1010827264 : i32
+  %gcr_release = scalar.constant -2143289344 : i32
+  %acquire_bit = scalar.andi %cache_flags, %one : i32
+  %release_bit = scalar.andi %cache_flags, %two : i32
+  %needs_acquire = scalar.cmpi ne, %acquire_bit, %zero : i32
+  %needs_release = scalar.cmpi ne, %release_bit, %zero : i32
+  %acquire_bytes = scf.select %needs_acquire, %gcr_bytes, %zero64 : i64
+  %release_bytes = scf.select %needs_release, %gcr_bytes, %zero64 : i64
+  %leading_bytes = scalar.addi %minimum_bytes, %acquire_bytes : i64
+  %chain_bytes = scalar.addi %leading_bytes, %release_bytes : i64
+  %ring_mask = scalar.subi %capacity_bytes, %one64 : i64
+  %completion_low = scalar.trunci %completion_address : i64 to i32
+  %completion_high64 = scalar.shrui %completion_address, %high_shift : i64
+  %completion_high = scalar.trunci %completion_high64 : i64 to i32
+
+  %statistics_aligned = buffer.assume.alignment %statistics {minimum_alignment = 64} : buffer
+  %statistics_view = buffer.view %statistics_aligned[%origin] : buffer -> view<12xi32>
+  %credit_mask = scalar.subi %credit_count, %one : i32
+
+  %done, %final_state, %final_frontier, %publications, %ring_blocks, %credit_blocks, %peak_live, %peak_bytes, %batches, %appends = scf.while(%begin = %zero : i32, %batch_seed = %seed : i32, %initial_frontier = %zero64 : i64, %publication_count = %zero : i32, %ring_block_count = %zero : i32, %credit_block_count = %zero : i32, %maximum_live = %zero : i32, %maximum_bytes = %zero64 : i64, %batch_count = %zero : i32, %append_count = %zero : i32) -> (i32, i32, i64, i32, i32, i32, i32, i64, i32, i32) {
+    %more = scalar.cmpi ult, %begin, %round_count : i32
+    scf.condition %more, %begin, %batch_seed, %initial_frontier, %publication_count, %ring_block_count, %credit_block_count, %maximum_live, %maximum_bytes, %batch_count, %append_count : i1, i32, i32, i64, i32, i32, i32, i32, i64, i32, i32
+  } do(%begin: i32, %batch_seed: i32, %initial_frontier: i64, %publication_count: i32, %ring_block_count: i32, %credit_block_count: i32, %maximum_live: i32, %maximum_bytes: i64, %batch_count: i32, %append_count: i32) {
+    %remaining = scalar.subi %round_count, %begin : i32
+    %partial = scalar.cmpi ult, %remaining, %batch_size : i32
+    %batch_length = scf.select %partial, %remaining, %batch_size : i32
+    %end = scalar.addi %begin, %batch_length : i32
+    %submitted_end, %consumed_end, %reserved_end, %published_end, %state_end, %publication_end, %ring_block_end, %credit_block_end, %live_end, %bytes_end, %append_end = scf.while(%submitted = %begin : i32, %consumed = %begin : i32, %reserved = %initial_frontier : i64, %published = %initial_frontier : i64, %state = %batch_seed : i32, %publication_total = %publication_count : i32, %ring_block_total = %ring_block_count : i32, %credit_block_total = %credit_block_count : i32, %live_maximum = %maximum_live : i32, %bytes_maximum = %maximum_bytes : i64, %append_total = %append_count : i32) -> (i32, i32, i64, i64, i32, i32, i32, i32, i32, i64, i32) {
+      %pending = scalar.cmpi ult, %consumed, %end : i32
+      scf.condition %pending, %submitted, %consumed, %reserved, %published, %state, %publication_total, %ring_block_total, %credit_block_total, %live_maximum, %bytes_maximum, %append_total : i1, i32, i32, i64, i64, i32, i32, i32, i32, i32, i64, i32
+    } do(%submitted: i32, %consumed: i32, %reserved: i64, %published: i64, %state: i32, %publication_total: i32, %ring_block_total: i32, %credit_block_total: i32, %live_maximum: i32, %bytes_maximum: i64, %append_total: i32) {
+      // Reservation is nonblocking. A full ring cannot prevent publication of
+      // the complete prefix that SDMA needs to make progress.
+      %filled, %filled_frontier, %read_at_stop, %padding_at_stop, %end_at_stop, %filled_live, %filled_bytes = scf.while(%ordinal = %submitted : i32, %frontier = %reserved : i64, %previous_read = %zero64 : i64, %previous_padding = %zero64 : i64, %previous_end = %zero64 : i64, %highest_live = %live_maximum : i32, %highest_bytes = %bytes_maximum : i64) -> (i32, i64, i64, i64, i64, i32, i64) {
+        %read = view.atomic.load %read_word[0] {ordering = acquire, scope = system} : view<1xi64> -> i64
+        %offset = scalar.andi %frontier, %ring_mask : i64
+        %tail = scalar.subi %capacity_bytes, %offset : i64
+        %wrap = scalar.cmpi ult, %tail, %chain_bytes : i64
+        %pad = scf.select %wrap, %tail, %zero64 : i64
+        %padded = scalar.addi %frontier, %pad : i64
+        %proposed_end = scalar.addi %padded, %chain_bytes : i64
+        %reserved_bytes = scalar.subi %proposed_end, %read : i64
+        %has_space = scalar.cmpi ult, %reserved_bytes, %capacity_bytes : i64
+        %live = scalar.subi %ordinal, %consumed : i32
+        %has_credit = scalar.cmpi ult, %live, %credit_count : i32
+        %has_request = scalar.cmpi ult, %ordinal, %end : i32
+        %admitted = scalar.andi %has_space, %has_credit : i1
+        %fill = scalar.andi %admitted, %has_request : i1
+        scf.condition %fill, %ordinal, %frontier, %read, %pad, %proposed_end, %highest_live, %highest_bytes : i1, i32, i64, i64, i64, i64, i32, i64
+      } do(%ordinal: i32, %frontier: i64, %read_snapshot: i64, %padding_bytes: i64, %reservation_end: i64, %highest_live: i32, %highest_bytes: i64) {
+        %generation = scalar.addi %ordinal, %one : i32
+        %selection_salt = scalar.muli %generation, %mix : i32
+        %selection = scalar.xori %batch_seed, %selection_salt : i32
+        %page = scalar.andi %selection, %seven : i32
+        %slot = scalar.andi %ordinal, %credit_mask : i32
+        %length_bits = scalar.shrui %selection, %eight : i32
+        %length_minus_one = scalar.andi %length_bits, %six_bits : i32
+        %word_count = scalar.addi %length_minus_one, %one : i32
+        %byte_count = scalar.shli %word_count, %two : i32
+        %encoded_byte_count = scalar.subi %byte_count, %one : i32
+        %page64 = scalar.extui %page : i32 to i64
+        %slot64 = scalar.extui %slot : i32 to i64
+        %page_base = scalar.muli %page64, %slot_stride : i64
+        %slot_base = scalar.muli %slot64, %slot_stride : i64
+        %source_offset = scalar.addi %page_base, %payload_offset : i64
+        %target_offset = scalar.addi %slot_base, %payload_offset : i64
+        %source = scalar.addi %source_address, %source_offset : i64
+        %target = scalar.addi %destination_address, %target_offset : i64
+        %source_low = scalar.trunci %source : i64 to i32
+        %source_high64 = scalar.shrui %source, %high_shift : i64
+        %source_high = scalar.trunci %source_high64 : i64 to i32
+        %target_low = scalar.trunci %target : i64 to i32
+        %target_high64 = scalar.shrui %target, %high_shift : i64
+        %target_high = scalar.trunci %target_high64 : i64 to i32
+
+        %ring_offset = scalar.andi %frontier, %ring_mask : i64
+        %wraps = scalar.cmpi ne, %padding_bytes, %zero64 : i64
+        %padding_words64 = scalar.shrui %padding_bytes, %two64 : i64
+        // A padded tail is shorter than the at-most-21-DWORD complete chain.
+        %padding_count_input = index.cast %padding_words64 : i64 to offset
+        %padding_count_bounded = index.assume %padding_count_input [range(%padding_count_input, 0, 20)] : offset
+        %padding_count = index.cast %padding_count_bounded : offset to index
+        %padding_offset = index.cast %ring_offset : i64 to offset
+        %padding = buffer.view %ring_aligned[%padding_offset] : buffer -> view<[%padding_count]xi32>
+        scf.for %position = [%first to %padding_count step %step] {
+          view.store %zero, %padding[%position] : i32, view<[%padding_count]xi32>
+        }
+        %start = scf.select %wraps, %zero64, %ring_offset : i64
+        %start_offset = index.cast %start : i64 to offset
+        scf.if %needs_acquire {
+          %acquire = buffer.view %ring_aligned[%start_offset] : buffer -> view<5xi32>
+          view.store %gcr_header, %acquire[0] : i32, view<5xi32>
+          view.store %zero, %acquire[1] : i32, view<5xi32>
+          view.store %gcr_acquire, %acquire[2] : i32, view<5xi32>
+          view.store %zero, %acquire[3] : i32, view<5xi32>
+          view.store %zero, %acquire[4] : i32, view<5xi32>
+        }
+        %copy_start = scalar.addi %start, %acquire_bytes : i64
+        %copy_offset = index.cast %copy_start : i64 to offset
+        %copy = buffer.view %ring_aligned[%copy_offset] : buffer -> view<7xi32>
+        view.store %one, %copy[0] : i32, view<7xi32>
+        view.store %encoded_byte_count, %copy[1] : i32, view<7xi32>
+        view.store %copy_control, %copy[2] : i32, view<7xi32>
+        view.store %source_low, %copy[3] : i32, view<7xi32>
+        view.store %source_high, %copy[4] : i32, view<7xi32>
+        view.store %target_low, %copy[5] : i32, view<7xi32>
+        view.store %target_high, %copy[6] : i32, view<7xi32>
+        %release_start = scalar.addi %copy_start, %copy_bytes : i64
+        %release_offset = index.cast %release_start : i64 to offset
+        scf.if %needs_release {
+          %release = buffer.view %ring_aligned[%release_offset] : buffer -> view<5xi32>
+          view.store %gcr_header, %release[0] : i32, view<5xi32>
+          view.store %zero, %release[1] : i32, view<5xi32>
+          view.store %gcr_release, %release[2] : i32, view<5xi32>
+          view.store %zero, %release[3] : i32, view<5xi32>
+          view.store %zero, %release[4] : i32, view<5xi32>
+        }
+        %fence_start = scalar.addi %release_start, %release_bytes : i64
+        %fence_offset = index.cast %fence_start : i64 to offset
+        %fence = buffer.view %ring_aligned[%fence_offset] : buffer -> view<4xi32>
+        view.store %fence_header, %fence[0] : i32, view<4xi32>
+        view.store %completion_low, %fence[1] : i32, view<4xi32>
+        view.store %completion_high, %fence[2] : i32, view<4xi32>
+        view.store %generation, %fence[3] : i32, view<4xi32>
+        %live = scalar.subi %generation, %consumed : i32
+        %extent = scalar.subi %reservation_end, %read_snapshot : i64
+        %more_live = scalar.cmpi ugt, %live, %highest_live : i32
+        %more_bytes = scalar.cmpi ugt, %extent, %highest_bytes : i64
+        %next_live = scf.select %more_live, %live, %highest_live : i32
+        %next_bytes = scf.select %more_bytes, %extent, %highest_bytes : i64
+        %ordinal_offset = index.cast %ordinal : i32 to offset
+        %ordinal_index = index.cast %ordinal_offset : offset to index
+        %record_offset = index.scale %ordinal_index, %record_stride : index, offset -> offset
+        %record = buffer.view %records_aligned[%record_offset] : buffer -> view<80xi32>
+        %frontier_low = scalar.trunci %reservation_end : i64 to i32
+        %frontier_high64 = scalar.shrui %reservation_end, %high_shift : i64
+        %frontier_high = scalar.trunci %frontier_high64 : i64 to i32
+        %read_low = scalar.trunci %read_snapshot : i64 to i32
+        %read_high64 = scalar.shrui %read_snapshot, %high_shift : i64
+        %read_high = scalar.trunci %read_high64 : i64 to i32
+        %published_low = scalar.trunci %published : i64 to i32
+        %published_high64 = scalar.shrui %published, %high_shift : i64
+        %published_high = scalar.trunci %published_high64 : i64 to i32
+        %padding32 = scalar.trunci %padding_bytes : i64 to i32
+        view.store %page, %record[0] : i32, view<80xi32>
+        view.store %slot, %record[1] : i32, view<80xi32>
+        view.store %word_count, %record[2] : i32, view<80xi32>
+        view.store %batch_seed, %record[3] : i32, view<80xi32>
+        view.store %generation, %record[6] : i32, view<80xi32>
+        view.store %padding32, %record[7] : i32, view<80xi32>
+        view.store %frontier_low, %record[8] : i32, view<80xi32>
+        view.store %frontier_high, %record[9] : i32, view<80xi32>
+        view.store %read_low, %record[10] : i32, view<80xi32>
+        view.store %read_high, %record[11] : i32, view<80xi32>
+        view.store %published_low, %record[12] : i32, view<80xi32>
+        view.store %published_high, %record[13] : i32, view<80xi32>
+        view.store %live, %record[14] : i32, view<80xi32>
+        view.store %consumed, %record[15] : i32, view<80xi32>
+        scf.yield %generation, %reservation_end, %read_snapshot, %padding_bytes, %reservation_end, %next_live, %next_bytes : i32, i64, i64, i64, i64, i32, i64
+      }
+      %has_request = scalar.cmpi ult, %filled, %end : i32
+      %live = scalar.subi %filled, %consumed : i32
+      %no_credit = scalar.cmpi uge, %live, %credit_count : i32
+      %has_credit = scalar.cmpi ult, %live, %credit_count : i32
+      %requested_bytes = scalar.subi %end_at_stop, %read_at_stop : i64
+      %no_space = scalar.cmpi uge, %requested_bytes, %capacity_bytes : i64
+      %ring_only = scalar.andi %has_credit, %no_space : i1
+      %ring_blocked = scalar.andi %has_request, %ring_only : i1
+      %credit_blocked = scalar.andi %has_request, %no_credit : i1
+      %ring_increment = scf.select %ring_blocked, %one, %zero : i32
+      %credit_increment = scf.select %credit_blocked, %one, %zero : i32
+      %next_ring_blocks = scalar.addi %ring_block_total, %ring_increment : i32
+      %next_credit_blocks = scalar.addi %credit_block_total, %credit_increment : i32
+      %publish = scalar.cmpi ne, %filled_frontier, %published : i64
+      scf.if %publish {
+        view.atomic.store %filled_frontier, %write_word[0] {ordering = release, scope = system} : i64, view<1xi64>
+        view.atomic.store %filled_frontier, %notification_word[0] {ordering = release, scope = system} : i64, view<1xi64>
+      }
+      %publication_increment = scf.select %publish, %one, %zero : i32
+      %next_publications = scalar.addi %publication_total, %publication_increment : i32
+      %already_pending = scalar.cmpi ugt, %submitted, %consumed : i32
+      %appending = scalar.andi %publish, %already_pending : i1
+      %append_increment = scf.select %appending, %one, %zero : i32
+      %next_appends = scalar.addi %append_total, %append_increment : i32
+      %has_result = scalar.cmpi ult, %consumed, %filled : i32
+      %next_consumed, %next_state = scf.if %has_result -> (i32, i32) {
+        %generation = scalar.addi %consumed, %one : i32
+        %copied = scf.while(%seen = %zero : i32) -> (i32) {
+          %pending = scalar.cmpi ult, %seen, %generation : i32
+          scf.condition %pending, %seen : i1, i32
+        } do(%seen: i32) {
+          %observed = view.atomic.load %completion_word[0] {ordering = relaxed, scope = system} : view<1xi32> -> i32
+          scf.yield %observed : i32
+        }
+        buffer.fence scope(system) ordering(acquire)
+        %ordinal_offset = index.cast %consumed : i32 to offset
+        %ordinal_index = index.cast %ordinal_offset : offset to index
+        %record_offset = index.scale %ordinal_index, %record_stride : index, offset -> offset
+        %record = buffer.view %records_aligned[%record_offset] : buffer -> view<80xi32>
+        %slot = view.load %record[1] : view<80xi32> -> i32
+        %word_count = view.load %record[2] : view<80xi32> -> i32
+        %slot64 = scalar.extui %slot : i32 to i64
+        %slot_base = scalar.muli %slot64, %slot_stride : i64
+        %target_offset = scalar.addi %slot_base, %payload_offset : i64
+        %target_byte_offset = index.cast %target_offset : i64 to offset
+        %payload = buffer.view %destinations_aligned[%target_byte_offset] : buffer -> view<64xi32>
+        %length_minus_one = scalar.subi %word_count, %one : i32
+        // The publisher stores lengths in [1, 64] in its own transcript.
+        %last_input = index.cast %length_minus_one : i32 to offset
+        %last_bounded = index.assume %last_input [range(%last_input, 0, 63)] : offset
+        %last_index = index.cast %last_bounded : offset to index
+        %first_value = view.load %payload[0] : view<64xi32> -> i32
+        %last_value = view.load %payload[%last_index] : view<64xi32> -> i32
+        %salt = scalar.muli %generation, %mix : i32
+        %salted = scalar.addi %last_value, %salt : i32
+        %payload_mix = scalar.xori %first_value, %salted : i32
+        %updated_state = scalar.addi %state, %payload_mix : i32
+        view.store %updated_state, %record[4] : i32, view<80xi32>
+        view.store %copied, %record[5] : i32, view<80xi32>
+        scf.for %position = [%first to %payload_words step %step] {
+          %value = view.load %payload[%position] : view<64xi32> -> i32
+          %record_position = index.add %position, %record_header_words : index
+          view.store %value, %record[%record_position] : i32, view<80xi32>
+        }
+        // The next system-release publication orders all these reads before
+        // SDMA can overwrite a returned slot. RPTR never returns this credit.
+        scf.yield %generation, %updated_state : i32, i32
+      } else {
+        scf.yield %consumed, %state : i32, i32
+      }
+      scf.yield %filled, %next_consumed, %filled_frontier, %filled_frontier, %next_state, %next_publications, %next_ring_blocks, %next_credit_blocks, %filled_live, %filled_bytes, %next_appends : i32, i32, i64, i64, i32, i32, i32, i32, i32, i64, i32
+    }
+    %next_batch_count = scalar.addi %batch_count, %one : i32
+    scf.yield %consumed_end, %state_end, %reserved_end, %publication_end, %ring_block_end, %credit_block_end, %live_end, %bytes_end, %next_batch_count, %append_end : i32, i32, i64, i32, i32, i32, i32, i64, i32, i32
+  }
+  %peak_bytes32 = scalar.trunci %peak_bytes : i64 to i32
+  %frontier_low = scalar.trunci %final_frontier : i64 to i32
+  %frontier_high64 = scalar.shrui %final_frontier, %high_shift : i64
+  %frontier_high = scalar.trunci %frontier_high64 : i64 to i32
+  %final_completion = view.atomic.load %completion_word[0] {ordering = acquire, scope = system} : view<1xi32> -> i32
+  view.store %publications, %statistics_view[0] : i32, view<12xi32>
+  view.store %ring_blocks, %statistics_view[1] : i32, view<12xi32>
+  view.store %credit_blocks, %statistics_view[2] : i32, view<12xi32>
+  view.store %peak_live, %statistics_view[3] : i32, view<12xi32>
+  view.store %peak_bytes32, %statistics_view[4] : i32, view<12xi32>
+  view.store %batches, %statistics_view[5] : i32, view<12xi32>
+  view.store %final_state, %statistics_view[6] : i32, view<12xi32>
+  view.store %done, %statistics_view[7] : i32, view<12xi32>
+  view.store %final_completion, %statistics_view[8] : i32, view<12xi32>
+  view.store %appends, %statistics_view[9] : i32, view<12xi32>
+  view.store %frontier_low, %statistics_view[10] : i32, view<12xi32>
+  view.store %frontier_high, %statistics_view[11] : i32, view<12xi32>
+  buffer.fence scope(system) ordering(release)
+  kernel.return
+}

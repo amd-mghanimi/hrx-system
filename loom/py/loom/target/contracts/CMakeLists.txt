@@ -30,9 +30,11 @@ iree_py_library(
     "memory_spaces.py"
     "patterns.py"
     "rules.py"
+    "selection.py"
     "source.py"
     "source_memory.py"
     "templates.py"
+    "temporary_allocation.py"
   DEPS
     loom::py::loom::core
     loom::py::loom::error::error
@@ -48,6 +50,7 @@ iree_py_test(
     "compile_test.py"
     "lower_rules_test.py"
     "schema_test.py"
+    "selection_test.py"
     "source_memory_test.py"
     "templates_test.py"
     "../../tools/pytest_style_runner.py"
@@ -55,11 +58,14 @@ iree_py_test(
     "loom.target.contracts.compile_test"
     "loom.target.contracts.lower_rules_test"
     "loom.target.contracts.schema_test"
+    "loom.target.contracts.selection_test"
     "loom.target.contracts.source_memory_test"
     "loom.target.contracts.templates_test"
   DEPS
     loom::py::loom::target::contracts::contracts
     loom::py::loom::dialect::shared
+    loom::py::loom::dialect::buffer::buffer
+    loom::py::loom::dialect::cfg::cfg
     loom::py::loom::dialect::scalar::scalar
     loom::py::loom::dialect::vector::vector
     loom::py::loom::target::test::descriptors

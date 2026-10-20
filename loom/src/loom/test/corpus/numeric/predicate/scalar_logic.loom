@@ -1,0 +1,90 @@
+func.def @boolean_logic(%a: i1, %b: i1) -> (i1, i1, i1) {
+  %both = scalar.andi %a, %b : i1
+  %either = scalar.ori %a, %b : i1
+  %exclusive = scalar.xori %a, %b : i1
+  func.return %both, %either, %exclusive : i1, i1, i1
+}
+
+// Predicates use the same source-ordered scalar ABI as other value arguments.
+// Both arms perform work, and their result joins before the return boundary.
+func.def @conditional(%condition: i1, %a: i64, %b: i64) -> (i64) {
+  %result = scf.if %condition -> (i64) {
+    %sum = scalar.addi %a, %b : i64
+    scf.yield %sum : i64
+  } else {
+    %difference = scalar.subi %a, %b : i64
+    scf.yield %difference : i64
+  }
+  func.return %result : i64
+}
+
+// A dynamic loop carries a mixed-width tuple through entry, cyclic backedge
+// moves and exit. Repeated invocations reuse the same invocation storage.
+func.def @loop_swap(%count: i32, %a: i64, %b: i64) -> (i32, i64, i64) {
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %remaining, %first, %second = scf.while(%before = %count : i32, %left = %a : i64, %right = %b : i64) -> (i32, i64, i64) {
+    %condition = scalar.cmpi sgt, %before, %c0 : i32
+    scf.condition %condition, %before, %left, %right : i1, i32, i64, i64
+  } do(%current: i32, %x: i64, %y: i64) {
+    %next = scalar.subi %current, %c1 : i32
+    scf.yield %next, %y, %x : i32, i64, i64
+  }
+  func.return %remaining, %first, %second : i32, i64, i64
+}
+
+// Unsigned comparison consumes the full i64 value and returns a boolean,
+// including when the input sign bits distinguish signed and unsigned order.
+func.def @unsigned_less(%a: i64, %b: i64) -> (i1) {
+  %result = scalar.cmpi ult, %a, %b : i64
+  func.return %result : i1
+}
+
+// Observes predicate logic, branch selection, loop-carried swaps, and unsigned
+// comparison across independent full-width inputs.
+func.def @scalar_logic_observations(%control: i64, %a: i64, %b: i64, %word_output: buffer, %wide_output: buffer) {
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %count_mask = scalar.constant 31 : i32
+  %control_word = scalar.trunci %control : i64 to i32
+  %condition_a_word = scalar.andi %control_word, %c1 : i32
+  %shifted_control = scalar.shrui %control_word, %c1 : i32
+  %condition_b_word = scalar.andi %shifted_control, %c1 : i32
+  %condition_a = scalar.cmpi ne, %condition_a_word, %c0 : i32
+  %condition_b = scalar.cmpi ne, %condition_b_word, %c0 : i32
+  %both, %either, %exclusive = func.call @boolean_logic(%condition_a, %condition_b) : (i1, i1) -> (i1, i1, i1)
+  %conditional = func.call @conditional(%condition_a, %a, %b) : (i1, i64, i64) -> (i64)
+  %count = scalar.andi %control_word, %count_mask : i32
+  %remaining, %first, %second = func.call @loop_swap(%count, %a, %b) : (i32, i64, i64) -> (i32, i64, i64)
+  %less = func.call @unsigned_less(%a, %b) : (i64, i64) -> (i1)
+  %both_word = scf.select %both, %c1, %c0 : i32
+  %either_word = scf.select %either, %c1, %c0 : i32
+  %exclusive_word = scf.select %exclusive, %c1, %c0 : i32
+  %less_word = scf.select %less, %c1, %c0 : i32
+  %word_observations = vector.from_elements %both_word, %either_word, %exclusive_word, %remaining, %less_word : vector<5xi32>
+  %wide_observations = vector.from_elements %conditional, %first, %second : vector<3xi64>
+  %origin = index.constant 0 : offset
+  %word_results = buffer.view %word_output[%origin] : buffer -> view<5xi32>
+  %wide_results = buffer.view %wide_output[%origin] : buffer -> view<3xi64>
+  vector.store %word_observations, %word_results[0] : vector<5xi32>, view<5xi32>
+  vector.store %wide_observations, %wide_results[0] : vector<3xi64>, view<3xi64>
+  func.return
+}
+
+check.scenario @scalar_logic_values {
+  check.trial[256](%trial: index, %entropy: check.entropy) {
+    %control_entropy = check.entropy.fork %entropy name("control") : check.entropy
+    %a_entropy = check.entropy.fork %entropy name("a") : check.entropy
+    %b_entropy = check.entropy.fork %entropy name("b") : check.entropy
+    %control = check.entropy.read %control_entropy[%trial] : check.entropy -> i64
+    %a = check.entropy.read %a_entropy[%trial] : check.entropy -> i64
+    %b = check.entropy.read %b_entropy[%trial] : check.entropy -> i64
+    %word_output = check.generate.fill value(0) : tensor<5xi32>
+    %wide_output = check.generate.fill value(0) : tensor<3xi64>
+    check.compare<@scalar_logic_observations>(%control, %a, %b, %word_output, %wide_output) : (i64, i64, i64, tensor<5xi32>, tensor<3xi64>) -> () {
+      check.expect.bitwise actual(%word_output) expected(%word_output) : tensor<5xi32>
+      check.expect.bitwise actual(%wide_output) expected(%wide_output) : tensor<3xi64>
+    }
+  }
+  check.return
+}

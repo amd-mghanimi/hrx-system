@@ -61,6 +61,8 @@ class Configs {
     const cxx::Type* source_type;
     // Scalar carrier shared by declarations, definitions and value reads.
     loom_type_t type;
+    // Merged unresolved-value constraints with subject ordinal zero.
+    std::vector<loom_predicate_t> predicates;
     // Exact source specialization, absent for declaration-only bindings.
     std::optional<loom_attribute_t> value;
     // Declaration or exact definition used as the emitted symbol's location.

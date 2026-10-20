@@ -34,12 +34,21 @@ typedef enum loomc_cxx_data_model_e {
   LOOMC_CXX_DATA_MODEL_ILP32 = 2,
 } loomc_cxx_data_model_t;
 
-/// Explicit source permissions and include delivery policy.
+/// Translation-unit floating-point transformation policy.
+///
+/// Source fastmath attributes may replace this default for individual
+/// functions or statements.
+typedef enum loomc_cxx_fp_model_e {
+  /// Preserve floating-point value and evaluation-order semantics.
+  LOOMC_CXX_FP_MODEL_PRECISE = 0,
+  /// Permit the complete Loom fast-math contract.
+  LOOMC_CXX_FP_MODEL_FAST = 1,
+} loomc_cxx_fp_model_t;
+
+/// Include delivery policy.
 typedef enum loomc_cxx_import_flag_bits_e {
-  /// Permit approximate mathematical functions (Loom's AFN contract).
-  LOOMC_CXX_IMPORT_FLAG_APPROXIMATE_FUNCTIONS = 1u << 0,
   /// Omit the embedded system include root; use caller paths/providers only.
-  LOOMC_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES = 1u << 1,
+  LOOMC_CXX_IMPORT_FLAG_NO_BUILTIN_INCLUDES = 1u << 0,
 } loomc_cxx_import_flag_bits_t;
 /// Bitmask of loomc_cxx_import_flag_bits_t values.
 typedef uint32_t loomc_cxx_import_flags_t;
@@ -76,6 +85,36 @@ typedef struct loomc_cxx_source_provider_t {
   void* user_data;
 } loomc_cxx_source_provider_t;
 
+/// Maps a physical frontend path to the logical source identifier retained in
+/// diagnostics and imported modules.
+///
+/// The physical path remains the identity used for include lookup. Returning
+/// the same logical identifier for distinct physical sources is invalid.
+///
+/// @param user_data Caller state from the mapper descriptor.
+/// @param path Physical frontend path borrowed for this callback.
+/// @param out_identifier Receives the logical diagnostic/module identity.
+/// @return OK when the path was mapped, or a mapping failure status.
+///
+/// @lifetime
+/// The returned identifier must remain valid until the next mapper callback.
+/// The importer copies it before another callback can occur.
+///
+/// @thread_safety
+/// Calls are synchronous and sequential within one import. A mapper shared by
+/// concurrent imports must synchronize its own mutable state.
+typedef loomc_status_t(LOOMC_API_PTR* loomc_cxx_source_path_mapper_fn_t)(
+    void* user_data, loomc_string_view_t path,
+    loomc_string_view_t* out_identifier);
+
+/// Optional logical-identity mapper for retained frontend source paths.
+typedef struct loomc_cxx_source_path_mapper_t {
+  /// Callback, or NULL to retain physical frontend paths unchanged.
+  loomc_cxx_source_path_mapper_fn_t fn;
+  /// Caller-owned state borrowed until import returns.
+  void* user_data;
+} loomc_cxx_source_path_mapper_t;
+
 /// Preprocessor definition applied after the frontend's predefined macros.
 typedef struct loomc_cxx_define_t {
   /// Macro name, including parameters for a function-like macro.
@@ -84,9 +123,17 @@ typedef struct loomc_cxx_define_t {
   loomc_string_view_t value;
 } loomc_cxx_define_t;
 
+/// Immutable process-local C/C++ semantic preamble.
+///
+/// A preamble owns the parsed state and exact source snapshot of one leading
+/// include prefix. It does not retain the source, context, import options, or
+/// callback state used to create it. Retained handles may be shared by
+/// concurrent imports; each import restores into a fresh translation unit.
+typedef struct loomc_cxx_preamble_t loomc_cxx_preamble_t;
+
 /// Configuration for one source translation unit.
 ///
-/// Zero initialization selects C++26, LP64, strict math, visible definitions
+/// Zero initialization selects C++26, LP64, precise math, visible definitions
 /// as roots, and the embedded facade system root when built into the library.
 /// All strings, arrays, and callback state are borrowed until import returns.
 typedef struct loomc_cxx_import_options_t {
@@ -102,10 +149,14 @@ typedef struct loomc_cxx_import_options_t {
   loomc_string_view_t triple;
   /// Source integer and pointer layout.
   loomc_cxx_data_model_t data_model;
-  /// Source permissions and include delivery flags.
+  /// Default floating-point transformation policy.
+  loomc_cxx_fp_model_t fp_model;
+  /// Include delivery flags.
   loomc_cxx_import_flags_t flags;
   /// Optional include provider; embedded headers are resolved separately.
   loomc_cxx_source_provider_t source_provider;
+  /// Optional mapping from physical paths to retained logical identities.
+  loomc_cxx_source_path_mapper_t source_path_mapper;
   /// User include directories, searched after quoted local includes.
   const loomc_string_view_t* include_paths;
   /// Number of user include directories.
@@ -123,7 +174,61 @@ typedef struct loomc_cxx_import_options_t {
   const loomc_string_view_t* roots;
   /// Number of explicitly selected roots.
   loomc_host_size_t root_count;
+  /// Optional immutable preamble borrowed until import returns. An exact source
+  /// prefix or frontend-configuration mismatch uses ordinary cold parsing.
+  const loomc_cxx_preamble_t* preamble;
 } loomc_cxx_import_options_t;
+
+/// Creates an immutable semantic preamble from leading include directives.
+///
+/// The representative source must begin with at least one reusable include.
+/// The handle copies its matching source prefix, resolved headers, retained
+/// misses, and serialized frontend state. Later imports can vary source text
+/// after that prefix and import-only policy such as roots or floating-point
+/// lowering while retaining the same language, ABI, include-search, define,
+/// and embedded-header configuration.
+///
+/// @param context Immutable context defining diagnostic source retention.
+/// @param source Representative source with UNKNOWN format.
+/// @param options Source configuration, or NULL for defaults.
+/// @param allocator Host allocator owning the returned handle and result.
+/// @param out_preamble Receives one owned preamble after successful admission.
+/// @param out_result Receives one owned result with retained diagnostics.
+/// @return OK for successful creation or diagnosed source rejection. Rejection
+/// returns a failed result and NULL preamble. A source without a leading
+/// include returns FAILED_PRECONDITION with NULL outputs.
+///
+/// @ownership
+/// Release outputs with loomc_cxx_preamble_release and loomc_result_release.
+/// The caller owns catalog lookup, caching, and eviction policy.
+///
+/// @lifetime
+/// Source/include bytes, options, and callback state may be released on return.
+/// The returned handle is process-local and has no persisted wire format.
+///
+/// @thread_safety
+/// The immutable handle may be retained, released, and used by concurrent
+/// imports. The source provider and path mapper follow their documented
+/// per-invocation synchronization requirements during creation.
+LOOMC_API_EXPORT loomc_status_t loomc_cxx_preamble_create(
+    loomc_context_t* context, const loomc_source_t* source,
+    const loomc_cxx_import_options_t* options, loomc_allocator_t allocator,
+    loomc_cxx_preamble_t** out_preamble, loomc_result_t** out_result);
+
+/// Retains `preamble` for another owner. Passing NULL is allowed.
+///
+/// @param preamble Preamble to retain, or NULL.
+///
+/// Retain/release operations are safe to perform from multiple threads.
+LOOMC_API_EXPORT void loomc_cxx_preamble_retain(loomc_cxx_preamble_t* preamble);
+
+/// Releases `preamble` from one owner. Passing NULL is allowed.
+///
+/// @param preamble Preamble to release, or NULL.
+///
+/// The immutable preamble is destroyed after its final reference is released.
+LOOMC_API_EXPORT void loomc_cxx_preamble_release(
+    loomc_cxx_preamble_t* preamble);
 
 /// Imports C/C++ source into a verified High IR module, without cleanup passes.
 ///

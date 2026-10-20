@@ -47,7 +47,10 @@ enum loom_value_relation_kind_e {
   LOOM_VALUE_RELATION_LOOP_BYPASS = 8,
   // A mutually exclusive region yield and its parent result.
   LOOM_VALUE_RELATION_REGION_RESULT = 9,
-  LOOM_VALUE_RELATION_COUNT_ = 10,
+  // A buffer/view result derived from an operand's storage, with potentially
+  // different coordinates and physical representation.
+  LOOM_VALUE_RELATION_REFERENCE_SOURCE = 10,
+  LOOM_VALUE_RELATION_COUNT_ = 11,
 };
 typedef uint8_t loom_value_relation_kind_t;
 

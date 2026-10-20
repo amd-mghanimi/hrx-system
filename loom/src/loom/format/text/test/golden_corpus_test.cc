@@ -17,12 +17,12 @@
 #include "iree/testing/status_matchers.h"
 #include "loom/codegen/low/text_asm.h"
 #include "loom/error/diagnostic.h"
+#include "loom/format/testdata/golden_text_corpus.h"
 #include "loom/format/text/parser.h"
 #include "loom/format/text/printer.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/target/low_descriptor_registry_core_test.h"
-#include "loom/test/corpus/text/golden_text_corpus.h"
 #include "loom/testing/context.h"
 
 namespace loom {
@@ -48,8 +48,8 @@ class GoldenCorpusTest : public ::testing::Test {
 
   loom_module_t* Parse(iree_string_view_t source, iree_string_view_t filename) {
     loom_text_parse_options_t options = {
-        /*.diagnostic_sink=*/{loom_diagnostic_stderr_sink, NULL},
-        /*.max_errors=*/20,
+        .diagnostic_sink = {loom_diagnostic_stderr_sink, NULL},
+        .max_errors = 20,
     };
     loom_low_descriptor_text_asm_environment_initialize(
         &low_registry_.registry, &options.low_asm_environment);
@@ -68,8 +68,8 @@ class GoldenCorpusTest : public ::testing::Test {
     loom_low_descriptor_text_asm_environment_initialize(&low_registry_.registry,
                                                         &low_asm_environment);
     const loom_text_print_options_t options = {
-        /*.flags=*/LOOM_TEXT_PRINT_DEFAULT,
-        /*.low_asm_environment=*/low_asm_environment,
+        .flags = LOOM_TEXT_PRINT_DEFAULT,
+        .low_asm_environment = low_asm_environment,
     };
     IREE_EXPECT_OK(loom_text_print_module_to_builder_with_options(
         module, &builder, &options));

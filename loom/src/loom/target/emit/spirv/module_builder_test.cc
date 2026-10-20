@@ -74,6 +74,21 @@ bool HasInstruction(const std::vector<Instruction>& instructions,
   return false;
 }
 
+bool HasExtension(const std::vector<Instruction>& instructions,
+                  const std::string& extension_name) {
+  for (const Instruction& instruction : instructions) {
+    if (instruction.opcode != LOOM_SPIRV_OP_EXTENSION) {
+      continue;
+    }
+    iree_host_size_t next_operand_index = 0;
+    if (DecodeStringOperand(instruction.operands, 0, &next_operand_index) ==
+        extension_name) {
+      return true;
+    }
+  }
+  return false;
+}
+
 const Instruction* FindInstruction(const std::vector<Instruction>& instructions,
                                    uint16_t opcode,
                                    std::initializer_list<uint32_t> prefix) {
@@ -394,27 +409,73 @@ TEST(SpirvModuleBuilderTest, BuildsStorageBufferI32AddModule) {
   loom_spirv_module_binary_deinitialize(&module, iree_allocator_system());
 }
 
+TEST(SpirvModuleBuilderTest, InternsExtendedInstructionImports) {
+  loom_spirv_module_builder_t builder;
+  IREE_ASSERT_OK(loom_spirv_module_builder_initialize(
+      &loom_spirv_low_target_bundle_vulkan1_3, iree_allocator_system(),
+      &builder));
+
+  uint32_t first_id = 0;
+  IREE_ASSERT_OK(loom_spirv_module_builder_import_extended_instruction_set(
+      &builder, LOOM_SPIRV_EXTENDED_INSTRUCTION_SET_GLSL_STD_450, &first_id));
+  uint32_t repeated_id = 0;
+  IREE_ASSERT_OK(loom_spirv_module_builder_import_extended_instruction_set(
+      &builder, LOOM_SPIRV_EXTENDED_INSTRUCTION_SET_GLSL_STD_450,
+      &repeated_id));
+  EXPECT_EQ(repeated_id, first_id);
+
+  loom_spirv_module_binary_t module;
+  IREE_ASSERT_OK(loom_spirv_module_builder_finalize(&builder, &module));
+  loom_spirv_module_builder_deinitialize(&builder);
+
+  const std::vector<Instruction> instructions = ParseInstructions(module);
+  iree_host_size_t import_count = 0;
+  const Instruction* imported_set = nullptr;
+  for (const Instruction& instruction : instructions) {
+    if (instruction.opcode != LOOM_SPIRV_OP_EXT_INST_IMPORT) {
+      continue;
+    }
+    ++import_count;
+    imported_set = &instruction;
+    ASSERT_FALSE(instruction.operands.empty());
+    EXPECT_EQ(instruction.operands[0], first_id);
+    iree_host_size_t next_operand_index = 0;
+    EXPECT_EQ(DecodeStringOperand(instruction.operands, 1, &next_operand_index),
+              "GLSL.std.450");
+    EXPECT_EQ(next_operand_index, instruction.operands.size());
+  }
+  EXPECT_EQ(import_count, 1u);
+  ASSERT_NE(imported_set, nullptr);
+  const Instruction* memory_model =
+      FindInstruction(instructions, LOOM_SPIRV_OP_MEMORY_MODEL, {});
+  ASSERT_NE(memory_model, nullptr);
+  EXPECT_LT(imported_set->word_offset, memory_model->word_offset);
+
+  loom_spirv_module_binary_deinitialize(&module, iree_allocator_system());
+}
+
 TEST(SpirvModuleBuilderTest, EmitsRawBdaHalKernelPreamble) {
   const loom_target_snapshot_t snapshot = {
-      /*.name=*/IREE_SVL("spirv-vulkan1.3"),
-      /*.codegen_format=*/LOOM_TARGET_CODEGEN_FORMAT_SPIRV,
-      /*.artifact_format=*/LOOM_TARGET_ARTIFACT_FORMAT_SPIRV_BINARY,
+      .name = IREE_SVL("spirv-vulkan1.3"),
+      .codegen_format = LOOM_TARGET_CODEGEN_FORMAT_SPIRV,
+      .artifact_format = LOOM_TARGET_ARTIFACT_FORMAT_SPIRV_BINARY,
   };
   const loom_target_export_plan_t export_plan = {
-      /*.name=*/IREE_SVL("hal-kernel"),
-      /*.export_symbol=*/{},
-      /*.abi_kind=*/LOOM_TARGET_ABI_HAL_KERNEL,
+      .name = IREE_SVL("hal-kernel"),
+      .export_symbol = {},
+      .calling_convention = {},
+      .abi_kind = LOOM_TARGET_ABI_HAL_KERNEL,
   };
   const loom_target_config_t config = {
-      /*.name=*/IREE_SVL("spirv.logical.core"),
-      /*.contract_set_key=*/{},
-      /*.contract_feature_bits=*/LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA,
+      .name = IREE_SVL("spirv.logical.core"),
+      .contract_set_key = {},
+      .contract_feature_bits = LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA,
   };
   const loom_target_bundle_t target = {
-      /*.name=*/IREE_SVL("spirv-vulkan1.3-hal"),
-      /*.snapshot=*/&snapshot,
-      /*.export_plan=*/&export_plan,
-      /*.config=*/&config,
+      .name = IREE_SVL("spirv-vulkan1.3-hal"),
+      .snapshot = &snapshot,
+      .export_plan = &export_plan,
+      .config = &config,
   };
 
   loom_spirv_module_builder_t builder;
@@ -462,26 +523,28 @@ TEST(SpirvModuleBuilderTest, EmitsRawBdaHalKernelPreamble) {
 
 TEST(SpirvModuleBuilderTest, EmitsVulkanMemoryModelForDeviceScopeRawBda) {
   const loom_target_snapshot_t snapshot = {
-      /*.name=*/IREE_SVL("spirv-vulkan1.3"),
-      /*.codegen_format=*/LOOM_TARGET_CODEGEN_FORMAT_SPIRV,
-      /*.artifact_format=*/LOOM_TARGET_ARTIFACT_FORMAT_SPIRV_BINARY,
+      .name = IREE_SVL("spirv-vulkan1.3"),
+      .codegen_format = LOOM_TARGET_CODEGEN_FORMAT_SPIRV,
+      .artifact_format = LOOM_TARGET_ARTIFACT_FORMAT_SPIRV_BINARY,
   };
   const loom_target_export_plan_t export_plan = {
-      /*.name=*/IREE_SVL("hal-kernel"),
-      /*.export_symbol=*/{},
-      /*.abi_kind=*/LOOM_TARGET_ABI_HAL_KERNEL,
+      .name = IREE_SVL("hal-kernel"),
+      .export_symbol = {},
+      .calling_convention = {},
+      .abi_kind = LOOM_TARGET_ABI_HAL_KERNEL,
   };
   const loom_target_config_t config = {
-      /*.name=*/IREE_SVL("spirv.logical.core"),
-      /*.contract_set_key=*/{},
-      /*.contract_feature_bits=*/LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA |
+      .name = IREE_SVL("spirv.logical.core"),
+      .contract_set_key = {},
+      .contract_feature_bits =
+          LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA |
           LOOM_SPIRV_FEATURE_VULKAN_MEMORY_MODEL_DEVICE_SCOPE,
   };
   const loom_target_bundle_t target = {
-      /*.name=*/IREE_SVL("spirv-vulkan1.3-hal-device-scope"),
-      /*.snapshot=*/&snapshot,
-      /*.export_plan=*/&export_plan,
-      /*.config=*/&config,
+      .name = IREE_SVL("spirv-vulkan1.3-hal-device-scope"),
+      .snapshot = &snapshot,
+      .export_plan = &export_plan,
+      .config = &config,
   };
 
   loom_spirv_module_builder_t builder;
@@ -510,25 +573,26 @@ TEST(SpirvModuleBuilderTest, EmitsVulkanMemoryModelForDeviceScopeRawBda) {
 
 TEST(SpirvModuleBuilderTest, EmitsCooperativeMatrixRawBdaHalKernelPreamble) {
   const loom_target_snapshot_t snapshot = {
-      /*.name=*/IREE_SVL("spirv-vulkan1.3"),
-      /*.codegen_format=*/LOOM_TARGET_CODEGEN_FORMAT_SPIRV,
-      /*.artifact_format=*/LOOM_TARGET_ARTIFACT_FORMAT_SPIRV_BINARY,
+      .name = IREE_SVL("spirv-vulkan1.3"),
+      .codegen_format = LOOM_TARGET_CODEGEN_FORMAT_SPIRV,
+      .artifact_format = LOOM_TARGET_ARTIFACT_FORMAT_SPIRV_BINARY,
   };
   const loom_target_export_plan_t export_plan = {
-      /*.name=*/IREE_SVL("hal-kernel"),
-      /*.export_symbol=*/{},
-      /*.abi_kind=*/LOOM_TARGET_ABI_HAL_KERNEL,
+      .name = IREE_SVL("hal-kernel"),
+      .export_symbol = {},
+      .calling_convention = {},
+      .abi_kind = LOOM_TARGET_ABI_HAL_KERNEL,
   };
   const loom_target_config_t config = {
-      /*.name=*/IREE_SVL("spirv.logical.core"),
-      /*.contract_set_key=*/{},
-      /*.contract_feature_bits=*/LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA,
+      .name = IREE_SVL("spirv.logical.core"),
+      .contract_set_key = {},
+      .contract_feature_bits = LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA,
   };
   const loom_target_bundle_t target = {
-      /*.name=*/IREE_SVL("spirv-vulkan1.3-hal-coop"),
-      /*.snapshot=*/&snapshot,
-      /*.export_plan=*/&export_plan,
-      /*.config=*/&config,
+      .name = IREE_SVL("spirv-vulkan1.3-hal-coop"),
+      .snapshot = &snapshot,
+      .export_plan = &export_plan,
+      .config = &config,
   };
 
   loom_spirv_module_builder_t builder;
@@ -580,27 +644,80 @@ TEST(SpirvModuleBuilderTest, EmitsCooperativeMatrixRawBdaHalKernelPreamble) {
   loom_spirv_module_binary_deinitialize(&module, iree_allocator_system());
 }
 
+TEST(SpirvModuleBuilderTest, EmitsTransitiveSubgroupBallotCapabilities) {
+  loom_spirv_module_builder_t builder;
+  IREE_ASSERT_OK(loom_spirv_module_builder_initialize(
+      &loom_spirv_low_target_bundle_subgroup32_ballot_hal,
+      iree_allocator_system(), &builder));
+  loom_spirv_module_builder_require_feature_bits(
+      &builder, LOOM_SPIRV_FEATURE_GROUP_NON_UNIFORM_BALLOT);
+
+  loom_spirv_module_binary_t module;
+  IREE_ASSERT_OK(loom_spirv_module_builder_finalize(&builder, &module));
+  loom_spirv_module_builder_deinitialize(&builder);
+
+  const std::vector<Instruction> instructions = ParseInstructions(module);
+  EXPECT_TRUE(HasInstruction(instructions, LOOM_SPIRV_OP_CAPABILITY,
+                             {LOOM_SPIRV_CAPABILITY_GROUP_NON_UNIFORM}));
+  EXPECT_TRUE(HasInstruction(instructions, LOOM_SPIRV_OP_CAPABILITY,
+                             {LOOM_SPIRV_CAPABILITY_GROUP_NON_UNIFORM_BALLOT}));
+
+  loom_spirv_module_binary_deinitialize(&module, iree_allocator_system());
+}
+
+TEST(SpirvModuleBuilderTest, EmitsFloatControlsOnlyWhenRequired) {
+  loom_spirv_module_builder_t builder;
+  IREE_ASSERT_OK(loom_spirv_module_builder_initialize(
+      &loom_spirv_low_target_bundle_extended_types, iree_allocator_system(),
+      &builder));
+
+  loom_spirv_module_binary_t module;
+  IREE_ASSERT_OK(loom_spirv_module_builder_finalize(&builder, &module));
+  loom_spirv_module_builder_deinitialize(&builder);
+
+  std::vector<Instruction> instructions = ParseInstructions(module);
+  EXPECT_FALSE(HasInstruction(instructions, LOOM_SPIRV_OP_CAPABILITY,
+                              {LOOM_SPIRV_CAPABILITY_DENORM_PRESERVE}));
+  EXPECT_FALSE(HasExtension(instructions, "SPV_KHR_float_controls"));
+  loom_spirv_module_binary_deinitialize(&module, iree_allocator_system());
+
+  IREE_ASSERT_OK(loom_spirv_module_builder_initialize(
+      &loom_spirv_low_target_bundle_extended_types, iree_allocator_system(),
+      &builder));
+  loom_spirv_module_builder_require_feature_bits(
+      &builder, LOOM_SPIRV_FEATURE_FLOAT32_DENORM_PRESERVE);
+  IREE_ASSERT_OK(loom_spirv_module_builder_finalize(&builder, &module));
+  loom_spirv_module_builder_deinitialize(&builder);
+
+  instructions = ParseInstructions(module);
+  EXPECT_TRUE(HasInstruction(instructions, LOOM_SPIRV_OP_CAPABILITY,
+                             {LOOM_SPIRV_CAPABILITY_DENORM_PRESERVE}));
+  EXPECT_TRUE(HasExtension(instructions, "SPV_KHR_float_controls"));
+  loom_spirv_module_binary_deinitialize(&module, iree_allocator_system());
+}
+
 TEST(SpirvModuleBuilderTest, RejectsNonSpirvTargetBundle) {
   const loom_target_snapshot_t snapshot = {
-      /*.name=*/IREE_SVL("not-spirv"),
-      /*.codegen_format=*/LOOM_TARGET_CODEGEN_FORMAT_LOW_NATIVE,
-      /*.artifact_format=*/LOOM_TARGET_ARTIFACT_FORMAT_ELF,
+      .name = IREE_SVL("not-spirv"),
+      .codegen_format = LOOM_TARGET_CODEGEN_FORMAT_LOW_NATIVE,
+      .artifact_format = LOOM_TARGET_ARTIFACT_FORMAT_ELF,
   };
   const loom_target_export_plan_t export_plan = {
-      /*.name=*/IREE_SVL("shader-entry"),
-      /*.export_symbol=*/{},
-      /*.abi_kind=*/LOOM_TARGET_ABI_SHADER_ENTRY_POINT,
+      .name = IREE_SVL("shader-entry"),
+      .export_symbol = {},
+      .calling_convention = {},
+      .abi_kind = LOOM_TARGET_ABI_SHADER_ENTRY_POINT,
   };
   const loom_target_config_t config = {
-      /*.name=*/IREE_SVL("config"),
-      /*.contract_set_key=*/{},
-      /*.contract_feature_bits=*/LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA,
+      .name = IREE_SVL("config"),
+      .contract_set_key = {},
+      .contract_feature_bits = LOOM_SPIRV_FEATURE_PROFILE_VULKAN_1_3_BDA,
   };
   const loom_target_bundle_t target = {
-      /*.name=*/IREE_SVL("wrong-target"),
-      /*.snapshot=*/&snapshot,
-      /*.export_plan=*/&export_plan,
-      /*.config=*/&config,
+      .name = IREE_SVL("wrong-target"),
+      .snapshot = &snapshot,
+      .export_plan = &export_plan,
+      .config = &config,
   };
 
   loom_spirv_module_builder_t builder;

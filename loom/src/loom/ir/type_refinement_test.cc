@@ -166,9 +166,9 @@ TEST_F(TypeRefinementTest, OverflowShapePreservesViewAccessRequirement) {
   }
 }
 
-TEST_F(TypeRefinementTest, PoolDimensionNarrowsLikeOtherDimensionedTypes) {
-  loom_type_t current = loom_type_pool(loom_dim_pack_dynamic(1));
-  loom_type_t candidate = loom_type_pool(loom_dim_pack_static(4096));
+TEST_F(TypeRefinementTest, GroupDimensionNarrowsLikeOtherDimensionedTypes) {
+  loom_type_t current = loom_type_group_1d(loom_dim_pack_dynamic(1));
+  loom_type_t candidate = loom_type_group_1d(loom_dim_pack_static(4096));
 
   loom_type_t refined = {};
   loom_type_refinement_result_t result = LOOM_TYPE_REFINEMENT_CONFLICT;

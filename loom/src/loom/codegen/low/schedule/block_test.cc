@@ -22,15 +22,15 @@ TEST(ScheduleBlockTest, RetainsOwnedRowsWithShiftedNodeIndices) {
   iree_arena_allocator_t arena;
   iree_arena_initialize(&pool, &arena);
   const auto* descriptors = loom_test_low_core_descriptor_set();
-  loom_low_schedule_options_t options = {};
-  options.strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL;
+  loom_low_schedule_options_t options = {
+      .strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+  };
 
   // Node indices shift because an earlier block gained an operation. The
   // unchanged block keeps its selected order, including two simultaneous
   // instructions. Operation pointers are identities owned outside both tables.
   loom_op_t operations[4] = {};
-  loom_block_t block = {};
-  block.region_index = 1;
+  loom_block_t block = {.region_index = 1};
   loom_low_schedule_block_t previous_blocks[2] = {};
   auto& previous_block = previous_blocks[1];
   previous_block.block = &block;
@@ -53,11 +53,11 @@ TEST(ScheduleBlockTest, RetainsOwnedRowsWithShiftedNodeIndices) {
     if (i < IREE_ARRAYSIZE(descriptor_ordinals)) {
       const uint32_t ordinal = descriptor_ordinals[i];
       node.descriptor = &descriptors->descriptors[ordinal];
-      node.schedule_class_id =
-          loom_low_descriptor_set_descriptor_view_at(descriptors, ordinal)
-              ->schedule_class_id;
+      const loom_low_descriptor_view_t* descriptor_view =
+          loom_low_descriptor_set_descriptor_view_at(descriptors, ordinal);
+      node.schedule_class_id = descriptor_view->schedule_class_id;
       node.schedule_class =
-          &descriptors->schedule_classes[node.schedule_class_id];
+          loom_low_descriptor_set_schedule_class(descriptors, descriptor_view);
     }
   }
   previous_nodes[3].issue_cycle = 8;
@@ -77,12 +77,13 @@ TEST(ScheduleBlockTest, RetainsOwnedRowsWithShiftedNodeIndices) {
   previous_decisions[1].rejected_node = 1;
   previous_decisions[1].ready_candidate_count = 2;
   previous_decisions[1].scored_candidate_count = 2;
-  loom_low_schedule_table_t previous = {};
-  previous.blocks = previous_blocks;
-  previous.nodes = previous_nodes;
-  previous.scheduled_node_indices = previous_order;
-  previous.pressure_steps = previous_steps;
-  previous.candidate_decisions = previous_decisions;
+  loom_low_schedule_table_t previous = {
+      .blocks = previous_blocks,
+      .nodes = previous_nodes,
+      .scheduled_node_indices = previous_order,
+      .pressure_steps = previous_steps,
+      .candidate_decisions = previous_decisions,
+  };
 
   loom_low_schedule_block_t blocks[2] = {};
   blocks[1].block = &block;
@@ -110,9 +111,10 @@ TEST(ScheduleBlockTest, RetainsOwnedRowsWithShiftedNodeIndices) {
     resources[i].capacity_per_cycle =
         descriptors->resources[i].capacity_per_cycle;
   }
-  loom_low_schedule_build_state_t state = {};
-  state.arena = &arena;
-  state.options = &options;
+  loom_low_schedule_build_state_t state = {
+      .options = &options,
+      .arena = &arena,
+  };
   state.target.descriptor_set = descriptors;
   state.blocks = blocks;
   state.nodes = nodes;
@@ -161,9 +163,11 @@ TEST(ScheduleBlockTest, RetainsOwnedRowsWithShiftedNodeIndices) {
   EXPECT_EQ(effects[0].node_index, 2u);
   EXPECT_EQ(effects[0].scheduled_ordinal, 1u);
   EXPECT_EQ(hazards[0].node_index, 2u);
+  EXPECT_EQ(hazards[0].hazard_index, nodes[2].schedule_class->hazard_start);
 
   // Results retain target-owned descriptors and newly owned rows, never old
   // nodes or diagnostics. Retiring those tables cannot change the result.
+  previous_nodes[1] = {};
   previous_nodes[2] = {};
   previous_steps[1] = {};
   previous_decisions[1] = {};
@@ -172,6 +176,12 @@ TEST(ScheduleBlockTest, RetainsOwnedRowsWithShiftedNodeIndices) {
   EXPECT_EQ(steps[2].node_index, 3u);
   EXPECT_EQ(decisions[1].ready_candidate_count, 2u);
   EXPECT_EQ(ordered_ops[2], &operations[1]);
+  const auto& hazard_node = nodes[hazards[0].node_index];
+  EXPECT_EQ(hazard_node.op, &operations[0]);
+  EXPECT_EQ(hazard_node.block_index, 1u);
+  EXPECT_EQ(hazard_node.scheduled_ordinal, 1u);
+  EXPECT_EQ(descriptors->hazards[hazards[0].hazard_index].kind,
+            LOOM_LOW_HAZARD_KIND_MIN_DISTANCE);
   iree_arena_deinitialize(&arena);
   iree_arena_block_pool_deinitialize(&pool);
 }
@@ -186,50 +196,89 @@ TEST(ScheduleBlockTest, MergesRoundedClassPeaksWithoutDoubleCountingCliffs) {
   const loom_target_residency_derived_member_range_t ranges[] = {{0, 1},
                                                                  {1, 1}};
   const loom_target_residency_cliff_t cliffs[] = {{0, 9, 4, 3}, {0, 13, 3, 2}};
-  loom_target_residency_derived_resource_t resource = {};
-  resource.member_count = 2;
-  resource.cliff_count = 2;
-  loom_target_residency_derived_resource_table_t table = {};
-  table.resources = &resource;
-  table.resource_count = 1;
-  table.members = members;
-  table.member_count = IREE_ARRAYSIZE(members);
-  table.cliffs = cliffs;
-  table.cliff_count = IREE_ARRAYSIZE(cliffs);
-  table.member_indices_by_direct_resource = member_indices;
-  table.member_ranges_by_direct_resource = ranges;
-  loom_low_descriptor_set_t descriptors = {};
-  descriptors.reg_class_count = 2;
+  loom_target_residency_derived_resource_t resource = {
+      .name = IREE_SV("shared_register_file"),
+      .pool_units = 64,
+      .allocation_granularity = 1,
+      .member_count = 2,
+      .cliff_count = 2,
+  };
+  loom_target_residency_derived_resource_table_t table = {
+      .resources = &resource,
+      .resource_count = 1,
+      .members = members,
+      .member_count = IREE_ARRAYSIZE(members),
+      .cliffs = cliffs,
+      .cliff_count = IREE_ARRAYSIZE(cliffs),
+      .member_indices_by_direct_resource = member_indices,
+      .member_ranges_by_direct_resource = ranges,
+  };
+  loom_low_descriptor_set_t descriptors = {.reg_class_count = 2};
   const uint64_t retained_peaks[] = {5, 2, 2, 5, 1, 1};
-  uint64_t result_peaks[6] = {};
-  loom_low_schedule_table_t previous = {};
-  previous.block_pressure_peaks = retained_peaks;
-  loom_low_schedule_build_state_t state = {};
+  loom_low_schedule_table_t previous = {.block_pressure_peaks = retained_peaks};
+  const iree_string_view_t direct_names[] = {IREE_SV("first"),
+                                             IREE_SV("second")};
+  const loom_target_residency_cliff_range_t direct_ranges[] = {{0, 2}, {2, 0}};
+  const loom_target_residency_model_t residency_model = {
+      .best_tier = 4,
+      .direct_resources = {direct_names, cliffs, IREE_ARRAYSIZE(cliffs),
+                           direct_ranges, 2},
+      .derived_resources = table,
+  };
+  loom_low_schedule_options_t options = {
+      .strategy = LOOM_LOW_SCHEDULE_STRATEGY_RESOURCE_STALL,
+  };
+  iree_arena_block_pool_t pool;
+  iree_arena_block_pool_initialize(4096, iree_allocator_system(), &pool);
+  iree_arena_allocator_t arena;
+  iree_arena_initialize(&pool, &arena);
+  loom_region_t body = {};
+  loom_local_value_domain_t value_domain = {};
+  loom_low_schedule_build_state_t state = {
+      .options = &options,
+      .scratch_arena = &arena,
+      .body = &body,
+      .value_domain = &value_domain,
+  };
   state.target.descriptor_set = &descriptors;
+  state.pressure_cliffs = &residency_model.direct_resources;
   state.pressure_resources = &table;
-  state.block_pressure_peaks = result_peaks;
-  uint64_t high_water[] = {0, 0};
-  loom_low_schedule_resource_pressure_record_t record = {};
-  record.next_cliff_index = 1;
-  loom_low_schedule_pressure_state_t pressure = {};
-  pressure.resources.peak_live_units_by_reg_class = high_water;
-  pressure.resources.records = &record;
+  for (uint32_t tier_limit : {2u, 3u, 4u}) {
+    SCOPED_TRACE(tier_limit);
+    options.residency =
+        loom_target_residency_view(&residency_model, tier_limit);
+    uint64_t result_peaks[6] = {};
+    state.block_pressure_peaks = result_peaks;
+    loom_low_schedule_pressure_state_t pressure = {};
+    IREE_ASSERT_OK(loom_low_schedule_pressure_initialize(&state, 0, &pressure));
+    auto& record = pressure.resources.records[0];
+    EXPECT_EQ(pressure.first_actionable_pressure_cliff_indices[0],
+              4u - tier_limit);
+    EXPECT_EQ(pressure.first_actionable_pressure_cliff_indices[1], 2u);
+    EXPECT_EQ(record.next_cliff_index, 4u - tier_limit);
+    // Source-order analysis can advance the cursor but never reopen a cliff
+    // already excluded by the function's fixed ceiling.
+    record.next_cliff_index = iree_max(record.next_cliff_index, 1u);
 
-  loom_low_schedule_pressure_retain_block(&state, &pressure, &previous, 0);
-  EXPECT_EQ(record.current_peak_units, 12u);
-  EXPECT_EQ(pressure.resources.pressure_cliff_penalty, 0u);
-  loom_low_schedule_pressure_retain_block(&state, &pressure, &previous, 1);
-  EXPECT_EQ(record.current_peak_units, 16u);
-  EXPECT_EQ(record.next_cliff_index, 2u);
-  EXPECT_EQ(pressure.resources.pressure_cliff_penalty, 1u);
-  loom_low_schedule_pressure_retain_block(&state, &pressure, &previous, 2);
-  EXPECT_EQ(record.current_peak_units, 16u);
-  EXPECT_EQ(pressure.resources.pressure_cliff_penalty, 1u);
-  EXPECT_EQ(high_water[0], 5u);
-  EXPECT_EQ(high_water[1], 5u);
-  for (uint32_t i = 0; i < IREE_ARRAYSIZE(result_peaks); ++i) {
-    EXPECT_EQ(result_peaks[i], retained_peaks[i]);
+    loom_low_schedule_pressure_retain_block(&state, &pressure, &previous, 0);
+    EXPECT_EQ(record.current_peak_units, 12u);
+    EXPECT_EQ(pressure.resources.pressure_cliff_penalty, 0u);
+    loom_low_schedule_pressure_retain_block(&state, &pressure, &previous, 1);
+    EXPECT_EQ(record.current_peak_units, 16u);
+    EXPECT_EQ(record.next_cliff_index, 2u);
+    const uint32_t expected_penalty = tier_limit == 2 ? 0 : 1;
+    EXPECT_EQ(pressure.resources.pressure_cliff_penalty, expected_penalty);
+    loom_low_schedule_pressure_retain_block(&state, &pressure, &previous, 2);
+    EXPECT_EQ(record.current_peak_units, 16u);
+    EXPECT_EQ(pressure.resources.pressure_cliff_penalty, expected_penalty);
+    EXPECT_EQ(pressure.resources.peak_live_units_by_reg_class[0], 5u);
+    EXPECT_EQ(pressure.resources.peak_live_units_by_reg_class[1], 5u);
+    for (uint32_t i = 0; i < IREE_ARRAYSIZE(result_peaks); ++i) {
+      EXPECT_EQ(result_peaks[i], retained_peaks[i]);
+    }
   }
+  iree_arena_deinitialize(&arena);
+  iree_arena_block_pool_deinitialize(&pool);
 }
 
 }  // namespace

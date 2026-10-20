@@ -50,6 +50,21 @@ std::string RenderFixHint(const loom_error_def_t* error,
   return result;
 }
 
+std::string RenderParamValue(const loom_diagnostic_param_t* param,
+                             loom_type_formatter_t type_formatter = {nullptr,
+                                                                     nullptr}) {
+  iree_string_builder_t builder;
+  iree_string_builder_initialize(iree_allocator_system(), &builder);
+  loom_output_stream_t stream;
+  loom_output_stream_for_builder(&builder, &stream);
+  IREE_CHECK_OK(
+      loom_diagnostic_render_param_value(param, type_formatter, &stream));
+  std::string result(iree_string_builder_buffer(&builder),
+                     iree_string_builder_size(&builder));
+  iree_string_builder_deinitialize(&builder);
+  return result;
+}
+
 std::string FormatMinimalType(loom_type_t type) {
   iree_string_builder_t builder;
   iree_string_builder_initialize(iree_allocator_system(), &builder);
@@ -164,6 +179,21 @@ TEST(Renderer, StringListParam) {
                     IREE_ARRAYSIZE(params));
   EXPECT_NE(message.find("contributors: [%acc0, %acc1, %a_frag0]"),
             std::string::npos);
+}
+
+TEST(Renderer, ParamValueUsesCanonicalSpelling) {
+  const iree_string_view_t strings[] = {IREE_SV("first"), IREE_SV("second")};
+  const loom_diagnostic_param_t string_list =
+      loom_param_string_list(strings, IREE_ARRAYSIZE(strings));
+  EXPECT_EQ(RenderParamValue(&string_list), "[first, second]");
+
+  const loom_diagnostic_param_t boolean = loom_param_bool(true);
+  EXPECT_EQ(RenderParamValue(&boolean), "true");
+
+  const loom_diagnostic_param_t type =
+      loom_param_type(loom_type_scalar(LOOM_SCALAR_TYPE_BF16));
+  EXPECT_EQ(RenderParamValue(&type, {loom_type_format_minimal, nullptr}),
+            "bf16");
 }
 
 //===----------------------------------------------------------------------===//

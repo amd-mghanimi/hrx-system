@@ -34,6 +34,19 @@ typedef struct iree_hal_replay_physical_memory_entry_t {
   iree_hal_physical_memory_t* handle;
 } iree_hal_replay_physical_memory_entry_t;
 
+// One scoped host mapping, including a native owner redirected by map_range.
+typedef struct iree_hal_replay_buffer_mapping_entry_t {
+  // Native scoped mapping retained until consuming unmap.
+  iree_hal_buffer_mapping_t mapping;
+  // Retained actual storage, kept through address-owner cleanup on replay
+  // abort.
+  iree_hal_buffer_t* storage;
+  // Captured buffer whose coordinates describe host range operations.
+  iree_hal_replay_object_id_t buffer_id;
+  // Captured byte offset corresponding to the first mapped byte.
+  iree_device_size_t byte_offset;
+} iree_hal_replay_buffer_mapping_entry_t;
+
 // One retained object in the dense replay object table.
 typedef struct iree_hal_replay_object_entry_t {
   // Captured object type stored in this entry.
@@ -46,8 +59,12 @@ typedef struct iree_hal_replay_object_entry_t {
     iree_hal_device_t* device;
     // Retained HAL allocator.
     iree_hal_allocator_t* allocator;
+    // Retained HAL pool.
+    iree_hal_pool_t* pool;
     // Retained HAL buffer.
     iree_hal_buffer_t* buffer;
+    // Owned scoped host mapping with a stable address until unmap.
+    iree_hal_replay_buffer_mapping_entry_t* buffer_mapping;
     // Retained HAL command buffer.
     iree_hal_command_buffer_t* command_buffer;
     // Retained executable and function mapping.
@@ -61,9 +78,6 @@ typedef struct iree_hal_replay_object_entry_t {
     // Allocator-owned opaque physical memory state.
     iree_hal_replay_physical_memory_entry_t physical_memory;
   } value;
-  // Lazily created functional-replay pool for a queue object, or NULL.
-  // Buffer entries and every other object type leave this field NULL.
-  iree_hal_pool_t* queue_allocation_pool;
 } iree_hal_replay_object_entry_t;
 
 // One live virtual-to-physical range reconstructed during replay.
@@ -150,6 +164,23 @@ typedef struct iree_hal_replay_semaphore_list_storage_t {
     uint64_t* payload_values;
   } allocated;
 } iree_hal_replay_semaphore_list_storage_t;
+
+// Native queue barriers reconstructed from a validated record extension.
+typedef struct iree_hal_replay_queue_barrier_storage_t {
+  // Queue operand referencing |lists|; NULL boundaries select defaults.
+  iree_hal_queue_barriers_t barriers;
+  // Before and after lists, respectively, referencing |allocation|.
+  iree_hal_barrier_list_t lists[2];
+  // Owned contiguous native descriptor storage.
+  void* allocation;
+} iree_hal_replay_queue_barrier_storage_t;
+
+// Resolves captured buffer ids and reconstructs the native descriptors. The
+// record's structural extents have already been validated by the file reader.
+iree_status_t iree_hal_replay_executor_make_queue_barriers(
+    iree_hal_replay_executor_t* executor,
+    const iree_hal_replay_file_record_t* record,
+    iree_hal_replay_queue_barrier_storage_t* out_storage);
 
 // Temporary HAL buffer reference list with inline storage.
 typedef struct iree_hal_replay_buffer_ref_list_storage_t {
@@ -252,10 +283,6 @@ iree_status_t iree_hal_replay_executor_require_payload(
     const iree_hal_replay_file_record_t* record,
     iree_hal_replay_payload_type_t payload_type,
     iree_host_size_t minimum_length);
-
-iree_status_t iree_hal_replay_executor_make_buffer_params(
-    const iree_hal_replay_allocator_allocate_buffer_payload_t* payload,
-    iree_hal_buffer_params_t* out_params);
 
 iree_status_t iree_hal_replay_executor_write_buffer_data(
     iree_hal_buffer_t* buffer, iree_device_size_t byte_offset,

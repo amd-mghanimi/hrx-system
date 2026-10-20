@@ -21,7 +21,10 @@ _EMBED_COMPATIBLE_WITH = loom_config_compatible_with([
 
 iree_c_embed_data(
     name = "embedded_standard_headers",
-    srcs = ["//loom/src/loom/import/cxx:include/stdfloat"],
+    srcs = [
+        "//loom/src/loom/import/cxx:include/initializer_list",
+        "//loom/src/loom/import/cxx:include/stdfloat",
+    ],
     c_file_output = "embedded_standard_headers.c",
     flatten = True,
     h_file_output = "embedded_standard_headers.h",
@@ -33,18 +36,29 @@ iree_c_embed_data(
     name = "embedded_loomcxx_headers",
     srcs = [
         "//loom/src/loom/import/cxx:include/loomcxx/atomic.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/buffer.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/cache.h",
         "//loom/src/loom/import/cxx:include/loomcxx/check.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/encoding.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/encoding_type.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/index.h",
         "//loom/src/loom/import/cxx:include/loomcxx/kernel.h",
         "//loom/src/loom/import/cxx:include/loomcxx/low.h",
         "//loom/src/loom/import/cxx:include/loomcxx/math.h",
         "//loom/src/loom/import/cxx:include/loomcxx/numeric.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/predicate.h",
         "//loom/src/loom/import/cxx:include/loomcxx/scalar.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/shape.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/target.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/target/amdgpu.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/vector.h",
         "//loom/src/loom/import/cxx:include/loomcxx/view.h",
     ],
     c_file_output = "embedded_loomcxx_headers.c",
-    flatten = True,
+    flatten = False,
     h_file_output = "embedded_loomcxx_headers.h",
     identifier = "loom_cxx_embedded_loomcxx_headers",
+    strip_prefix = "loom/src/loom/import/cxx/include/loomcxx/",
     target_compatible_with = _EMBED_COMPATIBLE_WITH,
 )
 
@@ -97,17 +111,59 @@ loom_cc_library(
 )
 
 loom_cc_library(
-    name = "source",
-    srcs = ["source.cc"],
-    hdrs = ["source.h"],
+    name = "contents",
+    srcs = ["contents.cc"],
+    hdrs = ["contents.h"],
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
         ":catalog",
         ":error",
         ":options",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "frontend",
+    srcs = ["frontend.cc"],
+    hdrs = ["frontend.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":contents",
+        ":error",
+        ":options",
         "//loom/src/loom/error:error_defs",
         "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "preamble",
+    srcs = ["preamble.cc"],
+    hdrs = ["preamble.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":error",
+        ":frontend",
+        ":options",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_library(
+    name = "source",
+    srcs = ["source.cc"],
+    hdrs = ["source.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":frontend",
+        ":preamble",
     ],
 )
 
@@ -126,25 +182,12 @@ loom_cc_test(
 )
 
 loom_cc_test(
-    name = "constant_bits_test",
-    srcs = ["constant_bits_test.cc"],
-    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
-    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
-    deps = [
-        ":options",
-        ":source",
-        "//runtime/src/iree/testing:gtest",
-        "//runtime/src/iree/testing:gtest_main",
-        "//third_party:cxx_parser",
-    ],
-)
-
-loom_cc_test(
     name = "constexpr_test",
     srcs = ["constexpr_test.cc"],
     cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
     cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
     deps = [
+        ":expressions",
         ":options",
         ":source",
         "//runtime/src/iree/testing:gtest",
@@ -204,6 +247,15 @@ loom_cc_library(
     deps = ["//third_party:cxx_parser"],
 )
 
+loom_cc_library(
+    name = "expressions",
+    srcs = ["expressions.cc"],
+    hdrs = ["expressions.h"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = ["//third_party:cxx_parser"],
+)
+
 loom_cc_test(
     name = "constants_test",
     srcs = ["constants_test.cc"],
@@ -239,6 +291,22 @@ loom_cc_test(
     deps = [
         ":error",
         ":options",
+        ":preamble",
+        ":source",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//third_party:cxx_parser",
+    ],
+)
+
+loom_cc_test(
+    name = "preamble_test",
+    srcs = ["preamble_test.cc"],
+    cxx_features = CXX_COMPILER_OPTIONS["cxx_features"],
+    cxx_standard = CXX_COMPILER_OPTIONS["cxx_standard"],
+    deps = [
+        ":frontend",
+        ":preamble",
         ":source",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",

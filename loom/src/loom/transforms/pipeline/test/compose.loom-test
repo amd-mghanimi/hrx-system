@@ -1,0 +1,132 @@
+// RUN: with-checks pass inline-callables,cfg-simplify,outline-pipeline-strands,cfg-simplify
+
+// Composition substitutes dependent types before the strand capture boundary.
+// The runtime loop remains inside that boundary; it is not a sequence of launches.
+target.decl @npu
+
+func.decl @consume(%width: index, %payload: view<[%width]xi32>)
+
+pipeline.def @reader(%width: index, %column: index) run(%input: channel<tile<[%width]xi32>>, %count: index) {
+  pipeline.strand workers([%column, 2], [1, 1], [1, 1]) {
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    scf.for %record = [%begin to %count step %step] {
+      %read, %payload = channel.acquire %input : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>>, view<[%width]xi32>)
+      func.call @consume(%width, %payload) : (index, view<[%width]xi32>)
+      channel.release %read : read<tile<[%width]xi32>>
+    }
+  }
+}
+
+pipeline.def @column(%width: index, %column: index) run(%input: channel<tile<[%width]xi32>>, %count: index) {
+  pipeline.compose @reader[%width, %column](%input, %count) : [index, index](channel<tile<[%width]xi32>>, index)
+}
+
+pipeline.def<kernel> public target(@npu) @stream(%width: index, %column: index) run(%input: channel<tile<[%width]xi32>>, %count: index) {
+  pipeline.compose @column[%width, %column](%input, %count) : [index, index](channel<tile<[%width]xi32>>, index)
+}
+
+// ----
+CHECK: pipeline.def<kernel> public target(@npu) @stream(%width: index, %column: index) run(%input: channel<tile<[%width]xi32>>, %count: index) {
+CHECK: pipeline.strand workers([%column, 2], [1, 1], [1, 1]) {
+CHECK: scf.for %record = [%begin to %count step %step] {
+CHECK: %read, %payload = channel.acquire %input : channel<tile<[%width]xi32>> -> (read<tile<[%width]xi32>>, view<[%width]xi32>)
+CHECK: channel.release %read : read<tile<[%width]xi32>>
+CHECK-NOT: pipeline.compose *
+CHECK-NOT: pipeline.def @reader*
+CHECK-NOT: pipeline.def @column*
+
+// ====
+// RUN: with-checks pass inline-callables,cse
+
+// Each child owns its own scratch allocation even when both compositions pass
+// identical arguments. The shared clone/move paths must retain that identity.
+func.decl @record(%storage: buffer, %value: i32)
+
+pipeline.def @child(%bytes: offset) run(%value: i32) {
+  %storage = buffer.alloca<workgroup> align(64) %bytes : buffer
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    func.call @record(%storage, %value) : (buffer, i32)
+  }
+}
+
+pipeline.def public @twice(%bytes: offset) run(%value: i32) {
+  pipeline.compose @child[%bytes](%value) : [offset](i32)
+  pipeline.compose @child[%bytes](%value) : [offset](i32)
+}
+
+// ----
+CHECK-COUNT-2: * = buffer.alloca<workgroup> align(64) %bytes : buffer
+CHECK-COUNT-2: pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+CHECK-COUNT-2: func.call @record(*, %value) : (buffer, i32)
+CHECK-NOT: pipeline.compose *
+CHECK-NOT: pipeline.def @child*
+
+// ====
+// RUN: with-checks pass inline-callables,cse
+
+// Composed helpers preserve the supplied pool. Two allocations in the same
+// pool remain fresh, and another pool is never replaced with the first one.
+func.decl @stamp(%storage: buffer, %value: i32)
+
+pipeline.def @pooled_child(%memory: pool, %bytes: offset) run(%value: i32) {
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    func.call @stamp(%storage, %value) : (buffer, i32)
+  }
+}
+
+pipeline.def public @pooled_children(%left_memory: pool, %right_memory: pool, %bytes: offset) run(%value: i32) {
+  pipeline.compose @pooled_child[%left_memory, %bytes](%value) : [pool, offset](i32)
+  pipeline.compose @pooled_child[%right_memory, %bytes](%value) : [pool, offset](i32)
+  pipeline.compose @pooled_child[%left_memory, %bytes](%value) : [pool, offset](i32)
+}
+
+// ----
+CHECK-COUNT-2: * = buffer.alloca<workgroup> pool(%left_memory) align(64) %bytes : buffer
+CHECK-COUNT-1: * = buffer.alloca<workgroup> pool(%right_memory) align(64) %bytes : buffer
+CHECK-COUNT-3: func.call @stamp(*, %value) : (buffer, i32)
+CHECK-NOT: pipeline.compose *
+CHECK-NOT: pipeline.def @pooled_child(*
+
+// ====
+// RUN: with-checks pass inline-callables
+
+// A child target or artifact boundary cannot disappear into an unconstrained
+// parent. The retained composition supplies that information to materialization.
+target.decl @npu
+
+pipeline.def target(@npu) @device_work() run(%input: channel<tile<16xi32>>) {
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %read, %payload = channel.acquire %input : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    channel.release %read : read<tile<16xi32>>
+  }
+}
+
+pipeline.def<kernel> @kernel_work() run(%input: channel<tile<16xi32>>) {
+  pipeline.strand workers([1, 2], [1, 1], [1, 1]) {
+    %read, %payload = channel.acquire %input : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    channel.release %read : read<tile<16xi32>>
+  }
+}
+
+pipeline.def public @system() run(%input: channel<tile<16xi32>>) {
+  pipeline.compose @device_work(%input) : (channel<tile<16xi32>>)
+  pipeline.compose @kernel_work(%input) : (channel<tile<16xi32>>)
+}
+
+// ----
+CHECK: pipeline.def target(@npu) @device_work() run(%input: channel<tile<16xi32>>) {
+CHECK: pipeline.def<kernel> @kernel_work() run(%input: channel<tile<16xi32>>) {
+CHECK: pipeline.compose @device_work(%input) : (channel<tile<16xi32>>)
+CHECK: pipeline.compose @kernel_work(%input) : (channel<tile<16xi32>>)
+
+// ====
+// RUN: pass inline-callables
+
+pipeline.def @recursive() run() {
+  // ERROR@+1: LOWERING/044 {op_name="pipeline.compose", phase_name="inline-callables", callee_name="recursive", failure_code="required_cycle"}
+  pipeline.compose @recursive() : ()
+}
+
+// ----

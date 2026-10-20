@@ -81,6 +81,9 @@ iree_string_view_t loom_low_allocation_check_violation_kind_name(
 // Mandatory per-unit storage identities are checked transitively. Optional
 // aliases justify equal contents only until either endpoint is overwritten;
 // an extended storage reservation does not extend the old SSA value's identity.
+// Storage-lease checks prove that allocation authorized each physical reuse.
+// Whether a target emitted the required asynchronous completion is a property
+// of its later, final packet plan and is outside this frame-level contract.
 iree_status_t loom_low_allocation_check_frame(
     const loom_low_emission_frame_t* frame, iree_arena_allocator_t* arena,
     loom_low_allocation_check_result_t* out_result);

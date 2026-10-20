@@ -20,7 +20,7 @@ func.def @constant() -> (index) {
 }
 
 // ----
-CHECK: * = index.constant 5 : index
+CHECK-COUNT-1: * = index.constant 5 : index
 CHECK: func.return * : index
 
 // ====

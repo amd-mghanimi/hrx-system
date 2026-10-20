@@ -73,7 +73,7 @@ class TemplatePrinterTest : public ::testing::Test {
         module_, iree_make_cstring_view(name), &name_id));
     loom_symbol_id_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    return {/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    return {.module_id = 0, .symbol_id = symbol_id};
   }
 
   loom_op_t* BuildDefinition(loom_template_def_build_flags_t build_flags,
@@ -84,7 +84,7 @@ class TemplatePrinterTest : public ::testing::Test {
     loom_op_t* op = NULL;
     IREE_CHECK_OK(loom_template_def_build(
         &builder_, build_flags, family, /*visibility=*/0, /*retain=*/0,
-        /*cc=*/0, /*purity=*/0, /*temperature=*/0, target,
+        /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0, target,
         loom_parameterized_attr_array_empty(), priority, implementation, &f32,
         1, &f32, 1, NULL, 0, NULL, 0, LOOM_LOCATION_UNKNOWN, &op));
     return op;
@@ -103,8 +103,8 @@ TEST_F(TemplatePrinterTest, Apply) {
 
   loom_op_t* op = NULL;
   IREE_ASSERT_OK(loom_template_apply_build(
-      &builder_, 0, family, &input, 1, /*purity=*/0, /*temperature=*/0, &f32, 1,
-      NULL, 0, LOOM_LOCATION_UNKNOWN, &op));
+      &builder_, 0, family, &input, 1, /*effect_contract=*/0, /*temperature=*/0,
+      &f32, 1, NULL, 0, LOOM_LOCATION_UNKNOWN, &op));
   EXPECT_EQ(PrintOp(op),
             "%1 = template.apply<@my.template>(%0) : (f32) -> (f32)\n");
 }

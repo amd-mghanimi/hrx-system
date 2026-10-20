@@ -21,6 +21,44 @@ subexpression elimination and dead-code elimination, and prints Loom text.
 `--cleanup=false` exposes the direct import. `--to=bc --output=module.loombc`
 produces normal Loom bytecode for the existing compilation and linking tools.
 
+## Exporting High IR as C++
+
+`loom-export-cxx` presents a cleaned or specialized High module through the
+same C++ authoring API. The exporter is always available because it consumes
+the Python IR model and does not link the optional C++ frontend. Reimporting
+its output requires the importer.
+
+```sh
+loom-export-cxx specialized.loombc --output=specialized.cxx
+loom-import-cxx specialized.cxx --to=bc --output=edited.loombc
+```
+
+The first projection accepts one structured kernel and reconstructs ordinary
+C++ expressions, mutable loop-carried state, views, launch contracts, target
+records, and Loom scheduling attributes. For example, an SSA chain containing
+hardware IDs, integer casts, and a dynamic subview renders as:
+
+```cpp
+constexpr loom::amdgpu::target rendered_target{.kind = "gfx942"};
+
+[[loom::kernel, loom::target(rendered_target), loom::workgroup_count(1, 1, 1), loom::workgroup_size(64, 1, 1)]]
+void copy_one(const float* input, float* output) {
+  auto input_view = loom::buffer::view<64>(input, {}, loom::encoding::layout::dense<1>());
+  unsigned workitem = static_cast<unsigned>(loom::kernel::workitem::id.x);
+  auto slice = loom::view::subview<1>(input_view, {workitem}, {});
+  float value = loom::view::load(slice, 0);
+  auto output_view = loom::buffer::view<64>(output, {}, loom::encoding::layout::dense<1>());
+  loom::view::store(value, output_view, workitem);
+}
+```
+
+This is a readable semantic projection rather than an archival source form.
+It preserves represented program and scheduling contracts while omitting
+incidental SSA temporaries and redundant range facts. Loom text and bytecode
+remain the lossless forms. An operation without a validated C++ spelling stops
+rendering with the operation name and the unsupported semantic boundary; the
+tool never emits a partial approximation.
+
 ## Explicit 16-bit floating-point types
 
 `<stdfloat>` provides `std::float16_t` (IEEE FP16) and `std::bfloat16_t` (BF16).
@@ -105,15 +143,17 @@ narrowing conversions.
 The fundamental spellings `__float8_e4m3fn` and `__float8_e5m2` also work in C.
 Ordinary floating literals initialize them; no FP8 literal suffix is required.
 These spellings identify signed-zero formats, not the distinct FNUZ encodings.
-The optional header contains only aliases, documentation and guards, with no
-transitive includes. Scalar math templates admit these types when used without
-adding per-format declarations to every import.
+The optional header has no transitive includes. It contains the aliases and the
+small numeric-conversion facade described below; scalar math templates admit
+these types without adding per-format declarations to every import.
 
-## Numeric vector conversion
+## Numeric conversion
 
-`__builtin_convertvector(value, DestinationType)` converts each lane numerically
-while preserving the number of lanes. It works in C and C++, needs no header,
-and accepts template-dependent destination types and constant expressions.
+`loom::convert<DestinationType>(value)` converts a scalar or each vector lane
+numerically. Native vectors preserve their lane count, and semantic
+`loom::type::vector` values preserve their complete logical shape. The same
+spelling accepts template-dependent destination types and remains a constant
+expression for scalars and native vectors.
 
 For example, load packed FP8 values, compute in F32, and round back to FP8:
 
@@ -124,8 +164,8 @@ using Float8x4 =
 using Float4 = float __attribute__((ext_vector_type(4)));
 
 Float8x4 scale(Float8x4 value, float factor) {
-  auto wide = __builtin_convertvector(value, Float4);
-  return __builtin_convertvector(wide * factor, Float8x4);
+  auto wide = loom::convert<Float4>(value);
+  return loom::convert<Float8x4>(wide * factor);
 }
 ```
 
@@ -155,6 +195,253 @@ vector casts and `__builtin_bit_cast` continue to reinterpret equal-sized
 objects. The importer leaves vector legalization and instruction selection to
 the target compiler.
 
+## Floating-point permissions
+
+Ordinary C++ arithmetic inherits the invocation's floating-point model.
+`fp-model=precise` is the default and grants no Loom fast-math permissions;
+`fp-model=fast` grants the complete `fast` contract across the translation
+unit. Every permission is recorded on the imported High IR operations, so no
+hidden module-wide policy survives import.
+
+The standalone importer and public C API select the same policy:
+
+```shell
+loom-import-cxx --fp-model=fast kernel.cxx
+```
+
+```c
+loomc_cxx_import_options_t options = {
+    .fp_model = LOOMC_CXX_FP_MODEL_FAST,
+};
+```
+
+Source attributes replace that inherited policy for one function or statement.
+The no-argument shorthand grants the complete `fast` contract without
+replacing natural operators:
+
+```cpp
+[[loom::fastmath]]
+float accumulate(float sum, float value, float scale) {
+  return sum + value * scale;
+}
+```
+
+The permissions become ordinary High IR attributes:
+
+```loom
+%scaled = scalar.mulf<reassoc|nnan|ninf|nsz|arcp|contract|afn> %value, %scale : f32
+%result = scalar.addf<reassoc|nnan|ninf|nsz|arcp|contract|afn> %sum, %scaled : f32
+```
+
+An argument list establishes exactly its named permissions. Function
+attributes may precede the declaration or follow its parameter list. A leading
+statement attribute replaces the enclosing policy within that statement and
+its nested control flow, allowing a numerically relaxed accumulation to remain
+local inside an otherwise precise helper:
+
+```cpp
+float update(float sum, float value, float scale) {
+  [[loom::fastmath("reassoc", "nsz")]] {
+    sum += value * scale;
+  }
+  return sum;
+}
+```
+
+`[[loom::fastmath(false)]]` establishes a precise island inside a globally fast
+invocation:
+
+```cpp
+[[loom::fastmath(false)]]
+float sensitive(float numerator, float denominator) {
+  return numerator / denominator;
+}
+```
+
+Nested scopes replace the active permissions and restore them on exit. A called
+helper keeps the contract on its own definition; a caller's contract does not
+silently change separately emitted function bodies. Concrete template
+specializations retain the contract on their source definition. Repeated
+declarations may carry the same contract, while conflicting contracts are
+rejected.
+
+The selective argument strings exactly match Loom's `reassoc`, `nnan`, `ninf`,
+`nsz`, `arcp`, `contract`, `afn`, and `fast` IR flags. Natural scalar and
+vector arithmetic, negation, comparisons, and floating truth conversion receive
+the active permissions. Explicit scalar, floating dot, and floating reduction
+intrinsics combine their declared flags with the lexical contract. Float
+precision conversions continue to use their independent `daz` and `ftz`
+subnormal contract.
+
+## Vector dots and reductions
+
+`<loomcxx/vector.h>` exposes seeded dots and reductions without including other
+facades. Argument deduction retains the source formats, lane counts and
+accumulator type:
+
+```cpp
+#include <loomcxx/vector.h>
+#include <stdfloat>
+
+using BFloat16 = std::bfloat16_t __attribute__((ext_vector_type(16)));
+using Float8 = float __attribute__((ext_vector_type(8)));
+
+float weighted_sum(BFloat16 weights, BFloat16 activations, float seed) {
+  Float8 partial = {};
+  partial = loom::vector::dot2f(weights, activations, partial);
+  return loom::vector::reduce::addf(partial, seed);
+}
+```
+
+After ordinary cleanup, the computation is:
+
+```loom
+func.def public @weighted_sum(%weights: vector<16xbf16>, %activations: vector<16xbf16>, %seed: f32) -> (f32) {
+  %zero = vector.constant 0.0 : vector<8xf32>
+  %partial = vector.dot2f %weights, %activations, %zero : vector<16xbf16>, vector<16xbf16>, vector<8xf32>
+  %sum = vector.reduce<addf> %partial, %seed : vector<8xf32>, f32
+  func.return %sum : f32
+}
+```
+
+`dot2f` accepts equal FP16 or BF16 vectors and an F32 accumulator with half as
+many lanes. Each adjacent pair contributes to one accumulator lane using the
+target's native grouped arithmetic. Intermediate precision, rounding and
+subnormal handling can differ from two ordered F32 fused multiply-adds.
+Target-independent folding, facts and scalar expansion use the ordered F32
+reference, so compile-time evaluation remains predictable before a target is
+selected; folded and native results need not have identical bits.
+
+`dotf(lhs, rhs, seed)` produces a scalar, accumulating fused products in logical
+lane order with the input vector's element type. Explicitly widening the inputs
+selects ordered F32 accumulation:
+
+```cpp
+using Float16 = float __attribute__((ext_vector_type(16)));
+
+float ordered_weighted_sum(BFloat16 weights, BFloat16 activations, float seed) {
+  return loom::vector::dotf(loom::convert<Float16>(weights),
+                            loom::convert<Float16>(activations), seed);
+}
+```
+
+Multiplying vectors first and then reducing expresses separately rounded
+products. These distinct source forms preserve the chosen arithmetic in High IR.
+
+The `loom::vector::reduce` namespace provides `addi`, `muli`, `minsi`, `maxsi`,
+`minui`, `maxui`, `andi`, `ori`, `xori`, `addf`, `mulf`, `minimumf`, `maximumf`,
+`minnumf` and `maxnumf`. The vector element, scalar seed and result types must
+match, including integer signedness. Integer arithmetic wraps at the element
+width. Signed and unsigned extrema match their source element interpretation;
+IEEE minimum/maximum propagate NaNs, while the C99-style minnum/maxnum select
+the numeric operand when only one operand is NaN.
+
+Floating reductions preserve logical lane order by default. A lexical contract
+can relax both the reduction and surrounding arithmetic. A custom operation
+declaration remains useful when one call requires permissions that differ from
+its enclosing source scope:
+
+```cpp
+template <class Vector, class Scalar>
+[[loom::op("vector.reduce", "addf", "reassoc")]]
+Scalar reassociated_sum(Vector values, Scalar seed);
+```
+
+`vector.dotf` accepts the same fast-math flag spellings. These permissions
+survive template specialization and combine with explicit importer-wide
+permissions. Integer reductions and `dot2f` have no fast-math arguments.
+Signatures are checked only for concrete specializations that are used; the
+operation and its semantic arguments are checked when declared.
+
+The [packed group example](test/packed_group_dot.cxx) combines ordinary nibble
+indexing, signed codebook lookup, exact byte-to-BF16 conversion, two pair dots,
+a reduction and a scaled epilogue. Its executable checks supply runtime buffers
+and compare against independently calculated results. These source operations
+use the same target lowering as authored Loom; importing them does not select
+an instruction set or alter the target's numerical contracts.
+
+## MXFP4 and MXFP8 groups
+
+`<loomcxx/encoding.h>` describes block formats independently of their runtime
+payloads and scales. A constant parameter aggregate defines an ordinary
+`encoding<schema>` value; `vector::decode` receives the payload and a record of
+named vector operands:
+
+```cpp
+#include <loomcxx/encoding.h>
+#include <loomcxx/vector.h>
+#include <stdfloat>
+
+using Words4 = unsigned __attribute__((ext_vector_type(4)));
+using ScaleWord = unsigned __attribute__((ext_vector_type(1)));
+using BFloat32 = std::bfloat16_t __attribute__((ext_vector_type(32)));
+using Float16 = float __attribute__((ext_vector_type(16)));
+
+struct Scales { ScaleWord scale; };
+
+float mxfp4_group_dot(Words4 payload, ScaleWord scale, BFloat32 activations) {
+  auto schema = loom::encoding::define<loom::encoding::f4e2m1{}>();
+  auto weights = loom::vector::decode<BFloat32>(payload, schema, Scales{scale});
+  Float16 partial = {};
+  partial = loom::vector::dot2f(weights, activations, partial);
+  return loom::vector::reduce::addf(partial, 0.0f);
+}
+```
+
+The default E2M1 schema describes 32 values in four packed words, with
+little-endian nibble order and one E8M0 scale per group of 32. The low byte of
+`scale` supplies that group's exponent; code 127 is identity and code 128 doubles
+the weights. The scale remains a runtime SSA operand. After ordinary cleanup,
+the computation has the same operations as authored Loom:
+
+```loom
+%schema = encoding.define #encoding.f4e2m1<affine=scale_only, payload_elements=32, payload_packing=little_endian_nibbles, payload_registers=4, scale_format=e8m0, scale_group_elements=32, scale_operands=1, scale_topology=block_1d, zero_scale_fallback=true> : encoding<schema>
+%weights = vector.decode %payload using %schema {scale = %scale : vector<1xi32>} : vector<4xi32>, encoding<schema> -> vector<32xbf16>
+%zero = vector.constant 0.0 : vector<16xf32>
+%partial = vector.dot2f %weights, %activations, %zero : vector<32xbf16>, vector<32xbf16>, vector<16xf32>
+%seed = scalar.constant 0.0 : f32
+%sum = vector.reduce<addf> %partial, %seed : vector<16xf32>, f32
+```
+
+MXFP8 uses the same sequence with a vector of
+`loom::type::float8_e4m3fn_t` from `<loomcxx/numeric.h>` and
+`encoding::define<encoding::f8e4m3fn{}>()`. Both default schemas describe one
+32-value group. Result types are explicit, while payload, schema and auxiliary
+types are deduced. On gfx1250 these examples select four native eight-value
+scaled conversions and sixteen BF16 pair dots before the F32 reduction.
+
+Designated initializers select other group shapes. Two consecutive MXFP4
+groups use `f4e2m1{.payload_elements = 64}` and two MXFP8 groups use
+`f8e4m3fn{.payload_elements = 64}`. Both consume the low two bytes of the packed
+scale word, one per group. The E2M1 schema derives its packed 32-bit word count
+from the logical payload size, rounding up to cover a partial word. An explicit
+`payload_registers` initializer overrides that default; changing the payload
+size keeps the scale groups at 32 elements unless separately specified.
+
+The [complete MX example](test/mxfp_group_dot.cxx) contains both kernels,
+runtime-scale dot checks, exact adjacent-group decode checks, and their
+independent expected results. Group arithmetic follows the native `dot2f`
+contract above. Decode checks compare BF16 bits, including minimum E8M0 scales
+and the NaN scale code, independently of accumulation tolerance.
+
+Schemas can pass through ordinary helpers and records as
+`loom::type::encoding<loom::encoding::role::schema>`. The small
+`<loomcxx/encoding_type.h>` header provides that type without the format facade;
+layout encodings retain their distinct role. Custom schema factories use
+`[[loom::op("encoding.define", "encoding.family")]]` on a zero-argument function
+template with one constant aggregate argument. Field names match the registered
+family's parameters; integer and boolean fields remain typed, and enum members
+map by spelling rather than C++ numeric ordinal. An alias's fixed parameters
+cannot be overridden. This binding accepts scalar static parameters; array and
+object parameters receive a source diagnostic.
+
+Auxiliary records are flat aggregates of vectors whose field names match the
+encoding vocabulary, such as `scale`, `zero_point`, or `codebook`. Field order
+does not change the key/value association. Schemas that need no auxiliary values
+use `decode<Result>(payload, schema)`. Core verification owns the schema's
+required keys, operand shapes and numerical rules. The headers select neither
+a target nor a decoding instruction.
+
 ## Packed scalar and vector bit casts
 
 `__builtin_bit_cast(DestinationType, value)` reinterprets equal-width scalar
@@ -175,7 +462,7 @@ own lane. The imported value stays in SSA: a scalar endpoint uses a one-lane
 `vector.from_elements` or `vector.extract` around `vector.bitcast`. The target
 compiler can realize those representation changes as register aliases. Floating
 bit casts preserve the payload, including signed zero and NaN encodings; use
-`__builtin_convertvector` for numeric conversion.
+`loom::convert` for numeric conversion.
 
 The same operation supports scalar-to-scalar and vector-to-vector values.
 Pointers, aggregates and padded vectors produce source diagnostics. Runtime
@@ -195,7 +482,7 @@ constexpr Fp8x4 kScale = __builtin_bit_cast(Fp8x4, 0x403c3830u);
 static_assert(kScale[0] == 0.5f && kScale[3] == 2.0f);
 
 void apply_scale(const Float4* input, Float4* output) {
-  *output = *input * __builtin_convertvector(kScale, Float4);
+  *output = *input * loom::convert<Float4>(kScale);
 }
 ```
 
@@ -236,6 +523,29 @@ same case, diagnostic, comparison, and update machinery as `.loom-test` files.
 Each case is an independent translation unit. Roundtrip imports C++ and checks
 canonical Loom output; pass, verify, format, emit, and report modes consume that
 same module.
+
+`emit cxx` instead compares the readable C++ projection of the admitted module.
+It uses the public `loom-export-cxx` tool, so the golden covers the same bytecode
+boundary and renderer as the command-line workflow. Declare the tool requirement
+in files using the mode:
+
+```cpp
+// RUN: emit cxx
+// REQUIRES: loom-export-cxx
+#include <loomcxx/kernel.h>
+
+[[loom::kernel, loom::workgroup_count(1, 1, 1), loom::workgroup_size(1, 1, 1)]]
+void copy_one(const float* input, float* output) {
+  // ...
+}
+// ----
+// Canonical exported C++ maintained by loom-check --update.
+```
+
+Additional `// ====` cases exercise independent source programs in the same
+file. This keeps feature-scale C++ import/export coverage in ordinary
+source-shaped fixtures; the CLI JSON smoke remains responsible for process and
+option behavior.
 
 Files group cases with one shared `RUN` mode declared at the top.
 
@@ -283,11 +593,11 @@ quotes. The C++ provider accepts:
 | `std=c++23` | Source language standard, including supported C spellings. |
 | `triple=...` | Source ABI triple. |
 | `data-model=lp64` | `lp64`, `llp64`, or `ilp32` integer and pointer widths. |
+| `fp-model=precise` | `precise` or `fast` translation-unit floating-point policy. |
 | `root=entry` | Exported source function; repeat for multiple roots. |
 | `I=include` | User include directory, relative to the test file; repeatable. |
 | `isystem=include` | System include directory, relative to the test file; repeatable. |
 | `D=COUNT=8` | Macro definition; repeatable. `D=ENABLED` defines it to `1`. |
-| `approximate-functions=true` | Permit approximate mathematical functions. |
 | `builtin-includes=false` | Use explicit include paths without embedded headers. |
 
 Source locations use physical, case-relative lines. `#line` controls the presumed
@@ -354,8 +664,7 @@ and benchmarks. One annotation on any canonical redeclaration supplies the
 name; repeated identical redeclarations agree, and conflicting names diagnose.
 Source calls and `--root` selection still use C++ names. The attribute changes
 neither visibility nor reachability: a selected root remains public, a reached
-helper remains private, and an unused helper is omitted. Ordinary called
-functions still require C++ definitions during import.
+helper remains private, and an unused helper or bodyless declaration is omitted.
 
 Public overloads, operator functions and concrete template specializations
 require explicit names. An attribute on a primary template, member, local or
@@ -364,6 +673,79 @@ no function symbol to rename. Names contain ASCII letters, digits, `_`, `$`, `.`
 or `-`, with no leading `@`. Functions and configuration values share one Loom
 namespace; conflicting exact names diagnose instead of receiving an automatic
 suffix.
+
+## Translation-unit and runtime imports
+
+A called namespace-scope prototype becomes an ordinary High `func.decl` when
+the translation unit does not provide its definition. This is the C++ surface
+for Loom's existing module boundary: compile each `.cxx` file to `.loombc`, then
+let `loom-link` resolve declarations against definitions from the other input
+modules.
+
+For example, a provider can export an exact Loom identity:
+
+```cpp
+[[loom::symbol("library.adjust")]]
+unsigned adjust(unsigned value) { return value * 3u + 1u; }
+```
+
+A separately imported consumer uses an ordinary C++ declaration and call:
+
+```cpp
+[[loom::symbol("library.adjust")]] unsigned adjust(unsigned value);
+
+unsigned apply_adjustment(unsigned value) {
+  return adjust(value);
+}
+```
+
+The consumer contains `func.call @library.adjust` and
+`func.decl @library.adjust`; linking replaces the declaration with the provider
+definition. Non-overloaded external names derive from their qualified C++ names.
+Overloads, operators and template specializations need `loom::symbol` because a
+stable cross-module identity cannot depend on reachability or declaration order.
+
+`loom::import` binds a bodyless function to a runtime module or service instead
+of another Loom definition. The first string names the service. An optional
+second string names its external function; omitting it reuses the local Loom
+symbol name.
+
+```cpp
+#include <loomcxx/index.h>
+
+class [[loom::type("hal.buffer")]] Buffer {};
+
+[[loom::import("hal", "buffer.length")]]
+loom::type::index length(Buffer buffer);
+
+[[loom::import("trace")]] void consume_length(loom::type::index value);
+
+loom::type::index inspect(Buffer buffer) {
+  auto value = length(buffer);
+  consume_length(value);
+  return value;
+}
+```
+
+This imports through the same typed call path:
+
+```loom
+func.def public @inspect(%buffer: hal.buffer) -> (index) {
+  %value = func.call @length(%buffer) : (hal.buffer) -> (index)
+  func.call @consume_length(%value) : (index)
+  func.return %value : index
+}
+
+func.decl import("hal", "buffer.length") @length(%buffer: hal.buffer) -> (index)
+func.decl import("trace") @consume_length(%value: index)
+```
+
+The C++ importer does not know what `hal`, `trace` or any other service means.
+It preserves generic function import metadata, scalar and opaque dialect types,
+flattened records, and dependent view shapes. Linking and target lowering own
+resolution and the physical ABI. Import annotations require nonempty string
+literals on bodyless functions with external linkage; conflicting
+redeclarations diagnose during source admission.
 
 ## Kernel pointer contracts
 
@@ -411,8 +793,9 @@ non-overlapping with `[[loom::noalias]]`:
 void gather_rows([[loom::noalias]] const float* weights,
                  [[loom::noalias]] const unsigned* row_ids,
                  [[loom::noalias]] float* output) {
-  unsigned row = loom::workgroup_id.y;
-  unsigned column = loom::workgroup_id.x * 256u + loom::workitem_id.x;
+  unsigned row = loom::kernel::workgroup::id.y;
+  unsigned column =
+      loom::kernel::workgroup::id.x * 256u + loom::kernel::workitem::id.x;
   unsigned source_row = row_ids[row];
   loom::assume(source_row < 65536u);
   output[row * 768u + column] = weights[source_row * 768u + column];
@@ -457,11 +840,14 @@ or command-line inputs. `iree-test-loom` and `iree-benchmark-loom` both apply
 `--config=tuning.factor=5` when compiling called functions as well as kernels.
 
 Config values work in ordinary arithmetic, branches, loop bounds and scheduling
-attributes:
+attributes. Native index configs keep shape and schedule values in Loom's index
+domain without integer widening or `index.cast` noise:
 
 ```cpp
-[[loom::config("tuning.unroll")]] extern const unsigned unroll;
-[[loom::config("tuning.depth")]] extern const unsigned depth;
+#include <loomcxx/index.h>
+
+[[loom::config("tuning.unroll")]] extern const loom::type::index unroll;
+[[loom::config("tuning.depth")]] extern const loom::type::index depth;
 
 unsigned sum(const unsigned* input, unsigned count) {
   unsigned total = 0;
@@ -472,6 +858,10 @@ unsigned sum(const unsigned* input, unsigned count) {
   return total;
 }
 ```
+
+These declarations become `config.decl ... : index`, and the resulting
+`config.get` values feed `scf.for` scheduling operands directly. Predicate
+arguments on an index config accept ordinary integral or enum constants.
 
 An attributed constant definition supplies an exact value:
 
@@ -497,10 +887,13 @@ unresolved module again.
 Bindings require a leading `[[loom::config("key")]]` attribute on every
 declaration and definition, including redeclarations. Keys are explicit,
 nonempty Loom symbol spellings without `@`. Different source names with the same
-key share one binding; their source types and any exact definitions must agree. Boolean, integer,
-floating-point and enum scalars retain their source representations. Mutable,
-volatile, thread-local, local, member, pointer and aggregate bindings produce
-source diagnostics. Configs are values without addressable storage.
+key share one binding; their source types and any exact definitions must agree.
+Boolean, integer, floating-point and enum scalars retain their source
+representations; `loom::type::index` retains the native index representation.
+An exact index definition uses explicit constant construction, such as
+`const loom::type::index tile{64}`. Mutable, volatile, thread-local, local,
+member, pointer and aggregate bindings produce source diagnostics. Configs are
+values without addressable storage.
 
 An unresolved setting is not a C++ constant expression. Template arguments,
 `constexpr` initializers, `static_assert` and fixed type extents still require
@@ -509,6 +902,49 @@ types or template instantiations. Ordinary `if` remains available for Loom
 specialization. `if constexpr` selects from source-known constants, including
 template arguments and exact config definitions; unresolved config declarations
 cannot select a C++ branch.
+
+## Required compile-time specialization
+
+A leading `[[loom::constexpr]]` attribute preserves the requirement that an
+automatic `const` scalar become exact during Loom specialization:
+
+```cpp
+[[loom::config("tuning.tile")]] extern const unsigned tile;
+
+unsigned tile_width() {
+  [[loom::constexpr]] const unsigned width = tile + 1u;
+  return width;
+}
+```
+
+The local imports as an ordinary named SSA value behind a compile-time query:
+
+```loom
+%tile = config.get @tuning.tile : i32
+%c1 = scalar.constant 1 : i32
+%sum = scalar.addi %tile, %c1 : i32
+%width = scalar.constexpr %sum : i32
+```
+
+Supplying `tuning.tile` makes configured canonicalization replace `%width` with
+an ordinary constant. An unresolved query reaching target lowering produces a
+source diagnostic at the attribute. This makes a scheduling, layout, storage,
+or target-selection assumption explicit at its C or C++ binding without fixing
+the value in the imported library.
+
+C++ `constexpr` has a different boundary: the source frontend must resolve it
+while checking template arguments, types, `static_assert`, and `if constexpr`.
+`[[loom::constexpr]]` accepts unresolved Loom values and records when the Loom
+compiler must finish specialization. Ordinary `const` locals carry no such
+requirement.
+
+Boolean, integer, floating-point, enum, and Loom index bindings use their native
+scalar or address-domain query. The attribute also applies to
+condition declarations; `while` and general `for` loops preserve it each time
+they recreate the decision value. The declaration must have automatic storage,
+remain non-volatile and non-addressable, and place the attribute before the
+declaration specifiers. Pointer, vector, array, and record bindings are not
+scalar specialization contracts. No facade header is required.
 
 ## Compile-time branches
 
@@ -577,19 +1013,53 @@ in the preheader and after each body/increment, preserving side effects and
 Discarded template arms are not instantiated. Outside templates, both arms
 remain subject to C++ source checking even though only one is imported.
 
+## Borrowed storage domains
+
+Buffer-root promises mirror the `buffer.assume.*` IR family under
+`loom::buffer::assume`: `noalias(source)`, `alignment<Bytes>(source)`, and
+`memory_space<Space>(source)`.
+
+`loom::buffer::assume::memory_space<Space>(source)` publishes an existing
+storage-domain contract to Loom. It accepts a pointer or `loom::type::buffer<T>`
+and returns the same source type, preserving element qualifiers, storage
+identity, and pointer byte origin. The operation neither allocates nor copies
+storage. All `loom::memory_space` values are admitted: `global`, `workgroup`,
+`private_`, `constant`, `host`, `descriptor`, and `generic`. Target lowering
+determines which domains are legal for the program.
+
+```cpp
+#include <loomcxx/buffer.h>
+
+unsigned read_immutable(const unsigned* input, unsigned index) {
+  // The caller keeps this input immutable through completion of every access.
+  auto* values = loom::buffer::assume::memory_space<loom::memory_space::constant>(input);
+  return values[index];
+}
+```
+
+The `constant` promise applies to the storage, including other aliases, rather
+than merely preventing writes through this C++ pointer. This lets target
+lowering keep immutable input reads separate from synchronized mutable
+publication buffers. Conflicting known storage domains are rejected. The
+promise preserves the original extent, alignment, and nullability facts; it
+does not establish any of them independently.
+
 ## Typed views and layouts
 
-`<loomcxx/view.h>` exposes Loom views without hiding their shape and address
-mapping behind a pointer intrinsic. Static extents remain template arguments;
-`loom::type::dynamic` marks each extent supplied when the view is formed. Layout
-values live in the matching `loom::encoding` namespace and can be dense or use
-runtime element strides.
+`<loomcxx/view.h>` exposes Loom views without hiding their shape and encoding
+behind a pointer intrinsic. `view<shape<...>, element, role>` follows the same
+left-to-right order as a Loom IR shaped type. Ranks one through fifteen are
+supported. Static extents remain template arguments; `loom::type::dynamic`
+marks each extent supplied when the view is formed. Layout values live in the
+matching `loom::encoding` namespace and can be dense or use runtime element
+strides.
 
 ```cpp
 #include <loomcxx/view.h>
 
 namespace loomt = loom::type;
-using rows32 = loomt::view<const float, loomt::dynamic, 32>;
+using rows32 =
+    loomt::view<loomt::shape<loomt::dynamic, 32>, const float>;
 
 rows32 suffix(rows32 source, unsigned first, unsigned remaining) {
   return loom::view::subview(source, {first, 0}, {remaining});
@@ -613,8 +1083,8 @@ The deduced `subview` overload retains the source's static/dynamic extent
 pattern. An explicit `subview<loom::type::dynamic, 16>(...)` selects a different
 result pattern while still deducing the element and source shape. Dimensions
 are supplied in source-axis order, with no slot for an axis already fixed by
-the type. A `view<const T, ...>` supports loads; ordinary C++ template deduction
-rejects attempts to store through it.
+the type. A `view<shape<...>, const T>` supports loads; ordinary C++ template
+deduction rejects attempts to store through it.
 
 The facade types have real, trivially copyable C++ object representations, so
 copies, overload resolution, `sizeof`, and data-model-dependent layout remain
@@ -624,8 +1094,8 @@ structured branches reserve all destination identities before constructing the
 dependent view type. A helper returning `rows32` therefore has the shape:
 
 ```loom
-func.def @suffix(...) -> (%rows: index, %layout: encoding<layout>,
-                          view<[%rows]x32xf32, %layout>)
+func.def @suffix(...) -> (%dim0: index, %layout: encoding<layout>,
+                          view<[%dim0]x32xf32, %layout>)
 ```
 
 Every call result and control-flow join names its own extent and layout instead
@@ -656,6 +1126,38 @@ float read_view(View source) {
 specialization deduces its own return type. The generic reader accepts either
 type, and Loom retains the shape and layout facts through the helper calls.
 
+Physical storage uses the same view type with an explicit storage role. The
+actual encoding remains an ordinary SSA value composed from a layout and
+schema; only its semantic role is part of the C++ type. This keeps helper
+signatures precise without trying to put a runtime value in a template
+argument:
+
+```cpp
+#include <loomcxx/encoding.h>
+#include <loomcxx/numeric.h>
+
+using Weight = loom::type::float8_e4m3fn_t;
+using Weights = loom::type::view<
+    loom::type::shape<loom::type::dynamic, loom::type::dynamic, 16>,
+    const Weight, loom::encoding::role::storage>;
+
+Weights weights(const Weight* data, unsigned rows, unsigned tiles) {
+  auto layout = loom::encoding::layout::dense<3>();
+  auto schema = loom::encoding::define<loom::encoding::f8e4m3fn{
+      .payload_elements = 16, .scale_group_elements = 16}>();
+  auto storage = loom::encoding::define(layout, schema);
+  return loom::buffer::view<loom::type::dynamic, loom::type::dynamic, 16>(
+      data, {rows, tiles}, storage);
+}
+```
+
+The result imports as a
+`view<[%rows]x[%tiles]x16xf8E4M3, %storage>`. Layout and storage encodings carry
+the view rank. Schema and numeric-transform encodings have rank zero. A view
+accepts only layout or storage because either must own its address mapping;
+runtime scales, zero points and codebooks stay explicit operands of the decode
+or matrix operation that consumes them.
+
 ## Integer bit counts
 
 `<loomcxx/scalar.h>` exposes `ctlzi`, `cttzi`, and `ctpopi` for non-boolean
@@ -679,9 +1181,10 @@ permissions do not apply to these integer operations.
 ## Integer atomics
 
 `<loomcxx/atomic.h>` exposes scalar atomic observations and updates through typed
-pointers. The kind, ordering, and scope use the same names as High IR, with
-explicit template arguments. Pointer arithmetic and helper calls preserve the
-original allocation and byte origin.
+pointers and typed views. The kind, ordering, and scope use the same names as
+High IR, with explicit template arguments. Pointer arithmetic and helper calls
+preserve the original allocation and byte origin. View accesses retain their
+rank, encoding, and logical coordinates directly.
 
 ```cpp
 #include <loomcxx/atomic.h>
@@ -715,22 +1218,38 @@ The atomic operations import directly as:
 %old = view.atomic.cmpxchg %expected, %replacement, %cell[0] {failure_ordering = acquire, scope = device, success_ordering = acq_rel} : i32, view<1xi32> -> i32
 ```
 
-`rmw<kind, ordering, scope>(value, pointer)` returns the old memory value.
-`reduce<kind, ordering, scope>(value, pointer)` performs an atomic update without
-a result. Integer kinds include exchange, addition, subtraction, bitwise
-AND/OR/XOR, and signed or unsigned minimum/maximum. Minimum/maximum signedness
+An existing view is passed before one index per logical axis:
+
+```cpp
+auto counters = loom::buffer::view<4, 8>(
+    storage, {}, loom::encoding::layout::dense<2>());
+unsigned ticket = loom::view::atomic::rmw<
+    kind::addi, ordering::relaxed, scope::device>(
+    1u, counters, row, column);
+```
+
+This imports as one `view.atomic.rmw` on the original `view<4x8xi32>` instead
+of projecting an interior pointer and rebuilding a one-element view.
+
+`rmw<kind, ordering, scope>(value, storage, indices...)` returns the old memory
+value. `reduce<kind, ordering, scope>(value, storage, indices...)` performs an
+atomic update without a result. Pointer storage has no indices; view storage
+has one per logical axis. Integer kinds include exchange, addition,
+subtraction, bitwise AND/OR/XOR, and signed or unsigned minimum/maximum.
+Minimum/maximum signedness
 must agree with the source integer type; the High payload itself is signless.
 
-`cmpxchg<success, failure, scope>(expected, replacement, pointer)` returns the
-old value on both success and failure. It writes exactly when the old bits
-equal `expected`, without spurious failure or an output parameter. Failure
-ordering cannot release or be stronger than success ordering. The declaration
-binding validates this pair using the same contract as High IR.
+`cmpxchg<success, failure, scope>(expected, replacement, storage, indices...)`
+returns the old value on both success and failure. It writes exactly when the
+old bits equal `expected`, without spurious failure or an output parameter.
+Failure ordering cannot release or be stronger than success ordering. The
+declaration binding validates this pair using the same contract as High IR.
 
-`load<ordering, scope>(pointer)` observes an object without changing it;
-`store<ordering, scope>(value, pointer)` publishes a value without reading the
-old one. Loads accept relaxed, acquire, or sequentially consistent ordering.
-Stores accept relaxed, release, or sequentially consistent ordering.
+`load<ordering, scope>(storage, indices...)` observes an object without changing
+it; `store<ordering, scope>(value, storage, indices...)` publishes a value
+without reading the old one. Loads accept relaxed, acquire, or sequentially
+consistent ordering. Stores accept relaxed, release, or sequentially consistent
+ordering.
 
 ```cpp
 unsigned consume(const unsigned* ready, const unsigned* payload) {
@@ -798,32 +1317,34 @@ the corresponding High operation.
 ## Subgroup cooperation
 
 `<loomcxx/kernel.h>` exposes subgroup topology, votes, and broadcasts as typed
-High operations. `subgroup_id()`, `subgroup_count()`, `subgroup_size()`, and
-`subgroup_lane_id()` return unsigned coordinates. The execution width includes
-inactive lanes and can exceed the number of invocations in a partial subgroup.
+High operations. `loom::kernel::subgroup::{id,count,size,lane_id}()` return
+unsigned coordinates. The execution width includes inactive lanes and can
+exceed the number of invocations in a partial subgroup.
 
-Votes observe the active invocations at the call. `subgroup_any(predicate)` and
-`subgroup_all(predicate)` return booleans. `subgroup_ballot(predicate)` returns
-a 64-bit mask, with bit *i* identifying physical lane *i*;
-`subgroup_ballot<unsigned>(predicate)` explicitly requests a 32-bit mask.
-`subgroup_active_mask<Mask>()` uses the same width contract without a predicate.
-The selected mask must cover the target subgroup width.
+Votes observe the active invocations at the call.
+`loom::kernel::subgroup::vote::{any,all}(predicate)` return booleans.
+`loom::kernel::subgroup::vote::ballot(predicate)` returns a 64-bit mask, with
+bit *i* identifying physical lane *i*; an explicit `unsigned` template argument
+requests a 32-bit mask. `loom::kernel::subgroup::active_mask<Mask>()` uses the
+same width contract without a predicate. The selected mask must cover the
+target subgroup width.
 
 Broadcasts preserve their scalar or explicit vector value type. A named source
-lane must be active; the target determines its range and uniformity requirements.
-`subgroup_broadcast_first(value)` selects the first active lane, including
-inside divergent control flow; that lane need not be lane zero.
+lane must be active; the target determines its range and uniformity
+requirements. `loom::kernel::subgroup::broadcast_first(value)` selects the
+first active lane, including inside divergent control flow; that lane need not
+be lane zero.
 
 ```cpp
 #include <loomcxx/kernel.h>
 using UInt4 = unsigned __attribute__((ext_vector_type(4)));
 
 [[loom::force_inline]] UInt4 exchange(UInt4 local, unsigned elected_lane) {
-  return loom::subgroup_broadcast(local, elected_lane);
+  return loom::kernel::subgroup::broadcast(local, elected_lane);
 }
 
 [[loom::force_inline]] unsigned long long ready_streams(bool ready) {
-  return loom::subgroup_ballot(ready);
+  return loom::kernel::subgroup::vote::ballot(ready);
 }
 ```
 
@@ -844,18 +1365,167 @@ using loom::atomic::scope;
 // After observing a system publication, acquire the payload and let the
 // subgroup cooperate on it.
 loom::buffer::fence<ordering::acquire, scope::system>();
-loom::barrier<loom::memory_space::global, scope::subgroup,
-              ordering::acq_rel>();
+loom::kernel::barrier<loom::memory_space::global, scope::subgroup,
+                      ordering::acq_rel>();
 ```
 
 The second call emits one `kernel.barrier<global> scope(subgroup)
 ordering(acq_rel)`. Barriers accept subgroup or workgroup scope. Global memory
 accepts acquire, release, or acquire-release ordering; workgroup memory requires
 acquire-release. They can live in ordinary callable helpers and do not complete
-independent asynchronous DMA. `workgroup_barrier()` retains the HIP-style
-global-and-workgroup-memory contract. Native payload widths and synchronization
-support follow the corresponding High operations; source import does not split
-values or insert target-specific instructions.
+independent asynchronous DMA. `loom::kernel::workgroup::barrier()` retains the
+HIP-style global-and-workgroup-memory contract. Native payload widths and
+synchronization support follow the corresponding High operations; source import
+does not split values or insert target-specific instructions.
+
+Subgroup and workgroup prefixes are available under
+`loom::kernel::{subgroup,workgroup}::scan`. Their combining names match High
+(`addi`, `addf`, `minsi`, `maxui`, and the other reduction kinds). The first
+two template arguments select `scan_mode::{inclusive,exclusive}` and
+`scan_direction::{forward,reverse}`; defaults are inclusive and forward.
+Subgroup scans additionally accept cluster size and stride after those two
+selectors. Workgroup reductions use `loom::kernel::workgroup::reduce`.
+
+```cpp
+using loom::kernel::scan_direction;
+using loom::kernel::scan_mode;
+auto offset = loom::kernel::workgroup::scan::addi<scan_mode::exclusive>(count);
+auto suffix = loom::kernel::subgroup::scan::addf<
+    scan_mode::inclusive, scan_direction::reverse>(value);
+```
+
+Each operation preserves its scalar or rank-one vector type; an explicit cast
+before the collective selects a wider accumulator. Signed and unsigned minimum
+and maximum kinds require matching source signedness. The compiler retains the
+operation's native scope, inclusivity, direction, and cluster attributes in
+ordinary bytecode. Target support and convergence follow the High collective
+contract, including participation by a partially occupied final subgroup.
+
+Floating sums and products default to native target arithmetic, independently of
+the caller's lexical fast-math settings. This permits parallel association and
+the target's intermediate precision, signed-zero, subnormal, and nonfinite
+behavior. Floating extrema keep their selected kind's NaN and zero-ordering
+rules. Integer arithmetic remains exact at the source width.
+
+The optional final non-type template argument on floating collectives is
+`collective_math::{native,preserve}`. Preservation requires a parallel tree of
+source-format combines, including rounding and exceptional values. It preserves
+each combine's arithmetic, not the reduction order: serial evaluation, a fixed
+tree, and reproducibility are not promised. It does not enable the C++ dynamic
+rounding environment or floating-point exception flags. An unsupported request
+fails compilation instead of silently using weaker native arithmetic.
+
+```cpp
+using loom::kernel::collective_math;
+auto native_sum = loom::kernel::workgroup::reduce::addf(value);
+auto preserved_sum = loom::kernel::workgroup::reduce::addf<
+    collective_math::preserve>(value);
+auto preserved_cluster = loom::kernel::subgroup::reduce::mulf<
+    8, 1, collective_math::preserve>(value);
+```
+
+## Target-selected template providers
+
+`LOOM_TEMPLATE_DECL` declares a typed family whose call sites remain
+`template.apply` operations until linking. `LOOM_TEMPLATE_DEF` supplies one
+bodyful implementation. A provider can bind a source-owned target and priority,
+so ordinary C++ templates express alternatives that CUDA and HIP source often
+select with preprocessor branches:
+
+```cpp
+#include <loomcxx/kernel.h>
+#include <loomcxx/target/amdgpu.h>
+
+LOOM_TEMPLATE_DECL("guide.target_value") unsigned target_value();
+
+constexpr loom::amdgpu::target gfx11{.kind = "gfx11-generic"};
+constexpr loom::amdgpu::target gfx12{.kind = "gfx12-generic"};
+
+struct Gfx11 {};
+struct Gfx12 {};
+
+template <class Target>
+unsigned target_value_provider();
+
+template <>
+LOOM_TEMPLATE_DEF(target_value)
+[[loom::target(gfx11), loom::priority(20)]]
+unsigned target_value_provider<Gfx11>() {
+  return 11;
+}
+
+template <>
+LOOM_TEMPLATE_DEF(target_value)
+[[loom::target(gfx12), loom::priority(20)]]
+unsigned target_value_provider<Gfx12>() {
+  return 12;
+}
+```
+
+A call to `target_value()` uses normal C++ type checking and imports as
+`template.apply<@guide.target_value>`. Linking for `gfx1100` retains the first
+provider; linking for `gfx1200` retains the second. Providers are module-owned
+definitions rather than ordinary C++ callees or roots. The importer retains
+them even when an explicit root list does not reach their implementation
+symbols, while unselected providers and their transitive helpers disappear
+during linking.
+
+The provider signature must exactly match its family after C++ type resolution.
+The family also owns the calling convention: a `LOOM_DEVICE LOOM_TEMPLATE_DECL`
+declaration makes every provider device code without repeating `LOOM_DEVICE`.
+Provider declarations and definitions may repeat the same family, target and
+priority annotations; conflicting redeclarations diagnose at the source
+attribute. Calling or selecting an implementation function directly is an
+error because it would bypass late template selection.
+
+Providers can depend on a normalized target fact without naming a backend or
+processor. A trailing `loom::where` comparison against
+`loom::target::subgroup::size()` becomes the template's parameterized target
+condition, while ordinary value clauses remain value predicates:
+
+```cpp
+#include <loomcxx/kernel.h>
+#include <loomcxx/predicate.h>
+#include <loomcxx/target.h>
+
+LOOM_TEMPLATE_DECL("guide.scale")
+unsigned scale(unsigned value)
+    [[loom::where(loom::predicate::multiple_of(value, 8u))]];
+
+LOOM_TEMPLATE_DEF(scale)
+[[loom::priority(20)]] unsigned scale_wave64(unsigned value)
+    [[loom::where(loom::target::subgroup::size() == 64u && value > 0u)]] {
+  return value + value;
+}
+
+LOOM_TEMPLATE_DEF(scale)
+[[loom::priority(20)]] unsigned scale_wave32(unsigned value)
+    [[loom::where(32u == loom::target::subgroup::size() && value > 0u)]] {
+  return value << 1u;
+}
+
+LOOM_TEMPLATE_DEF(scale)
+[[loom::priority(1)]] unsigned scale_fallback(unsigned value) {
+  return value * 2u;
+}
+```
+
+The specialized providers import with
+`requires [#target.subgroup.size<64>]` and
+`requires [#target.subgroup.size<32>]`; both independently retain
+`where [ne(%value, 0)]`. The family retains its
+`where [multiple_of(%value, 8)]` contract. Link-time template selection uses
+the selected target facts and proven call-site value facts without a
+preprocessor branch or runtime comparison. An exact subgroup condition can
+also appear on the family declaration when every provider and application has
+that requirement. Other comparisons diagnose because the current target
+condition represents exact subgroup size, not a range or exclusion.
+
+Providers compose across translation units. A header-only library can publish
+them with its callers, while a provider-only `.cxx` file can import to its own
+Loom module and link as a normal library dependency. The latter keeps target
+recipes independent of kernel roots and lets several kernel modules reuse one
+provider set.
 
 ## Embedded Low assembly
 
@@ -911,7 +1581,7 @@ Packed saturate_s4(SignedBytes values) {
 High `vector.bitpack` packs low bits; this fragment also selects the hardware's
 saturation behavior. Its control-register writes and the pack's state reads
 are descriptor effects visible to optimization and scheduling. The native
-[packing test](../../../../../experimental/xdna/cts/testdata/assembly_pack.cxx)
+[packing test](../../tooling/target/amd/xdna/test/assembly_pack.cxx)
 alternates saturated and unsaturated fragments on the same inputs, within
 ordinary C++ vector loads, stores, and loops.
 
@@ -1035,15 +1705,14 @@ void update(unsigned* output, unsigned value) {
 }
 
 LOOM_CHECK_CASE(update_values) {
-  const auto storage = loom::check::fill<unsigned, 3>(37u);
+  const auto storage = loom::check::fill<3, unsigned>(37u);
   const auto middle = loom::check::slice<1>(storage, 1);
   loom::check::launch<update>(middle, 13u);
-  loom::check::expect_bitwise(middle, loom::check::fill<unsigned, 1>(13u));
+  loom::check::expect_bitwise(middle, loom::check::fill<1, unsigned>(13u));
   loom::check::expect_bitwise(loom::check::slice<1>(storage, 0),
-                            loom::check::fill<unsigned, 1>(37u));
+                            loom::check::fill<1, unsigned>(37u));
   loom::check::expect_bitwise(loom::check::slice<1>(storage, 2),
-                            loom::check::fill<unsigned, 1>(37u));
-  loom::check::expect_event("device", "type", "asan_report", "count", 0);
+                            loom::check::fill<1, unsigned>(37u));
 }
 LOOM_CHECK_BENCHMARK(update_benchmark, update_values);
 ```
@@ -1067,6 +1736,22 @@ arguments match its scalar ABI types. The kernel retains its declared launch
 geometry and configurations. Tensors are test data handles, not C++ pointers
 that can be passed to ordinary functions. `expect_bitwise` compares equal-typed
 tensors exactly, including floating-point payload bits.
+
+`expect_close(actual, expected, absolute_tolerance, relative_tolerance)` compares
+floating scalars or equal-typed floating tensors. Finite elements must satisfy
+`abs(actual - expected) <= absolute_tolerance + relative_tolerance * abs(expected)`.
+Both tolerances are explicit, finite, non-negative compile-time constants. An
+optional final literal `"same"` (the default) accepts two NaNs; `"different"`
+rejects any NaN. Infinities compare only when they have the same sign. For example:
+
+```cpp
+loom::check::expect_close(actual, expected, 1e-5, 1e-4, "different");
+```
+
+This emits `check.expect.close` and uses the runner's existing numerical
+comparison. The source chooses an accuracy requirement independently of the
+kernel's instruction selection; exact storage and guard checks can still use
+`expect_bitwise` in the same case.
 
 These calls produce the same IR as authored Loom checks:
 
@@ -1189,9 +1874,8 @@ Fixed underlying types are checked for representability, including implicit
 enumerator increments. Inferred enums select the first type in the integer
 promotion order that contains their complete value range; values above 32 bits
 and the full unsigned 64-bit range remain intact. Template-dependent definitions
-are resolved when instantiated. Boolean enums use `i1` values. Accessing their
-memory requires a byte-storage projection and receives the same diagnostic as
-accessing storage through `bool*`; carrying either pointer is supported.
+are resolved when instantiated. Boolean enums use `i1` values and one-byte
+objects, with the same load/store conversion as `bool`.
 
 GNU `packed` enums select their smallest signed or unsigned storage while
 retaining the promotion selected from their enumerator range. An enum containing
@@ -1275,7 +1959,30 @@ come from the frontend's completed object layout; field stores leave padding
 and neighboring fields untouched. `&particles[index].flags` can pass through an
 ordinary helper as a typed pointer.
 
-Memory records admit non-boolean scalar, enum, vector and nested named fields,
+`bool` and enums with underlying type `bool` occupy one byte per object while
+their computed values, parameters and results use `i1`. Loads read `i8` and
+compare against zero; stores extend the predicate to the canonical byte value
+zero or one. This applies to pointer accesses, record fields, fixed arrays,
+addressed locals and workgroup storage. Const and volatile qualifiers retain
+their normal meaning.
+
+```cpp
+bool exchange(bool* destination, const bool* source) {
+  bool previous = *destination;
+  *destination = *source;
+  return previous;
+}
+```
+
+Both pointers address `view<1xi8>` storage; `previous` and the function result
+remain `i1`. Arrays advance by one byte and fields keep their source-layout
+offsets. Shared private storage promotion can eliminate addressed objects, and
+ordinary canonicalization folds direct predicate-to-byte-to-predicate conversions
+back to the original value. Packed Boolean vectors, typed Loom views and atomic
+bindings have separate representation contracts; admitting Boolean objects does not change
+their element-type requirements.
+
+Memory records admit scalar, enum, vector and nested named fields,
 including fixed arrays of those types and multidimensional arrays. Array
 members decay to borrowed pointers, so ordinary helpers can consume them.
 Indexing and pointer-to-array arithmetic preserve each source extent's stride.
@@ -1370,8 +2077,9 @@ The functions import as scalar constants. `__attribute__((packed))`,
 requests share the same source layout owner. GNU `aligned(N)` raises a packed
 member's alignment, while a pragma pack cap limits member alignment. Record
 alignment can raise the final stride without changing internal member offsets.
-Standard `alignas` retains its own validation rules. Explicit alignment on shared
-arrays reaches the workgroup allocation's `align` operand.
+Standard `alignas` retains its own validation rules. Explicit alignment on
+shared scalar, vector, and fixed scalar-array objects reaches the workgroup
+allocation's `align` operand.
 
 Compound `__builtin_offsetof` designators follow nested members and constant
 array indices. For example, `__builtin_offsetof(Block<unsigned>, words[2])` is
@@ -1401,7 +2109,8 @@ with source object sizes determining pointer strides. The
 tail and ordinary pointer reinterpretation.
 
 GNU `vector_size` and Clang `ext_vector_type` forms admit arithmetic, bitwise
-operations, shifts, scalar splats, brace initialization and indexed lane reads.
+operations, shifts, scalar splats, brace initialization, and indexed lane reads
+and writes.
 Named brace initializers and typed temporaries such as `u32x16{1u, 2u}` use
 the same lane conversions and zero the remaining lanes. Typed temporaries can
 appear in returns, call arguments and larger expressions. Vector comparisons
@@ -1411,14 +2120,36 @@ the scalar language's integer promotions. Equal-size vector casts and
 `__builtin_bit_cast` reinterpret the bits. Whole vectors flow through local
 values, helper calls, returns, branches and loops.
 
+Lane assignment keeps an automatic vector in SSA. Plain assignment, compound
+assignment, and integral pre/post increment and decrement emit
+`vector.insert`; a surrounding structured region carries the updated vector:
+
+```cpp
+using u32x4 = unsigned __attribute__((ext_vector_type(4)));
+
+u32x4 fill(u32x4 values, unsigned begin) {
+  [[loom::unroll]] for (unsigned lane = 0; lane < 4; ++lane) {
+    values[lane] = begin + lane;
+  }
+  return values;
+}
+```
+
+A lane of a vector stored in memory uses one vector load and one vector store
+around the functional insertion. Nested record fields update only their vector
+component. The vector object and lane selector are each evaluated once, so
+side effects retain the source evaluation order for plain and compound updates.
+Native vectors are the register-resident spelling for dynamically selected
+fixed lanes; C++ arrays retain their object-storage and aliasing contract.
+
 Admission requires non-boolean lanes and an object layout with no padding beyond
 the lanes. Packed boolean vectors and padded three-lane objects need separate
-storage projections. Lane assignment, lane addresses, swizzles, vector `&&`/`||`
-and vector-conditioned `?:` also produce source diagnostics: they require
-additional lvalue or lane-selection projections. Target support remains a
-separate compilation boundary. For example, the VM can execute extracted lane
-programs but currently rejects vector aggregate transport across loop/branch
-arguments; that requires a shared aggregate representation through control flow.
+storage projections. Lane addresses, swizzles, vector `&&`/`||`, and
+vector-conditioned `?:` produce source diagnostics: they require additional
+address or lane-selection projections. Target support remains a separate
+compilation boundary. For example, the VM can execute extracted lane programs
+but currently rejects vector aggregate transport across loop/branch arguments;
+that requires a shared aggregate representation through control flow.
 
 Kernel launch contracts are explicit source attributes:
 
@@ -1450,8 +2181,8 @@ Contracts on leading function declarations carry to the definition; conflicting
 redeclarations and multiple contracts for the same dimension group are errors.
 Import does not guess launch dimensions or select a physical target.
 
-`loom::assume`, also exposed as HIP's `__builtin_assume`, carries unsigned
-integer bounds into Loom's value analysis:
+`loom::assume`, also exposed as HIP's `__builtin_assume`, carries integer
+contracts into Loom's value analysis:
 
 ```cpp
 constexpr unsigned capacity = 28672;
@@ -1459,14 +2190,34 @@ loom::assume(count < ((capacity / sizeof(unsigned) - 16u - 320u) / 16u + 1u) &&
              channel < 256u);
 ```
 
-Each `binding < bound` becomes a `scalar.assume` range on the current value.
-Parentheses and repeated bindings preserve the same refinements as separate
-calls. Narrow unsigned bindings retain their C++ integer promotions before
-refinement. Bounds are pure integer constant expressions in `[1, INT32_MAX]`,
-including named constants, concrete template arguments, integral casts and
-`sizeof`. Source conditions generate no runtime comparisons or branches.
-Calls, mutation, volatile reads, overloaded operators and unsupported predicates
-produce source diagnostics. The program must satisfy every declared bound.
+Builtin `==`, `!=`, `<`, `<=`, `>`, and `>=` comparisons can relate scalar
+integer bindings or pure integer constants and can be joined by `&&`. Bare
+integer and Boolean bindings retain nonzero truth. Every constrained binding is
+rebound through the identity results of `scalar.assume`, including both sides
+of a value relation. Parentheses and repeated bindings preserve the same
+refinements as separate calls. Named constants, concrete template arguments,
+integral casts and `sizeof` retain normal C++ constant evaluation.
+
+C++ integral promotions determine the comparison domain. Signed comparisons
+use Loom's signed relations, while unsigned ordering uses `ult`, `ule`, `ugt`,
+and `uge`. Equality is independent of signedness. Simple unsigned constant
+bounds still normalize to range or nonzero facts when that gives downstream
+analysis a stronger result. For example, both of these produce facts without
+executable comparisons:
+
+```cpp
+loom::assume(tokens <= capacity);  // tokens and capacity are unsigned
+loom::assume(hidden > 0);          // hidden is signed
+```
+
+Fixed-width Loom integers retain their bit pattern in a canonical sign-extended
+64-bit carrier. Unsigned predicates compare those carrier bits as unsigned, so
+they preserve ordering across the sign bit for every promoted integer width
+without storing a separate source width. Calls, mutation, volatile reads,
+overloaded operators, value-changing operand casts, derived runtime expressions
+and disjunction produce source diagnostics. Source conditions generate no
+runtime comparisons or branches. The program must satisfy every declared
+predicate.
 
 Counted unsigned `for` loops accept explicit scheduling attributes:
 
@@ -1479,10 +2230,10 @@ for (unsigned column = 0; column < columns; ++column) {
 
 Factors and depths can also be ordinary integer expressions: local values,
 helper parameters, template arguments, arithmetic, and topology values such
-as `loom::workgroup_size.x`. The importer reads them once after the `for`
-initializer, before loop execution, and retains them as SSA index operands
-of `scf.for`. Mutation of a binding inside the loop does not change its
-schedule. Source widths, promotions, and signedness are preserved.
+as `loom::kernel::workgroup::size.x`. The importer reads them once after the
+`for` initializer, before loop execution, and retains them as SSA index
+operands of `scf.for`. Mutation of a binding inside the loop does not change
+its schedule. Source widths, promotions, and signedness are preserved.
 
 ```cpp
 LOOM_FORCE_INLINE int sum(const int* input, unsigned columns,
@@ -1577,6 +2328,29 @@ For example, `loom::scalar::expf(x)` imports `scalar.expf`;
 the same checked binding. Incorrect arity, types, flags, or attribute arguments
 produce source diagnostics.
 
+Approximate sine and cosine use the target's native zero-sign convention.
+`loom::scalar::approximate::preserved::{sinf,cosf,sinturnsf,costurnsf}` adds an
+explicit zero-sign requirement while keeping nonzero results approximate.
+For example, native `sinturnsf(-1.0f)` may return positive zero; its preserved
+form returns negative zero. This matters to sign-bit or reciprocal consumers.
+The requirement survives lexical `fastmath`, including `nsz`, and is retained
+when a separately defined helper is inlined. It is a positive operation
+requirement, so it is absent from `fast` and cannot be named in `fastmath`.
+
+```cpp
+float twiddle(float turns) {
+  return loom::scalar::approximate::sinturnsf(turns);
+}
+
+float signed_cardinal(float turns) {
+  return loom::scalar::approximate::preserved::sinturnsf(turns);
+}
+```
+
+The equivalent IR is `scalar.sinturnsf<afn>` and
+`scalar.sinturnsf<afn|preserve>`. Scalar and vector sine/cosine share this
+contract; other operations retain their own numerical permissions.
+
 Deduced scalar calls accept `_Float16`, `__bf16`, `float`, or `double`, with
 matching operand types. An explicit template argument requests conversion:
 `loom::scalar::mulf<__bf16>(value, 5.0f)` converts the second operand to BF16
@@ -1652,7 +2426,8 @@ The current translation surface covers scalar and explicit vector arithmetic,
 conversions, typed-pointer indexing and arithmetic, aggregate record values,
 record field storage, local SSA values, automatic scalar, vector, and array storage,
 conditional regions, short-circuit `&&` and `||`, counted and general `for`
-loops, `while` and `do/while` loops, fixed workgroup arrays, and direct calls.
+loops, `while` and `do/while` loops, scalar/vector/fixed-array workgroup
+storage, and direct calls.
 Unsupported reachable types and statements produce source diagnostics. Integral
 subscripts preserve their source width and signedness. Interior pointers carry a
 buffer root and an
@@ -1717,7 +2492,7 @@ unsigned update(unsigned input, bool enabled) {
 }
 ```
 
-Automatic storage supports the same non-boolean scalar and vector types as
+Automatic storage supports the same scalar and vector types as
 typed pointer storage. The importer emits `buffer.alloca<private>` at the
 object's declaration, using its source size and alignment, and initializes it
 with a store preserving its access qualifiers. A declaration without an
@@ -1737,7 +2512,7 @@ continue to import directly as SSA values. An aliased loop bound or induction
 object uses a general loop so indirect mutations cannot be lost by counted-loop
 lowering.
 
-Fixed one-dimensional arrays of non-boolean scalars use the same private storage
+Fixed one-dimensional arrays of scalars use the same private storage
 contract. Braced and parenthesized element initializers execute in order, with
 each element stored before evaluating the next clause. Omitted elements are
 value-initialized; a declaration without an initializer emits no stores.
@@ -1768,7 +2543,7 @@ edges. Objects with constructors, exceptions, and indirect calls need additional
 storage and control-flow projections before they can be imported.
 
 Volatile scalar and vector accesses through pointers, automatic objects, and
-workgroup arrays become `view.load/store<volatile>` and
+workgroup objects become `view.load/store<volatile>` and
 `vector.load/store<volatile>`. The qualifier belongs to the accessed object:
 a copied pointer or a pointer member
 retains its pointee's observation semantics. Discarded reads, including explicit
@@ -1786,8 +2561,9 @@ unsigned observe(const volatile unsigned* input, volatile unsigned* output) {
 }
 ```
 
-Typed views use the same contract. A `loom::type::view<volatile unsigned, ...>`
-preserves its element qualifier through copies, helpers and subviews;
+Typed views use the same contract. A
+`loom::type::view<loom::type::shape<...>, volatile unsigned>` preserves its
+element qualifier through copies, helpers and subviews;
 `loom::view::load` returns an ordinary scalar and `loom::view::store` accepts
 one. A `const volatile` element permits observations but rejects stores.
 Volatile supplies observable accesses, without atomicity, synchronization or a
@@ -1836,8 +2612,8 @@ header APIs, and direct API tests that do not link the aggregate importer.
 | `source/` | One configured frontend invocation, provider and diagnostic handling, immutable facade lookup, and source locations copied into the output module. |
 | `value/` | Source type/layout projection, scalar/vector SSA and buffer/origin representations, arithmetic, and memory access construction from already evaluated operands. |
 | `control/` | An immutable analysis of ordered source writes, function/iteration exits and fallthrough, and nonwrapping counted-loop eligibility. This package has no IR dependency. |
-| `binding/` | Admission and construction for generated operation bindings, named scalar configs, kernel launch contracts, and explicit loop schedules. |
-| `symbol/` | Root selection, reachable function identities, deterministic naming, and native function definitions with explicit body contracts. |
+| `binding/` | Admission and construction for generated operation bindings, runtime imports, named scalar configs, kernel launch contracts, and explicit loop schedules. |
+| `symbol/` | Root selection, reachable function identities, deterministic linkage names, and native function declarations or definitions with explicit contracts. |
 
 `import.cc` owns the native API's validation, exception boundary, module
 ownership, and final verification. `translation.cc` composes the packages: it

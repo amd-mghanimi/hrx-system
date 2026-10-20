@@ -25,86 +25,55 @@ class PipelineBuilder(DialectBuilder):
         body: Region | None = ...,
         location_id: int | None = ...,
     ) -> None: ...
-    def scatter(
+    def finish(
         self,
         *,
-        source: ValueRef,
-        group: ValueRef,
-        results: list[Type | TiedResultSpec],
-        name: str | None = ...,
-        names: Sequence[str] | None = ...,
-        result_names: Sequence[str] | None = ...,
-        location_id: int | None = ...,
-    ) -> ValueRef: ...
-    def read(
-        self,
-        *,
-        source: ValueRef,
-        group: ValueRef,
-        results: list[Type | TiedResultSpec],
-        name: str | None = ...,
-        names: Sequence[str] | None = ...,
-        result_names: Sequence[str] | None = ...,
-        location_id: int | None = ...,
-    ) -> ValueRef: ...
-    def stage(
-        self,
-        *,
-        entry: str,
-        group: ValueRef,
-        inputs: list[ValueRef] = ...,
-        results: list[Type | TiedResultSpec],
-        name: str | None = ...,
-        names: Sequence[str] | None = ...,
-        result_names: Sequence[str] | None = ...,
-        location_id: int | None = ...,
-    ) -> list[ValueRef]: ...
-    def buffer(
-        self,
-        *,
-        source: ValueRef,
-        capacity: ValueRef,
-        results: list[Type | TiedResultSpec],
-        name: str | None = ...,
-        names: Sequence[str] | None = ...,
-        result_names: Sequence[str] | None = ...,
-        location_id: int | None = ...,
-    ) -> ValueRef: ...
-    def fold(
-        self,
-        *,
-        kind: str,
-        fastmath: str = ...,
-        source: ValueRef,
-        results: list[Type | TiedResultSpec],
-        name: str | None = ...,
-        names: Sequence[str] | None = ...,
-        result_names: Sequence[str] | None = ...,
-        location_id: int | None = ...,
-    ) -> ValueRef: ...
-    def reduce(
-        self,
-        *,
-        entry: str,
-        source_group: ValueRef,
-        source_inputs: list[ValueRef] = ...,
-        target_group: ValueRef,
-        target_inputs: list[ValueRef] = ...,
-        results: list[Type | TiedResultSpec],
-        name: str | None = ...,
-        names: Sequence[str] | None = ...,
-        result_names: Sequence[str] | None = ...,
-        location_id: int | None = ...,
-    ) -> list[ValueRef]: ...
-    def write(
-        self,
-        *,
-        source: ValueRef,
-        target: ValueRef,
         location_id: int | None = ...,
     ) -> None: ...
-    def return_(
+    def strand(
         self,
         *,
+        target: str | None = ...,
+        origins: list[int | ValueRef],
+        counts: list[int | ValueRef],
+        strides: list[int | ValueRef],
+        body: Region | None = ...,
+        location_id: int | None = ...,
+    ) -> None: ...
+    def end(
+        self,
+        *,
+        location_id: int | None = ...,
+    ) -> None: ...
+    def compose(
+        self,
+        *,
+        callee: str,
+        specializations: list[ValueRef] = ...,
+        bindings: list[ValueRef] = ...,
+        location_id: int | None = ...,
+    ) -> None: ...
+    def memory(
+        self,
+        *,
+        memory_space: str,
+        coordinates: list[int | ValueRef],
+        results: list[Type | TiedResultSpec],
+        name: str | None = ...,
+        names: Sequence[str] | None = ...,
+        result_names: Sequence[str] | None = ...,
+        location_id: int | None = ...,
+    ) -> ValueRef: ...
+    def decl(
+        self,
+        *,
+        scope: str | None = ...,
+        visibility: str | None = ...,
+        retain: str | None = ...,
+        target: str | None = ...,
+        callee: str,
+        specializations: list[ValueRef] = ...,
+        bindings: list[ValueRef] = ...,
+        predicates: list[Predicate] = ...,
         location_id: int | None = ...,
     ) -> None: ...

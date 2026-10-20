@@ -41,16 +41,18 @@ from loom.assembly import (
 )
 from loom.dsl import (
     ANY,
+    ATTR_TYPE_SYMBOL_SET,
     SYMBOL_DEFINE,
-    UNKNOWN_EFFECTS,
     AttrDef,
     Dialect,
     Op,
     Operand,
+    Reads,
     Result,
     SymbolDefinition,
     SymbolDefinitionFlag,
     SymbolReference,
+    Writes,
 )
 
 # ============================================================================
@@ -115,7 +117,7 @@ global_constant = Op(
     verify="loom_global_constant_verify",
     examples=[
         "global.constant @pi : f32 = 3.14159265358979",
-        "global.constant @weights : tile<[%m]x[%k]xf32> where [mul(%m, 16)]",
+        "global.constant @weights : tile<[%m]x[%k]xf32> where [multiple_of(%m, 16)]",
     ],
 )
 
@@ -164,7 +166,7 @@ global_variable = Op(
     ],
     verify="loom_global_variable_verify",
     examples=[
-        "global.variable @kv_cache : tile<[%s]x[%d]xf32> where [mul(%s, 64)]",
+        "global.variable @kv_cache : tile<[%s]x[%d]xf32> where [multiple_of(%s, 64)]",
         "global.variable @step_count : index = 0",
     ],
 )
@@ -179,9 +181,12 @@ global_rodata = Op(
     doc=(
         "Read-only executable data payload. This defines a named artifact "
         "symbol containing uninterpreted bytes, optionally with a stronger "
-        "power-of-two byte alignment requirement. It is used for compiler-owned "
-        "tables and metadata such as sanitizer site records; user-visible value "
-        "globals remain global.constant/global.variable."
+        "power-of-two byte alignment requirement. Bank conflicts form a "
+        "reciprocal relation between definitions that must occupy disjoint "
+        "target-defined storage banks when retained by one resident function. "
+        "It is used for compiler-owned tables and metadata such as sanitizer "
+        "site records; user-visible value globals remain "
+        "global.constant/global.variable."
     ),
     traits=[SYMBOL_DEFINE],
     symbol_def=SymbolDefinition(
@@ -194,11 +199,22 @@ global_rodata = Op(
         AttrDef("symbol", "symbol"),
         AttrDef("contents", "bytes"),
         AttrDef("alignment", "i64", optional=True),
+        AttrDef(
+            "bank_conflicts",
+            ATTR_TYPE_SYMBOL_SET,
+            optional=True,
+            symbol_ref=SymbolReference("read-only data", ["rodata"]),
+            doc=("Read-only data definitions that must occupy disjoint target-defined storage banks in one resident function. Every relation is reciprocal."),
+        ),
     ],
     format=[
         SymbolRef("symbol"),
         EQUALS,
         OptionalGroup([Clause("align", Attr("alignment"))], anchor="alignment"),
+        OptionalGroup(
+            [Clause("conflicts", Attr("bank_conflicts"))],
+            anchor="bank_conflicts",
+        ),
         Attr("contents"),
     ],
     verify="loom_global_rodata_def_verify",
@@ -255,7 +271,7 @@ global_load = Op(
     # Variadic results: the loaded value + any dim/encoding co-results.
     # The result count is determined by the LHS result names.
     results=[Result("result", ANY, variadic=True)],
-    traits=[UNKNOWN_EFFECTS],
+    effects=[Reads()],
     canonicalize="loom_global_load_canonicalize",
     facts="loom_global_load_facts",
     verify="loom_global_load_verify",
@@ -295,7 +311,7 @@ global_store = Op(
             symbol_ref=SymbolReference("global", ["global"]),
         ),
     ],
-    traits=[UNKNOWN_EFFECTS],
+    effects=[Writes()],
     verify="loom_global_store_verify",
     format=[
         Ref("value"),

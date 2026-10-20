@@ -14,24 +14,25 @@
 
 #include "iree/base/tooling/flags.h"
 #include "loom/sanitizer/options.h"
-#include "loom/tooling/compile/report_capture.h"
 #include "loom/tooling/input/flags.h"
 #include "loom/tooling/testbench/testbench.h"
 #include "loom/tools/iree-benchmark-loom/module_query.h"
 #include "loom/util/json.h"
 
 IREE_FLAG(string, case, "",
-          "Optional check.case symbol to benchmark, such as '@smoke'. Empty "
-          "keeps all cases referenced by selected benchmarks.");
+          "Optional check.case or check.scenario symbol to benchmark, such as "
+          "'@smoke'. Empty keeps all records referenced by selected "
+          "benchmarks.");
 IREE_FLAG(string, benchmark, "",
           "Optional check.benchmark name to execute, such as '@smoke_time'. "
           "Empty executes all benchmarks in source order.");
 IREE_FLAG(int32_t, sample, -1,
           "Optional concrete sample ordinal to execute for selected benchmark "
-          "cases. Negative executes all planned samples.");
-IREE_FLAG(string, measure, "case_end_to_end",
-          "Measurement mode. Use 'case_end_to_end', 'end_to_end', or "
-          "'dispatch_complete'.");
+          "records. Negative executes all planned samples.");
+IREE_FLAG(string, measure, "auto",
+          "Measurement mode. 'auto' selects case_end_to_end for check.case "
+          "and dispatch_complete for check.scenario. Explicit modes are "
+          "'case_end_to_end', 'end_to_end', and 'dispatch_complete'.");
 IREE_FLAG_NAMED(int32_t, max_samples_per_case, "max-samples-per-case",
                 LOOM_TESTBENCH_DEFAULT_MAX_SAMPLES_PER_CASE,
                 "Maximum number of samples planned per check.case.");
@@ -67,9 +68,10 @@ IREE_FLAG_NAMED(
     string, output_format, "output-format", "snapshot",
     "Benchmark result output format. Use 'snapshot' for one compact JSON "
     "document or 'jsonl' for newline-delimited lifecycle events.");
-IREE_FLAG_NAMED(string, file_output_dir, "file-output-dir", "",
-                "Directory receiving check.file.write.* outputs. Empty uses "
-                "$TMPDIR/iree-loom-benchmark/<source>_<hash>/ for this run.");
+IREE_FLAG_NAMED(string, file_output_root, "file-output-root", "",
+                "Root for relative check.file.write.* output paths. Empty "
+                "uses $TMPDIR/iree-loom-benchmark/<source>_<hash>/ for this "
+                "run.");
 IREE_FLAG_NAMED(
     string, artifact_bundle_dir, "artifact-bundle-dir", "",
     "Directory receiving a self-contained run bundle. When set and --output "
@@ -117,11 +119,12 @@ IREE_FLAG_NAMED(
 IREE_FLAG_NAMED(
     int64_t, input_ring_min_bytes, "input-ring-min-bytes",
     IREE_BENCHMARK_LOOM_DEFAULT_INPUT_RING_MIN_BYTES,
-    "Minimum total byte size of the device-buffer binding ring used by "
-    "dispatch_complete benchmarks. Automatic selection materializes enough "
-    "binding sets to approach this target, capped at one set per batch "
-    "dispatch. A binding set already larger than the target is not "
-    "duplicated; use 0 to record one hot-reuse binding set.");
+    "Minimum total byte size of the unique reachable device-buffer ranges "
+    "used by dispatch_complete benchmarks. Repeated and overlapping aliases "
+    "and storage shared across sequence steps count once per materialized "
+    "set. Automatic selection materializes enough sets to approach this "
+    "target, capped at one set per batch input use. A set already larger than "
+    "the target is not duplicated; use 0 to record one hot-reuse set.");
 IREE_FLAG_NAMED(
     int32_t, input_ring_count, "input-ring-count", 0,
     "Exact number of physical device-buffer binding sets to rotate through "
@@ -197,7 +200,7 @@ void iree_benchmark_loom_options_initialize(
   out_options->output_format = IREE_BENCHMARK_LOOM_OUTPUT_FORMAT_SNAPSHOT;
   out_options->artifact_bundle_policy =
       IREE_BENCHMARK_LOOM_ARTIFACT_BUNDLE_POLICY_MINIMAL;
-  out_options->measure = IREE_SV("case_end_to_end");
+  out_options->measure = IREE_SV("auto");
   out_options->compile_report = IREE_SV("summary");
   out_options->artifact_manifest = IREE_SV("none");
   out_options->input_ring_min_bytes =
@@ -270,7 +273,7 @@ iree_status_t iree_benchmark_loom_options_from_flags(
   out_options->output = iree_make_cstring_view(FLAG_output);
   IREE_RETURN_IF_ERROR(iree_benchmark_loom_parse_output_format(
       iree_make_cstring_view(FLAG_output_format), &out_options->output_format));
-  out_options->file_output_dir = iree_make_cstring_view(FLAG_file_output_dir);
+  out_options->file_output_root = iree_make_cstring_view(FLAG_file_output_root);
   out_options->artifact_bundle_dir =
       iree_string_view_trim(iree_make_cstring_view(FLAG_artifact_bundle_dir));
   out_options->dry_run = FLAG_dry_run;
@@ -376,14 +379,14 @@ iree_status_t iree_benchmark_loom_options_from_flags(
       !iree_string_view_is_empty(out_options->selected_case)) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
-        "--compare selects benchmark/case pairs directly and cannot be "
+        "--compare selects benchmark subjects directly and cannot be "
         "combined with --case");
   }
-  if (iree_string_view_equal(
-          iree_string_view_trim(out_options->file_output_dir), IREE_SV("-"))) {
+  if (iree_string_view_equal(out_options->file_output_root, IREE_SV("-"))) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
-        "--file-output-dir must name a directory; '-' is reserved for stdout");
+        "--file-output-root must name a directory; '-' is reserved for "
+        "stdout");
   }
   return iree_ok_status();
 }

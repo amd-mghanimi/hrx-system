@@ -40,6 +40,7 @@ from loom.target.arch.amdgpu.isa_xml import (  # noqa: E402
 from loom.target.arch.amdgpu.names import amdgpu_c_identifier_fragment  # noqa: E402
 from loom.target.arch.amdgpu.target_info import (  # noqa: E402
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE,
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_PACKETIZATION,
     AmdgpuDescriptorSetInfo,
     amdgpu_descriptor_set_ordinal,
@@ -65,6 +66,7 @@ _FORM_TIED_ACCUMULATE = "LOOM_AMDGPU_VOPD_COMPONENT_FORM_TIED_ACCUMULATE"
 _COMPONENT_FLAG_NONE = "LOOM_AMDGPU_VOPD_COMPONENT_FLAG_NONE"
 _COMPONENT_FLAG_COMMUTABLE_SOURCES = "LOOM_AMDGPU_VOPD_COMPONENT_FLAG_COMMUTABLE_SOURCES"
 _COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE = "LOOM_AMDGPU_VOPD_COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE"
+_COMPONENT_FLAG_SOURCE_PARITY = "LOOM_AMDGPU_VOPD_COMPONENT_FLAG_SOURCE_PARITY"
 _COMPONENT_FLAGS_NONE: frozenset[str] = frozenset()
 
 _LANE_XY = "LOOM_AMDGPU_VOPD_COMPONENT_LANE_XY"
@@ -81,10 +83,15 @@ _SOURCE_NONE = "LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_NONE"
 _SOURCE_SRC0 = "LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_SRC0"
 _SOURCE_VSRC1 = "LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_VSRC1"
 
-_PLACEMENT_COMPONENT_FIRST = "LOOM_LOW_PLACEMENT_PAIR_COMPONENT_FIRST"
-_PLACEMENT_COMPONENT_SECOND = "LOOM_LOW_PLACEMENT_PAIR_COMPONENT_SECOND"
-_PLACEMENT_VALUE_OPERAND = "LOOM_LOW_PLACEMENT_PAIR_VALUE_OPERAND"
-_PLACEMENT_VALUE_RESULT = "LOOM_LOW_PLACEMENT_PAIR_VALUE_RESULT"
+_CACHE_NONE = "LOOM_AMDGPU_VOPD_CACHE_REGISTER_NONE"
+_CACHE_SRC0 = "LOOM_AMDGPU_VOPD_CACHE_REGISTER_SRC0"
+_CACHE_VSRC1 = "LOOM_AMDGPU_VOPD_CACHE_REGISTER_VSRC1"
+_CACHE_VDST = "LOOM_AMDGPU_VOPD_CACHE_REGISTER_VDST"
+
+_PLACEMENT_COMPONENT_FIRST = "0"
+_PLACEMENT_COMPONENT_SECOND = "1"
+_PLACEMENT_VALUE_OPERAND = "LOOM_LOW_PLACEMENT_VALUE_OPERAND"
+_PLACEMENT_VALUE_RESULT = "LOOM_LOW_PLACEMENT_VALUE_RESULT"
 _PLACEMENT_DIFFERENT_MASKED = "LOOM_LOW_PLACEMENT_RELATION_DIFFERENT_MASKED_LOCATION"
 _PLACEMENT_DISJOINT = "LOOM_LOW_PLACEMENT_RELATION_DISJOINT_STORAGE"
 
@@ -580,6 +587,8 @@ def _component_flags_for_descriptor_set(
             flags.add(_COMPONENT_FLAG_COMMUTABLE_SOURCES)
     if component.form == _FORM_REGISTER_MOV and descriptor_set_info.flags & AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE:
         flags.add(_COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE)
+    if descriptor_set_info.flags & AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD:
+        flags.add(_COMPONENT_FLAG_SOURCE_PARITY)
     return frozenset(flags)
 
 
@@ -811,17 +820,26 @@ def _component_sources_are_commutable(
     return _COMPONENT_FLAG_COMMUTABLE_SOURCES in component_flags
 
 
-def _components_share_source_cache(
-    first_component: _VopdComponentDefinition,
-    second_component: _VopdComponentDefinition,
-    source_mask: str,
-    first_component_flags: frozenset[str],
-    second_component_flags: frozenset[str],
-) -> bool:
-    if source_mask != _SOURCE_SRC0:
-        return True
-    has_separate_caches = _COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE in first_component_flags and _COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE in second_component_flags
-    return not (has_separate_caches and first_component.op_value == second_component.op_value)
+def _component_cache_registers(component: _VopdComponentDefinition) -> tuple[str, str, str]:
+    src0 = _CACHE_SRC0 if _component_has_source(component, _SOURCE_SRC0) else _CACHE_NONE
+    src1 = _CACHE_VSRC1 if _component_has_source(component, _SOURCE_VSRC1) else _CACHE_NONE
+    if component.form == _FORM_FMAMK_LITERAL:
+        return (src0, _CACHE_NONE, src1)
+    if component.form == _FORM_TIED_ACCUMULATE:
+        return (src0, src1, _CACHE_VDST)
+    return (src0, src1, _CACHE_NONE)
+
+
+def _cache_placement_ref(
+    pair_component: str,
+    component: _VopdComponentDefinition,
+    cache_register: str,
+    component_flags: frozenset[str],
+) -> _VopdPairPlacementValueRef:
+    if cache_register == _CACHE_VDST:
+        return _placement_result_ref(pair_component)
+    source_mask = _SOURCE_SRC0 if cache_register == _CACHE_SRC0 else _SOURCE_VSRC1
+    return _placement_source_ref(pair_component, component, _source_mask_for_component_orientation(source_mask, component_flags))
 
 
 def _pair_placement_relations(
@@ -840,6 +858,22 @@ def _pair_placement_relations(
             location_mask=0x1,
         )
     ]
+    first_caches = _component_cache_registers(first_component)
+    second_caches = _component_cache_registers(second_component)
+    if first_component.op_value == second_component.op_value and _COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE in first_component_flags & second_component_flags:
+        second_caches = (_CACHE_NONE, _CACHE_NONE, _CACHE_SRC0)
+    source_bank_mask = 1 if _COMPONENT_FLAG_SOURCE_PARITY in first_component_flags | second_component_flags else 3
+    for first_register, second_register, bank_mask in zip(first_caches, second_caches, (source_bank_mask, source_bank_mask, 1), strict=True):
+        if first_register == _CACHE_NONE or second_register == _CACHE_NONE:
+            continue
+        relation = _VopdPairPlacementRelation(
+            result=_cache_placement_ref(_PLACEMENT_COMPONENT_FIRST, first_component, first_register, first_component_flags),
+            source=_cache_placement_ref(_PLACEMENT_COMPONENT_SECOND, second_component, second_register, second_component_flags),
+            kind=_PLACEMENT_DIFFERENT_MASKED,
+            location_mask=bank_mask,
+        )
+        if relation not in relations:
+            relations.append(relation)
     for source_mask in (_SOURCE_SRC0, _SOURCE_VSRC1):
         first_source_mask = _source_mask_for_component_orientation(
             source_mask,
@@ -854,33 +888,6 @@ def _pair_placement_relations(
             second_component,
             second_source_mask,
         )
-        if (
-            first_has_source
-            and second_has_source
-            and _components_share_source_cache(
-                first_component,
-                second_component,
-                source_mask,
-                first_component_flags,
-                second_component_flags,
-            )
-        ):
-            relations.append(
-                _VopdPairPlacementRelation(
-                    result=_placement_source_ref(
-                        _PLACEMENT_COMPONENT_FIRST,
-                        first_component,
-                        first_source_mask,
-                    ),
-                    source=_placement_source_ref(
-                        _PLACEMENT_COMPONENT_SECOND,
-                        second_component,
-                        second_source_mask,
-                    ),
-                    kind=_PLACEMENT_DIFFERENT_MASKED,
-                    location_mask=0x3,
-                )
-            )
         if second_has_source:
             relations.append(
                 _VopdPairPlacementRelation(
@@ -1294,6 +1301,7 @@ def _component_rule_initializer(
             f"                .vsrc1_index = {vsrc1_index},",
             "            },",
             f"        .source_register_mask = {component.source_register_mask},",
+            f"        .cache_registers = {{{', '.join(_component_cache_registers(component))}}},",
             f"        .flags = {_component_flags_initializer(rule.flags)},",
             "    },",
         ]
@@ -1349,8 +1357,8 @@ def _pair_placement_recipe_initializer(
     return "\n".join(
         [
             f"    [{recipe_index}] = {{",
-            f"        .relations = &kVopdPairPlacementRelations[{first_relation}],",
-            f"        .relation_count = {relation_count},",
+            f"        .preferences = &kVopdPairPlacementPreferences[{first_relation}],",
+            f"        .preference_count = {relation_count},",
             f"        .alternative_count = {len(recipe.alternatives)},",
             f"        .packet_savings = {recipe.packet_savings},",
             "    },",
@@ -1358,26 +1366,13 @@ def _pair_placement_recipe_initializer(
     )
 
 
-def _pair_placement_relation_initializer(
-    relation: _VopdPairPlacementRelation,
-) -> str:
+def _placement_predicate_initializer(relation: _VopdPairPlacementRelation) -> str:
     return "\n".join(
         [
             "    {",
-            "        .result =",
-            "            {",
-            f"                .component = {relation.result.component},",
-            f"                .kind = {relation.result.kind},",
-            f"                .index = {relation.result.index},",
-            f"                .unit_offset = {relation.result.unit_offset},",
-            "            },",
-            "        .source =",
-            "            {",
-            f"                .component = {relation.source.component},",
-            f"                .kind = {relation.source.kind},",
-            f"                .index = {relation.source.index},",
-            f"                .unit_offset = {relation.source.unit_offset},",
-            "            },",
+            "        .result = 0, .source = 1,",
+            f"        .result_unit_offset = {relation.result.unit_offset},",
+            f"        .source_unit_offset = {relation.source.unit_offset},",
             f"        .unit_count = {relation.unit_count},",
             f"        .kind = {relation.kind},",
             f"        .location_mask = 0x{relation.location_mask:X},",
@@ -1389,7 +1384,12 @@ def _pair_placement_relation_initializer(
 def _emit_source(tables: _VopdComponentTables) -> str:
     component_infos, info_index_by_op_value = _canonical_component_infos(tables.rules)
     recipe_initializers: list[str] = []
-    relation_initializers: list[str] = []
+    preference_indices: dict[_VopdPairPlacementRelation, int] = {}
+    predicate_indices: dict[tuple[str, int, int, int, int], int] = {}
+    predicate_initializers: list[str] = []
+    value_initializers: list[str] = []
+    preference_initializers: list[str] = []
+    alternative_initializers: list[str] = []
     first_relation = 0
     for recipe_index, recipe in enumerate(tables.pair_placement_recipes):
         recipe_initializers.append(
@@ -1399,7 +1399,23 @@ def _emit_source(tables: _VopdComponentTables) -> str:
                 recipe,
             )
         )
-        relation_initializers.extend(_pair_placement_relation_initializer(relation) for alternative in recipe.alternatives for relation in alternative)
+        for alternative in recipe.alternatives:
+            for relation in alternative:
+                if relation not in preference_indices:
+                    preference_indices[relation] = len(preference_indices)
+                    predicate_key = (relation.kind, relation.location_mask, relation.unit_count, relation.result.unit_offset, relation.source.unit_offset)
+                    if predicate_key not in predicate_indices:
+                        predicate_indices[predicate_key] = len(predicate_indices)
+                        predicate_initializers.append(_placement_predicate_initializer(relation))
+                    first_value = len(value_initializers)
+                    value_initializers.extend(f"    {{{ref.component}, {ref.kind}, {ref.index}}}," for ref in (relation.result, relation.source))
+                    preference_initializers.append(
+                        "    {"
+                        f".values = &kVopdPlacementValues[{first_value}], "
+                        f".predicates = &kVopdPlacementPredicates[{predicate_indices[predicate_key]}], "
+                        ".clauses = &kVopdPlacementClause, .value_count = 2, .clause_count = 1},"
+                    )
+                alternative_initializers.append(f"    &kVopdPlacementPreferences[{preference_indices[relation]}],")
         first_relation += len(recipe.alternatives[0]) * len(recipe.alternatives)
 
     op_lookup_initializers = [f"    [{component.op}] = {index + 1}," for index, component in enumerate(component_infos)]
@@ -1453,9 +1469,25 @@ def _emit_source(tables: _VopdComponentTables) -> str:
                 *(_pair_affinity_range_initializer(row) for row in tables.pair_affinity_ranges),
                 "};",
                 "",
-                "static const loom_low_placement_pair_relation_t",
-                "    kVopdPairPlacementRelations[] = {",
-                *relation_initializers,
+                "static const loom_low_placement_clause_t kVopdPlacementClause = {",
+                "    .predicate_count = 1, .weight = 1, .kind = LOOM_LOW_PLACEMENT_CLAUSE_ANY,",
+                "};",
+                "",
+                "static const loom_low_placement_value_ref_t kVopdPlacementValues[] = {",
+                *value_initializers,
+                "};",
+                "",
+                "static const loom_low_placement_predicate_t kVopdPlacementPredicates[] = {",
+                *predicate_initializers,
+                "};",
+                "",
+                "static const loom_low_placement_preference_t kVopdPlacementPreferences[] = {",
+                *preference_initializers,
+                "};",
+                "",
+                "static const loom_low_placement_preference_t* const",
+                "    kVopdPairPlacementPreferences[] = {",
+                *alternative_initializers,
                 "};",
                 "",
                 "const loom_low_placement_pair_recipe_t",

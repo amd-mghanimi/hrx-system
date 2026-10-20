@@ -52,3 +52,54 @@ func.def @shift_cfg(%input: i64, %condition: i1) -> (i64) {
 ^exit:
   func.return %head_high : i64
 }
+
+// ====
+
+// RUN: pass canonicalize
+
+// The second rotation consumes the first rotation's complete interval. The
+// textual order interleaves the components; only CFG dependencies order them.
+func.def @sequential_rotations(%repeat_first: i1, %repeat_second: i1) -> (i64, i64, i64) {
+  %low = index.constant 8 : offset
+  %middle = index.constant 24 : offset
+  %high = index.constant 40 : offset
+  cfg.br ^first(%low: offset, %middle: offset)
+^first(%first_left: offset, %first_right: offset):
+  cfg.cond_br %repeat_first, ^first_back, ^between
+^between:
+  cfg.br ^second(%first_left: offset, %high: offset)
+^second(%second_left: offset, %second_right: offset):
+  cfg.cond_br %repeat_second, ^second_back, ^exit
+^second_back:
+  cfg.br ^second(%second_right: offset, %second_left: offset)
+^first_back:
+  cfg.br ^first(%first_right: offset, %first_left: offset)
+^exit:
+  %minimum = test.fact_range_lo %second_left : offset -> i64
+  %maximum = test.fact_range_hi %second_left : offset -> i64
+  %multiple = test.fact_divisor %second_left : offset -> i64
+  func.return %minimum, %maximum, %multiple : i64, i64, i64
+}
+
+// ----
+func.def @sequential_rotations(%repeat_first: i1, %repeat_second: i1) -> (i64, i64, i64) {
+  %low = index.constant 8 : offset
+  %middle = index.constant 24 : offset
+  %high = index.constant 40 : offset
+  cfg.br ^first(%low: offset, %middle: offset)
+^first(%first_left: offset, %first_right: offset):
+  cfg.cond_br %repeat_first, ^first_back, ^between
+^between:
+  cfg.br ^second(%first_left: offset, %high: offset)
+^second(%second_left: offset, %second_right: offset):
+  cfg.cond_br %repeat_second, ^second_back, ^exit
+^second_back:
+  cfg.br ^second(%second_right: offset, %second_left: offset)
+^first_back:
+  cfg.br ^first(%first_right: offset, %first_left: offset)
+^exit:
+  %minimum = scalar.constant 8 : i64
+  %maximum = scalar.constant 40 : i64
+  %multiple = scalar.constant 8 : i64
+  func.return %minimum, %maximum, %multiple : i64, i64, i64
+}

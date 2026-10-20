@@ -19,32 +19,36 @@
 extern "C" {
 #endif
 
-typedef struct loom_low_schedule_alias_pressure_record_t
-    loom_low_schedule_alias_pressure_record_t;
+typedef struct loom_low_schedule_pressure_set_record_t
+    loom_low_schedule_pressure_set_record_t;
 typedef struct loom_low_schedule_resource_pressure_record_t
     loom_low_schedule_resource_pressure_record_t;
 typedef struct loom_low_schedule_unlock_record_t
     loom_low_schedule_unlock_record_t;
+typedef struct loom_low_schedule_required_pressure_t
+    loom_low_schedule_required_pressure_t;
 
 // Mutable pressure simulation state for one scheduling run.
 struct loom_low_schedule_pressure_state_t {
   // Current live register units by descriptor register-class ID.
   uint64_t* current_live_units_by_reg_class;
+  // Required ownership and instruction-phase changes by completion domain.
+  loom_low_schedule_required_pressure_t* required_pressure;
   // Block-local aligned-packing headroom by descriptor register-class ID.
   uint32_t* packing_reserve_units_by_reg_class;
-  // Shared pressure state for overlapping register classes.
+  // Shared pressure state for register classes with one allocation domain.
   struct {
-    // Mutable records indexed by one-based alias-set ID.
-    loom_low_schedule_alias_pressure_record_t* records;
-    // Alias-set IDs seen with live pressure in the current block.
+    // Mutable records indexed by one-based pressure-set ID.
+    loom_low_schedule_pressure_set_record_t* records;
+    // Pressure-set IDs seen with live pressure in the current block.
     uint16_t* block_ids;
-    // Alias-set IDs touched by the current candidate.
+    // Pressure-set IDs touched by the current candidate.
     uint16_t* candidate_delta_touched_ids;
     // Number of populated entries in block_ids.
     iree_host_size_t block_count;
     // Number of populated entries in candidate_delta_touched_ids.
     iree_host_size_t candidate_delta_touched_count;
-  } alias_sets;
+  } pressure_sets;
   // Incremental high-water state for derived target pressure resources.
   struct {
     // Per-class high-water marks, dense by descriptor register-class ID.
@@ -70,17 +74,29 @@ struct loom_low_schedule_pressure_state_t {
   // Candidate operand multiplicity by local value ordinal, retained through
   // target scoring so packing completion can distinguish final uses.
   uint16_t* candidate_operand_use_counts;
-  // Per-candidate counters reused for alias units and unlocked operand uses.
+  // Per-candidate counters reused for ready keys, alias units, and unlocked
+  // operand uses.
   uint32_t* candidate_scratch_counts;
   // Value ordinals touched in candidate_operand_use_counts.
   loom_value_ordinal_t* candidate_operand_ordinals;
   // Scratch live-unit delta by descriptor register-class ID.
   int64_t* candidate_delta_units_by_reg_class;
-  // Units created during the Early phase by descriptor register-class ID.
-  uint64_t* candidate_early_added_units_by_reg_class;
+  // Candidate operand deaths by descriptor register-class ID. Allocated only
+  // when retained calls impose narrower boundary capacities.
+  uint64_t* candidate_killed_units_by_reg_class;
+  // Candidate instruction-phase overlap, indexed by descriptor register class.
+  struct {
+    // Result storage created before ordinary input reads complete.
+    uint64_t* early_added_units;
+    // Dying input units retained through result writes.
+    uint64_t* late_released_units;
+  } candidate_lifetime;
   // Downstream headroom reserved by the current candidate, indexed by
   // register-packing resource.
   uint32_t* candidate_register_packing_activation_units;
+  // Downstream headroom reserved by the current candidate, indexed by bounded
+  // unspillable completion domain.
+  uint32_t* candidate_unspillable_activation_units;
   // Earliest unscheduled completion sink retaining live storage in each
   // register-packing resource.
   uint32_t* active_register_packing_completion_sinks;
@@ -105,6 +121,9 @@ struct loom_low_schedule_pressure_state_t {
     // Downstream activation footprints indexed by producer node then
     // register-packing resource.
     uint32_t* register_packing_activation_units;
+    // Downstream activation footprints indexed by producer node then bounded
+    // unspillable completion domain.
+    uint32_t* unspillable_activation_units;
     // Descriptor-consumer list heads indexed by producer node.
     uint32_t* descriptor_heads;
     // Next descriptor consumer indexed by consumer node.
@@ -144,6 +163,23 @@ static inline const uint32_t* loom_low_schedule_const_register_packing_row(
              state->target.descriptor_set->register_packing_resource_count;
 }
 
+// Returns the row for |node_index| in a bounded unspillable-domain table.
+static inline uint32_t* loom_low_schedule_unspillable_pressure_row(
+    const loom_low_schedule_build_state_t* state, uint32_t* table,
+    uint32_t node_index) {
+  return table + (iree_host_size_t)node_index *
+                     state->pressure_limits.unspillable_completion_domain_count;
+}
+
+// Returns the const row for |node_index| in a bounded unspillable-domain
+// table.
+static inline const uint32_t* loom_low_schedule_const_unspillable_pressure_row(
+    const loom_low_schedule_build_state_t* state, const uint32_t* table,
+    uint32_t node_index) {
+  return table + (iree_host_size_t)node_index *
+                     state->pressure_limits.unspillable_completion_domain_count;
+}
+
 // Returns the bounded completion domain containing |reg_class_id|.
 static inline uint16_t loom_low_schedule_unspillable_completion_domain_id(
     const loom_low_schedule_build_state_t* state, uint16_t reg_class_id) {
@@ -156,6 +192,19 @@ static inline uint16_t loom_low_schedule_unspillable_completion_domain_id(
       .unspillable_completion_domain_ids_by_reg_class[reg_class_id];
 }
 
+// Resets the sparse operand-use scratch for one candidate operand.
+static inline void loom_low_schedule_reset_candidate_operand_use(
+    const loom_low_schedule_build_state_t* state,
+    loom_low_schedule_pressure_state_t* pressure_state,
+    loom_value_ordinal_t value_ordinal) {
+  pressure_state->candidate_operand_use_counts[value_ordinal] = 0;
+  pressure_state->candidate_scratch_counts[value_ordinal] = 0;
+  state->values[value_ordinal].candidate_transferred_units = 0;
+  state->values[value_ordinal].flags &=
+      ~(LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_ALIAS_CLAIM |
+        LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_LATE_READ);
+}
+
 // Resets the sparse operand-use scratch accumulated for one candidate.
 static inline void loom_low_schedule_reset_candidate_operand_uses(
     const loom_low_schedule_build_state_t* state,
@@ -164,10 +213,8 @@ static inline void loom_low_schedule_reset_candidate_operand_uses(
        ++i) {
     const loom_value_ordinal_t value_ordinal =
         pressure_state->candidate_operand_ordinals[i];
-    pressure_state->candidate_operand_use_counts[value_ordinal] = 0;
-    pressure_state->candidate_scratch_counts[value_ordinal] = 0;
-    state->values[value_ordinal].flags &=
-        ~LOOM_LOW_SCHEDULE_VALUE_FLAG_CANDIDATE_ALIAS_CLAIM;
+    loom_low_schedule_reset_candidate_operand_use(state, pressure_state,
+                                                  value_ordinal);
   }
   pressure_state->candidate_operand_count = 0;
 }
@@ -217,8 +264,19 @@ typedef enum loom_low_schedule_pressure_risk_e {
   LOOM_LOW_SCHEDULE_PRESSURE_RISK_DEBT = 2,
 } loom_low_schedule_pressure_risk_t;
 
+// Register debt for 64 canonical register-class IDs. Shared alias pools use
+// their representative class, so all aliases identify the same physical bank.
+typedef struct loom_low_schedule_register_debt_word_t {
+  // Banks whose physical pressure grows beyond their spillable capacity.
+  uint64_t banks;
+  // Subset of banks in which the candidate opens required register lifetimes.
+  uint64_t required_banks;
+} loom_low_schedule_register_debt_word_t;
+
 // Complete bounded score for one ready scheduling candidate.
 typedef struct loom_low_schedule_candidate_score_t {
+  // Debt words borrowed from the candidate policy until its next selection.
+  loom_low_schedule_register_debt_word_t* register_debt;
   // Aggregate live register units after scheduling the candidate.
   uint64_t projected_live_units;
   // Live register units whose last use is the candidate.
@@ -229,7 +287,7 @@ typedef struct loom_low_schedule_candidate_score_t {
   uint32_t killed_live_value_count;
   // Register result values made live by the candidate.
   uint32_t produced_live_value_count;
-  // Longest same-block latency path starting at the candidate.
+  // Longest same-block issue-separation path starting at the candidate.
   uint32_t critical_path_cycles;
   // Downstream visible register demand reached through structural nodes.
   uint32_t pressure_demand_units;
@@ -254,12 +312,18 @@ typedef struct loom_low_schedule_candidate_score_t {
   // Crossed pressure cliff, or LOOM_LOW_SCHEDULE_PRESSURE_CLIFF_NONE.
   // Presence excludes |units_until_pressure_cliff|.
   uint32_t pressure_cliff_units;
-  // Required physical units before the next cliff when no cliff was crossed,
-  // or LOOM_LOW_SCHEDULE_PRESSURE_CLIFF_NONE.
+  // Remaining units before the next cliff in a resource the candidate grows,
+  // or LOOM_LOW_SCHEDULE_PRESSURE_CLIFF_NONE when none applies or one crossed.
   uint32_t units_until_pressure_cliff;
-  // Smallest full unspillable capacity whose active completion chain the
+  // Smallest hard unspillable capacity whose selected completion chain the
   // candidate advances, or UINT32_MAX when it advances none.
   uint32_t active_unspillable_completion_capacity;
+  // Smallest hard capacity whose transaction-local final the candidate
+  // advances, or UINT32_MAX when it advances none.
+  uint32_t active_unspillable_transaction_final_capacity;
+  // Smallest full unspillable capacity whose exact next-consumer handoff the
+  // candidate opens, or UINT32_MAX when it opens none.
+  uint32_t opened_unspillable_completion_capacity;
   // Smallest packing-resource capacity whose selected completion chain the
   // candidate advances, or UINT32_MAX when it advances none.
   uint32_t active_register_packing_completion_capacity;
@@ -309,8 +373,15 @@ enum loom_low_schedule_candidate_flag_bits_e {
   // Candidate grows at least one constrained register-packing resource.
   LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_GROWS_PACKING_RESOURCE = 1u << 4,
   // Candidate itself requires more physical storage than an unspillable
-  // register class or wholly unspillable alias set can provide.
+  // register class, pressure set, or shared packing resource can provide.
   LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_EXCEEDS_UNSPILLABLE_CAPACITY = 1u << 5,
+  // Candidate opens required storage above a spillable bank's capacity.
+  // Other live values can still spill, so this is pressure debt, not proof
+  // that the candidate's mandatory physical footprint cannot fit.
+  LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_OPENS_REQUIRED_REGISTER_DEBT = 1u << 10,
+  // Candidate grows a spillable bank beyond its capacity, independently of
+  // whether its new values require physical registers across later repairs.
+  LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_OPENS_REGISTER_DEBT = 1u << 11,
   // Candidate establishes storage for a later operation. Storage setup is
   // actionable only when it also advances storage or unlocks a descriptor.
   LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_STORAGE_SETUP = 1u << 7,
@@ -328,7 +399,7 @@ enum loom_low_schedule_candidate_flag_bits_e {
       LOOM_LOW_SCHEDULE_NODE_FLAG_DESCRIPTOR_SETUP,
 };
 static_assert(
-    LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_EXACT_PACKING_COMPLETION <= UINT16_MAX,
+    LOOM_LOW_SCHEDULE_CANDIDATE_FLAG_OPENS_REGISTER_DEBT <= UINT16_MAX,
     "candidate flags must fit in loom_low_schedule_candidate_score_t");
 static_assert(
     (LOOM_LOW_SCHEDULE_NODE_FLAG_PAIR_TRANSPARENT << 1u) ==
@@ -377,11 +448,11 @@ void loom_low_schedule_reverse_source_pressure_node(
     loom_low_schedule_pressure_state_t* pressure_state,
     const loom_low_schedule_node_t* node);
 
-// Removes the block arguments closing a reverse source-order block sweep.
-void loom_low_schedule_remove_source_pressure_block_arguments(
+// Starts a reverse source-order block sweep at its canonical live-outs.
+// Block-local live state is reset; function-wide high-water marks are retained.
+void loom_low_schedule_initialize_source_pressure_block(
     loom_low_schedule_build_state_t* state,
-    loom_low_schedule_pressure_state_t* pressure_state,
-    const loom_block_t* block);
+    loom_low_schedule_pressure_state_t* pressure_state, uint32_t block_index);
 
 // Resets mutable state used to reconstruct source-order pressure ceilings.
 void loom_low_schedule_reset_source_pressure_sweep(
@@ -392,17 +463,29 @@ iree_status_t loom_low_schedule_pressure_initialize_unlock_summaries(
     loom_low_schedule_build_state_t* state, uint32_t node_count,
     loom_low_schedule_pressure_state_t* pressure_state);
 
-// Publishes one consumer to its final unscheduled dependency producer.
+// Publishes an admitted source-range consumer whose sole remaining dependency
+// group belongs to an unscheduled producer. Range admission is owned by the
+// list scheduler; dependency readiness alone cannot cross a source boundary.
 void loom_low_schedule_pressure_publish_unlock_consumer(
     loom_low_schedule_build_state_t* state,
-    loom_low_schedule_pressure_state_t* pressure_state, uint32_t producer_node,
-    uint32_t consumer_node);
+    loom_low_schedule_pressure_state_t* pressure_state, uint32_t group_index);
+
+// Queries the retained descriptor frontier for a consumer made ready by
+// |candidate_node| that is the final local consumer of another live operand in
+// |resource|. Forwarded values cannot retire locally. The resource's pressure
+// projection determines whether this continuation is constrained.
+bool loom_low_schedule_pressure_candidate_unlocks_packing_continuation(
+    const loom_low_schedule_build_state_t* state,
+    const loom_low_schedule_pressure_state_t* pressure_state,
+    uint32_t candidate_node,
+    const loom_low_register_packing_resource_t* resource);
 
 void loom_low_schedule_pressure_score_candidate(
     const loom_low_schedule_build_state_t* state,
     loom_low_schedule_pressure_state_t* pressure_state,
     const loom_low_schedule_ready_policy_t* ready_policy,
     const uint32_t* indegrees, uint32_t node_index,
+    loom_low_schedule_register_debt_word_t* register_debt,
     loom_low_schedule_candidate_score_t* out_score);
 
 // Resolves a pressure source to its target descriptor-authored name.

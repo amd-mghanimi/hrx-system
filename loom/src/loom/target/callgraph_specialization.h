@@ -22,6 +22,9 @@ const loom_pass_info_t* loom_target_callgraph_specialization_pass_info(void);
 // Public definitions keep their own contexts; visible callers cannot bind an
 // unbound public entry. Private dependencies reachable from an unbound entry
 // preserve their original definitions while bound callers use private versions.
+// Independently executing regions supply the context of calls within them;
+// construction and worker calls can specialize the same private helper
+// separately.
 iree_status_t loom_target_callgraph_specialization_run(loom_pass_t* pass,
                                                        loom_module_t* module);
 

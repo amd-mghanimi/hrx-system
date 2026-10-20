@@ -120,8 +120,9 @@ func.def @ancestor_types_and_attributes(%choose: i1, %element: f32) {
   cfg.br ^tail
 ^tail:
   scf.if %choose {
-    test.decl @nested_signature(%storage: pool<[%width]>) -> (i32)
+    test.decl @nested_signature(%storage: group<[%width]>) -> (i32)
     %annotated = test.attrs %element {shape = #test.options<mode = fast, element_type = vector<[%width]xf32>>} : f32
+    test.use %annotated : f32
   } else {
     %c0 = index.constant 0 : index
     %bounded = index.assume %c0 [lt(%c0, %width)] : index
@@ -135,8 +136,9 @@ func.def @ancestor_types_and_attributes(%choose: i1, %element: f32) {
   %width = index.constant 16 : index
   test.use %width : index
   scf.if %choose {
-    test.decl @nested_signature(%storage: pool<[%width]>) -> (i32)
+    test.decl @nested_signature(%storage: group<[%width]>) -> (i32)
     %annotated = test.attrs %element {shape = #test.options<mode = fast, element_type = vector<[%width]xf32>>} : f32
+    test.use %annotated : f32
   } else {
     %c0 = index.constant 0 : index
     %bounded = index.assume %c0 [lt(%c0, %width)] : index
@@ -146,10 +148,10 @@ func.def @ancestor_types_and_attributes(%choose: i1, %element: f32) {
 }
 
 // ====
-// RUN: with-checks pass-report cfg-simplify
+// RUN: pass cfg-simplify
 
-// A whole chain needs one structural edit and one confirming iteration.
-func.def @chain_iteration_count(%input: i32) -> (i32) {
+// Fusing the chain preserves each side effect and its forwarded payload.
+func.def @chain_payloads(%input: i32) -> (i32) {
   cfg.br ^start(%input: i32)
 ^start(%first: i32):
   test.use %first : i32
@@ -163,15 +165,17 @@ func.def @chain_iteration_count(%input: i32) -> (i32) {
 }
 
 // ----
-CHECK: *"changed":true,*
-CHECK: *"iterations":2,*
-CHECK: *"blocks-fused":3,*
+func.def @chain_payloads(%input: i32) -> (i32) {
+  test.use %input : i32
+  test.use %input : i32
+  test.use %input : i32
+  func.return %input : i32
+}
 
 // ====
-// RUN: with-checks pass-report cfg-simplify
+// RUN: pass cfg-simplify
 
-// Independent terminal paths contract together, without cloning returns and
-// restarting analysis for each resulting unreachable block.
+// Each terminal path retains its side effect and return.
 func.def @terminal_paths(%choose_side: i1, %choose_value: i1, %value: i32) {
   cfg.cond_br %choose_side, ^left, ^right
 ^left:
@@ -201,16 +205,32 @@ func.def @terminal_paths(%choose_side: i1, %choose_value: i1, %value: i32) {
 }
 
 // ----
-CHECK: *"changed":true,*
-CHECK: *"iterations":2,*
-CHECK: *"blocks-fused":4,*
+func.def @terminal_paths(%choose_side: i1, %choose_value: i1, %value: i32) {
+  cfg.cond_br %choose_side, ^left, ^right
+^left:
+  cfg.cond_br %choose_value, ^first, ^second
+^right:
+  cfg.cond_br %choose_value, ^third, ^fourth
+^first:
+  test.use %value : i32
+  func.return
+^second:
+  test.use %value : i32
+  func.return
+^third:
+  test.use %value : i32
+  func.return
+^fourth:
+  test.use %value : i32
+  func.return
+}
 
 // ====
-// RUN: with-checks pass-report cfg-simplify
+// RUN: pass cfg-simplify
 
 test.target<low_core> @target
 
-// A Low chain ending in an operandless return contracts in one edit.
+// A Low chain collapses to its operandless return.
 low.kernel.def target<test.low.core>(@target) @terminal_chain() asm {
   low.br ^start
 ^start:
@@ -222,9 +242,11 @@ low.kernel.def target<test.low.core>(@target) @terminal_chain() asm {
 }
 
 // ----
-CHECK: *"changed":true,*
-CHECK: *"iterations":2,*
-CHECK: *"blocks-fused":3,*
+test.target<low_core> @target
+
+low.kernel.def target<test.low.core>(@target) @terminal_chain() asm {
+  return
+}
 
 // ====
 // RUN: pass cfg-simplify
@@ -362,8 +384,6 @@ low.func.def target<test.low.core>(@target) @fused_concat_dominates_consumer(%ch
   %low = test.const.i32 7
   %high = test.const.i32 11
   %pair = concat(%low, %high) : (reg<test.i32>, reg<test.i32>) -> reg<test.i32 x2>
-  low.cond_br %choose, ^consumer, ^exit : reg<test.i32>
-^consumer:
   return %pair
 ^exit:
   return %seed

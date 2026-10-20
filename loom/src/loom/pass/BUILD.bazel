@@ -16,6 +16,8 @@ loom_cc_library(
     name = "environment",
     srcs = ["environment.c"],
     hdrs = ["environment.h"],
+    # Environment lookup borrows descriptors; it defines no descriptor identity.
+    tags = ["LINKABLE_MORE_THAN_ONCE"],
     deps = [
         "//runtime/src/iree/base",
     ],
@@ -26,7 +28,6 @@ loom_cc_library(
     hdrs = ["types.h"],
     deps = [
         "//loom/src/loom/error:emitter",
-        "//loom/src/loom/ir",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
     ],
@@ -39,9 +40,11 @@ loom_cc_library(
     deps = [
         ":types",
         "//loom/src/loom/analysis:conditioned_value_facts",
+        "//loom/src/loom/analysis:symbol_facts",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops:type_registry",
+        "//loom/src/loom/ops/target",
         "//loom/src/loom/util:fact_table",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
@@ -54,6 +57,33 @@ loom_cc_library(
     hdrs = ["pipeline.h"],
     deps = [
         "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "pipeline_snapshot",
+    srcs = ["pipeline_snapshot.c"],
+    hdrs = ["pipeline_snapshot.h"],
+    deps = [
+        "//loom/src/loom/ir",
+        "//loom/src/loom/link:linker",
+        "//loom/src/loom/ops/pass",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_test(
+    name = "pipeline_snapshot_test",
+    srcs = ["pipeline_snapshot_test.cc"],
+    deps = [
+        ":pipeline_snapshot",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops/pass",
+        "//loom/src/loom/pass/test:harness",
+        "//runtime/src/iree/base/internal:arena",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
     ],
 )
 
@@ -100,6 +130,7 @@ loom_cc_library(
     hdrs = ["predicate.h"],
     deps = [
         ":types",
+        "//loom/src/loom/ir",
         "//runtime/src/iree/base",
     ],
 )
@@ -108,12 +139,24 @@ loom_cc_library(
     name = "registry",
     srcs = ["registry.c"],
     hdrs = ["registry.h"],
+    # Registry queries borrow descriptors owned by their caller.
+    tags = ["LINKABLE_MORE_THAN_ONCE"],
     deps = [
-        ":environment",
-        ":pipeline",
         ":types",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
+    name = "options",
+    srcs = ["options.c"],
+    hdrs = ["options.h"],
+    deps = [
+        ":pipeline",
+        ":registry",
         "//loom/src/loom/ir",
         "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
     ],
 )
 
@@ -122,6 +165,7 @@ loom_cc_library(
     srcs = ["invocation.c"],
     hdrs = ["invocation.h"],
     deps = [
+        ":options",
         ":registry",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/pass",
@@ -152,6 +196,7 @@ loom_cc_library(
     deps = [
         ":environment",
         ":invocation",
+        ":options",
         ":registry",
         ":verify",
         "//loom/src/loom/ir",
@@ -165,9 +210,10 @@ loom_cc_library(
     name = "report",
     srcs = ["report.c"],
     hdrs = ["report.h"],
+    # Reports own caller-allocated storage and borrow compiler descriptors.
+    tags = ["LINKABLE_MORE_THAN_ONCE"],
     deps = [
         ":environment",
-        ":program",
         ":registry",
         ":types",
         "//loom/src/loom/util:json",
@@ -256,9 +302,7 @@ loom_cc_library(
         "//loom/src/loom/target/arch/amdgpu:__pkg__",
         "//loom/src/loom/target/arch/cmd/check:__pkg__",
         "//loom/src/loom/target/arch/cmd/lower:__pkg__",
-        "//loom/src/loom/tooling/compile:__pkg__",
         "//loom/src/loom/tools/loom-check:__pkg__",
-        "//loom/src/loom/tools/loom-compile:__pkg__",
         "//loom/src/loom/tools/loom-import-cxx:__pkg__",
         "//loom/src/loom/tools/loom-opt:__pkg__",
         "//loom/src/loom/transforms/symbol:__pkg__",
@@ -266,7 +310,6 @@ loom_cc_library(
     deps = [
         ":registry",
         "//loom/src/loom/codegen/low/pipeline:pass_environment",
-        "//loom/src/loom/codegen/low/pipeline:pass_requirements",
         "//loom/src/loom/codegen/low/transforms:allocation",
         "//loom/src/loom/codegen/low/transforms:cfg_tuple_decomposition",
         "//loom/src/loom/codegen/low/transforms:cse",
@@ -293,14 +336,15 @@ loom_cc_library(
         "//loom/src/loom/transforms/cleanup:strip_hints",
         "//loom/src/loom/transforms/encoding:layout_transport",
         "//loom/src/loom/transforms/func:locations",
-        "//loom/src/loom/transforms/kernel:kernel_async_legality",
         "//loom/src/loom/transforms/kernel:kernel_resources",
+        "//loom/src/loom/transforms/kernel:kernel_synchronization_legality",
         "//loom/src/loom/transforms/kernel:promote_private_fragments",
         "//loom/src/loom/transforms/kernel:stage_loop_carried_fragments",
         "//loom/src/loom/transforms/loop:licm",
         "//loom/src/loom/transforms/loop:loop_fusion",
         "//loom/src/loom/transforms/math:legalize",
         "//loom/src/loom/transforms/ownership:ownership_lifetime",
+        "//loom/src/loom/transforms/pipeline:outline",
         "//loom/src/loom/transforms/scf:scf_pipeline",
         "//loom/src/loom/transforms/scf:scf_to_cfg",
         "//loom/src/loom/transforms/scf:scf_unroll",
@@ -323,6 +367,7 @@ loom_cc_test(
     srcs = ["invocation_test.cc"],
     deps = [
         ":invocation",
+        ":options",
         "//loom/src/loom/ops/pass",
         "//loom/src/loom/pass/test:harness",
         "//loom/src/loom/pass/test:registry",
@@ -352,8 +397,30 @@ loom_cc_test(
         ":interpreter",
         ":program",
         ":report",
-        "//loom/src/loom/error:error_defs",
+        ":trace",
+        "//loom/src/loom/error:parameter",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
+        "//loom/src/loom/ops/test",
         "//loom/src/loom/pass/test:harness",
+        "//loom/src/loom/rewrite:rewriter",
+        "//loom/src/loom/util:stream",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "target_scope_test",
+    srcs = ["target_scope_test.cc"],
+    deps = [
+        ":value_facts",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_registry",
+        "//loom/src/loom/ops/pipeline",
+        "//loom/src/loom/ops/target",
+        "//loom/src/loom/ops/test",
+        "//loom/src/loom/rewrite:rewriter",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -404,6 +471,7 @@ loom_cc_test(
     name = "program_test",
     srcs = ["program_test.cc"],
     deps = [
+        ":options",
         ":program",
         "//loom/src/loom/ops/pass",
         "//loom/src/loom/pass/test:harness",
@@ -417,9 +485,9 @@ loom_cc_test(
     srcs = ["builtin_registry_test.cc"],
     deps = [
         ":builtin_registry",
+        ":options",
         ":registry",
         "//loom/src/loom/codegen/low/pipeline:pass_environment",
-        "//loom/src/loom/codegen/low/pipeline:pass_requirements",
         "//loom/src/loom/pass/testing:registry_verify",
         "//loom/src/loom/target:legalization",
         "//loom/src/loom/target:pass_environment",

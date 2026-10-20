@@ -105,8 +105,8 @@ typedef struct iree_benchmark_loom_summary_event_t {
 typedef struct iree_benchmark_loom_device_event_t {
   // Run identity shared by all emitted events.
   const iree_benchmark_loom_run_identity_t* run;
-  // HAL context whose selected device metadata is reported.
-  iree_benchmark_loom_hal_context_t* context;
+  // Borrowed HAL context whose current device state is reported.
+  const iree_benchmark_loom_hal_context_t* context;
 } iree_benchmark_loom_device_event_t;
 
 typedef struct iree_benchmark_loom_compile_event_t {
@@ -154,8 +154,10 @@ typedef struct iree_benchmark_loom_benchmark_result_event_t {
   const loom_module_t* module;
   // Benchmark plan owning the result.
   const loom_testbench_benchmark_plan_t* benchmark_plan;
-  // Case plan referenced by |benchmark_plan|.
+  // Case plan referenced by |benchmark_plan|, or NULL for a scenario result.
   const loom_testbench_case_plan_t* case_plan;
+  // Scenario plan referenced by |benchmark_plan|, or NULL for a case result.
+  const loom_testbench_scenario_plan_t* scenario_plan;
   // Effective benchmark policy used by the measurement.
   const iree_benchmark_loom_benchmark_policy_t* policy;
   // Borrowed benchmark result payload.
@@ -177,8 +179,10 @@ typedef struct iree_benchmark_loom_profile_replay_event_t {
   const loom_module_t* module;
   // Benchmark plan owning the replay result.
   const loom_testbench_benchmark_plan_t* benchmark_plan;
-  // Case plan referenced by |benchmark_plan|.
+  // Case plan referenced by |benchmark_plan|, or NULL for a scenario replay.
   const loom_testbench_case_plan_t* case_plan;
+  // Scenario plan referenced by |benchmark_plan|, or NULL for a case replay.
+  const loom_testbench_scenario_plan_t* scenario_plan;
   // Effective benchmark policy used by the replay.
   const iree_benchmark_loom_benchmark_policy_t* policy;
   // Borrowed benchmark result payload.
@@ -334,11 +338,11 @@ iree_status_t iree_benchmark_loom_event_sink_emit_summary(
     iree_host_size_t correctness_sample_count,
     iree_host_size_t correctness_failed_sample_count, bool dry_run);
 
-// Emits selected HAL device metadata.
+// Emits current HAL device metadata without initializing the runtime.
 iree_status_t iree_benchmark_loom_event_sink_emit_device(
     const iree_benchmark_loom_event_sink_t* sink,
     const iree_benchmark_loom_run_identity_t* run,
-    iree_benchmark_loom_hal_context_t* context);
+    const iree_benchmark_loom_hal_context_t* context);
 
 // Emits candidate compile metadata.
 iree_status_t iree_benchmark_loom_event_sink_emit_compile(
@@ -369,6 +373,7 @@ iree_status_t iree_benchmark_loom_event_sink_emit_benchmark_result(
     iree_host_size_t work_item_index, const loom_module_t* module,
     const loom_testbench_benchmark_plan_t* benchmark_plan,
     const loom_testbench_case_plan_t* case_plan,
+    const loom_testbench_scenario_plan_t* scenario_plan,
     const iree_benchmark_loom_benchmark_policy_t* policy,
     const iree_benchmark_loom_benchmark_result_t* benchmark_result,
     iree_host_size_t correctness_sample_count,
@@ -382,6 +387,7 @@ iree_status_t iree_benchmark_loom_event_sink_emit_profile_replay(
     iree_host_size_t work_item_index, const loom_module_t* module,
     const loom_testbench_benchmark_plan_t* benchmark_plan,
     const loom_testbench_case_plan_t* case_plan,
+    const loom_testbench_scenario_plan_t* scenario_plan,
     const iree_benchmark_loom_benchmark_policy_t* policy,
     const iree_benchmark_loom_benchmark_result_t* benchmark_result);
 

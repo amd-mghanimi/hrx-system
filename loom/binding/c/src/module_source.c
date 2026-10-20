@@ -88,15 +88,79 @@ loomc_status_t loomc_module_deserialize_from_source(
     const loomc_module_deserialize_options_t* options,
     loomc_allocator_t allocator, loomc_module_t** out_module,
     loomc_result_t** out_result) {
-  LOOMC_RETURN_IF_ERROR(loomc_module_validate_source_arguments(
-      context, workspace, source, out_module, out_result));
+  IREE_TRACE_ZONE_BEGIN(z0);
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_module_validate_source_arguments(context, workspace, source,
+                                                 out_module, out_result));
   loomc_source_format_t format = LOOMC_SOURCE_FORMAT_UNKNOWN;
-  LOOMC_RETURN_IF_ERROR(loomc_module_select_deserialize_format(
-      options, loomc_source_format(source), loomc_source_contents(source),
-      &format));
-  return loomc_module_deserialize_selected_source(context, workspace, source,
-                                                  options, format, allocator,
-                                                  out_module, out_result);
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_module_select_deserialize_format(
+              options, loomc_source_format(source),
+              loomc_source_contents(source), &format));
+  loomc_status_t return_status = loomc_module_deserialize_selected_source(
+      context, workspace, source, options, format, allocator, out_module,
+      out_result);
+  IREE_TRACE_ZONE_END(z0);
+  return return_status;
+}
+
+loomc_status_t loomc_module_deserialize_request(
+    loomc_context_t* context, loomc_workspace_t* workspace,
+    const loomc_request_t* request, loomc_allocator_t host_allocator,
+    loomc_module_t** out_module, loomc_string_view_t* out_root_symbols,
+    loomc_result_t** out_result) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+  if (out_module != NULL) {
+    *out_module = NULL;
+  }
+  if (out_result != NULL) {
+    *out_result = NULL;
+  }
+  if (request == NULL || out_module == NULL || out_result == NULL) {
+    IREE_TRACE_ZONE_END(z0);
+    return loomc_make_status(
+        LOOMC_STATUS_INVALID_ARGUMENT,
+        "request, out_module, and out_result must not be NULL");
+  }
+
+  loomc_module_t* module = NULL;
+  loomc_result_t* result = NULL;
+  loomc_status_t status = loomc_module_deserialize_bytecode_from_source(
+      context, workspace, loomc_request_source(request), NULL, host_allocator,
+      &module, &result);
+  if (loomc_status_is_ok(status) && loomc_result_succeeded(result)) {
+    const loom_module_t* internal_module =
+        loomc_module_const_loom_module(module);
+    for (loomc_host_size_t i = 0;
+         i < loomc_request_root_count(request) && loomc_status_is_ok(status);
+         ++i) {
+      loomc_request_root_t root;
+      loomc_request_root_at(request, i, &root);
+      if (root.module_ordinal != 0) {
+        status =
+            loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                              "request root addresses an unavailable module");
+      } else if (root.symbol_ordinal >= internal_module->symbols.count) {
+        status =
+            loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                              "request root addresses an unavailable symbol");
+      } else if (out_root_symbols != NULL) {
+        const loom_symbol_t* symbol =
+            &internal_module->symbols.entries[root.symbol_ordinal];
+        out_root_symbols[i] = loomc_string_view_from_iree(
+            loom_string_table_get(&internal_module->strings, symbol->name_id));
+      }
+    }
+  }
+  if (loomc_status_is_ok(status)) {
+    *out_module = module;
+    *out_result = result;
+  } else {
+    loomc_module_release(module);
+    loomc_result_release(result);
+  }
+  IREE_TRACE_ZONE_END(z0);
+  return status;
 }
 
 loomc_status_t loomc_module_deserialize_from_file(
@@ -104,6 +168,7 @@ loomc_status_t loomc_module_deserialize_from_file(
     const loomc_module_deserialize_options_t* options,
     loomc_allocator_t allocator, loomc_module_t** out_module,
     loomc_result_t** out_result) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (out_module != NULL) {
     *out_module = NULL;
   }
@@ -112,16 +177,19 @@ loomc_status_t loomc_module_deserialize_from_file(
   }
   if (context == NULL || workspace == NULL || file == NULL ||
       out_module == NULL || out_result == NULL) {
-    return loomc_make_status(
+    loomc_status_t return_status = loomc_make_status(
         LOOMC_STATUS_INVALID_ARGUMENT,
         "context, workspace, file, out_module, and out_result must not be "
         "NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
 
   uint8_t* storage = NULL;
   loomc_host_size_t storage_length = 0;
-  LOOMC_RETURN_IF_ERROR(loomc_source_read_file_to_storage(
-      file, allocator, &storage, &storage_length));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_source_read_file_to_storage(file, allocator, &storage,
+                                            &storage_length));
   const loomc_byte_span_t contents =
       loomc_make_byte_span(storage, storage_length);
   loomc_source_format_t format = LOOMC_SOURCE_FORMAT_UNKNOWN;
@@ -144,6 +212,7 @@ loomc_status_t loomc_module_deserialize_from_file(
   }
   loomc_source_release(source);
   loomc_allocator_free(allocator, storage);
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }
 
@@ -152,6 +221,7 @@ loomc_status_t loomc_module_deserialize_from_path(
     loomc_string_view_t path, const loomc_module_deserialize_options_t* options,
     loomc_allocator_t allocator, loomc_module_t** out_module,
     loomc_result_t** out_result) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (out_module != NULL) {
     *out_module = NULL;
   }
@@ -161,19 +231,24 @@ loomc_status_t loomc_module_deserialize_from_path(
   if (context == NULL || workspace == NULL ||
       loomc_string_view_is_empty(path) || out_module == NULL ||
       out_result == NULL) {
-    return loomc_make_status(
+    loomc_status_t return_status = loomc_make_status(
         LOOMC_STATUS_INVALID_ARGUMENT,
         "context, workspace, path, out_module, and out_result must be valid");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
   if (!loomc_allocator_is_valid(allocator)) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "allocator.ctl must not be NULL");
+    loomc_status_t return_status = loomc_make_status(
+        LOOMC_STATUS_INVALID_ARGUMENT, "allocator.ctl must not be NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
 
   iree_io_file_contents_t* file_contents = NULL;
-  LOOMC_RETURN_IF_ERROR(loomc_status_from_iree(iree_io_file_contents_read(
-      iree_string_view_from_loomc(path), iree_allocator_from_loomc(allocator),
-      &file_contents)));
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_status_from_iree(iree_io_file_contents_read(
+              iree_string_view_from_loomc(path),
+              iree_allocator_from_loomc(allocator), &file_contents)));
   const loomc_byte_span_t contents =
       loomc_byte_span_from_iree(file_contents->const_buffer);
   loomc_source_format_t format = LOOMC_SOURCE_FORMAT_UNKNOWN;
@@ -203,6 +278,7 @@ loomc_status_t loomc_module_deserialize_from_path(
   }
   loomc_source_release(source);
   iree_io_file_contents_free(file_contents);
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }
 
@@ -247,21 +323,28 @@ loomc_status_t loomc_module_serialize_to_source(
     const loomc_module_t* module,
     const loomc_module_serialize_options_t* options,
     loomc_allocator_t allocator, loomc_source_t** out_source) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (out_source != NULL) {
     *out_source = NULL;
   }
   loomc_source_format_t format = LOOMC_SOURCE_FORMAT_UNKNOWN;
-  LOOMC_RETURN_IF_ERROR(loomc_module_select_serialize_format(options, &format));
-  return loomc_module_serialize_selected_source(module, options, format,
-                                                allocator, out_source);
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, loomc_module_select_serialize_format(options, &format));
+  loomc_status_t return_status = loomc_module_serialize_selected_source(
+      module, options, format, allocator, out_source);
+  IREE_TRACE_ZONE_END(z0);
+  return return_status;
 }
 
 loomc_status_t loomc_module_serialize_to_file(
     const loomc_module_t* module,
     const loomc_module_serialize_options_t* options, FILE* file) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (module == NULL || file == NULL) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "module and file must not be NULL");
+    loomc_status_t return_status = loomc_make_status(
+        LOOMC_STATUS_INVALID_ARGUMENT, "module and file must not be NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
   loomc_source_t* source = NULL;
   loomc_status_t status = loomc_module_serialize_to_source(
@@ -276,6 +359,7 @@ loomc_status_t loomc_module_serialize_to_file(
     }
   }
   loomc_source_release(source);
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }
 
@@ -283,18 +367,25 @@ loomc_status_t loomc_module_serialize_to_path(
     const loomc_module_t* module,
     const loomc_module_serialize_options_t* options, loomc_string_view_t path,
     loomc_allocator_t allocator) {
+  IREE_TRACE_ZONE_BEGIN(z0);
   if (module == NULL || loomc_string_view_is_empty(path)) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "module must not be NULL and path must not be "
-                             "empty");
+    loomc_status_t return_status =
+        loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
+                          "module must not be NULL and path must not be "
+                          "empty");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
   if (!loomc_allocator_is_valid(allocator)) {
-    return loomc_make_status(LOOMC_STATUS_INVALID_ARGUMENT,
-                             "allocator.ctl must not be NULL");
+    loomc_status_t return_status = loomc_make_status(
+        LOOMC_STATUS_INVALID_ARGUMENT, "allocator.ctl must not be NULL");
+    IREE_TRACE_ZONE_END(z0);
+    return return_status;
   }
 
   loomc_source_t* source = NULL;
-  LOOMC_RETURN_IF_ERROR(
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0,
       loomc_module_serialize_to_source(module, options, allocator, &source));
   iree_io_stream_t* stream = NULL;
   loomc_status_t status = loomc_status_from_iree(iree_io_stdio_stream_open(
@@ -306,7 +397,11 @@ loomc_status_t loomc_module_serialize_to_path(
     status = loomc_status_from_iree(
         iree_io_stream_write(stream, contents.data_length, contents.data));
   }
+  if (loomc_status_is_ok(status)) {
+    status = loomc_status_from_iree(iree_io_stream_flush(stream));
+  }
   iree_io_stream_release(stream);
   loomc_source_release(source);
+  IREE_TRACE_ZONE_END(z0);
   return status;
 }

@@ -10,6 +10,7 @@
 #include <cxx/attributes.h>
 #include <cxx/types_fwd.h>
 
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -20,6 +21,8 @@
 #include "loom/ops/op_defs.h"
 
 namespace loom::cxx_import {
+
+class Storage;
 
 // One concrete specialization of a typed encoding or view operation. Template
 // declarations establish the public operation spelling; concrete source types
@@ -40,8 +43,8 @@ class ViewIntrinsic {
   // Emits the admitted operation. Value absence is the result of a handled
   // void store, not an unrecognized intrinsic.
   std::optional<Value> call(std::span<const Value> arguments, Types& types,
-                            ValueArena& arena, cxx::AST* owner,
-                            loom_builder_t* builder,
+                            ValueArena& arena, Storage& storage,
+                            cxx::AST* owner, loom_builder_t* builder,
                             loom_location_id_t location) const;
 
   // Compares the complete concrete contract for one canonical declaration.
@@ -67,10 +70,18 @@ class ViewIntrinsic {
   const cxx::Type* result_source_type_ = nullptr;
   // Admitted encoding result for layout factories.
   const EncodingPartition* result_encoding_ = nullptr;
+  // Typed zero-origin buffer source for buffer.view, null for C++ pointers.
+  const BufferPartition* source_buffer_ = nullptr;
   // Admitted source view for subview/load/store.
   const ViewPartition* source_view_ = nullptr;
   // Admitted dependent result view for buffer.view/subview.
   const ViewPartition* result_view_ = nullptr;
+  // Source arguments whose fixed-width integer values are unsigned.
+  uint32_t unsigned_argument_mask_ = 0;
+  // Flattened dimension components whose integer values are unsigned.
+  uint16_t unsigned_dimension_mask_ = 0;
+  // Flattened subview origin components whose integer values are unsigned.
+  uint16_t unsigned_origin_mask_ = 0;
   // Native scalar result for view.load.
   loom_type_t scalar_result_ = {};
 };

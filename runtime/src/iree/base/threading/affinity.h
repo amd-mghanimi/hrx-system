@@ -54,33 +54,27 @@ extern "C" {
 //   management infra to see if we can tell when we need to do this.
 //
 //   Mapping:
-//    group: NUMA node passed to set_mempolicy.
+//    group: NUMA node when group_any is set; otherwise unused.
 //       id: CPU_SET bit indicating which CPU to run on.
 //      smt: whether to CPU_SET both the base ID and the subsequent ID.
 //
 // Windows:
-//   Stuff just works. Love it.
-//
 //   Mapping:
-//    group: GROUP_AFFINITY::Group/PROCESSOR_NUMBER::Group.
+//    group: NUMA node when group_any is set; otherwise processor group.
 //       id: GROUP_AFFINITY::Mask bit/PROCESSOR_NUMBER::Number.
 //      smt: whether to set both the base ID and the subsequent ID in Mask.
 typedef struct iree_thread_affinity_t {
   // When 1 the processor ID will be ignored and the platform will choose any
-  // processor associated with the specified group (NUMA node ID).
+  // processor associated with the specified NUMA node. On Windows this node
+  // is resolved to its primary processor group's node-local CPU mask.
   uint32_t group_any : 1;
-  // Processor group the thread should be assigned to, aka NUMA node, cluster,
-  // etc depending on platform. On platforms where the processor ID is unique
-  // for the purposes of scheduling (e.g. Linux) this is used for related APIs
-  // like mbind/set_mempolicy. If group_any is set and id_assigned is not then
-  // any processor associated with the group will be used.
-  uint32_t group : 8;
+  // NUMA node when group_any is set. Otherwise the native processor group for
+  // a specific CPU (Windows), or unused (Linux/Darwin). Memory placement is
+  // independent of thread affinity.
+  uint32_t group;
 
-  uint32_t reserved : 23;
-
-  // When 0 the affinity is undefined and the system may place the thread
-  // anywhere and migrate it as much as it likes. In practice it may do that
-  // even when specified.
+  // When group_any is 0, indicates whether id specifies a processor. When
+  // both flags are 0 the affinity is unspecified.
   uint32_t id_assigned : 1;
   // Processor ID the thread should be scheduled on. The interpretation and
   // efficacy of this request varies per platform.
@@ -101,7 +95,7 @@ static inline bool iree_thread_affinity_is_unspecified(
 }
 
 // Sets |out_thread_affinity| to match all processors associated with the given
-// processor group (aka NUMA node ID). Any processor within the group may be
+// NUMA node ID. Any eligible processor within the node may be
 // selected by the platform.
 IREE_API_EXPORT void iree_thread_affinity_set_group_any(
     uint32_t group, iree_thread_affinity_t* out_thread_affinity);

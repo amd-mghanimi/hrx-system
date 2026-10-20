@@ -1,0 +1,141 @@
+// Two subgroups exchange complete panels through a bounded LDS ring. A slot
+// sequence governs publication and reuse independently of its payload address.
+// Subgroup barriers join all payload accesses before the leader publishes or
+// returns credit; neither role waits at a workgroup barrier inside the stream.
+kernel.def @panel_stream() {
+  %unit = index.constant 1 : index
+  %subgroup_size = target.subgroup.size : index
+  %role_count = index.constant 2 : index
+  %items = index.mul %subgroup_size, %role_count : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%items, %unit, %unit) : index
+} launch(%record_count: index, %input: buffer, %output: buffer) where [range(%record_count, 0, 40)] {
+  %origin = index.constant 0 : offset
+  %output_origin = index.constant 64 : offset
+  %payload_bytes = index.constant 2048 : offset
+  %sequence_bytes = index.constant 8 : offset
+  %payload_storage = buffer.alloca<workgroup> align(16) %payload_bytes : buffer
+  %sequence_storage = buffer.alloca<workgroup> align(4) %sequence_bytes : buffer
+  %slots = buffer.view %payload_storage[%origin] : buffer -> view<2x2x128xf32>
+  %sequences = buffer.view %sequence_storage[%origin] : buffer -> view<2xi32>
+  %inputs = buffer.view %input[%origin] : buffer -> view<40x2x128xf32>
+  %outputs = buffer.view %output[%output_origin] : buffer -> view<40x128xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %capacity = index.constant 2 : index
+  %columns = index.constant 128 : index
+  %last_column = index.constant 127 : index
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %c2 = scalar.constant 2 : i32
+  %half = scalar.constant 0.5 : f32
+  %quarter = scalar.constant 0.25 : f32
+  %lane = kernel.subgroup.lane.id : index
+  %subgroup = kernel.subgroup.id : index
+  %width = kernel.subgroup.size : index
+  %item = kernel.workitem.id<x> : index
+  %initializer = index.cmp eq, %item, %begin : index
+  %leader = index.cmp eq, %lane, %begin : index
+  %producer = index.cmp eq, %subgroup, %begin : index
+  %consumer = index.cmp eq, %subgroup, %step : index
+  scf.if %initializer {
+    view.store %c0, %sequences[0] : i32, view<2xi32>
+    view.store %c1, %sequences[1] : i32, view<2xi32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  scf.if %producer {
+    scf.for %record = [%begin to %record_count step %step] {
+      %slot = index.rem %record, %capacity : index
+      %free_sequence = index.cast %record : index to i32
+      scf.while {
+        %observed = view.atomic.load %sequences[%slot] {ordering = acquire, scope = workgroup} : view<2xi32> -> i32
+        %sequence = kernel.subgroup.broadcast.first %observed : i32
+        %pending = scalar.cmpi ne, %sequence, %free_sequence : i32
+        scf.condition %pending : i1
+      } do {
+        scf.yield
+      }
+      scf.for %column = [%lane to %columns step %width] {
+        %gate = view.load %inputs[%record, 0, %column] : view<40x2x128xf32> -> f32
+        %up = view.load %inputs[%record, 1, %column] : view<40x2x128xf32> -> f32
+        view.store %gate, %slots[%slot, 0, %column] : f32, view<2x2x128xf32>
+        view.store %up, %slots[%slot, 1, %column] : f32, view<2x2x128xf32>
+      }
+      kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+      %ready_sequence = scalar.addi %free_sequence, %c1 : i32
+      scf.if %leader {
+        view.atomic.store %ready_sequence, %sequences[%slot] {ordering = release, scope = workgroup} : i32, view<2xi32>
+      }
+    }
+  }
+  scf.if %consumer {
+    scf.for %record = [%begin to %record_count step %step] {
+      %slot = index.rem %record, %capacity : index
+      %free_sequence = index.cast %record : index to i32
+      %ready_sequence = scalar.addi %free_sequence, %c1 : i32
+      scf.while {
+        %observed = view.atomic.load %sequences[%slot] {ordering = acquire, scope = workgroup} : view<2xi32> -> i32
+        %sequence = kernel.subgroup.broadcast.first %observed : i32
+        %pending = scalar.cmpi ne, %sequence, %ready_sequence : i32
+        scf.condition %pending : i1
+      } do {
+        scf.yield
+      }
+      kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+      scf.for %ordinal = [%lane to %columns step %width] {
+        %column = index.sub %last_column, %ordinal : index
+        %gate = view.load %slots[%slot, 0, %column] : view<2x2x128xf32> -> f32
+        %up = view.load %slots[%slot, 1, %column] : view<2x2x128xf32> -> f32
+        %linear = scalar.mulf %gate, %quarter : f32
+        %scale = scalar.addf %half, %linear : f32
+        %activated = scalar.mulf %gate, %scale : f32
+        %result = scalar.mulf %activated, %up : f32
+        view.store %result, %outputs[%record, %column] : f32, view<40x128xf32>
+      }
+      kernel.barrier<workgroup> scope(subgroup) ordering(acq_rel)
+      %next_sequence = scalar.addi %free_sequence, %c2 : i32
+      scf.if %leader {
+        view.atomic.store %next_sequence, %sequences[%slot] {ordering = release, scope = workgroup} : i32, view<2xi32>
+      }
+    }
+  }
+  kernel.return
+}
+
+// The sequential oracle has no queue, shared allocation, or publication state.
+func.def @panel_stream_oracle(%record_count: index, %input: buffer, %output: buffer) where [range(%record_count, 0, 40)] {
+  %origin = index.constant 0 : offset
+  %output_origin = index.constant 64 : offset
+  %inputs = buffer.view %input[%origin] : buffer -> view<40x2x128xf32>
+  %outputs = buffer.view %output[%output_origin] : buffer -> view<40x128xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %columns = index.constant 128 : index
+  %half = scalar.constant 0.5 : f32
+  %quarter = scalar.constant 0.25 : f32
+  scf.for %record = [%begin to %record_count step %step] {
+    scf.for %column = [%begin to %columns step %step] {
+      %gate = view.load %inputs[%record, 0, %column] : view<40x2x128xf32> -> f32
+      %up = view.load %inputs[%record, 1, %column] : view<40x2x128xf32> -> f32
+      %linear = scalar.mulf %gate, %quarter : f32
+      %scale = scalar.addf %half, %linear : f32
+      %activated = scalar.mulf %gate, %scale : f32
+      %result = scalar.mulf %activated, %up : f32
+      view.store %result, %outputs[%record, %column] : f32, view<40x128xf32>
+    }
+  }
+  func.return
+}
+
+check.scenario @panel_stream_values {
+  check.trial[41](%record_count: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%record_count] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-4.0 to 4.0) : tensor<40x2x128xf32>
+    %unchanged_input = check.generate.random.uniform seed(%seed) range(-4.0 to 4.0) : tensor<40x2x128xf32>
+    %output = check.generate.fill value(-123.0) : tensor<5152xf32>
+    check.compare<@panel_stream, @panel_stream_oracle>(%record_count, %input, %output) : (index, tensor<40x2x128xf32>, tensor<5152xf32>) -> () {
+      check.expect.bitwise actual(%input) expected(%unchanged_input) : tensor<40x2x128xf32>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<5152xf32>
+    }
+  }
+  check.return
+}

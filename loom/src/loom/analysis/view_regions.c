@@ -9,10 +9,13 @@
 #include <string.h>
 
 #include "iree/base/internal/math.h"
+#include "loom/analysis/symbolic_congruence.h"
 #include "loom/analysis/symbolic_expr_proof.h"
 #include "loom/ir/attribute.h"
 #include "loom/ir/context.h"
 #include "loom/ops/buffer/ops.h"
+#include "loom/ops/callable_effects.h"
+#include "loom/ops/channel/ops.h"
 #include "loom/ops/encoding/storage.h"
 #include "loom/ops/kernel/ops.h"
 #include "loom/ops/view/ops.h"
@@ -77,7 +80,7 @@ iree_status_t loom_view_region_table_initialize(
     if (root != LOOM_VALUE_ID_INVALID) {
       loom_value_ordinal_t root_ordinal;
       IREE_RETURN_IF_ERROR(loom_local_value_domain_register_value(
-          value_domain, expression_context->arena, root, &root_ordinal));
+          value_domain, root, &root_ordinal));
     }
   }
   const iree_host_size_t value_count = value_domain->value_count;
@@ -693,14 +696,14 @@ static iree_status_t loom_view_region_build_subview(
   return iree_ok_status();
 }
 
-static iree_status_t loom_view_region_build_refine(
+static iree_status_t loom_view_region_build_reinterpret(
     loom_view_region_table_t* table, loom_value_id_t value_id,
-    const loom_op_t* op, loom_type_t view_type,
+    loom_value_id_t source_value_id, loom_type_t view_type,
     loom_value_fact_view_reference_t reference,
     loom_view_region_t* out_region) {
   const loom_view_region_t* source_region = NULL;
-  IREE_RETURN_IF_ERROR(loom_view_region_get_source(
-      table, loom_view_refine_source(op), &source_region));
+  IREE_RETURN_IF_ERROR(
+      loom_view_region_get_source(table, source_value_id, &source_region));
   IREE_RETURN_IF_ERROR(loom_view_region_build_default(
       table, value_id, view_type, reference, out_region));
   if (!source_region) {
@@ -754,9 +757,10 @@ static iree_status_t loom_view_region_build_for_value(
     return loom_view_region_build_subview(table, value_id, defining_op,
                                           view_type, reference, out_region);
   }
-  if (loom_view_refine_isa(defining_op)) {
-    return loom_view_region_build_refine(table, value_id, defining_op,
-                                         view_type, reference, out_region);
+  if (loom_view_refine_isa(defining_op) || loom_view_bitcast_isa(defining_op)) {
+    return loom_view_region_build_reinterpret(
+        table, value_id, loom_op_const_operands(defining_op)[0], view_type,
+        reference, out_region);
   }
   return loom_view_region_build_default(table, value_id, view_type, reference,
                                         out_region);
@@ -933,6 +937,21 @@ static uint32_t loom_view_region_overlapping_memory_spaces(
   return spaces;
 }
 
+static void loom_view_region_add_write_spaces(loom_view_region_table_t* table,
+                                              loom_memory_space_mask_t spaces) {
+  if (spaces & (1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN)) {
+    table->interference_memory_spaces = UINT32_MAX;
+    return;
+  }
+  for (uint32_t i = 0; i < LOOM_VALUE_FACT_MEMORY_SPACE_COUNT_; ++i) {
+    if (spaces & (1u << i)) {
+      table->interference_memory_spaces |=
+          loom_view_region_overlapping_memory_spaces(
+              (loom_value_fact_memory_space_t)i);
+    }
+  }
+}
+
 static bool loom_view_region_ordering_acquires(loom_attribute_t attribute) {
   if (loom_attr_is_absent(attribute)) {
     return false;
@@ -946,6 +965,14 @@ static bool loom_view_region_ordering_acquires(loom_attribute_t attribute) {
 static void loom_view_region_analyze_interference(
     loom_view_region_table_t* table, const loom_op_t* op,
     const loom_op_vtable_t* vtable, loom_trait_flags_t traits) {
+  const bool communication =
+      loom_kernel_async_group_isa(op) || loom_kernel_async_wait_isa(op) ||
+      loom_op_dialect_id(op->kind) == LOOM_DIALECT_CHANNEL;
+  if (communication && iree_any_bit_set(traits, LOOM_TRAIT_UNKNOWN_EFFECTS |
+                                                    LOOM_TRAIT_MEMORY_FENCE)) {
+    table->communication_memory_spaces = UINT32_MAX;
+    return;
+  }
   if (iree_any_bit_set(traits, LOOM_TRAIT_UNKNOWN_EFFECTS)) {
     table->interference_memory_spaces = UINT32_MAX;
   }
@@ -993,6 +1020,8 @@ enum {
   // Temporary incoming-payload proof, consumed before type dependencies refine
   // it.
   LOOM_VIEW_STORAGE_JOIN_INVARIANT = 1u << 3,
+  // Root-use flags occupy the upper bits of the existing summary byte.
+  LOOM_VIEW_STORAGE_ROOT_USE_SHIFT = 4,
 };
 
 typedef enum loom_view_region_analysis_phase_e {
@@ -1017,6 +1046,102 @@ loom_view_access_flags_t loom_view_region_table_root_access_flags(
              ? 0
              : table->storage_flags_by_value_ordinal[ordinal] &
                    (LOOM_VIEW_ACCESS_READ | LOOM_VIEW_ACCESS_WRITE);
+}
+
+loom_view_root_use_flags_t loom_view_region_table_root_use_flags(
+    const loom_view_region_table_t* table, loom_value_id_t root_value_id) {
+  const loom_value_ordinal_t ordinal =
+      loom_local_value_domain_try_ordinal(table->value_domain, root_value_id);
+  return ordinal == LOOM_VALUE_ORDINAL_INVALID
+             ? LOOM_VIEW_ROOT_USE_OPAQUE
+             : table->storage_flags_by_value_ordinal[ordinal] >>
+                   LOOM_VIEW_STORAGE_ROOT_USE_SHIFT;
+}
+
+static loom_value_id_t loom_view_region_resolve_buffer_root(
+    const loom_view_region_table_t* table, loom_value_id_t buffer_value_id) {
+  loom_value_fact_buffer_reference_t reference = {
+      .root_value_id = buffer_value_id,
+  };
+  (void)loom_value_facts_query_buffer_reference(
+      &table->expression_context->fact_table->context,
+      loom_view_region_lookup_facts(table, buffer_value_id), &reference);
+  return loom_value_fact_buffer_reference_resolve_root_value(reference,
+                                                             buffer_value_id);
+}
+
+static loom_value_id_t loom_view_region_mark_buffer_use(
+    loom_view_region_table_t* table, loom_value_id_t buffer_value_id,
+    loom_view_root_use_flags_t flags) {
+  const loom_value_id_t root_value_id =
+      loom_view_region_resolve_buffer_root(table, buffer_value_id);
+  const loom_value_ordinal_t ordinal =
+      loom_local_value_domain_try_ordinal(table->value_domain, root_value_id);
+  if (ordinal != LOOM_VALUE_ORDINAL_INVALID) {
+    table->storage_flags_by_value_ordinal[ordinal] |=
+        flags << LOOM_VIEW_STORAGE_ROOT_USE_SHIFT;
+  }
+  return root_value_id;
+}
+
+static bool loom_view_region_is_view_only_buffer_operand(
+    const loom_op_t* op, uint16_t operand_index) {
+  if (loom_buffer_view_isa(op)) {
+    return operand_index == 0;
+  }
+  if (loom_buffer_assume_alignment_isa(op)) {
+    return operand_index < loom_buffer_assume_alignment_results(op).count;
+  }
+  if (loom_buffer_assume_noalias_isa(op)) {
+    return operand_index < loom_buffer_assume_noalias_results(op).count;
+  }
+  return false;
+}
+
+static iree_status_t loom_view_region_analyze_buffer_uses(
+    loom_view_region_table_t* table, const loom_op_t* op) {
+  if (loom_buffer_assume_memory_space_isa(op)) {
+    IREE_RETURN_IF_ERROR(iree_arena_grow_array(
+        table->expression_context->arena, table->memory_space_refinements.count,
+        table->memory_space_refinements.count + 1,
+        sizeof(*table->memory_space_refinements.entries),
+        &table->memory_space_refinements.capacity,
+        (void**)&table->memory_space_refinements.entries));
+    const loom_value_id_t root = loom_view_region_mark_buffer_use(
+        table, loom_buffer_assume_memory_space_buffer(op),
+        LOOM_VIEW_ROOT_USE_MEMORY_SPACE);
+    table->memory_space_refinements
+        .entries[table->memory_space_refinements.count++] =
+        (loom_view_memory_space_refinement_t){
+            .operation = op,
+            .root_value_id = root,
+        };
+    return iree_ok_status();
+  }
+  const loom_module_t* module = table->expression_context->module;
+  const loom_value_id_t* operands = loom_op_const_operands(op);
+  for (uint16_t i = 0; i < op->operand_count; ++i) {
+    const loom_value_id_t operand = operands[i];
+    if (loom_type_is_buffer(loom_module_value_type(module, operand)) &&
+        !loom_view_region_is_view_only_buffer_operand(op, i)) {
+      loom_view_region_mark_buffer_use(table, operand,
+                                       LOOM_VIEW_ROOT_USE_OPAQUE);
+    }
+  }
+  return iree_ok_status();
+}
+
+static void loom_view_region_analyze_buffer_type_uses(
+    loom_view_region_table_t* table) {
+  const loom_module_t* module = table->expression_context->module;
+  for (loom_value_ordinal_t i = 0; i < table->value_domain->value_count; ++i) {
+    const loom_value_id_t value_id = table->value_domain->value_ids[i];
+    if (loom_type_is_buffer(loom_module_value_type(module, value_id)) &&
+        loom_module_value_has_type_uses(module, value_id)) {
+      loom_view_region_mark_buffer_use(table, value_id,
+                                       LOOM_VIEW_ROOT_USE_OPAQUE);
+    }
+  }
 }
 
 static void loom_view_region_add_root_access(
@@ -1052,15 +1177,25 @@ static iree_status_t loom_view_region_analyze_operand_access(
                                      region->alias_scope_id,
                                      region->memory_space, flags);
   } else {
-    // Raw byte accesses and buffer aliases participate in the same root proof.
+    // Opaque storage capabilities can carry either buffer or view references.
+    // Their effects belong to the backing allocation, just like typed views.
+    const loom_value_facts_t facts =
+        loom_view_region_lookup_facts(table, operand);
+    const loom_fact_context_t* context =
+        &table->expression_context->fact_table->context;
     loom_value_fact_buffer_reference_t reference = {
         .root_value_id = operand,
         .alias_scope_id = LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE,
         .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN,
     };
-    (void)loom_value_facts_query_buffer_reference(
-        &table->expression_context->fact_table->context,
-        loom_view_region_lookup_facts(table, operand), &reference);
+    loom_value_fact_view_reference_t view;
+    if (!loom_value_facts_query_buffer_reference(context, facts, &reference) &&
+        loom_value_facts_query_view_reference(context, facts, &view)) {
+      reference.root_value_id =
+          loom_value_fact_view_reference_resolve_root_value(view, operand);
+      reference.alias_scope_id = view.alias_scope_id;
+      reference.memory_space = view.memory_space;
+    }
     loom_view_region_add_root_access(
         table,
         loom_value_fact_buffer_reference_resolve_root_value(reference, operand),
@@ -1073,11 +1208,43 @@ static iree_status_t loom_view_region_table_analyze_op_memory(
     loom_view_region_table_t* table, const loom_op_t* op,
     const loom_op_vtable_t* vtable, loom_trait_flags_t traits,
     loom_view_region_analysis_phase_t phase) {
+  if (phase == LOOM_VIEW_REGION_ANALYZE_MEMORY) {
+    IREE_RETURN_IF_ERROR(loom_view_region_analyze_buffer_uses(table, op));
+  }
   if (!vtable) {
     table->interference_memory_spaces = UINT32_MAX;
     return iree_ok_status();
   }
   if (phase == LOOM_VIEW_REGION_ANALYZE_MEMORY) {
+    if (vtable->call_like &&
+        iree_any_bit_set(traits, LOOM_TRAIT_UNKNOWN_EFFECTS)) {
+      const loom_module_t* module = table->expression_context->module;
+      const loom_symbol_ref_t callee = loom_attr_as_symbol(
+          loom_op_attrs(op)[vtable->call_like->callee_attr_index]);
+      if (callee.module_id == 0) {
+        const loom_func_like_t function = loom_func_like_cast(
+            module, module->symbols.entries[callee.symbol_id].defining_op);
+        const loom_memory_space_mask_t write_spaces =
+            loom_callable_effects_written_memory_spaces(function);
+        if (!(write_spaces & (1u << LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN))) {
+          // This refines storage interference only. Reads and architectural
+          // state effects do not make the call pure or freely movable.
+          traits &= ~LOOM_TRAIT_UNKNOWN_EFFECTS;
+          loom_view_region_add_write_spaces(table, write_spaces);
+          if (loom_callable_effects_may_access_memory(function)) {
+            const loom_value_id_t* operands = loom_op_const_operands(op);
+            for (uint16_t i = 0; i < op->operand_count; ++i) {
+              const loom_type_t type =
+                  loom_module_value_type(module, operands[i]);
+              if (loom_type_is_buffer(type) || loom_type_is_view(type)) {
+                IREE_RETURN_IF_ERROR(loom_view_region_analyze_operand_access(
+                    table, operands[i], LOOM_VIEW_ACCESS_READ));
+              }
+            }
+          }
+        }
+      }
+    }
     loom_view_region_analyze_interference(table, op, vtable, traits);
   }
 
@@ -1125,7 +1292,8 @@ static iree_status_t loom_view_region_table_analyze_op_memory(
   }
   if (!has_described_write &&
       iree_any_bit_set(traits, LOOM_TRAIT_WRITES_MEMORY)) {
-    table->interference_memory_spaces = UINT32_MAX;
+    loom_view_region_add_write_spaces(
+        table, loom_op_written_memory_spaces(op, traits));
   }
   return iree_ok_status();
 }
@@ -1480,6 +1648,7 @@ iree_status_t loom_view_region_table_analyze(loom_view_region_table_t* table) {
   IREE_RETURN_IF_ERROR(loom_view_region_table_analyze_region(
       table, table->value_domain->region, LOOM_VIEW_REGION_ANALYZE_MEMORY,
       false));
+  loom_view_region_analyze_buffer_type_uses(table);
   if (table->varying_root_write_memory_spaces) {
     table->varying_root_write_memory_spaces = 0;
     IREE_RETURN_IF_ERROR(loom_view_region_table_analyze_region(
@@ -1504,7 +1673,9 @@ bool loom_view_region_table_root_is_stable(
   }
   return memory_space == LOOM_VALUE_FACT_MEMORY_SPACE_CONSTANT ||
          (alias_scope_id != LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE &&
-          !(table->interference_memory_spaces & (1u << memory_space)) &&
+          !((table->interference_memory_spaces |
+             table->communication_memory_spaces) &
+            (1u << memory_space)) &&
           (ordinal >= table->value_domain->definition_count ||
            iree_any_bit_set(flags, LOOM_VIEW_STORAGE_INVARIANT) ||
            !(table->varying_root_write_memory_spaces & (1u << memory_space))));
@@ -1524,6 +1695,31 @@ bool loom_view_memory_spaces_are_disjoint(
          right == LOOM_VALUE_FACT_MEMORY_SPACE_PRIVATE;
 }
 
+bool loom_view_region_roots_are_disjoint(
+    const loom_view_region_t* left_region,
+    const loom_view_region_t* right_region) {
+  if (loom_value_fact_reference_origins_are_disjoint(left_region->origin,
+                                                     right_region->origin)) {
+    return true;
+  }
+  if (left_region->root_value_id == LOOM_VALUE_ID_INVALID ||
+      right_region->root_value_id == LOOM_VALUE_ID_INVALID) {
+    return false;
+  }
+  if (left_region->root_value_id != right_region->root_value_id) {
+    const loom_value_fact_alias_scope_id_t left_alias =
+        loom_view_region_comparable_alias_scope(left_region);
+    const loom_value_fact_alias_scope_id_t right_alias =
+        loom_view_region_comparable_alias_scope(right_region);
+    return loom_view_memory_spaces_are_disjoint(left_region->memory_space,
+                                                right_region->memory_space) ||
+           (left_alias != LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE &&
+            right_alias != LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE &&
+            left_alias != right_alias);
+  }
+  return false;
+}
+
 iree_status_t loom_view_regions_prove_no_overlap(
     loom_view_region_table_t* table, const loom_view_region_t* left_region,
     const loom_view_region_t* right_region, bool* out_no_overlap) {
@@ -1531,23 +1727,11 @@ iree_status_t loom_view_regions_prove_no_overlap(
   if (!left_region || !right_region) {
     return iree_ok_status();
   }
-  if (loom_value_fact_reference_origins_are_disjoint(left_region->origin,
-                                                     right_region->origin)) {
-    *out_no_overlap = true;
-    return iree_ok_status();
-  }
-  if (left_region->root_value_id == LOOM_VALUE_ID_INVALID ||
-      right_region->root_value_id == LOOM_VALUE_ID_INVALID) {
-    return iree_ok_status();
-  }
-  if (left_region->root_value_id != right_region->root_value_id) {
-    if (loom_view_memory_spaces_are_disjoint(left_region->memory_space,
-                                             right_region->memory_space) ||
-        (left_region->alias_scope_id != LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE &&
-         right_region->alias_scope_id != LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE &&
-         left_region->alias_scope_id != right_region->alias_scope_id)) {
-      *out_no_overlap = true;
-    }
+  *out_no_overlap =
+      loom_view_region_roots_are_disjoint(left_region, right_region);
+  if (*out_no_overlap || left_region->root_value_id == LOOM_VALUE_ID_INVALID ||
+      right_region->root_value_id == LOOM_VALUE_ID_INVALID ||
+      left_region->root_value_id != right_region->root_value_id) {
     return iree_ok_status();
   }
 
@@ -1564,6 +1748,19 @@ iree_status_t loom_view_regions_prove_no_overlap(
       &left_region->begin_byte_offset, &proof));
   if (proof == LOOM_SYMBOLIC_PROOF_TRUE) {
     *out_no_overlap = true;
+  } else if (loom_symbolic_expr_is_constant(&left_region->byte_length) &&
+             loom_symbolic_expr_is_constant(&right_region->byte_length) &&
+             left_region->byte_length.constant > 0 &&
+             right_region->byte_length.constant > 0) {
+    // Periodic placement can separate intervals without fixing their order:
+    // complementary banks exchange positions on each iteration. Overlap would
+    // require right.begin-left.begin in [1-right.length, left.length-1].
+    *out_no_overlap =
+        loom_symbolic_congruence_prove_difference_outside_interval(
+            table->expression_context, &right_region->begin_byte_offset,
+            &left_region->begin_byte_offset,
+            1 - right_region->byte_length.constant,
+            left_region->byte_length.constant - 1);
   }
   return iree_ok_status();
 }

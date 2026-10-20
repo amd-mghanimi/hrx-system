@@ -429,9 +429,10 @@ class TcpConnectionTest : public ::testing::Test {
   void CreateReceivePool(iree_host_size_t buffer_size,
                          iree_host_size_t buffer_count,
                          ReceivePool* out_receive_pool) {
-    iree_async_slab_options_t options = {};
-    options.buffer_size = buffer_size;
-    options.buffer_count = buffer_count;
+    iree_async_slab_options_t options = {
+        .buffer_size = buffer_size,
+        .buffer_count = buffer_count,
+    };
     IREE_ASSERT_OK(iree_async_slab_create(options, iree_allocator_system(),
                                           &out_receive_pool->slab));
     IREE_ASSERT_OK(iree_async_proactor_register_slab(
@@ -685,9 +686,9 @@ TEST(TcpConnectionOptionsTest, Defaults) {
             IREE_NET_TCP_DEFAULT_MAX_ENDPOINT_COUNT);
   EXPECT_EQ(options.max_frame_size, IREE_NET_TCP_DEFAULT_MAX_FRAME_SIZE);
   EXPECT_EQ(options.carrier_options.max_send_operations,
-            IREE_NET_TCP_DEFAULT_MAX_SEND_OPERATIONS);
+            IREE_NET_STREAM_DEFAULT_MAX_SEND_OPERATIONS);
   EXPECT_EQ(options.carrier_options.generated_prefix_capacity,
-            IREE_NET_TCP_DEFAULT_GENERATED_PREFIX_CAPACITY);
+            IREE_NET_STREAM_DEFAULT_GENERATED_PREFIX_CAPACITY);
 }
 
 TEST(TcpConnectionOptionsTest, ReservesInternalActivationSlot) {
@@ -1391,7 +1392,7 @@ TEST_F(TcpConnectionTest, SendReturnsDirectMessageFailureBeforePrefixWrite) {
   ASSERT_EQ(server_messages->error_code, IREE_STATUS_DATA_LOSS);
 
   PrefixWriter writer = {
-      /*.value=*/0x7A,
+      .value = 0x7A,
   };
   SendResult rejected_result;
   rejected_result.is_polling = &is_polling_;
@@ -1451,7 +1452,7 @@ TEST_F(TcpConnectionTest, SendReturnsDeferredMessageFailureBeforePrefixWrite) {
   EXPECT_EQ(queued_result.callback_count, 0);
 
   PrefixWriter writer = {
-      /*.value=*/0x7A,
+      .value = 0x7A,
   };
   SendResult rejected_result;
   rejected_result.is_polling = &is_polling_;

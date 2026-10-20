@@ -66,6 +66,21 @@ ROCR_VISIBLE_DEVICES=2,3 iree-run-loom \
   --device=amdgpu --probe-hal
 ```
 
+The device provisions one queue per selected GPU by default. Applications
+that submit independent workloads can request a fixed inventory at device
+creation:
+
+```sh
+iree-run-loom --device='amdgpu://0?queue_count=2' --probe-hal
+```
+
+`queue_count` is a positive decimal integer per selected GPU. The total across
+selected GPUs must fit the topology's 256 queue axes; native resource limits
+may be lower. The queues live until device destruction and remain available
+to profiling. Creating extra queues does not assign workloads to them or
+reserve compute resources; applications select provisioned queues through
+the HAL queue-family interface.
+
 Compile and run a Loom kernel with the AMDGPU HAL driver:
 
 ```sh
@@ -83,15 +98,18 @@ Add `--kernel-input-value=`, `--kernel-input-buffer=`, and
 `--expected-kernel-buffer=` flags matching the kernel ABI when running kernels
 that require arguments or output validation.
 
-To capture a Tracy trace of the same runtime path, use the Bazel trace wrapper.
-The wrapper requires a `tracy-capture` binary in `PATH`, or one supplied through
-`IREE_TRACY_CAPTURE`:
+To capture a Tracy trace of the same runtime path, start a matching
+`tracy-capture` in another terminal before running the instrumented tool:
 
 ```sh
-IREE_TRACY_CAPTURE=/path/to/tracy-capture \
-  build_tools/bin/iree-bazel-run \
-  --trace \
-  --trace_name=amdgpu_runtime \
+tracy-capture -a 127.0.0.1 -p 18086 -o amdgpu_runtime.tracy -m 5
+```
+
+Then run with the Tracy provider selected:
+
+```sh
+TRACY_PORT=18086 TRACY_NO_EXIT=1 build_tools/bin/iree-bazel-run --config=opt \
+  --//runtime/config/base/tracing:provider=tracy \
   //loom/src/loom/tools/iree-run-loom \
   --//runtime/config/hal:drivers=amdgpu,task \
   --//runtime/src/iree/hal/drivers/amdgpu:targets=gfx1100 \
@@ -101,6 +119,13 @@ IREE_TRACY_CAPTURE=/path/to/tracy-capture \
   --function=main \
   --kernel-input-buffer=1024xf32=0
 ```
+
+`TRACY_NO_EXIT=1` holds a short-lived tool at exit until the collector can drain
+the trace; without a collector it waits instead of exiting. The
+[runtime tracing guide](../../../base/tracing/README.md) documents matching
+tools, live viewing, automatic capture, and connection lifetimes. CPU submission
+zones are not device durations; the HAL profiling workflow below owns device
+timing and hardware counters.
 
 ## Driver Shape
 

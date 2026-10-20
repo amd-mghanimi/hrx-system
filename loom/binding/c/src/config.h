@@ -9,9 +9,11 @@
 
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
+#include "loom/config/application.h"
+#include "loom/error/source.h"
 #include "loom/ir/module.h"
-#include "loom/tooling/config/config.h"
 #include "loomc/config.h"
+#include "loomc/context.h"
 #include "result.h"
 #include "visibility.h"
 
@@ -32,8 +34,10 @@ typedef struct loomc_config_application_result_t {
 typedef struct loomc_config_binding_record_t {
   // Next binding in application order, or NULL.
   struct loomc_config_binding_record_t* next;
-  // Copied binding independent of the caller's config module lifetime.
-  loom_tooling_config_binding_t binding;
+  // Arena-owned normalized config symbol name.
+  iree_string_view_t key;
+  // Arena-owned canonical attribute spelling.
+  iree_string_view_t value;
 } loomc_config_binding_record_t;
 
 // Applied invocation configuration retained with a compiled module.
@@ -45,21 +49,29 @@ typedef struct loomc_config_binding_list_t {
 } loomc_config_binding_list_t;
 
 // Copies one producer-established binding without duplicate-key rediscovery.
-LOOMC_API_PRIVATE iree_status_t
-loomc_config_binding_list_append(loomc_config_binding_list_t* list,
-                                 const loom_tooling_config_binding_t* binding,
-                                 iree_arena_allocator_t* arena);
+LOOMC_API_PRIVATE iree_status_t loomc_config_binding_list_append(
+    loomc_config_binding_list_t* list, iree_string_view_t key,
+    iree_string_view_t value, iree_arena_allocator_t* arena);
 
 // Structured config module application options.
 typedef struct loomc_config_apply_module_options_t {
+  // Compiler context supplying target-aware diagnostic spelling.
+  const loomc_context_t* context;
+
   // Typed config definitions to overlay, or NULL to apply only policy.
   const loom_module_t* config_module;
+
+  // Exact source resolver for diagnostics in |config_module|.
+  loom_source_resolver_t config_source_resolver;
 
   // Module receiving exact config values.
   loom_module_t* target_module;
 
+  // Exact source resolver for diagnostics in |target_module|.
+  loom_source_resolver_t target_source_resolver;
+
   // Receives applied bindings for the compiled module's retained identity.
-  loom_tooling_config_binding_sink_t binding_sink;
+  loom_config_applied_value_sink_t applied_value_sink;
 
   // Final config validation and resolution policy.
   loomc_config_policy_flags_t policy_flags;
@@ -76,11 +88,20 @@ typedef struct loomc_config_apply_module_options_t {
 
 // Text and JSON config application options.
 typedef struct loomc_config_apply_text_to_module_options_t {
+  // Compiler context supplying target-aware diagnostic spelling.
+  const loomc_context_t* context;
+
   // Public text and JSON config options to materialize.
   const loomc_config_options_t* config;
 
   // Module receiving config materialization.
   loom_module_t* module;
+
+  // Exact source resolver for diagnostics in |module|.
+  loom_source_resolver_t source_resolver;
+
+  // Receives applied bindings for compiler-owned reporting state.
+  loom_config_applied_value_sink_t applied_value_sink;
 
   // Result receiving config diagnostics.
   loomc_result_t* result;

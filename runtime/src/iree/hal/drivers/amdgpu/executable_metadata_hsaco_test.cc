@@ -112,12 +112,12 @@ static iree_hal_amdgpu_hsaco_metadata_arg_t MakeArg(
     iree_hal_amdgpu_hsaco_metadata_arg_kind_t kind,
     iree_string_view_t value_kind) {
   return iree_hal_amdgpu_hsaco_metadata_arg_t{
-      /*.name=*/name,
-      /*.offset=*/offset,
-      /*.size=*/size,
-      /*.alignment=*/size >= 8 ? 8u : 4u,
-      /*.kind=*/kind,
-      /*.value_kind=*/value_kind,
+      .name = name,
+      .offset = offset,
+      .size = size,
+      .alignment = size >= 8 ? 8u : 4u,
+      .kind = kind,
+      .value_kind = value_kind,
   };
 }
 
@@ -126,23 +126,23 @@ static iree_hal_amdgpu_hsaco_metadata_kernel_t MakeKernel(
     uint32_t kernarg_segment_size,
     const std::vector<iree_hal_amdgpu_hsaco_metadata_arg_t>& args) {
   return iree_hal_amdgpu_hsaco_metadata_kernel_t{
-      /*.name=*/name,
-      /*.symbol_name=*/symbol_name,
-      /*.reflection_name=*/name,
-      /*.arg_name_storage_size=*/{},
-      /*.kernarg_segment_size=*/kernarg_segment_size,
-      /*.kernarg_segment_alignment=*/8,
-      /*.group_segment_fixed_size=*/16,
-      /*.private_segment_fixed_size=*/32,
-      /*.max_flat_workgroup_size=*/256,
-      /*.vgpr_count=*/40,
-      /*.required_workgroup_size=*/{},
-      /*.has_required_workgroup_size=*/{},
-      /*.uniform_workgroup_size=*/{},
-      /*.workgroup_cluster_size=*/{},
-      /*.has_workgroup_cluster_size=*/{},
-      /*.arg_count=*/args.size(),
-      /*.args=*/args.data(),
+      .name = name,
+      .symbol_name = symbol_name,
+      .reflection_name = name,
+      .arg_name_storage_size = {},
+      .kernarg_segment_size = kernarg_segment_size,
+      .kernarg_segment_alignment = 8,
+      .group_segment_fixed_size = 16,
+      .private_segment_fixed_size = 32,
+      .max_flat_workgroup_size = 256,
+      .vgpr_count = 40,
+      .required_workgroup_size = {},
+      .has_required_workgroup_size = {},
+      .uniform_workgroup_size = {},
+      .workgroup_cluster_size = {},
+      .has_workgroup_cluster_size = {},
+      .arg_count = args.size(),
+      .args = args.data(),
   };
 }
 
@@ -193,16 +193,15 @@ TEST(ExecutableMetadataHsacoTest, PopulatesSparseInterleavedKernelLayout) {
   kernel.workgroup_cluster_size[1] = 2;
   kernel.workgroup_cluster_size[2] = 1;
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/source_code_object_data,
-      /*.message_pack_data=*/{},
-      /*.target=*/
-      ViewFromCodeObjectData(source_code_object_data,
-                             "amdgcn-amd-amdhsa--gfx942"),
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/1,
-      /*.kernels=*/&kernel,
+      .host_allocator = {},
+      .elf_data = source_code_object_data,
+      .message_pack_data = {},
+      .target = ViewFromCodeObjectData(source_code_object_data,
+                                       "amdgcn-amd-amdhsa--gfx942"),
+      .reflection_name_storage_size = {},
+      .arg_name_storage_size = {},
+      .kernel_count = 1,
+      .kernels = &kernel,
   };
 
   iree_hal_amdgpu_executable_metadata_counts_t counts;
@@ -332,14 +331,14 @@ TEST(ExecutableMetadataHsacoTest, PopulatesImplicitArgsSuffixLayout) {
                  ViewFromCodeObjectData(source_code_object_data, "implicit.kd"),
                  16 + IREE_AMDGPU_KERNEL_IMPLICIT_ARGS_SIZE, args);
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/source_code_object_data,
-      /*.message_pack_data=*/{},
-      /*.target=*/{},
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/1,
-      /*.kernels=*/&kernel,
+      .host_allocator = {},
+      .elf_data = source_code_object_data,
+      .message_pack_data = {},
+      .target = {},
+      .reflection_name_storage_size = {},
+      .arg_name_storage_size = {},
+      .kernel_count = 1,
+      .kernels = &kernel,
   };
 
   iree_hal_amdgpu_executable_metadata_t* metadata =
@@ -389,14 +388,14 @@ TEST(ExecutableMetadataHsacoTest, MarksImplicitBlockCountUsage) {
                  ViewFromCodeObjectData(source_code_object_data, "implicit.kd"),
                  16 + IREE_AMDGPU_KERNEL_IMPLICIT_ARGS_SIZE, args);
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/source_code_object_data,
-      /*.message_pack_data=*/{},
-      /*.target=*/{},
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/1,
-      /*.kernels=*/&kernel,
+      .host_allocator = {},
+      .elf_data = source_code_object_data,
+      .message_pack_data = {},
+      .target = {},
+      .reflection_name_storage_size = {},
+      .arg_name_storage_size = {},
+      .kernel_count = 1,
+      .kernels = &kernel,
   };
 
   iree_hal_amdgpu_executable_metadata_t* metadata =
@@ -417,21 +416,21 @@ TEST(ExecutableMetadataHsacoTest, PopulatesElfOnlyCustomDirectExport) {
   const iree_const_byte_span_t loaded_code_object_data =
       LoadedCodeObjectData(loaded_code_object_storage);
   iree_hal_amdgpu_hsaco_metadata_elf_kernel_symbol_t symbol = {
-      /*.name=*/ViewFromCodeObjectData(source_code_object_data, "direct"),
-      /*.symbol_name=*/
-      ViewFromCodeObjectData(source_code_object_data, "direct.kd"),
+      .name = ViewFromCodeObjectData(source_code_object_data, "direct"),
+      .symbol_name =
+          ViewFromCodeObjectData(source_code_object_data, "direct.kd"),
   };
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/source_code_object_data,
-      /*.message_pack_data=*/{},
-      /*.target=*/{},
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/{},
-      /*.kernels=*/{},
-      /*.elf_kernel_symbol_count=*/1,
-      /*.elf_kernel_symbols=*/&symbol,
+      .host_allocator = {},
+      .elf_data = source_code_object_data,
+      .message_pack_data = {},
+      .target = {},
+      .reflection_name_storage_size = {},
+      .arg_name_storage_size = {},
+      .kernel_count = {},
+      .kernels = {},
+      .elf_kernel_symbol_count = 1,
+      .elf_kernel_symbols = &symbol,
   };
 
   iree_hal_amdgpu_executable_metadata_counts_t counts;
@@ -465,47 +464,59 @@ TEST(ExecutableMetadataHsacoTest, PopulatesElfOnlyCustomDirectExport) {
   iree_hal_amdgpu_executable_metadata_free(metadata);
 }
 
-TEST(ExecutableMetadataHsacoTest, ElfOnlyExportStartsAfterReflectedParameters) {
-  const iree_const_byte_span_t source_code_object_data = SourceCodeObjectData();
-  std::vector<uint8_t> loaded_code_object_storage = MakeLoadedCodeObjectData();
-  const iree_const_byte_span_t loaded_code_object_data =
-      LoadedCodeObjectData(loaded_code_object_storage);
+TEST(ExecutableMetadataHsacoTest, PreservesParameterRangesWithElfOnlyExports) {
+  const auto source_data = SourceCodeObjectData();
+  std::vector<uint8_t> loaded_storage = MakeLoadedCodeObjectData();
+  const auto loaded_data = LoadedCodeObjectData(loaded_storage);
   std::vector<iree_hal_amdgpu_hsaco_metadata_arg_t> args = {
-      MakeArg(ViewFromCodeObjectData(source_code_object_data, "buffer"), 0, 8,
+      MakeArg(ViewFromCodeObjectData(source_data, "lhs"), 0, 8,
               IREE_HAL_AMDGPU_HSACO_METADATA_ARG_KIND_GLOBAL_BUFFER,
-              ViewFromCodeObjectData(source_code_object_data, "global_buffer")),
+              ViewFromCodeObjectData(source_data, "global_buffer")),
+      MakeArg(ViewFromCodeObjectData(source_data, "scale"), 8, 4,
+              IREE_HAL_AMDGPU_HSACO_METADATA_ARG_KIND_BY_VALUE,
+              ViewFromCodeObjectData(source_data, "by_value")),
   };
-  iree_hal_amdgpu_hsaco_metadata_kernel_t kernel =
-      MakeKernel(ViewFromCodeObjectData(source_code_object_data, "test"),
-                 ViewFromCodeObjectData(source_code_object_data, "test.kd"),
-                 /*kernarg_segment_size=*/8, args);
-  iree_hal_amdgpu_hsaco_metadata_elf_kernel_symbol_t symbol = {
-      /*.name=*/ViewFromCodeObjectData(source_code_object_data, "direct"),
-      /*.symbol_name=*/
-      ViewFromCodeObjectData(source_code_object_data, "direct.kd"),
+  auto kernel = MakeKernel(ViewFromCodeObjectData(source_data, "test"),
+                           ViewFromCodeObjectData(source_data, "test.kd"),
+                           /*kernarg_segment_size=*/16, args);
+  iree_hal_amdgpu_hsaco_metadata_elf_kernel_symbol_t symbols[] = {
+      {ViewFromCodeObjectData(source_data, "direct"),
+       ViewFromCodeObjectData(source_data, "direct.kd")},
+      {ViewFromCodeObjectData(source_data, "implicit"),
+       ViewFromCodeObjectData(source_data, "implicit.kd")},
   };
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/source_code_object_data,
-      /*.message_pack_data=*/{},
-      /*.target=*/{},
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/1,
-      /*.kernels=*/&kernel,
-      /*.elf_kernel_symbol_count=*/1,
-      /*.elf_kernel_symbols=*/&symbol,
+      .elf_data = source_data,
+      .kernel_count = 1,
+      .kernels = &kernel,
+      .elf_kernel_symbol_count = 2,
+      .elf_kernel_symbols = symbols,
   };
-
-  iree_hal_amdgpu_executable_metadata_t* metadata =
-      AllocateAndPopulate(&hsaco_metadata, loaded_code_object_data);
-  ASSERT_EQ(metadata->export_count, 2);
-  EXPECT_EQ(metadata->parameter_count, 1);
+  auto* metadata = AllocateAndPopulate(&hsaco_metadata, loaded_data);
+  ASSERT_EQ(metadata->export_count, 3);
+  ASSERT_EQ(metadata->parameter_count, 2);
   EXPECT_EQ(metadata->reflection[0].parameter_offset, 0);
-  EXPECT_EQ(metadata->reflection[0].parameter_count, 1);
-  EXPECT_EQ(metadata->reflection[1].parameter_offset, 1);
-  EXPECT_EQ(metadata->reflection[1].parameter_count, 0);
-
+  EXPECT_EQ(metadata->reflection[0].parameter_count, 2);
+  for (size_t i = 1; i < metadata->export_count; ++i) {
+    EXPECT_EQ(metadata->reflection[i].parameter_offset, 2);
+    EXPECT_EQ(metadata->reflection[i].parameter_count, 0);
+  }
+  // Executable reflection derives each range from adjacent export offsets,
+  // using the total parameter count as the final sentinel.
+  for (size_t i = 0; i < metadata->export_count; ++i) {
+    const auto begin = metadata->reflection[i].parameter_offset;
+    const auto end = i + 1 < metadata->export_count
+                         ? metadata->reflection[i + 1].parameter_offset
+                         : metadata->parameter_count;
+    EXPECT_GE(end, begin);
+    EXPECT_EQ(end - begin, metadata->reflection[i].parameter_count);
+  }
+  ExpectRebasedView(loaded_data, args[0].name, metadata->parameters[0].name);
+  EXPECT_EQ(metadata->parameters[0].type,
+            IREE_HAL_EXECUTABLE_FUNCTION_PARAMETER_TYPE_BINDING);
+  EXPECT_EQ(metadata->parameters[0].native_abi_offset, 0);
+  ExpectRebasedView(loaded_data, args[1].name, metadata->parameters[1].name);
+  EXPECT_EQ(metadata->parameters[1].native_abi_offset, 8);
   iree_hal_amdgpu_executable_metadata_free(metadata);
 }
 
@@ -516,12 +527,11 @@ TEST(ExecutableMetadataHsacoTest, RejectsLoadedCodeObjectStringMismatch) {
   const iree_const_byte_span_t loaded_code_object_data =
       LoadedCodeObjectData(loaded_code_object_storage);
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/source_code_object_data,
-      /*.message_pack_data=*/{},
-      /*.target=*/
-      ViewFromCodeObjectData(source_code_object_data,
-                             "amdgcn-amd-amdhsa--gfx942"),
+      .host_allocator = {},
+      .elf_data = source_code_object_data,
+      .message_pack_data = {},
+      .target = ViewFromCodeObjectData(source_code_object_data,
+                                       "amdgcn-amd-amdhsa--gfx942"),
   };
 
   iree_hal_amdgpu_executable_metadata_counts_t counts;
@@ -545,14 +555,14 @@ TEST(ExecutableMetadataHsacoTest, RejectsUnsupportedVisibleArgumentKind) {
   iree_hal_amdgpu_hsaco_metadata_kernel_t kernel =
       MakeKernel(IREE_SV("bad"), IREE_SV("bad.kd"), 8, args);
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/{},
-      /*.message_pack_data=*/{},
-      /*.target=*/{},
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/1,
-      /*.kernels=*/&kernel,
+      .host_allocator = {},
+      .elf_data = {},
+      .message_pack_data = {},
+      .target = {},
+      .reflection_name_storage_size = {},
+      .arg_name_storage_size = {},
+      .kernel_count = 1,
+      .kernels = &kernel,
   };
   iree_hal_amdgpu_executable_metadata_counts_t counts;
 
@@ -570,14 +580,14 @@ TEST(ExecutableMetadataHsacoTest, RejectsMisalignedGlobalBufferArgument) {
   iree_hal_amdgpu_hsaco_metadata_kernel_t kernel =
       MakeKernel(IREE_SV("bad"), IREE_SV("bad.kd"), 16, args);
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/{},
-      /*.message_pack_data=*/{},
-      /*.target=*/{},
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/1,
-      /*.kernels=*/&kernel,
+      .host_allocator = {},
+      .elf_data = {},
+      .message_pack_data = {},
+      .target = {},
+      .reflection_name_storage_size = {},
+      .arg_name_storage_size = {},
+      .kernel_count = 1,
+      .kernels = &kernel,
   };
   iree_hal_amdgpu_executable_metadata_counts_t counts;
 
@@ -601,14 +611,14 @@ TEST(ExecutableMetadataHsacoTest, RejectsHiddenArgsBeforeVisibleArgsEnd) {
   iree_hal_amdgpu_hsaco_metadata_kernel_t kernel =
       MakeKernel(IREE_SV("bad"), IREE_SV("bad.kd"), 24, args);
   iree_hal_amdgpu_hsaco_metadata_t hsaco_metadata = {
-      /*.host_allocator=*/{},
-      /*.elf_data=*/{},
-      /*.message_pack_data=*/{},
-      /*.target=*/{},
-      /*.reflection_name_storage_size=*/{},
-      /*.arg_name_storage_size=*/{},
-      /*.kernel_count=*/1,
-      /*.kernels=*/&kernel,
+      .host_allocator = {},
+      .elf_data = {},
+      .message_pack_data = {},
+      .target = {},
+      .reflection_name_storage_size = {},
+      .arg_name_storage_size = {},
+      .kernel_count = 1,
+      .kernels = &kernel,
   };
   iree_hal_amdgpu_executable_metadata_counts_t counts;
 

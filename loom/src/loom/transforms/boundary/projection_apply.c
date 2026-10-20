@@ -12,6 +12,7 @@
 #include "loom/ir/module.h"
 #include "loom/ops/cfg/ops.h"
 #include "loom/rewrite/remap.h"
+#include "loom/transforms/boundary/projection_branch.h"
 #include "loom/transforms/boundary/projection_loop.h"
 
 static iree_status_t loom_boundary_projection_name_component(
@@ -112,12 +113,12 @@ static iree_status_t loom_boundary_projection_reconstruct_block_candidate(
   loom_builder_t* builder = &plan->rewriter.builder;
   IREE_ASSERT(candidate->realization_anchor != NULL);
   loom_builder_set_before(builder, candidate->realization_anchor);
-  IREE_RETURN_IF_ERROR(loom_builder_reserve_results(
+  IREE_RETURN_IF_ERROR(loom_builder_reserve_values(
       builder, 1, &candidate->replacement_value_id));
   IREE_RETURN_IF_ERROR(loom_module_set_value_type(
       plan->module, candidate->replacement_value_id, logical_type));
-  IREE_RETURN_IF_ERROR(loom_rewriter_move_value_name(
-      &plan->rewriter, candidate->value_id, candidate->replacement_value_id));
+  IREE_RETURN_IF_ERROR(loom_boundary_projection_replace_definition(
+      plan, function, candidate->value_id, candidate->replacement_value_id));
   for (uint16_t component = 0; component < schema->component_count;
        ++component) {
     if (schema->component_name_suffixes) {
@@ -127,8 +128,6 @@ static iree_status_t loom_boundary_projection_reconstruct_block_candidate(
           schema->component_name_suffixes[component]));
     }
   }
-  IREE_RETURN_IF_ERROR(loom_rewriter_replace_all_uses_with(
-      &plan->rewriter, candidate->value_id, candidate->replacement_value_id));
   if (schema->component_count != 0) {
     IREE_RETURN_IF_ERROR(loom_rewriter_set_value_type(
         &plan->rewriter,
@@ -339,6 +338,8 @@ static iree_status_t loom_boundary_projection_rebuild_call(
       (uint16_t)(operand_offset + callee->final_argument_count);
   const uint16_t final_result_count =
       (uint16_t)(result_offset + callee->final_result_count);
+  loom_builder_t* builder = &plan->rewriter.builder;
+  loom_builder_set_before(builder, source);
 
   loom_value_id_t* operands = NULL;
   if (final_operand_count != 0) {
@@ -370,8 +371,6 @@ static iree_status_t loom_boundary_projection_rebuild_call(
   }
   IREE_ASSERT_EQ(next_operand, final_operand_count);
 
-  loom_builder_t* builder = &plan->rewriter.builder;
-  loom_builder_set_before(builder, source);
   loom_value_id_t* results = call_plan->result_ids;
   loom_type_t* result_types = NULL;
   if (final_result_count != 0) {
@@ -441,6 +440,7 @@ static iree_status_t loom_boundary_projection_rebuild_call(
   }
   target->instance_flags = source->instance_flags;
   target->traits = source->traits;
+  target->intrinsic_write_spaces = source->intrinsic_write_spaces;
   target->flags |= source->flags & LOOM_OP_SOURCE_PRESENTATION_FLAG_MASK;
   if (final_operand_count != 0) {
     memcpy(loom_op_operands(target), operands,
@@ -463,10 +463,8 @@ static iree_status_t loom_boundary_projection_rebuild_call(
       loom_boundary_projection_copy_comments(plan, source, target));
 
   for (uint16_t i = 0; i < result_offset; ++i) {
-    IREE_RETURN_IF_ERROR(loom_rewriter_move_value_name(
-        &plan->rewriter, source_results[i], results[i]));
-    IREE_RETURN_IF_ERROR(loom_rewriter_replace_all_uses_with(
-        &plan->rewriter, source_results[i], results[i]));
+    IREE_RETURN_IF_ERROR(loom_boundary_projection_replace_definition(
+        plan, function, source_results[i], results[i]));
   }
   next_result = result_offset;
   for (uint16_t i = 0; i < callee->result_count; ++i) {
@@ -474,10 +472,8 @@ static iree_status_t loom_boundary_projection_rebuild_call(
     const loom_boundary_projection_schema_t* schema =
         &callee->result_schemas[i];
     if (!loom_boundary_projection_schema_is_projected(schema)) {
-      IREE_RETURN_IF_ERROR(loom_rewriter_move_value_name(
-          &plan->rewriter, source_result, results[next_result]));
-      IREE_RETURN_IF_ERROR(loom_rewriter_replace_all_uses_with(
-          &plan->rewriter, source_result, results[next_result++]));
+      IREE_RETURN_IF_ERROR(loom_boundary_projection_replace_definition(
+          plan, function, source_result, results[next_result++]));
       continue;
     }
     const iree_host_size_t candidate_index =
@@ -499,10 +495,8 @@ static iree_status_t loom_boundary_projection_rebuild_call(
     IREE_RETURN_IF_ERROR(schema->rule->transport.reconstruct(
         schema->rule, plan, function, candidate, logical_type, source->location,
         &candidate->replacement_value_id));
-    IREE_RETURN_IF_ERROR(loom_rewriter_move_value_name(
-        &plan->rewriter, source_result, candidate->replacement_value_id));
-    IREE_RETURN_IF_ERROR(loom_rewriter_replace_all_uses_with(
-        &plan->rewriter, source_result, candidate->replacement_value_id));
+    IREE_RETURN_IF_ERROR(loom_boundary_projection_replace_definition(
+        plan, function, source_result, candidate->replacement_value_id));
     next_result = (uint16_t)(next_result + schema->component_count);
   }
   IREE_RETURN_IF_ERROR(loom_rewriter_erase(&plan->rewriter, source));
@@ -525,6 +519,8 @@ static iree_status_t loom_boundary_projection_rebuild_return(
     loom_boundary_projection_function_t* function,
     const loom_boundary_projection_return_t* return_plan) {
   loom_op_t* source = return_plan->op;
+  loom_builder_t* builder = &plan->rewriter.builder;
+  loom_builder_set_before(builder, source);
   loom_value_id_t* operands = NULL;
   if (function->final_result_count != 0) {
     IREE_RETURN_IF_ERROR(
@@ -553,8 +549,6 @@ static iree_status_t loom_boundary_projection_rebuild_return(
 
   loom_ir_remap_t remap = {0};
   IREE_RETURN_IF_ERROR(loom_boundary_projection_initialize_remap(plan, &remap));
-  loom_builder_t* builder = &plan->rewriter.builder;
-  loom_builder_set_before(builder, source);
   loom_op_t* target = NULL;
   IREE_RETURN_IF_ERROR(loom_builder_allocate_op(
       builder, source->kind, function->final_result_count,
@@ -562,6 +556,7 @@ static iree_status_t loom_boundary_projection_rebuild_return(
       source->attribute_count, source->location, &target));
   target->instance_flags = source->instance_flags;
   target->traits = source->traits;
+  target->intrinsic_write_spaces = source->intrinsic_write_spaces;
   target->flags |= source->flags & LOOM_OP_SOURCE_PRESENTATION_FLAG_MASK;
   if (function->final_result_count != 0) {
     memcpy(loom_op_operands(target), operands,
@@ -593,6 +588,8 @@ static iree_status_t loom_boundary_projection_rebuild_edge(
     const loom_boundary_projection_block_t* block_plan,
     const loom_boundary_projection_edge_t* edge_plan) {
   loom_op_t* source = edge_plan->terminator;
+  loom_builder_t* builder = &plan->rewriter.builder;
+  loom_builder_set_before(builder, source);
   const loom_value_id_t* old_arguments = loom_op_const_operands(source);
   loom_value_id_t* new_arguments = NULL;
   IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
@@ -621,8 +618,6 @@ static iree_status_t loom_boundary_projection_rebuild_edge(
   }
   IREE_ASSERT_EQ(next, block_plan->final_argument_count);
 
-  loom_builder_t* builder = &plan->rewriter.builder;
-  loom_builder_set_before(builder, source);
   loom_op_t* target = NULL;
   IREE_RETURN_IF_ERROR(loom_builder_allocate_op_with_successors(
       builder, source->kind, next, /*result_count=*/0,
@@ -630,6 +625,7 @@ static iree_status_t loom_boundary_projection_rebuild_edge(
       source->attribute_count, source->location, &target));
   target->instance_flags = source->instance_flags;
   target->traits = source->traits;
+  target->intrinsic_write_spaces = source->intrinsic_write_spaces;
   target->flags |= source->flags & LOOM_OP_SOURCE_PRESENTATION_FLAG_MASK;
   loom_op_successors(target)[0] = block_plan->block;
   if (next != 0) {
@@ -1040,6 +1036,7 @@ static iree_status_t loom_boundary_projection_replace_function(
   }
   target->instance_flags = source->instance_flags;
   target->traits = source->traits;
+  target->intrinsic_write_spaces = source->intrinsic_write_spaces;
   target->flags |= source->flags & LOOM_OP_SOURCE_PRESENTATION_FLAG_MASK;
   if (layout.operand_count != 0) {
     memcpy(loom_op_operands(target),
@@ -1083,7 +1080,31 @@ static iree_status_t loom_boundary_projection_replace_function(
         &plan->rewriter, function->results[i], target_results[target_index]));
   }
 
-  if (source_body) {
+  if (source_body &&
+      !iree_any_bit_set(source_body->flags, LOOM_REGION_INSTANCE_FLAG_CFG)) {
+    // A structured body has one entry with no backedges. Retarget its uses to
+    // the rebuilt signature directly instead of introducing a CFG trampoline.
+    loom_block_t* source_entry = loom_region_entry_block(source_body);
+    target_body->flags = source_body->flags;
+    target_body->source_flags = source_body->source_flags;
+    target_entry->label_id = source_entry->label_id;
+    target_entry->flags = source_entry->flags;
+    iree_host_size_t comment_count = 0;
+    const iree_string_view_t* comments =
+        loom_module_block_comments(plan->module, source_entry, &comment_count);
+    if (comment_count != 0) {
+      IREE_RETURN_IF_ERROR(loom_module_attach_block_comments(
+          plan->module, target_entry, comments, comment_count));
+    }
+    for (uint16_t i = 0; i < function->final_argument_count; ++i) {
+      IREE_RETURN_IF_ERROR(loom_rewriter_replace_all_uses_with(
+          &plan->rewriter, source_entry->arg_ids[i], target_arguments[i]));
+    }
+    while (source_entry->first_op != NULL) {
+      IREE_RETURN_IF_ERROR(loom_rewriter_move_to_block_end(
+          &plan->rewriter, source_entry->first_op, target_entry, target));
+    }
+  } else if (source_body) {
     loom_block_t* moved_entry = NULL;
     IREE_RETURN_IF_ERROR(loom_rewriter_move_region_blocks(
         &plan->rewriter, source_body, source, target_body,
@@ -1123,11 +1144,28 @@ static iree_status_t loom_boundary_projection_replace_functions(
 
 iree_status_t loom_boundary_projection_apply(
     loom_boundary_projection_plan_t* plan) {
+  // Capture the original value domain before application creates any values.
+  // Retained recipes stay keyed by those original identities while the
+  // correspondence follows any replacements applied before materialization.
+  for (iree_host_size_t i = 0; i < plan->function_count; ++i) {
+    if (!plan->functions[i].selected) {
+      continue;
+    }
+    IREE_RETURN_IF_ERROR(loom_ir_remap_initialize(
+        plan->module, plan->module, plan->arena,
+        &(loom_ir_remap_options_t){
+            .allow_unmapped_values = true,
+            .remap_symbol = loom_ir_remap_symbol_callback_empty(),
+        },
+        &plan->functions[i].value_correspondence));
+  }
   for (iree_host_size_t i = 0; i < plan->function_count; ++i) {
     if (!plan->functions[i].selected) {
       continue;
     }
     IREE_RETURN_IF_ERROR(loom_boundary_projection_preallocate_candidates(
+        plan, &plan->functions[i]));
+    IREE_RETURN_IF_ERROR(loom_boundary_projection_preallocate_branches(
         plan, &plan->functions[i]));
   }
   for (iree_host_size_t i = 0; i < plan->function_count; ++i) {
@@ -1143,6 +1181,8 @@ iree_status_t loom_boundary_projection_apply(
     }
     IREE_RETURN_IF_ERROR(
         loom_boundary_projection_apply_loops(plan, &plan->functions[i]));
+    IREE_RETURN_IF_ERROR(
+        loom_boundary_projection_apply_branches(plan, &plan->functions[i]));
   }
   for (iree_host_size_t i = 0; i < plan->function_count; ++i) {
     if (!plan->functions[i].selected) {

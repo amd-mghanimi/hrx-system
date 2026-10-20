@@ -318,6 +318,7 @@ iree_cc_library(
     "sequence.c"
   DEPS
     iree::base
+    iree::base::internal::unicode
     iree::tokenizer::normalizer
   PUBLIC
 )
@@ -338,6 +339,36 @@ iree_cc_test(
     iree::base
     iree::testing::gtest
     iree::testing::gtest_main
+)
+
+iree_cc_library(
+  NAME
+    span
+  HDRS
+    "span.h"
+  SRCS
+    "span.c"
+  DEPS
+    iree::base
+    iree::tokenizer::normalizer
+  PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    span_test
+  SRCS
+    "span_test.cc"
+  DEPS
+    ::normalizer_test_util
+    ::prepend
+    ::replace
+    ::sequence
+    ::span
+    iree::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+    iree::tokenizer::normalizer
 )
 
 iree_cc_library(

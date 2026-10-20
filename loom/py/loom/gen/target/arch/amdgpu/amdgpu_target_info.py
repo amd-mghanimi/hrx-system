@@ -27,6 +27,7 @@ _ensure_runtime_py_on_path()
 from loom.gen.support.c import c_string_arg as _c_string_arg  # noqa: E402
 from loom.gen.support.files import write_text_file  # noqa: E402
 from loom.gen.support.generated_file import line_comment_header  # noqa: E402
+from loom.gen.support.string_pool import CStringPool, emit_c_string_pool  # noqa: E402
 from loom.gen.target.arch.amdgpu.amdgpu_config_tables import (  # noqa: E402
     write_config_tables_to_paths,
 )
@@ -49,6 +50,7 @@ from loom.target.arch.amdgpu.lds_bank_service import (  # noqa: E402
     AMDGPU_LDS_BANK_SERVICE_EVIDENCE_SILICON_CALIBRATED_VENDOR_MODEL,
     AMDGPU_LDS_BANK_SERVICE_EVIDENCE_VENDOR_SOFTWARE_MODEL_UNVALIDATED,
     AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COALESCE_IDENTICAL_READS,
+    AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COMBINE_DISJOINT_WRITES,
     AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COUNT_EACH,
     AmdgpuLdsBankServiceModelInfo,
     amdgpu_lds_bank_service_model_info_by_key,
@@ -69,9 +71,9 @@ from loom.target.arch.amdgpu.target_info import (  # noqa: E402
     AMDGPU_CACHE_SCOPE_KEYWORDS,
     AMDGPU_CACHE_TEMPORAL_KEYWORDS,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS,
-    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_SYSTEM_MEMORY,
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_DESCRIPTOR_PACKET_ENCODING,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_OCP_FP8_NONCANONICAL_NAN,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_PACKED_BF16_ARITHMETIC,
@@ -81,8 +83,11 @@ from loom.target.arch.amdgpu.target_info import (  # noqa: E402
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOP3_TWO_SCALAR_SOURCES,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE,
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_NUMERIC_MINMAX_MNEMONICS,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_PACKETIZATION,
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES,
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION,
     AMDGPU_DESCRIPTOR_SET_INFO_KNOWN_FLAGS,
     AMDGPU_DESCRIPTOR_SET_ORDINAL_NONE,
     AMDGPU_ELF_GENERIC_VERSION_MASK_V6,
@@ -102,6 +107,7 @@ from loom.target.arch.amdgpu.target_info import (  # noqa: E402
     AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_DX10_CLAMP_AND_IEEE_MODE,
     AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_GFX10_SGPR_ENCODING,
     AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID,
+    AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT,
     AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAGS_PROFILELESS,
     AMDGPU_KERNEL_DESCRIPTOR_ABI_KNOWN_FLAGS,
     AMDGPU_KERNEL_DESCRIPTOR_PROFILE_GFX9,
@@ -130,6 +136,8 @@ from loom.target.arch.amdgpu.target_info import (  # noqa: E402
     AMDGPU_MATRIX_FEATURE_PROFILE_WMMA_GFX12,
     AMDGPU_MATRIX_FEATURE_PROFILE_WMMA_GFX12_5_GENERIC,
     AMDGPU_MATRIX_FEATURE_PROFILE_WMMA_GFX1250,
+    AMDGPU_MEMORY_CACHE_NATIVE_SCOPE_NAMES,
+    AMDGPU_MEMORY_CACHE_NATIVE_TEMPORAL_SUFFIXES,
     AMDGPU_MEMORY_ORDERING_MODELS,
     AMDGPU_PROCESSOR_INFO_FLAG_ARCHITECTED_WORKGROUP_IDS,
     AMDGPU_PROCESSOR_INFO_FLAG_CLUSTER_LAUNCH_STATE,
@@ -138,12 +146,17 @@ from loom.target.arch.amdgpu.target_info import (  # noqa: E402
     AMDGPU_PROCESSOR_ORDINAL_NONE,
     AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU,
     AMDGPU_PROCESSOR_SCHEDULING_DESTINATION_SELECTION_WAIT_STATES,
+    AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK,
+    AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES,
     AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER,
     AMDGPU_PROCESSOR_SCHEDULING_KNOWN_BITS,
+    AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN,
+    AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR,
     AMDGPU_PROCESSOR_SCHEDULING_VALU_SGPR_READ_DEPCTR,
     AMDGPU_PROCESSOR_SCHEDULING_VALU_SGPR_READ_WAIT_STATES,
     AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR,
     AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_WAIT_STATES,
+    AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES,
     AMDGPU_PROCESSOR_SCHEDULING_VMEM_RESULT_WRITES_IN_ORDER,
     AMDGPU_TARGET_ID_FEATURE_SUPPORT_KNOWN_FLAGS,
     AMDGPU_TARGET_ID_FEATURE_SUPPORT_SRAMECC,
@@ -264,18 +277,27 @@ _LDS_BANK_SERVICE_DIRECTION_EXPRS = {
 }
 
 _LDS_BANK_SERVICE_REQUEST_POLICY_EXPRS = {
+    AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COMBINE_DISJOINT_WRITES: "LOOM_AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COMBINE_DISJOINT_WRITES",
     AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COUNT_EACH: ("LOOM_AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COUNT_EACH"),
     AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COALESCE_IDENTICAL_READS: ("LOOM_AMDGPU_LDS_BANK_SERVICE_REQUEST_POLICY_COALESCE_IDENTICAL_READS"),
 }
 
 _DESCRIPTOR_SET_INFO_FLAG_EXPRS = (
     (
+        AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION,
+        "LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION",
+    ),
+    (
+        AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES,
+        "LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES",
+    ),
+    (
         AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES,
         "LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_STORE_DATA_WAIT_STATES",
     ),
     (
-        AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA,
-        "LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_NUMBER_EXTREMA",
+        AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA,
+        "LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_NUMBER_EXTREMA",
     ),
     (
         AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_FLOAT_AGENT_MEMORY,
@@ -328,6 +350,10 @@ _DESCRIPTOR_SET_INFO_FLAG_EXPRS = (
     (
         AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE,
         "LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE",
+    ),
+    (
+        AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD,
+        "LOOM_AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_INTERLOCK_HAZARD",
     ),
 )
 
@@ -432,9 +458,25 @@ _KERNEL_DESCRIPTOR_ABI_FLAG_EXPRS = (
         AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID,
         "LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_PACKED_WORKITEM_ID",
     ),
+    (
+        AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT,
+        "LOOM_AMDGPU_KERNEL_DESCRIPTOR_ABI_FLAG_USER_FLAT_SCRATCH_INIT",
+    ),
 )
 
 _PROCESSOR_SCHEDULING_BIT_EXPRS = (
+    (
+        AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES,
+        "LOOM_AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES",
+    ),
+    (
+        AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK,
+        "LOOM_AMDGPU_PROCESSOR_SCHEDULING_DGEMM_MEMORY_INTERLOCK",
+    ),
+    (
+        AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES,
+        "LOOM_AMDGPU_PROCESSOR_SCHEDULING_FIXED_DATA_WAIT_STATES",
+    ),
     (
         AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR,
         "LOOM_AMDGPU_PROCESSOR_SCHEDULING_VALU_TRANS_USE_DEPCTR",
@@ -452,6 +494,10 @@ _PROCESSOR_SCHEDULING_BIT_EXPRS = (
         "LOOM_AMDGPU_PROCESSOR_SCHEDULING_DESTINATION_SELECTION_WAIT_STATES",
     ),
     (
+        AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR,
+        "LOOM_AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR",
+    ),
+    (
         AMDGPU_PROCESSOR_SCHEDULING_VALU_SGPR_READ_DEPCTR,
         "LOOM_AMDGPU_PROCESSOR_SCHEDULING_VALU_SGPR_READ_DEPCTR",
     ),
@@ -466,6 +512,10 @@ _PROCESSOR_SCHEDULING_BIT_EXPRS = (
     (
         AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER,
         "LOOM_AMDGPU_PROCESSOR_SCHEDULING_FLAT_COUNTERS_IN_ORDER",
+    ),
+    (
+        AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN,
+        "LOOM_AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN",
     ),
 )
 
@@ -708,6 +758,29 @@ def _emit_memory_cache_policy_encoding_rows(
     )
 
 
+def _emit_memory_cache_native_names() -> str:
+    pool = CStringPool(c_enum_prefix="LOOM_AMDGPU_CACHE_NATIVE")
+    scopes = [pool.intern(name, name) for name in AMDGPU_MEMORY_CACHE_NATIVE_SCOPE_NAMES]
+    temporal_rows = []
+    for operation, suffixes in AMDGPU_MEMORY_CACHE_NATIVE_TEMPORAL_SUFFIXES:
+        names = [f"TH_{operation.upper()}_{suffix}" if suffix else "" for suffix in suffixes]
+        labels = [pool.intern(name or "empty", name) for name in names]
+        temporal_rows.append(f"  [LOOM_AMDGPU_CACHE_OPERATION_{operation.upper()}] = {{" + ", ".join(pool.ref(label) for label in labels) + "},")
+    return "\n".join(
+        [
+            *_memory_cache_policy_fragment_header(),
+            *emit_c_string_pool(pool, data_name="kAmdgpuCacheNativeStringData"),
+            "static const loom_string_ref_t kAmdgpuCacheScopeNames[] = {",
+            "  " + ", ".join(pool.ref(label) for label in scopes) + ",",
+            "};",
+            "static const loom_string_ref_t kAmdgpuCacheTemporalNames[][9] = {",
+            *temporal_rows,
+            "};",
+            "",
+        ]
+    )
+
+
 def _emit_memory_cache_policy_temporal_th() -> str:
     return (
         "\n".join(
@@ -748,7 +821,7 @@ def _lds_bank_service_model_initializer(
         f"        .wave_size = {info.wave_size},",
         f"        .bank_count = {info.bank_count},",
         f"        .bank_word_byte_count = {info.bank_word_byte_count},",
-        f"        .packet_word_count = {info.packet_word_count},",
+        f"        .packet_byte_count = {info.packet_byte_count},",
         f"        .phase_count = {len(info.phase_lane_masks)},",
         "        .phase_lane_masks = {",
     ]
@@ -1588,6 +1661,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Generated memory cache-policy encoding row fragment path.",
     )
     parser.add_argument(
+        "--cache-policy-native-names",
+        type=Path,
+        required=True,
+        help="Generated memory cache-policy native spelling fragment path.",
+    )
+    parser.add_argument(
         "--cache-policy-temporal-th",
         type=Path,
         required=True,
@@ -1658,6 +1737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.cache_policy_encoding_rows,
         _emit_memory_cache_policy_encoding_rows(descriptor_sets),
     )
+    write_text_file(args.cache_policy_native_names, _emit_memory_cache_native_names())
     write_text_file(
         args.cache_policy_temporal_th,
         _emit_memory_cache_policy_temporal_th(),

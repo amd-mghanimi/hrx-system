@@ -37,16 +37,6 @@ IREE_FLAG(int64_t, amdgpu_device_block_pool_large_capacity, 0,
           "Initial large block pool block allocation count in blocks or 0 for "
           "the default.");
 
-IREE_FLAG(int64_t, amdgpu_default_pool_range_length, 0,
-          "Logical byte length of the default TLSF queue-allocation pool per "
-          "physical device or 0 for the default.");
-IREE_FLAG(int64_t, amdgpu_default_pool_alignment, 0,
-          "Minimum byte alignment for default-pool reservations. Must be a "
-          "power of two or 0 for the default.");
-IREE_FLAG(int32_t, amdgpu_default_pool_frontier_capacity, 0,
-          "Maximum death-frontier entry count stored per free default-pool "
-          "block or 0 for the default.");
-
 IREE_FLAG(int64_t, amdgpu_file_staging_slot_size, 0,
           "Byte length of each queue_read/queue_write file staging slot. Must "
           "be a power of two or 0 for the default.");
@@ -104,25 +94,18 @@ IREE_FLAG(
     "Freed ASAN allocation mapping budget in bytes kept resident and poisoned "
     "for stale-pointer checks. Set to 0 to release freed mappings "
     "immediately.");
+IREE_FLAG(int64_t, amdgpu_asan_redzone_size,
+          IREE_HAL_AMDGPU_ASAN_DEFAULT_REDZONE_SIZE,
+          "Redzone bytes added around allocations from ASAN-enabled pools.");
 IREE_FLAG(bool, amdgpu_tsan, false,
           "Enables AMDGPU TSAN runtime state and config global publication.");
 IREE_FLAG(string, amdgpu_tsan_report_policy, "fail-device",
           "AMDGPU TSAN report policy: all policies emit device events and "
           "stop the offending kernel path; 'report-only' keeps the logical "
           "device usable, while 'fail-device' then fails the logical device.");
-IREE_FLAG(
-    int32_t, amdgpu_tsan_memory_granule_shift,
-    IREE_HAL_AMDGPU_TSAN_DEFAULT_MEMORY_GRANULE_SHIFT,
-    "Log2 local-memory bytes represented by one AMDGPU TSAN shadow entry.");
-IREE_FLAG(
-    int32_t, amdgpu_tsan_workgroup_local_memory_size,
-    IREE_HAL_AMDGPU_TSAN_DEFAULT_WORKGROUP_LOCAL_MEMORY_SIZE,
-    "Local-memory byte capacity represented by each AMDGPU TSAN workgroup "
-    "shadow. Zero uses the backend-selected group segment limit.");
-IREE_FLAG(int32_t, amdgpu_tsan_workgroup_capacity,
-          IREE_HAL_AMDGPU_TSAN_DEFAULT_WORKGROUP_CAPACITY,
-          "Maximum workgroup ordinals represented by one AMDGPU TSAN dispatch "
-          "shadow.");
+IREE_FLAG(int64_t, amdgpu_tsan_shadow_size,
+          IREE_HAL_AMDGPU_TSAN_DEFAULT_SHADOW_SIZE,
+          "Queue-local AMDGPU TSAN shadow arena size in bytes.");
 
 IREE_FLAG(bool, amdgpu_suppress_device_fine_memory, false,
           "Suppresses fine-grained GPU-local memory pools even when reported "
@@ -158,6 +141,7 @@ static iree_status_t iree_hal_amdgpu_driver_factory_enumerate(
     void* self, iree_host_size_t* out_driver_info_count,
     const iree_hal_driver_info_t** out_driver_infos) {
   static const iree_hal_driver_info_t default_driver_info = {
+      .driver_id = 0,
       .driver_name = IREE_SVL("amdgpu"),
       .full_name = IREE_SVL("AMD GPU Driver (HSA/ROCR)"),
   };
@@ -167,14 +151,8 @@ static iree_status_t iree_hal_amdgpu_driver_factory_enumerate(
 }
 
 static iree_status_t iree_hal_amdgpu_driver_factory_try_create(
-    void* self, iree_string_view_t driver_name, iree_allocator_t host_allocator,
+    void* self, iree_hal_driver_id_t driver_id, iree_allocator_t host_allocator,
     iree_hal_driver_t** out_driver) {
-  if (!iree_string_view_equal(driver_name, IREE_SV("amdgpu"))) {
-    return iree_make_status(IREE_STATUS_UNAVAILABLE,
-                            "no driver '%.*s' is provided by this factory",
-                            (int)driver_name.size, driver_name.data);
-  }
-
   iree_hal_amdgpu_driver_options_t options;
   iree_hal_amdgpu_driver_options_initialize(&options);
   iree_hal_amdgpu_logical_device_options_t* device_options =
@@ -226,33 +204,6 @@ static iree_status_t iree_hal_amdgpu_driver_factory_try_create(
         &device_options->device_block_pools.large.initial_capacity));
   }
 
-  if (FLAG_amdgpu_default_pool_range_length) {
-    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_flag_int64_to_device_size(
-        "--amdgpu_default_pool_range_length",
-        FLAG_amdgpu_default_pool_range_length,
-        &device_options->default_pool.range_length));
-  }
-  if (FLAG_amdgpu_default_pool_alignment) {
-    IREE_RETURN_IF_ERROR(iree_hal_amdgpu_flag_int64_to_device_size(
-        "--amdgpu_default_pool_alignment", FLAG_amdgpu_default_pool_alignment,
-        &device_options->default_pool.alignment));
-  }
-  if (FLAG_amdgpu_default_pool_frontier_capacity) {
-    if (FLAG_amdgpu_default_pool_frontier_capacity < 0) {
-      return iree_make_status(
-          IREE_STATUS_OUT_OF_RANGE,
-          "default pool frontier capacity must be non-negative (got %d)",
-          FLAG_amdgpu_default_pool_frontier_capacity);
-    }
-    if (FLAG_amdgpu_default_pool_frontier_capacity > UINT8_MAX) {
-      return iree_make_status(
-          IREE_STATUS_OUT_OF_RANGE,
-          "default pool frontier capacity %d exceeds maximum %u",
-          FLAG_amdgpu_default_pool_frontier_capacity, UINT8_MAX);
-    }
-    device_options->default_pool.frontier_capacity =
-        (uint8_t)FLAG_amdgpu_default_pool_frontier_capacity;
-  }
   if (FLAG_amdgpu_file_staging_slot_size) {
     IREE_RETURN_IF_ERROR(iree_hal_amdgpu_flag_int64_to_host_size(
         "--amdgpu_file_staging_slot_size", FLAG_amdgpu_file_staging_slot_size,
@@ -359,6 +310,9 @@ static iree_status_t iree_hal_amdgpu_driver_factory_try_create(
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_flag_int64_to_device_size(
       "amdgpu_asan_quarantine_size", FLAG_amdgpu_asan_quarantine_size,
       &device_options->asan.quarantine_size));
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_flag_int64_to_device_size(
+      "amdgpu_asan_redzone_size", FLAG_amdgpu_asan_redzone_size,
+      &device_options->asan.redzone_size));
   device_options->tsan.enabled =
       device_options->tsan.enabled || FLAG_amdgpu_tsan;
   if (strcmp(FLAG_amdgpu_tsan_report_policy, "report-only") == 0) {
@@ -372,35 +326,9 @@ static iree_status_t iree_hal_amdgpu_driver_factory_try_create(
                             "unrecognized TSAN report policy: '%s'",
                             FLAG_amdgpu_tsan_report_policy);
   }
-  if (FLAG_amdgpu_tsan_memory_granule_shift < 0 ||
-      FLAG_amdgpu_tsan_memory_granule_shift >
-          IREE_HAL_AMDGPU_TSAN_MAX_MEMORY_GRANULE_SHIFT) {
-    return iree_make_status(
-        IREE_STATUS_OUT_OF_RANGE,
-        "amdgpu_tsan_memory_granule_shift must be between 0 and %u "
-        "(got %d)",
-        IREE_HAL_AMDGPU_TSAN_MAX_MEMORY_GRANULE_SHIFT,
-        FLAG_amdgpu_tsan_memory_granule_shift);
-  }
-  device_options->tsan.memory_granule_shift =
-      (uint32_t)FLAG_amdgpu_tsan_memory_granule_shift;
-  if (FLAG_amdgpu_tsan_workgroup_local_memory_size < 0) {
-    return iree_make_status(
-        IREE_STATUS_OUT_OF_RANGE,
-        "amdgpu_tsan_workgroup_local_memory_size must be non-negative "
-        "(got %d)",
-        FLAG_amdgpu_tsan_workgroup_local_memory_size);
-  }
-  device_options->tsan.workgroup_local_memory_size =
-      (uint32_t)FLAG_amdgpu_tsan_workgroup_local_memory_size;
-  if (FLAG_amdgpu_tsan_workgroup_capacity < 0) {
-    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                            "amdgpu_tsan_workgroup_capacity must be "
-                            "non-negative (got %d)",
-                            FLAG_amdgpu_tsan_workgroup_capacity);
-  }
-  device_options->tsan.workgroup_capacity =
-      (uint32_t)FLAG_amdgpu_tsan_workgroup_capacity;
+  IREE_RETURN_IF_ERROR(iree_hal_amdgpu_flag_int64_to_device_size(
+      "amdgpu_tsan_shadow_size", FLAG_amdgpu_tsan_shadow_size,
+      &device_options->tsan.shadow_size));
 
   device_options->suppress_device_fine_memory =
       FLAG_amdgpu_suppress_device_fine_memory;
@@ -414,7 +342,7 @@ static iree_status_t iree_hal_amdgpu_driver_factory_try_create(
   device_options->wait_active_for_ns = FLAG_amdgpu_wait_active_for_ns;
 
   iree_status_t status = iree_hal_amdgpu_driver_create(
-      driver_name, &options, host_allocator, out_driver);
+      IREE_SV("amdgpu"), &options, host_allocator, out_driver);
 
   return status;
 }

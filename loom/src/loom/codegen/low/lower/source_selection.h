@@ -37,9 +37,6 @@ typedef struct loom_low_source_selection_options_t {
   // while selecting functions.
   iree_diagnostic_emitter_t diagnostic_emitter;
 
-  // User-facing lowering kind used in diagnostics.
-  iree_string_view_t lowering_kind;
-
   // Concrete compiler function versions participating in this lowering.
   const loom_function_version_list_t* function_versions;
 
@@ -48,11 +45,30 @@ typedef struct loom_low_source_selection_options_t {
 } loom_low_source_selection_options_t;
 
 typedef enum loom_low_source_selection_kind_e {
-  // Target-bound function body selected for lowering or legalization.
+  // Non-Low function body selected for lowering or legalization.
   LOOM_LOW_SOURCE_SELECTION_FUNCTION = 1,
   // Source declaration selected for Low callable signature lowering.
   LOOM_LOW_SOURCE_SELECTION_DECLARATION = 2,
+  // Existing Low definition or declaration for projection or legalization.
+  LOOM_LOW_SOURCE_SELECTION_REPRESENTATION = 3,
 } loom_low_source_selection_kind_t;
+
+// Specialization evidence captured only for requested target reports.
+typedef struct loom_low_source_selection_report_t {
+  // Borrowed module symbol name for the authored target, or empty when
+  // targetless.
+  iree_string_view_t target_symbol_name;
+
+  // Compatible different-topology targets, summarized in module order.
+  struct {
+    // Number of compatible target records.
+    uint32_t count;
+    // Borrowed symbol name of the first candidate, or empty when absent.
+    iree_string_view_t symbol_name;
+    // Immutable bundle of the first candidate, or NULL when absent.
+    const loom_target_bundle_t* bundle;
+  } candidates;
+} loom_low_source_selection_report_t;
 
 typedef struct loom_low_source_selection_t {
   // Selected symbol category.
@@ -78,26 +94,8 @@ typedef struct loom_low_source_selection_t {
   // Borrowed immutable function target facts for |func|.
   const loom_target_facts_t* target_facts;
 
-  // Borrowed module symbol name for |target_ref|, or empty when targetless.
-  iree_string_view_t target_symbol_name;
-
-  // Number of compatible module target records with different topology.
-  uint32_t candidate_target_count;
-
-  // First compatible different-topology target symbol name, if any.
-  iree_string_view_t candidate_target_symbol_name;
-
-  // First compatible different-topology target bundle name, if any.
-  iree_string_view_t candidate_target_bundle_name;
-
-  // First compatible different-topology target snapshot name, if any.
-  iree_string_view_t candidate_target_snapshot_name;
-
-  // First compatible different-topology target config name, if any.
-  iree_string_view_t candidate_target_config_name;
-
-  // First compatible different-topology target fixed subgroup size, if any.
-  uint32_t candidate_target_subgroup_size;
+  // Optional report-only specialization evidence, absent unless requested.
+  const loom_low_source_selection_report_t* report;
 
   // Lowering policy selected by |target_facts|.
   const loom_low_lower_policy_t* policy;
@@ -118,16 +116,17 @@ typedef struct loom_low_source_selection_list_t {
   iree_host_size_t count;
 } loom_low_source_selection_list_t;
 
-// Selects all source function and kernel definitions plus function
-// declarations compatible with the injected target-low registries.
-// Standalone lowering binds authored targets for execution; existing function
-// versions retain their selected modes. The function-only selectors below are
-// also used by legalization and preserve partial facts instead.
+// Selects compatible source definitions/declarations and existing Low
+// representation projections in one symbol-table traversal. All categories
+// share one symbol-fact table and immutable function-version snapshot.
+// Standalone source lowering binds authored targets for execution; existing
+// Low functions and function versions retain their selected modes. The
+// function-only selectors below preserve partial facts for legalization.
 //
 // The returned selection array is allocated from |arena| and remains valid for
 // the arena lifetime. A module with no compatible symbols succeeds with an
 // empty list so module passes can be no-ops.
-iree_status_t loom_low_select_source_symbols(
+iree_status_t loom_low_select_lowering_symbols(
     const loom_module_t* module,
     const loom_low_source_selection_options_t* options,
     iree_arena_allocator_t* arena,
@@ -158,11 +157,13 @@ iree_status_t loom_low_select_target_bound_funcs(
     iree_arena_allocator_t* arena,
     loom_low_source_selection_list_t* out_selection_list);
 
-// Invokes each distinct selected policy's module finalizer once in first-use
-// order. Policies without module finalizers are skipped.
+// Invokes each distinct source-lowering policy's module finalizer once in
+// first-use order. Existing Low projections and policies without finalizers
+// contribute no module resources and are skipped. Consumes the list's policy
+// bindings after all source plans have executed, reusing those fields for the
+// distinct-policy prefix. Other fields and the selection count are unchanged.
 iree_status_t loom_low_source_selection_finalize_policies(
-    loom_module_t* module,
-    const loom_low_source_selection_list_t* selection_list,
+    loom_module_t* module, loom_low_source_selection_list_t* selection_list,
     loom_low_lower_module_state_t* module_state,
     iree_arena_allocator_t* scratch_arena);
 

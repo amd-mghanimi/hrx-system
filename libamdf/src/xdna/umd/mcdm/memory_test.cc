@@ -163,6 +163,10 @@ class WindowsXdnaMemoryTest : public ::testing::Test {
     kmt_.map_gpu_virtual_address = FakeMapGpuVirtualAddress;
     kmt_.make_resident = FakeMakeResident;
     kmt_.wait_from_cpu = FakeWaitFromCpu;
+    kmt_.get_device_state = [](D3DKMT_GETDEVICESTATE* query) -> NTSTATUS {
+      query->ExecutionState = D3DKMT_DEVICEEXECUTION_ACTIVE;
+      return 0;
+    };
     device_.host_allocator = amdf_allocator_system();
     device_.host_allocator.user_data = &state_;
     device_.host_allocator.free = [](void* user_data, void* allocation) {
@@ -334,24 +338,61 @@ TEST_F(WindowsXdnaMemoryTest, BorrowsIndependentSubrangesWithoutAllocating) {
   EXPECT_EQ(state_.metadata_free_count, 1u);
 }
 
-TEST_F(WindowsXdnaMemoryTest, ExposesExactSystemMemoryProfile) {
-  EXPECT_EQ(profile_.memory_class, AMDF_MEMORY_CLASS_SYSTEM);
-  EXPECT_EQ(profile_.roles, AMDF_MEMORY_PROFILE_ROLE_CREATE |
-                                AMDF_MEMORY_PROFILE_ROLE_HOST_MAP);
-  EXPECT_EQ(profile_.guaranteed_device_access,
-            AMDF_MEMORY_ACCESS_READ | AMDF_MEMORY_ACCESS_WRITE);
-  EXPECT_EQ(profile_.supported_device_access,
-            AMDF_MEMORY_ACCESS_READ | AMDF_MEMORY_ACCESS_WRITE);
-  EXPECT_EQ(profile_.device_address.address_bit_count, 48u);
-  EXPECT_EQ(profile_.device_address.minimum_address, UINT64_C(65536));
-  EXPECT_EQ(profile_.device_address.maximum_address, (UINT64_C(1) << 48) - 1);
-  EXPECT_EQ(profile_.allocation.maximum_byte_length,
-            (UINT64_C(1) << 48) - UINT64_C(0x80000000) - UINT64_C(65536));
-  EXPECT_EQ(profile_.allocation.minimum_alignment, UINT64_C(4096));
-  EXPECT_EQ(profile_.allocation.maximum_alignment, UINT64_C(4096));
-  EXPECT_EQ(profile_.device_address.minimum_alignment, UINT64_C(4096));
-  EXPECT_EQ(profile_.allocation.native_byte_length_granularity,
-            UINT64_C(65536));
+TEST_F(WindowsXdnaMemoryTest,
+       StoppedDeviceRejectsMappingPublicationAndReclaimsConstruction) {
+  kmt_.get_device_state = [](D3DKMT_GETDEVICESTATE* query) -> NTSTATUS {
+    query->ExecutionState = D3DKMT_DEVICEEXECUTION_STOPPED;
+    return 0;
+  };
+  amdf_xdna_umd_memory_t* memory = nullptr;
+  amdf_xdna_umd_memory_result_t result;
+  std::memset(&result, 0xA5, sizeof(result));
+  const auto original = result;
+  EXPECT_EQ(amdf_xdna_umd_memory_prepare(&device_, &profile_, &create_info_,
+                                         &memory, &result),
+            amdf_make_api_status(AMDF_STATUS_CODE_DEVICE_LOST));
+  EXPECT_EQ(std::memcmp(&result, &original, sizeof(result)), 0);
+  EXPECT_EQ(state_.wait_targets, (std::vector<uint64_t>{1}));
+  EXPECT_EQ(amdf_kmt_device_status_query(&device_.status),
+            amdf_make_api_status(AMDF_STATUS_CODE_DEVICE_LOST));
+  ASSERT_NE(memory, nullptr);
+  // Synchronous allocation destruction reclaims failed native preparation;
+  // device failure does not authorize publishing or reusing the mapped range.
+  EXPECT_EQ(amdf_xdna_umd_memory_destroy(memory), AMDF_STATUS_OK);
+  EXPECT_EQ(state_.metadata_free_count, 1u);
+  EXPECT_EQ(state_.operations.back(), Operation::kDestroy);
+}
+
+TEST_F(WindowsXdnaMemoryTest, BoundsBackingWithoutTruncatingDeviceAddresses) {
+  for (uint32_t address_bit_count : {32u, 48u, 64u}) {
+    SCOPED_TRACE(address_bit_count);
+    device_profile_.dma.address_bit_count = address_bit_count;
+    for (uint32_t ordinal : {0u, 1u}) {
+      SCOPED_TRACE(ordinal);
+      ASSERT_EQ(amdf_xdna_umd_device_query_memory_profile(&device_, ordinal,
+                                                          &profile_),
+                AMDF_STATUS_OK);
+      const auto& construction =
+          ordinal == 0 ? profile_.allocation : profile_.registration;
+      const uint64_t maximum = construction.maximum_byte_length;
+      const uint64_t granularity = construction.native_byte_length_granularity;
+      const uint64_t address_limit = UINT64_MAX >> (64 - address_bit_count);
+      EXPECT_EQ(profile_.device_address.maximum_address, address_limit);
+      EXPECT_EQ(profile_.device_address.address_bit_count, address_bit_count);
+      ASSERT_GT(maximum, 0u);
+      EXPECT_EQ(maximum % granularity, 0u);
+      EXPECT_LE(maximum, UINT32_MAX);
+      const uint64_t native_end = profile_.device_address.minimum_address +
+                                  maximum - 1 + device_profile_.dma.byte_offset;
+      EXPECT_LE(native_end, address_limit);
+      // The next native unit must exceed an actual native constraint, not an
+      // arbitrary smaller construction cap. Wider VAs do not widen the
+      // standard-allocation size field's accepted range.
+      EXPECT_TRUE(maximum + granularity > UINT32_MAX ||
+                  native_end + granularity > address_limit);
+      EXPECT_EQ(profile_.host_mapping.maximum_byte_length, maximum);
+    }
+  }
   EXPECT_TRUE(state_.operations.empty());
 }
 
@@ -707,15 +748,21 @@ TEST(WindowsXdnaMemoryPairTest, RejectsUnqualifiedFamiliesWithoutOutput) {
       .access = AMDF_MEMORY_ACCESS_READ | AMDF_MEMORY_ACCESS_WRITE,
   };
   const amdf_queue_family_info_t families[] = {
-      {.command_type = AMDF_QUEUE_COMMAND_TYPE_GPU_PM4,
-       .format_version = AMDF_XDNA_QUEUE_FORMAT_VERSION_1,
-       .roles = AMDF_QUEUE_ROLE_COMPUTE},
-      {.command_type = AMDF_QUEUE_COMMAND_TYPE_XDNA,
-       .format_version = AMDF_XDNA_QUEUE_FORMAT_VERSION_1 + 1,
-       .roles = AMDF_QUEUE_ROLE_COMPUTE},
-      {.command_type = AMDF_QUEUE_COMMAND_TYPE_XDNA,
-       .format_version = AMDF_XDNA_QUEUE_FORMAT_VERSION_1,
-       .roles = AMDF_QUEUE_ROLE_TRANSFER},
+      {
+          .command_type = AMDF_QUEUE_COMMAND_TYPE_GPU_PM4,
+          .format_version = AMDF_XDNA_QUEUE_FORMAT_VERSION_1,
+          .roles = AMDF_QUEUE_ROLE_COMPUTE,
+      },
+      {
+          .command_type = AMDF_QUEUE_COMMAND_TYPE_XDNA,
+          .format_version = AMDF_XDNA_QUEUE_FORMAT_VERSION_1 + 1,
+          .roles = AMDF_QUEUE_ROLE_COMPUTE,
+      },
+      {
+          .command_type = AMDF_QUEUE_COMMAND_TYPE_XDNA,
+          .format_version = AMDF_XDNA_QUEUE_FORMAT_VERSION_1,
+          .roles = AMDF_QUEUE_ROLE_TRANSFER,
+      },
   };
   for (const auto& family : families) {
     amdf_memory_site_query_t query = {

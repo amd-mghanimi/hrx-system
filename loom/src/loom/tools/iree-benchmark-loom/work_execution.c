@@ -11,6 +11,7 @@
 #include "loom/tools/iree-benchmark-loom/case_execution.h"
 #include "loom/tools/iree-benchmark-loom/dispatch_benchmark.h"
 #include "loom/tools/iree-benchmark-loom/hal_setup.h"
+#include "loom/tools/iree-benchmark-loom/scenario_execution.h"
 
 static iree_status_t iree_benchmark_loom_run_dispatch_sample_work_item(
     const iree_benchmark_loom_work_plan_execution_options_t* options,
@@ -116,6 +117,7 @@ iree_status_t iree_benchmark_loom_run_work_plan(
     iree_host_size_t* inout_failed_benchmark_count) {
   const iree_benchmark_loom_work_plan_t* work_plan = options->work_plan;
   iree_benchmark_loom_hal_compile_context_t* hal_compile_contexts = NULL;
+  iree_benchmark_loom_scenario_execution_t* scenario_execution = NULL;
   iree_status_t status = iree_ok_status();
   if (work_plan->hal_compile_item_count != 0) {
     status = iree_allocator_malloc_array(
@@ -132,10 +134,7 @@ iree_status_t iree_benchmark_loom_run_work_plan(
       .work_plan = options->work_plan,
       .benchmark_options = options->benchmark_options,
       .hal_context = options->hal_context,
-      .session = options->session,
-      .run_module = options->run_module,
-      .compile_report_options = options->compile_report_options,
-      .artifact_manifest_options = options->artifact_manifest_options,
+      .compilation = options->compilation,
       .case_execution_options = options->case_execution_options,
       .execution_arena = options->execution_arena,
       .host_allocator = options->host_allocator,
@@ -148,6 +147,20 @@ iree_status_t iree_benchmark_loom_run_work_plan(
        ++work_item_index) {
     const iree_benchmark_loom_work_item_t* work_item =
         &work_plan->work_items[work_item_index];
+    const iree_benchmark_loom_selected_benchmark_t* selection =
+        &work_plan
+             ->selected_benchmarks[work_item->representative_selection_index];
+    if (selection->skipped) {
+      const iree_benchmark_loom_benchmark_result_t benchmark_result = {
+          .state = IREE_SV("skipped"),
+      };
+      status = iree_benchmark_loom_emit_work_item_result_aliases(
+          options->run, options->module_plan, work_plan, work_item,
+          &benchmark_result, /*correctness_sample_count=*/0,
+          /*correctness_failed_sample_count=*/0, options->event_sink,
+          inout_failed_benchmark_count);
+      continue;
+    }
     switch ((iree_benchmark_loom_work_item_kind_t)work_item->kind) {
       case IREE_BENCHMARK_LOOM_WORK_ITEM_CASE_END_TO_END: {
         if (work_item->hal_compile_item_index ==
@@ -178,6 +191,17 @@ iree_status_t iree_benchmark_loom_run_work_plan(
             inout_failed_benchmark_count);
         break;
       }
+      case IREE_BENCHMARK_LOOM_WORK_ITEM_SCENARIO_TRIAL: {
+        if (scenario_execution == NULL) {
+          status = iree_benchmark_loom_scenario_execution_allocate(
+              options, iree_string_view_empty(), &scenario_execution);
+        }
+        if (iree_status_is_ok(status)) {
+          status = iree_benchmark_loom_run_scenario_work_item(
+              scenario_execution, work_item, inout_failed_benchmark_count);
+        }
+        break;
+      }
       case IREE_BENCHMARK_LOOM_WORK_ITEM_NONE:
       default:
         status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -193,6 +217,7 @@ iree_status_t iree_benchmark_loom_run_work_plan(
           &hal_compile_contexts[i]);
     }
   }
+  iree_benchmark_loom_scenario_execution_free(scenario_execution);
   iree_allocator_free(options->host_allocator, hal_compile_contexts);
   return status;
 }

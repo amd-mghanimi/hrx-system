@@ -12,6 +12,7 @@
 // wake_budget == 1 control process pops operations and handles them by type:
 // barriers, host calls, and allocations are handled inline; command buffers are
 // filled into recording items and pushed to the compute process's pending list.
+// Mapping batches run as finite processes on the existing executor workers.
 //
 // The wake_budget > 1 compute process drains recording items cooperatively
 // across all workers via the block processor. It occupies a single compute slot
@@ -37,6 +38,7 @@
 #include "iree/hal/api.h"
 #include "iree/hal/drivers/task/command/block_processor.h"
 #include "iree/hal/drivers/task/profile.h"
+#include "iree/hal/drivers/task/queue/memory_barrier.h"
 #include "iree/task/executor.h"
 #include "iree/task/process.h"
 #include "iree/task/scope.h"
@@ -87,12 +89,27 @@ typedef enum iree_hal_task_queue_op_type_e {
   IREE_HAL_TASK_QUEUE_OP_ATOMIC_STORE,
   IREE_HAL_TASK_QUEUE_OP_ATOMIC_RMW,
   IREE_HAL_TASK_QUEUE_OP_DISPATCH,
+  IREE_HAL_TASK_QUEUE_OP_MAP,
 } iree_hal_task_queue_op_type_t;
 
 typedef uint32_t iree_hal_task_queue_op_flags_t;
 enum iree_hal_task_queue_op_flag_bits_e {
   IREE_HAL_TASK_QUEUE_OP_FLAG_NONE = 0u,
   IREE_HAL_TASK_QUEUE_OP_FLAG_HAS_PROFILE_OPERATION = 1u << 0,
+  // Payload acquisition after the operation's semaphore waits.
+  IREE_HAL_TASK_QUEUE_OP_FLAG_BEFORE_ACQUIRE = 1u << 1,
+  // Payload publication before the operation (including atomic flag stores).
+  IREE_HAL_TASK_QUEUE_OP_FLAG_BEFORE_RELEASE = 1u << 2,
+  // Payload acquisition after the operation (including atomic flag waits).
+  IREE_HAL_TASK_QUEUE_OP_FLAG_AFTER_ACQUIRE = 1u << 3,
+  // Payload publication before terminal completion signals.
+  IREE_HAL_TASK_QUEUE_OP_FLAG_AFTER_RELEASE = 1u << 4,
+  // Conservative acquisition of the one-shot operation's read operands.
+  IREE_HAL_TASK_QUEUE_OP_FLAG_BEFORE_DEFAULT = 1u << 5,
+  // Conservative publication of the one-shot operation's written operands.
+  IREE_HAL_TASK_QUEUE_OP_FLAG_AFTER_DEFAULT = 1u << 6,
+  // Successful file I/O returned from the proactor for cache operations.
+  IREE_HAL_TASK_QUEUE_OP_FLAG_COMPLETING_IO = 1u << 7,
 };
 
 typedef struct iree_hal_task_queue_op_t iree_hal_task_queue_op_t;
@@ -139,13 +156,8 @@ struct iree_hal_task_queue_op_t {
   // table buffers, etc.). Allocated from the small block pool.
   iree_hal_resource_set_t* resource_set;
 
-  // SCOPED buffer mappings referenced by a deferred block recording. The
-  // arena-owned array remains live through recording execution and is unmapped
-  // before user-visible completion is published.
-  iree_hal_buffer_mapping_t* recording_mappings;
-
-  // Number of entries in |recording_mappings|.
-  iree_host_size_t recording_mapping_count;
+  // Arena-owned host recipes, NULL when only fences/default operands suffice.
+  iree_hal_task_queue_memory_barriers_t* memory_barriers;
 
   // Frontier tracker advanced when the operation completes.
   iree_async_frontier_tracker_t* frontier_tracker;
@@ -196,6 +208,8 @@ struct iree_hal_task_queue_op_t {
       // Flags controlling callback ordering and completion.
       iree_hal_host_call_flags_t flags;
     } host_call;
+    // Arena-owned native mapping process, independent of the control process.
+    struct iree_hal_task_queue_mapping_t* mapping;
     struct {
       // Borrowed pool used for the complete allocation transaction.
       iree_hal_pool_t* pool;
@@ -220,6 +234,17 @@ struct iree_hal_task_queue_op_t {
 
       // Pool reservation flags used when probing the selected pool.
       iree_hal_pool_reserve_flags_t reserve_flags;
+
+      // Native acquisition completion, joined with its submitting call before
+      // any continuation may consume the operation or its borrowed arrays.
+      struct {
+        // Submission and callback each relinquish one claim.
+        iree_atomic_int32_t pending;
+        // Terminal pool result, published by completion.
+        iree_hal_pool_acquire_result_t result;
+        // Owned terminal failure, consumed by the continuation.
+        iree_status_t status;
+      } acquire;
 
       // True while this operation owns every entry in |reservations|.
       bool reservations_held;
@@ -471,7 +496,7 @@ typedef struct iree_hal_task_queue_create_params_t {
   // Executor retained by the queue.
   iree_task_executor_t* executor;
 
-  // NUMA-local proactor borrowed from the parent device's proactor pool.
+  // Local or explicitly unplaced proactor borrowed from the device's pool.
   iree_async_proactor_t* proactor;
 
   // Aggregate transfer payload length selecting direct or recorded execution.
@@ -528,9 +553,9 @@ struct iree_hal_task_queue_t {
   iree_task_executor_t* executor;
 
   // Proactor for async I/O operations on this queue. Borrowed from the
-  // device's proactor pool — selected at device creation time based on the
-  // executor's NUMA node for NUMA-correct I/O. Valid as long as the device
-  // (which retains the proactor pool) is alive.
+  // device's proactor pool. Device construction selects a local or explicitly
+  // unplaced service; dynamic queues reuse their executor's selected service.
+  // Valid as long as the device (which retains the proactor pool) is alive.
   iree_async_proactor_t* proactor;
 
   // Shared frontier tracker for cross-device causal ordering.
@@ -606,7 +631,7 @@ struct iree_hal_task_queue_t {
   // For COMMANDS operations, this process fills a recording item and pushes
   // it to compute_pending (delegating actual execution to the compute
   // process below). For all other operation types, this process handles
-  // them inline.
+  // them inline, except mappings scheduled as finite processes on the executor.
   //
   // The process participates in the process scope: scope_begin at
   // initialization, scope_end in the release callback. This ensures
@@ -677,6 +702,16 @@ struct iree_hal_task_queue_t {
   uint32_t compute_worker_count;
 };
 
+// Retains the queue through its HAL resource lifetime. NULL is allowed.
+static inline void iree_hal_task_queue_retain(iree_hal_task_queue_t* queue) {
+  iree_hal_queue_retain((iree_hal_queue_t*)queue);
+}
+
+// Releases a queue reference. NULL is allowed.
+static inline void iree_hal_task_queue_release(iree_hal_task_queue_t* queue) {
+  iree_hal_queue_release((iree_hal_queue_t*)queue);
+}
+
 iree_status_t iree_hal_task_queue_initialize(
     const iree_hal_task_queue_create_params_t* params,
     iree_hal_task_queue_t* out_queue);
@@ -714,7 +749,8 @@ void iree_hal_task_queue_set_profile_recorder(
 
 iree_status_t iree_hal_task_queue_submit_barrier(
     iree_hal_task_queue_t* queue, iree_hal_semaphore_list_t wait_semaphores,
-    iree_hal_semaphore_list_t signal_semaphores);
+    iree_hal_semaphore_list_t signal_semaphores,
+    const iree_hal_queue_barriers_t* barriers);
 
 iree_status_t iree_hal_task_queue_submit_commands(
     iree_hal_task_queue_t* queue, iree_host_size_t batch_count,
@@ -724,6 +760,90 @@ iree_status_t iree_hal_task_queue_submit_host_call(
     iree_hal_task_queue_t* queue, iree_hal_semaphore_list_t wait_semaphores,
     iree_hal_semaphore_list_t signal_semaphores, iree_hal_host_call_t call,
     const uint64_t args[4], iree_hal_host_call_flags_t flags);
+
+// Captures and submits one mapping vector with one dependency boundary.
+iree_status_t iree_hal_task_queue_submit_map(
+    iree_hal_queue_t* queue, iree_hal_semaphore_list_t waits,
+    iree_hal_semaphore_list_t signals, iree_host_size_t mapping_count,
+    const iree_hal_memory_mapping_t* mappings,
+    iree_hal_queue_map_flags_t flags);
+
+// Schedules a ready native mapping process on the existing executor.
+// The operation may complete and free itself before this call returns.
+void iree_hal_task_queue_issue_map(iree_hal_task_queue_op_t* operation);
+
+// Allocates one operation and begins its accepted-work scope. On success the
+// caller fills its payload and passes it to submit_op_finish exactly once.
+iree_status_t iree_hal_task_queue_submit_op_begin(
+    iree_hal_task_queue_t* queue, iree_hal_task_queue_op_type_t type,
+    const iree_hal_semaphore_list_t* signals,
+    iree_hal_task_queue_op_t** out_operation);
+
+// Retains resources and registers waits. Consumes the operation on all paths.
+iree_status_t iree_hal_task_queue_submit_op_finish(
+    iree_hal_task_queue_op_t* operation, iree_hal_semaphore_list_t waits,
+    iree_host_size_t resource_count, iree_hal_resource_t* const* resources);
+
+// Returns whether new queue progress should complete with cancellation.
+bool iree_hal_task_queue_is_shutting_down(iree_hal_task_queue_t* queue);
+
+// Constructs the terminal error for work cancelled during queue shutdown.
+iree_status_t iree_hal_task_queue_make_shutdown_status(void);
+
+// Transfers one ready operation to the existing queue process.
+void iree_hal_task_queue_schedule_ready(iree_hal_task_queue_op_t* operation);
+
+// Discards rejected capture without publishing signals. Consumes the operation.
+void iree_hal_task_queue_op_discard(iree_hal_task_queue_op_t* operation);
+
+// Retires an operation and fails its signals on error, without advancing the
+// queue frontier. Consumes the operation and status.
+void iree_hal_task_queue_op_destroy(iree_hal_task_queue_op_t* operation,
+                                    iree_status_t failure_status);
+
+// Acquires and publishes allocation backing after user waits resolve. Success
+// transfers ownership to completion; failure leaves cleanup with the caller.
+iree_status_t iree_hal_task_queue_issue_alloca(
+    iree_hal_task_queue_op_t* operation);
+
+// Returns allocation ownership and completes its accepted queue operation.
+void iree_hal_task_queue_issue_dealloca(iree_hal_task_queue_op_t* operation);
+
+// Returns staged allocation reservations and destroys completed wait state.
+void iree_hal_task_queue_alloca_cleanup(iree_hal_task_queue_op_t* operation);
+
+// Marks a captured operation as requiring asynchronous dependency progress.
+void iree_hal_task_queue_profile_force_software_defer(
+    iree_hal_task_queue_op_t* operation);
+
+// Records one allocation lifecycle event when memory profiling is enabled.
+void iree_hal_task_queue_profile_record_memory_event(
+    iree_hal_task_queue_op_t* operation,
+    iree_hal_profile_memory_event_type_t type,
+    iree_hal_profile_memory_event_flags_t flags, uint32_t result,
+    const iree_hal_pool_reservation_t* reservations,
+    uint64_t frontier_entry_count);
+
+// Records the operation's transition from submitted to ready exactly once.
+void iree_hal_task_queue_profile_record_queue_event(
+    iree_hal_task_queue_op_t* operation, iree_time_t ready_host_time_ns);
+
+// Records terminal failure before the operation became ready to execute.
+void iree_hal_task_queue_profile_record_failed_before_ready(
+    iree_hal_task_queue_op_t* operation);
+
+// Begins the bounded host-execution interval when profiling is enabled.
+void iree_hal_task_queue_profile_start_host_execution(
+    iree_hal_task_queue_op_t* operation);
+
+// Publishes terminal success and retires the operation's frontier and scope.
+// Consumes the operation.
+void iree_hal_task_queue_op_complete(iree_hal_task_queue_op_t* operation);
+
+// Publishes terminal failure to the signals and frontier, then retires the
+// operation's scope. Consumes both the operation and its non-OK status.
+void iree_hal_task_queue_op_fail(iree_hal_task_queue_op_t* operation,
+                                 iree_status_t status);
 
 iree_status_t iree_hal_task_queue_submit_alloca(
     iree_hal_task_queue_t* queue, iree_hal_pool_t* pool,
@@ -744,14 +864,16 @@ iree_status_t iree_hal_task_queue_submit_read(
     uint64_t source_offset, iree_hal_buffer_t* target_buffer,
     iree_device_size_t target_offset, iree_device_size_t length,
     iree_hal_semaphore_list_t wait_semaphores,
-    iree_hal_semaphore_list_t signal_semaphores);
+    iree_hal_semaphore_list_t signal_semaphores,
+    const iree_hal_queue_barriers_t* barriers);
 
 iree_status_t iree_hal_task_queue_submit_write(
     iree_hal_task_queue_t* queue, iree_hal_buffer_t* source_buffer,
     iree_device_size_t source_offset, iree_hal_file_t* target_file,
     uint64_t target_offset, iree_device_size_t length,
     iree_hal_semaphore_list_t wait_semaphores,
-    iree_hal_semaphore_list_t signal_semaphores);
+    iree_hal_semaphore_list_t signal_semaphores,
+    const iree_hal_queue_barriers_t* barriers);
 
 iree_status_t iree_hal_task_queue_submit_fill(
     iree_hal_task_queue_t* queue, iree_hal_buffer_t* target_buffer,
@@ -778,19 +900,22 @@ iree_status_t iree_hal_task_queue_submit_atomic_wait(
     iree_hal_task_queue_t* queue, iree_hal_buffer_t* target_buffer,
     iree_device_size_t target_offset, iree_hal_atomic_wait_params_t params,
     iree_hal_semaphore_list_t wait_semaphores,
-    iree_hal_semaphore_list_t signal_semaphores);
+    iree_hal_semaphore_list_t signal_semaphores,
+    const iree_hal_queue_barriers_t* barriers);
 
 iree_status_t iree_hal_task_queue_submit_atomic_store(
     iree_hal_task_queue_t* queue, iree_hal_buffer_t* target_buffer,
     iree_device_size_t target_offset, iree_hal_atomic_store_params_t params,
     iree_hal_semaphore_list_t wait_semaphores,
-    iree_hal_semaphore_list_t signal_semaphores);
+    iree_hal_semaphore_list_t signal_semaphores,
+    const iree_hal_queue_barriers_t* barriers);
 
 iree_status_t iree_hal_task_queue_submit_atomic_rmw(
     iree_hal_task_queue_t* queue, iree_hal_buffer_t* target_buffer,
     iree_device_size_t target_offset, iree_hal_atomic_rmw_params_t params,
     iree_hal_semaphore_list_t wait_semaphores,
-    iree_hal_semaphore_list_t signal_semaphores);
+    iree_hal_semaphore_list_t signal_semaphores,
+    const iree_hal_queue_barriers_t* barriers);
 
 iree_status_t iree_hal_task_queue_submit_dispatch(
     iree_hal_task_queue_t* queue, iree_hal_executable_t* executable,
@@ -798,7 +923,8 @@ iree_status_t iree_hal_task_queue_submit_dispatch(
     iree_hal_dispatch_config_t config, iree_const_byte_span_t constants,
     const iree_hal_buffer_ref_t* bindings, iree_host_size_t binding_count,
     iree_hal_dispatch_flags_t flags, iree_hal_semaphore_list_t wait_semaphores,
-    iree_hal_semaphore_list_t signal_semaphores);
+    iree_hal_semaphore_list_t signal_semaphores,
+    const iree_hal_queue_barriers_t* barriers);
 
 #ifdef __cplusplus
 }  // extern "C"

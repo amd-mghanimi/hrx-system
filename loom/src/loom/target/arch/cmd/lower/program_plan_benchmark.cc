@@ -46,6 +46,8 @@ enum class LaunchShape {
   kDistinctKernelClasses,
   // One launch of each independently defined kernel.
   kIndependentKernels,
+  // Logical launches whose counts read one shared storage workload.
+  kStorageBackedWorkloads,
 };
 
 enum class KernelRequestMode {
@@ -68,8 +70,9 @@ class ProgramPlanFixture {
     source_module_ = ParseAndVerify(BuildSource(launch_shape, launch_count));
     CheckStatus(loom_link_module_index_allocate(
         &context_, &block_pool_, iree_allocator_system(), &index_));
-    loom_link_module_index_add_options_t add_options = {};
-    add_options.provider_name = IREE_SV("command_plan_benchmark");
+    loom_link_module_index_add_options_t add_options = {
+        .provider_name = IREE_SV("command_plan_benchmark"),
+    };
     CheckStatus(loom_link_module_index_add_materialized(
         index_, source_module_, &add_options,
         /*out_provider_ordinal=*/nullptr));
@@ -79,13 +82,14 @@ class ProgramPlanFixture {
       std::abort();
     }
     const loom_link_plan_root_facet_t root_facet = {
-        /*.symbol_ordinal=*/root_symbol_->ordinal,
-        /*.kind=*/LOOM_LINK_SYMBOL_FACET_COMMAND_IMPLEMENTATION,
+        .symbol_ordinal = root_symbol_->ordinal,
+        .kind = LOOM_LINK_SYMBOL_FACET_COMMAND_IMPLEMENTATION,
     };
-    loom_link_plan_options_t options = {};
-    options.mode = LOOM_LINK_PLAN_LINK;
-    options.root_facets = {1, &root_facet};
-    options.dependency_policy = LOOM_LINK_PLAN_DEPENDENCY_REQUESTED_FACETS;
+    loom_link_plan_options_t options = {
+        .mode = LOOM_LINK_PLAN_LINK,
+        .root_facets = {1, &root_facet},
+        .dependency_policy = LOOM_LINK_PLAN_DEPENDENCY_REQUESTED_FACETS,
+    };
     CheckStatus(loom_link_plan_build(index_, &options, iree_allocator_system(),
                                      &plan_));
   }
@@ -103,10 +107,11 @@ class ProgramPlanFixture {
 
   loom_link_plan_materialization_t Materialize(
       iree_arena_allocator_t* arena, loom_symbol_ref_t* out_root_ref) {
-    loom_link_plan_materialization_environment_t environment = {};
-    environment.context = &context_;
-    environment.block_pool = &block_pool_;
-    environment.allocator = iree_allocator_system();
+    loom_link_plan_materialization_environment_t environment = {
+        .context = &context_,
+        .block_pool = &block_pool_,
+        .allocator = iree_allocator_system(),
+    };
     loom_link_plan_materialization_t materialization = {};
     CheckStatus(loom_link_plan_materialize(plan_, &environment,
                                            IREE_SV("command_plan_benchmark"),
@@ -154,6 +159,32 @@ class ProgramPlanFixture {
         source.append("  kernel.launch @kernel_");
         source.append(std::to_string(i));
         source.append("() : ()\n");
+      }
+      source.append("  command.return\n}\n");
+      return source;
+    }
+
+    if (launch_shape == LaunchShape::kStorageBackedWorkloads) {
+      source.append(R"(
+kernel.def @tiles(%count_storage: buffer) {
+  %offset = index.constant 0 : offset
+  %index = index.constant 0 : index
+  %counts = buffer.view %count_storage[%offset] : buffer -> view<1xi32>
+  %raw_count = view.load %counts[%index] : view<1xi32> -> i32
+  %wide_count = scalar.extui %raw_count : i32 to i64
+  %count = index.cast %wide_count : i64 to index
+  %one = index.constant 1 : index
+  kernel.launch.config workgroups(%count, %one, %one) workgroup_size(%one, %one, %one) : index
+} launch() {
+  kernel.return
+}
+
+command.program.def public @root() launch(%count_storage: buffer) {
+  %unique_counts = buffer.assume.noalias %count_storage : buffer
+)");
+      for (iree_host_size_t i = 0; i < launch_count; ++i) {
+        source.append(
+            "  kernel.launch @tiles[%unique_counts]() : [buffer]()\n");
       }
       source.append("  command.return\n}\n");
       return source;
@@ -233,6 +264,7 @@ kernel.def @tiles(%extent: index) {
             "[index](index)\n");
         break;
       case LaunchShape::kIndependentKernels:
+      case LaunchShape::kStorageBackedWorkloads:
         std::abort();
     }
     source.append(R"(  }
@@ -243,9 +275,10 @@ kernel.def @tiles(%extent: index) {
   }
 
   loom_module_t* ParseAndVerify(const std::string& source) {
-    loom_text_parse_options_t parse_options = {};
-    parse_options.diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr};
-    parse_options.max_errors = 20;
+    loom_text_parse_options_t parse_options = {
+        .diagnostic_sink = {loom_diagnostic_stderr_sink, nullptr},
+        .max_errors = 20,
+    };
     loom_module_t* module = nullptr;
     CheckStatus(
         loom_text_parse(iree_make_string_view(source.data(), source.size()),
@@ -296,10 +329,9 @@ static void RunProgramPlanBenchmark(benchmark::State& state,
     loom_link_plan_materialization_t materialization =
         fixture.Materialize(&materialization_arena, &root_ref);
     state.ResumeTiming();
-
     bool valid = false;
     loom_cmd_program_plan_t program_plan = {};
-    CheckStatus(loom_cmd_program_plan_prepare_materialization(
+    CheckStatus(loom_cmd_program_plan_build_from_materialization(
         &materialization, &root_ref, /*program_count=*/1,
         /*kernel_source=*/nullptr, loom_pass_builtin_registry(),
         loom_cleanup_configured_pattern_provider_set(),
@@ -367,6 +399,8 @@ static iree_host_size_t ExpectedKernelRequestCount(
       return launch_count <= 128 ? 1 : 2;
     case LaunchShape::kIndependentKernels:
       return launch_count;
+    case LaunchShape::kStorageBackedWorkloads:
+      return 2;
   }
   std::abort();
 }
@@ -378,21 +412,21 @@ static void RunIndexedProgramPlanBenchmark(benchmark::State& state,
                              static_cast<iree_host_size_t>(state.range(0)));
   const iree_host_size_t root_symbol_ordinal = fixture.root_symbol_ordinal();
   const loom_link_plan_materialization_environment_t environment = {
-      /*.context=*/fixture.context(),
-      /*.block_pool=*/fixture.block_pool(),
-      /*.low_repr_environment=*/{},
-      /*.diagnostic_sink=*/nullptr,
-      /*.prepare_module=*/nullptr,
-      /*.user_data=*/nullptr,
-      /*.allocator=*/iree_allocator_system(),
+      .context = fixture.context(),
+      .block_pool = fixture.block_pool(),
+      .low_repr_environment = {},
+      .diagnostic_sink = nullptr,
+      .prepare_module = nullptr,
+      .user_data = nullptr,
+      .allocator = iree_allocator_system(),
   };
   loom_cmd_program_plan_index_options_t options;
   loom_cmd_program_plan_index_options_initialize(&options);
   KernelRequestCapture capture;
   if (request_mode == KernelRequestMode::kPublish) {
     options.kernel_request_sink = {
-        /*.publish=*/CaptureKernelRequest,
-        /*.user_data=*/&capture,
+        .publish = CaptureKernelRequest,
+        .user_data = &capture,
     };
   }
 
@@ -411,7 +445,7 @@ static void RunIndexedProgramPlanBenchmark(benchmark::State& state,
     capture.start_time = std::chrono::steady_clock::now();
     bool valid = false;
     loom_cmd_program_plan_t program_plan = {};
-    CheckStatus(loom_cmd_program_plan_prepare_index(
+    CheckStatus(loom_cmd_program_plan_build_from_index(
         fixture.index(), &root_symbol_ordinal, /*program_count=*/1,
         request_mode == KernelRequestMode::kPublish ? &options : nullptr,
         loom_pass_builtin_registry(),
@@ -494,12 +528,21 @@ static void BM_PrepareIndexedIndependentKernelRequests(
                                  KernelRequestMode::kPublish);
 }
 
+static void BM_PrepareIndexedStorageBackedRequests(benchmark::State& state) {
+  RunIndexedProgramPlanBenchmark(state, LaunchShape::kStorageBackedWorkloads,
+                                 KernelRequestMode::kPublish);
+}
+
 static void LaunchScales(benchmark::Benchmark* benchmark) {
   benchmark->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(256)->Arg(1024);
 }
 
 static void RequestScales(benchmark::Benchmark* benchmark) {
   benchmark->Arg(1)->Arg(16)->Arg(256)->Arg(1024);
+}
+
+static void StorageScales(benchmark::Benchmark* benchmark) {
+  benchmark->Arg(1)->Arg(4)->Arg(16)->Arg(64)->Arg(256);
 }
 
 BENCHMARK(BM_PrepareDirectDispatches)
@@ -534,6 +577,9 @@ BENCHMARK(BM_PrepareIndexedIndependentKernelsBodyBlind)
     ->Complexity(benchmark::oN);
 BENCHMARK(BM_PrepareIndexedIndependentKernelRequests)
     ->Apply(RequestScales)
+    ->Complexity(benchmark::oN);
+BENCHMARK(BM_PrepareIndexedStorageBackedRequests)
+    ->Apply(StorageScales)
     ->Complexity(benchmark::oN);
 
 }  // namespace

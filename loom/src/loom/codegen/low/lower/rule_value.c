@@ -10,6 +10,7 @@
 
 #include "iree/base/internal/math.h"
 #include "loom/ir/context.h"
+#include "loom/ir/float_facts.h"
 #include "loom/ir/module.h"
 #include "loom/ops/op_defs.h"
 
@@ -22,51 +23,66 @@ loom_low_lower_rule_value_materializer(
   return &rule_set->materializers[materializer_index];
 }
 
-static loom_low_lower_u32_divisor_magic_info_t
-loom_low_lower_u32_divisor_magic_info(uint32_t divisor) {
+loom_low_lower_unsigned_divisor_magic_info_t
+loom_low_lower_unsigned_divisor_magic_info(uint64_t divisor, uint32_t bit_width,
+                                           uint64_t numerator_maximum) {
+  IREE_ASSERT_GE(bit_width, 2u);
+  IREE_ASSERT_LE(bit_width, 64u);
   IREE_ASSERT_GT(divisor, 1u);
-  const uint64_t u32_mask = UINT32_MAX;
-  const uint64_t two31 = ((uint64_t)1) << 31;
-  const uint64_t two31_minus_one = two31 - 1;
+  const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+  IREE_ASSERT_LE(divisor, mask);
+  const uint64_t half = UINT64_C(1) << (bit_width - 1);
+  const uint64_t half_minus_one = half - 1;
+  if (numerator_maximum < divisor) {
+    return (loom_low_lower_unsigned_divisor_magic_info_t){0};
+  }
 
-  const uint64_t nc = u32_mask - ((u32_mask + 1u - divisor) % divisor);
-  uint32_t p = 31;
-  uint64_t q1 = two31 / nc;
-  uint64_t r1 = two31 % nc;
-  uint64_t q2 = two31_minus_one / divisor;
-  uint64_t r2 = two31_minus_one % divisor;
+  // The last numerator congruent to divisor-1 bounds reciprocal-rounding
+  // error. Using the proven domain here retains native product precision while
+  // allowing fewer reciprocal bits. The subtraction also works at width 64
+  // without forming an unrepresentable 2^64.
+  const uint64_t nc =
+      numerator_maximum - ((numerator_maximum - divisor + 1) % divisor);
+  uint32_t p = bit_width - 1;
+  uint64_t q1 = half / nc;
+  uint64_t r1 = half % nc;
+  uint64_t q2 = half_minus_one / divisor;
+  uint64_t r2 = half_minus_one % divisor;
   bool is_add = false;
   for (;;) {
     ++p;
-    if (r1 >= nc - r1) {
-      q1 = ((q1 << 1) + 1) & u32_mask;
-      r1 = ((r1 << 1) - nc) & u32_mask;
+    const bool carry = r1 >= nc - r1;
+    // q1 is used only for the termination comparison against delta < divisor.
+    // A small numerator bound can make it exceed the product width; saturation
+    // preserves that comparison whereas wrapping would lose the range proof.
+    q1 = q1 >= half ? mask : (q1 << 1) + carry;
+    if (carry) {
+      r1 = ((r1 << 1) - nc) & mask;
     } else {
-      q1 = (q1 << 1) & u32_mask;
-      r1 = (r1 << 1) & u32_mask;
+      r1 = (r1 << 1) & mask;
     }
     if (r2 + 1 >= divisor - r2) {
-      if (q2 >= two31_minus_one) {
+      if (q2 >= half_minus_one) {
         is_add = true;
       }
-      q2 = ((q2 << 1) + 1) & u32_mask;
-      r2 = ((r2 << 1) + 1 - divisor) & u32_mask;
+      q2 = ((q2 << 1) + 1) & mask;
+      r2 = ((r2 << 1) + 1 - divisor) & mask;
     } else {
-      if (q2 >= two31) {
+      if (q2 >= half) {
         is_add = true;
       }
-      q2 = (q2 << 1) & u32_mask;
-      r2 = ((r2 << 1) + 1) & u32_mask;
+      q2 = (q2 << 1) & mask;
+      r2 = ((r2 << 1) + 1) & mask;
     }
-    const uint64_t delta = (divisor - 1 - r2) & u32_mask;
-    if (!(p < 64 && (q1 < delta || (q1 == delta && r1 == 0)))) {
+    const uint64_t delta = (divisor - 1 - r2) & mask;
+    if (!(p < 2 * bit_width && (q1 < delta || (q1 == delta && r1 == 0)))) {
       break;
     }
   }
 
-  loom_low_lower_u32_divisor_magic_info_t info = {
-      .multiplier = (uint32_t)((q2 + 1) & u32_mask),
-      .post_shift = (uint8_t)(p - 32),
+  loom_low_lower_unsigned_divisor_magic_info_t info = {
+      .multiplier = (q2 + 1) & mask,
+      .post_shift = (uint8_t)(p - bit_width),
       .is_add = is_add,
   };
   if (info.is_add) {
@@ -74,6 +90,92 @@ loom_low_lower_u32_divisor_magic_info(uint32_t divisor) {
     --info.post_shift;
   }
   return info;
+}
+
+loom_low_lower_signed_divisor_magic_info_t
+loom_low_lower_signed_divisor_magic_info(int64_t divisor, uint32_t bit_width) {
+  IREE_ASSERT_GE(bit_width, 3u);
+  IREE_ASSERT_LE(bit_width, 64u);
+  IREE_ASSERT_NE(divisor, 0);
+  IREE_ASSERT_NE(divisor, 1);
+  IREE_ASSERT_NE(divisor, -1);
+  if (bit_width < 64) {
+    const int64_t signed_limit = INT64_C(1) << (bit_width - 1);
+    IREE_ASSERT_GE(divisor, -signed_limit);
+    IREE_ASSERT_LT(divisor, signed_limit);
+  }
+  const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+  const uint64_t sign_bit = UINT64_C(1) << (bit_width - 1);
+  const uint64_t divisor_bits = (uint64_t)divisor & mask;
+  const bool divisor_is_negative = (divisor_bits & sign_bit) != 0;
+  const uint64_t divisor_magnitude =
+      divisor_is_negative ? ((~divisor_bits + 1) & mask) : divisor_bits;
+  IREE_ASSERT_LE(divisor_magnitude, sign_bit);
+
+  // Hacker's Delight, second edition, section 10-4. All temporaries model
+  // fixed-width unsigned integers so this also handles the signed minimum
+  // divisor without forming its unrepresentable positive counterpart.
+  const uint64_t t = sign_bit + (divisor_bits >> (bit_width - 1));
+  const uint64_t ancestor = (t - 1 - (t % divisor_magnitude)) & mask;
+  uint32_t p = bit_width - 1;
+  uint64_t q1 = sign_bit / ancestor;
+  uint64_t r1 = sign_bit % ancestor;
+  uint64_t q2 = sign_bit / divisor_magnitude;
+  uint64_t r2 = sign_bit % divisor_magnitude;
+  uint64_t delta = 0;
+  do {
+    ++p;
+    q1 = (q1 << 1) & mask;
+    r1 = (r1 << 1) & mask;
+    if (r1 >= ancestor) {
+      q1 = (q1 + 1) & mask;
+      r1 -= ancestor;
+    }
+    q2 = (q2 << 1) & mask;
+    r2 = (r2 << 1) & mask;
+    if (r2 >= divisor_magnitude) {
+      q2 = (q2 + 1) & mask;
+      r2 -= divisor_magnitude;
+    }
+    delta = divisor_magnitude - r2;
+  } while (q1 < delta || (q1 == delta && r1 == 0));
+
+  uint64_t multiplier = (q2 + 1) & mask;
+  if (divisor_is_negative) {
+    multiplier = (~multiplier + 1) & mask;
+  }
+  const bool multiplier_is_negative = (multiplier & sign_bit) != 0;
+  const int8_t numerator_factor =
+      !divisor_is_negative && multiplier_is_negative   ? 1
+      : divisor_is_negative && !multiplier_is_negative ? -1
+                                                       : 0;
+  return (loom_low_lower_signed_divisor_magic_info_t){
+      .multiplier = multiplier,
+      .post_shift = (uint8_t)(p - bit_width),
+      .numerator_factor = numerator_factor,
+  };
+}
+
+loom_low_lower_signed_divisor_magic_kind_t
+loom_low_lower_signed_divisor_magic_kind(
+    loom_low_lower_signed_divisor_magic_info_t info) {
+  switch (info.numerator_factor) {
+    case 0:
+      return info.post_shift == 0
+                 ? LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY
+                 : LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_SHIFT;
+    case 1:
+      return info.post_shift == 0
+                 ? LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_ADD
+                 : LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_ADD_SHIFT;
+    case -1:
+      return info.post_shift == 0
+                 ? LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_SUBTRACT
+                 : LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY_SUBTRACT_SHIFT;
+    default:
+      IREE_ASSERT_UNREACHABLE("invalid signed divisor numerator factor");
+      return LOOM_LOW_LOWER_SIGNED_DIVISOR_MAGIC_MULTIPLY;
+  }
 }
 
 uint64_t loom_low_lower_u32_divisor_reciprocal(uint32_t divisor) {
@@ -127,6 +229,7 @@ loom_value_id_t loom_low_lower_rule_source_value_from_nodes(
           "source-memory dynamic term value ref needs a selected memory plan");
       IREE_BUILTIN_UNREACHABLE();
     case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_BYTE_OFFSET:
       IREE_ASSERT_UNREACHABLE(
           "source-memory byte offset value ref needs a selected memory plan");
       IREE_BUILTIN_UNREACHABLE();
@@ -134,10 +237,106 @@ loom_value_id_t loom_low_lower_rule_source_value_from_nodes(
       IREE_ASSERT_UNREACHABLE(
           "source-memory address value ref needs a selected memory plan");
       IREE_BUILTIN_UNREACHABLE();
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ELEMENT_STRIDE:
     case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ROOT:
       IREE_ASSERT_UNREACHABLE(
-          "source-memory root value ref needs a selected memory plan");
+          "source-memory geometry value ref needs a selected memory plan");
       IREE_BUILTIN_UNREACHABLE();
+    case LOOM_LOW_LOWER_VALUE_REF_EXACT_LANE_ORIGIN_OPERAND:
+      IREE_ASSERT_UNREACHABLE(
+          "exact lane origin value ref needs a populated fact table");
+      IREE_BUILTIN_UNREACHABLE();
+    case LOOM_LOW_LOWER_VALUE_REF_EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND:
+    case LOOM_LOW_LOWER_VALUE_REF_UNIFORM_ELEMENT_ORIGIN_OPERAND:
+      IREE_ASSERT_UNREACHABLE(
+          "uniform origin value ref needs a populated fact table");
+      IREE_BUILTIN_UNREACHABLE();
+    default:
+      IREE_ASSERT_UNREACHABLE("unknown generated value ref kind");
+      IREE_BUILTIN_UNREACHABLE();
+  }
+}
+
+bool loom_low_lower_rule_resolve_source_value_from_nodes(
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_target_contract_vector_lane_projection_t vector_lane_projection,
+    const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
+    const loom_op_t* const* source_nodes, uint8_t source_node_count,
+    uint16_t value_ref_index, loom_value_id_t* out_source_value_id) {
+  *out_source_value_id = LOOM_VALUE_ID_INVALID;
+  const loom_low_lower_value_ref_t* value_ref =
+      &rule_set->value_refs[value_ref_index];
+  switch (value_ref->kind) {
+    case LOOM_LOW_LOWER_VALUE_REF_OPERAND:
+    case LOOM_LOW_LOWER_VALUE_REF_RESULT:
+      *out_source_value_id = loom_low_lower_rule_source_value_from_nodes(
+          module, rule_set, source_op, source_nodes, source_node_count,
+          value_ref_index);
+      return true;
+    case LOOM_LOW_LOWER_VALUE_REF_EXACT_LANE_ORIGIN_OPERAND: {
+      if (fact_table == NULL) {
+        return false;
+      }
+      const loom_op_t* referenced_op =
+          loom_low_lower_rule_source_op(rule_set, source_op, source_nodes,
+                                        source_node_count, value_ref_index);
+      const loom_op_vtable_t* vtable = loom_op_vtable(module, referenced_op);
+      const loom_value_slice_t field =
+          loom_op_operand_field_span(vtable, referenced_op, value_ref->index);
+      IREE_ASSERT_LT(value_ref->element_index, field.count);
+      const loom_value_id_t value_id = field.values[value_ref->element_index];
+      loom_value_fact_exact_lane_origin_t origin = {0};
+      if (!loom_value_fact_table_query_exact_lane_origin(fact_table, module,
+                                                         value_id, &origin) ||
+          origin.source_lane_offset != 0 || origin.source_lane_stride != 1) {
+        return false;
+      }
+      uint64_t value_lane_count = 0;
+      uint64_t source_lane_count = 0;
+      if (!loom_type_static_element_count(
+              loom_target_contract_query_value_type(vector_lane_projection,
+                                                    module, value_id),
+              &value_lane_count) ||
+          !loom_type_static_element_count(
+              loom_target_contract_query_value_type(
+                  vector_lane_projection, module, origin.source_value_id),
+              &source_lane_count) ||
+          value_lane_count != source_lane_count) {
+        return false;
+      }
+      *out_source_value_id = origin.source_value_id;
+      return true;
+    }
+    case LOOM_LOW_LOWER_VALUE_REF_EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND:
+    case LOOM_LOW_LOWER_VALUE_REF_UNIFORM_ELEMENT_ORIGIN_OPERAND: {
+      if (fact_table == NULL) {
+        return false;
+      }
+      const loom_op_t* referenced_op =
+          loom_low_lower_rule_source_op(rule_set, source_op, source_nodes,
+                                        source_node_count, value_ref_index);
+      const loom_op_vtable_t* vtable = loom_op_vtable(module, referenced_op);
+      const loom_value_slice_t field =
+          loom_op_operand_field_span(vtable, referenced_op, value_ref->index);
+      IREE_ASSERT_LT(value_ref->element_index, field.count);
+      if (value_ref->kind ==
+          LOOM_LOW_LOWER_VALUE_REF_UNIFORM_ELEMENT_ORIGIN_OPERAND) {
+        return loom_value_fact_table_query_uniform_element_origin(
+            fact_table, module, field.values[value_ref->element_index],
+            out_source_value_id);
+      }
+      return loom_value_fact_table_query_exact_uniform_element_origin(
+          fact_table, module, field.values[value_ref->element_index],
+          out_source_value_id);
+    }
+    case LOOM_LOW_LOWER_VALUE_REF_TEMPORARY:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_DYNAMIC_TERM:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_BYTE_OFFSET:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ADDRESS:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ELEMENT_STRIDE:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ROOT:
+      return false;
     default:
       IREE_ASSERT_UNREACHABLE("unknown generated value ref kind");
       IREE_BUILTIN_UNREACHABLE();
@@ -169,8 +368,13 @@ loom_value_slice_t loom_low_lower_rule_value_ref_field_span_from_nodes(
     case LOOM_LOW_LOWER_VALUE_REF_TEMPORARY:
     case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_DYNAMIC_TERM:
     case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_BYTE_OFFSET:
     case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ADDRESS:
+    case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ELEMENT_STRIDE:
     case LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ROOT:
+    case LOOM_LOW_LOWER_VALUE_REF_EXACT_LANE_ORIGIN_OPERAND:
+    case LOOM_LOW_LOWER_VALUE_REF_EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND:
+    case LOOM_LOW_LOWER_VALUE_REF_UNIFORM_ELEMENT_ORIGIN_OPERAND:
       return (loom_value_slice_t){0};
     default:
       IREE_ASSERT_UNREACHABLE("unknown generated value ref kind");
@@ -246,13 +450,57 @@ bool loom_low_lower_rule_float_immediate_facts(
   return true;
 }
 
+bool loom_low_lower_rule_value_exact_bits(
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t value_id, uint32_t expected_bit_width, uint64_t* out_bits) {
+  if (fact_table == NULL) {
+    return false;
+  }
+  const loom_type_t type = loom_module_value_type(module, value_id);
+  if (!loom_type_is_scalar(type)) {
+    return false;
+  }
+  const loom_scalar_type_t scalar_type = loom_type_element_type(type);
+  if (loom_scalar_type_bitwidth(scalar_type) != expected_bit_width) {
+    return false;
+  }
+  const loom_value_facts_t facts =
+      loom_value_fact_table_lookup(fact_table, value_id);
+  if (loom_scalar_type_set_contains(LOOM_SCALAR_TYPE_SET_INTEGER_PAYLOAD,
+                                    scalar_type)) {
+    return loom_value_facts_as_exact_raw_bits(
+        facts, (int32_t)expected_bit_width, out_bits);
+  }
+  if (loom_scalar_type_set_contains(LOOM_SCALAR_TYPE_SET_FLOAT, scalar_type)) {
+    return loom_value_facts_as_exact_float_bits(scalar_type, facts, out_bits);
+  }
+  return false;
+}
+
+uint64_t loom_low_lower_unsigned_numerator_maximum(
+    const loom_value_fact_table_t* fact_table, loom_value_id_t numerator,
+    uint32_t bit_width) {
+  const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+  if (fact_table == NULL) {
+    return mask;
+  }
+  const loom_value_facts_t facts =
+      loom_value_fact_table_lookup(fact_table, numerator);
+  if (facts.range_lo >= 0) {
+    return iree_min((uint64_t)facts.range_hi, mask);
+  }
+  // A wholly negative signed interval is contiguous in the unsigned domain.
+  // An interval crossing zero includes -1 and therefore the unsigned maximum.
+  return facts.range_hi < 0 ? (uint64_t)facts.range_hi & mask : mask;
+}
+
 bool loom_low_lower_rule_value_facts_u32_divisor_magic_info(
     const loom_module_t* module, const loom_value_fact_table_t* fact_table,
-    loom_value_id_t value_id,
-    loom_low_lower_u32_divisor_magic_info_t* out_info) {
-  *out_info = (loom_low_lower_u32_divisor_magic_info_t){0};
+    loom_value_id_t numerator, loom_value_id_t divisor,
+    loom_low_lower_unsigned_divisor_magic_info_t* out_info) {
+  *out_info = (loom_low_lower_unsigned_divisor_magic_info_t){0};
   loom_value_facts_t facts = loom_value_facts_unknown();
-  if (!loom_low_lower_rule_integer_immediate_facts(module, fact_table, value_id,
+  if (!loom_low_lower_rule_integer_immediate_facts(module, fact_table, divisor,
                                                    &facts)) {
     return false;
   }
@@ -261,6 +509,29 @@ bool loom_low_lower_rule_value_facts_u32_divisor_magic_info(
       exact_value > UINT32_MAX) {
     return false;
   }
-  *out_info = loom_low_lower_u32_divisor_magic_info((uint32_t)exact_value);
+  *out_info = loom_low_lower_unsigned_divisor_magic_info(
+      (uint32_t)exact_value, /*bit_width=*/32,
+      loom_low_lower_unsigned_numerator_maximum(fact_table, numerator, 32));
+  return true;
+}
+
+bool loom_low_lower_rule_value_facts_i32_divisor_magic_info(
+    const loom_module_t* module, const loom_value_fact_table_t* fact_table,
+    loom_value_id_t divisor,
+    loom_low_lower_signed_divisor_magic_info_t* out_info) {
+  *out_info = (loom_low_lower_signed_divisor_magic_info_t){0};
+  loom_value_facts_t facts = loom_value_facts_unknown();
+  if (!loom_low_lower_rule_integer_immediate_facts(module, fact_table, divisor,
+                                                   &facts)) {
+    return false;
+  }
+  int64_t exact_value = 0;
+  if (!loom_value_facts_as_exact_i64(facts, &exact_value) ||
+      exact_value < INT32_MIN || exact_value > INT32_MAX ||
+      (exact_value >= -1 && exact_value <= 1)) {
+    return false;
+  }
+  *out_info =
+      loom_low_lower_signed_divisor_magic_info(exact_value, /*bit_width=*/32);
   return true;
 }

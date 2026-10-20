@@ -30,7 +30,11 @@ typedef struct loom_low_allocation_packet_move_context_t {
 
 // Packet-local final move groups.
 typedef struct loom_low_allocation_packet_move_plan_t {
-  // Per-packet groups in source order.
+  // Exact live transfer runs for groups with mixed or dead ranges.
+  loom_low_allocation_packet_transfer_t* transfers;
+  // Number of records in |transfers|.
+  iree_host_size_t transfer_count;
+  // Per-packet transfer groups in source order.
   loom_low_allocation_packet_move_group_t* groups;
   // Number of records in |groups|.
   iree_host_size_t group_count;

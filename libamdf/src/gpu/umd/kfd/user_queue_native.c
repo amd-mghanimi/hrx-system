@@ -40,8 +40,13 @@ static amdf_status_t amdf_gpu_kfd_user_queue_create_native(
     struct kfd_ioctl_create_queue_args* inout_arguments) {
   (void)user_data;
   struct kfd_ioctl_create_queue_args arguments = *inout_arguments;
-  if (ioctl(device->descriptor, AMDKFD_IOC_CREATE_QUEUE, &arguments) != 0) {
-    return amdf_linux_error(errno);
+  amdf_gpu_kfd_device_lock_memory(device);
+  const int result =
+      ioctl(device->descriptor, AMDKFD_IOC_CREATE_QUEUE, &arguments);
+  const int error = errno;
+  amdf_gpu_kfd_device_unlock_memory(device);
+  if (result != 0) {
+    return amdf_linux_error(error);
   }
   *inout_arguments = arguments;
   return AMDF_STATUS_OK;
@@ -53,10 +58,15 @@ static amdf_status_t amdf_gpu_kfd_user_queue_destroy_native(
   struct kfd_ioctl_destroy_queue_args arguments = {
       .queue_id = queue_identifier,
   };
-  if (ioctl(device->descriptor, AMDKFD_IOC_DESTROY_QUEUE, &arguments) == 0) {
+  amdf_gpu_kfd_device_lock_memory(device);
+  const int result =
+      ioctl(device->descriptor, AMDKFD_IOC_DESTROY_QUEUE, &arguments);
+  const int error = errno;
+  amdf_gpu_kfd_device_unlock_memory(device);
+  if (result == 0) {
     return AMDF_STATUS_OK;
   }
-  return amdf_linux_error(errno);
+  return amdf_linux_error(error);
 }
 
 static amdf_status_t amdf_gpu_kfd_user_queue_doorbell_map(
@@ -96,6 +106,26 @@ static amdf_status_t amdf_gpu_kfd_user_queue_vm_fault_query(
   return AMDF_STATUS_OK;
 }
 
+static amdf_status_t amdf_gpu_kfd_user_queue_device_doorbell_create(
+    void* user_data, amdf_gpu_umd_device_t* device, size_t byte_length,
+    amdf_gpu_kfd_doorbell_t** out_doorbell, uint64_t* out_device_address) {
+  (void)user_data;
+  return amdf_gpu_kfd_doorbell_create(device, byte_length, out_doorbell,
+                                      out_device_address);
+}
+
+static amdf_status_t amdf_gpu_kfd_user_queue_device_doorbell_destroy(
+    void* user_data, amdf_gpu_kfd_doorbell_t* doorbell) {
+  (void)user_data;
+  return amdf_gpu_kfd_doorbell_destroy(doorbell);
+}
+
+static void amdf_gpu_kfd_user_queue_device_doorbell_abandon(
+    void* user_data, amdf_gpu_kfd_doorbell_t* doorbell) {
+  (void)user_data;
+  amdf_gpu_kfd_doorbell_abandon(doorbell);
+}
+
 static const amdf_gpu_kfd_user_queue_native_api_t
     amdf_gpu_kfd_user_queue_native_api = {
         .buffer_create = amdf_gpu_kfd_user_queue_buffer_create,
@@ -105,6 +135,12 @@ static const amdf_gpu_kfd_user_queue_native_api_t
         .queue_destroy = amdf_gpu_kfd_user_queue_destroy_native,
         .doorbell_map = amdf_gpu_kfd_user_queue_doorbell_map,
         .doorbell_unmap = amdf_gpu_kfd_user_queue_doorbell_unmap,
+        .device_doorbell_create =
+            amdf_gpu_kfd_user_queue_device_doorbell_create,
+        .device_doorbell_destroy =
+            amdf_gpu_kfd_user_queue_device_doorbell_destroy,
+        .device_doorbell_abandon =
+            amdf_gpu_kfd_user_queue_device_doorbell_abandon,
         .vm_fault_query = amdf_gpu_kfd_user_queue_vm_fault_query,
 };
 

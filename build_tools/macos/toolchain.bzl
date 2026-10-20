@@ -149,7 +149,7 @@ def macos_cc_toolchains(name, repository_path, metadata, minimum_os, cross):
     cc_args(
         name = "libcxx",
         actions = [_ACTIONS + "cpp_compile_actions"],
-        args = ["-std=c++17", "-nostdinc++", "-isystem", repository_path + "/cxx"],
+        args = ["-std=c++20", "-nostdinc++", "-isystem", repository_path + "/cxx"],
         data = ["cxx/" + path for path in metadata["cxx_headers"]],
     )
     cc_args(
@@ -187,6 +187,20 @@ def macos_cc_toolchains(name, repository_path, metadata, minimum_os, cross):
     )
     cc_feature(name = "sanitizer_debug_info", feature_name = "sanitizer_debug_info", args = [":sanitizer_debug"])
     cc_args(
+        name = "speed_optimization",
+        actions = [_ACTIONS + "compile_actions"],
+        args = ["-O3"],
+        requires_any_of = [":optimize_for_speed"],
+    )
+    cc_feature(name = "optimize_for_speed", feature_name = "optimize_for_speed")
+    cc_args(
+        name = "thin_lto_compile_link",
+        actions = [_ACTIONS + "compile_actions", _ACTIONS + "link_actions"],
+        args = ["-flto=thin"],
+        requires_any_of = [":thin_lto_link"],
+    )
+    cc_feature(name = "thin_lto_link", feature_name = "thin_lto_link")
+    cc_args(
         name = "asan_compile",
         actions = [_ACTIONS + "compile_actions"],
         args = ["-fsanitize=address", "-fno-omit-frame-pointer"],
@@ -216,10 +230,10 @@ def macos_cc_toolchains(name, repository_path, metadata, minimum_os, cross):
             name = "cc_" + architecture,
             compiler = "clang",
             tool_map = ":" + name + "_tools",
-            args = [":target_" + architecture, ":sdk", ":compile", ":libcxx", ":link", ":nodeps_link", ":libraries_" + architecture],
+            args = [":target_" + architecture, ":sdk", ":compile", ":speed_optimization", ":thin_lto_compile_link", ":libcxx", ":link", ":nodeps_link", ":libraries_" + architecture],
             artifact_name_patterns = [":dylib"],
             enabled_features = [_STANDARD_FEATURES],
-            known_features = [_STANDARD_FEATURES, ":asan", ":sanitizer_debug_info"],
+            known_features = [_STANDARD_FEATURES, ":asan", ":sanitizer_debug_info", ":optimize_for_speed", ":thin_lto_link"],
             supports_param_files = True,
         )
     for framework, headers in metadata["framework_headers"].items():

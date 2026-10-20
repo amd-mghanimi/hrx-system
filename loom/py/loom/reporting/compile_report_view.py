@@ -28,6 +28,10 @@ from loom.reporting.compile_report_bank_service import (
     build_bank_service_diff,
     build_bank_service_show,
 )
+from loom.reporting.compile_report_barriers import (
+    append_barrier_show_text,
+    build_barrier_show,
+)
 from loom.reporting.compile_report_boundary_projections import (
     append_boundary_projection_show_text,
     build_boundary_projection_show,
@@ -42,6 +46,10 @@ from loom.reporting.compile_report_execution_economics import (
     build_execution_economics_diff,
     build_execution_economics_show,
     execution_economics_diff_has_changes,
+)
+from loom.reporting.compile_report_expansions import (
+    append_expansion_show_text,
+    build_expansion_show,
 )
 from loom.reporting.compile_report_loop_pipelines import (
     append_loop_pipeline_show_text,
@@ -60,6 +68,10 @@ from loom.reporting.compile_report_native_layout import (
     build_native_layout_diff,
     build_native_layout_show,
 )
+from loom.reporting.compile_report_pipelines import (
+    append_pipeline_show_text,
+    build_pipeline_show,
+)
 from loom.reporting.compile_report_residency import (
     append_residency_diff_text,
     append_residency_show_text,
@@ -67,11 +79,23 @@ from loom.reporting.compile_report_residency import (
     build_residency_show,
     residency_summary,
 )
+from loom.reporting.compile_report_scalarization import (
+    append_scalarization_show_text,
+    build_scalarization_show,
+)
 from loom.reporting.compile_report_subgroup_access import (
     append_subgroup_access_diff_text,
     append_subgroup_access_show_text,
     build_subgroup_access_diff,
     build_subgroup_access_show,
+)
+from loom.reporting.compile_report_wait_reasons import (
+    CompileReportWaitReasonInventory,
+    append_wait_reason_diff_text,
+    append_wait_reason_show_text,
+    build_wait_reason_diff,
+    build_wait_reason_show,
+    wait_reason_diff_has_changes,
 )
 from loom.reporting.compile_report_workload import (
     append_workload_diff_text,
@@ -287,6 +311,33 @@ _METRIC_SPECS = (
         "next_worse.additional_units",
     ),
     _analysis("schedule_node_count", "schedule nodes", "schedule_node_count"),
+    _analysis("frame_build_count", "frame builds", "planning.frame_build_count"),
+    _analysis(
+        "allocation_run_count", "allocation runs", "planning.allocation_run_count"
+    ),
+    *(
+        _analysis(key, label, "planning.repair." + key)
+        for key, label in (
+            ("iteration_count", "repair iterations"),
+            ("rematerialized_operand_count", "rematerialized operands"),
+            ("retained_placement_count", "retained producer placements"),
+            ("live_range_split_operand_count", "split live-range operands"),
+            ("spill_materialization_batch_count", "spill materialization batches"),
+        )
+    ),
+    *(
+        _analysis(
+            arena + "_used_bytes_high_water",
+            label + " arena used high water",
+            "planning.memory." + arena + ".used_bytes_high_water",
+            "bytes",
+        )
+        for arena, label in (
+            ("frame_arena", "frame"),
+            ("repair_arena", "repair"),
+            ("scratch_arena", "scratch"),
+        )
+    ),
     _analysis(
         "schedule_dependency_count",
         "schedule dependencies",
@@ -379,6 +430,7 @@ def build_compile_report_show(
     document: CompileReportDocument,
 ) -> dict[str, object]:
     """Builds a deterministic target-neutral report view."""
+    wait_reasons = document.wait_reason_inventory
     report_workload = build_workload_show(
         document.report.get("workload"),
         document.report.get("target_resources"),
@@ -405,13 +457,26 @@ def build_compile_report_show(
                 document.report.get("target_resources"),
                 f"{document.source}.entries.rows[{entry['index']}]",
                 document.residency_constraints_by_function,
+                wait_reasons,
             )
             for entry in document.entries
         ],
     }
+    scalarization = build_scalarization_show(document)
+    if scalarization is not None:
+        view["scalarization"] = scalarization
+    expansions = build_expansion_show(document)
+    if expansions is not None:
+        view["expansions"] = expansions
     loop_pipelines = build_loop_pipeline_show(document)
     if loop_pipelines is not None:
         view["loop_pipelines"] = loop_pipelines
+    pipelines = build_pipeline_show(document)
+    if pipelines is not None:
+        view["pipelines"] = pipelines
+    barriers = build_barrier_show(document)
+    if barriers is not None:
+        view["barriers"] = barriers
     boundary_projections = build_boundary_projection_show(document)
     if boundary_projections is not None:
         view["boundary_projections"] = boundary_projections
@@ -456,6 +521,8 @@ def build_compile_report_diff(
     report_workload = build_workload_diff(
         baseline_report_workload, candidate_report_workload
     )
+    baseline_wait_reasons = baseline.wait_reason_inventory
+    candidate_wait_reasons = candidate.wait_reason_inventory
     entries = []
     unchanged_entry_count = 0
     for pair in match.pairs:
@@ -511,6 +578,12 @@ def build_compile_report_diff(
             baseline_entry_source,
             candidate_entry_source,
         )
+        wait_reasons = build_wait_reason_diff(
+            baseline_wait_reasons,
+            candidate_wait_reasons,
+            pair.baseline_identity.function,
+            pair.candidate_identity.function,
+        )
         residency = build_residency_diff(
             build_residency_show(
                 pair.baseline,
@@ -531,6 +604,7 @@ def build_compile_report_diff(
             and not workload_diff_has_changes(entry_workload)
             and not execution_economics_diff_has_changes(execution_economics)
             and not move_cause_diff_has_changes(move_causes)
+            and not wait_reason_diff_has_changes(wait_reasons)
             and residency is None
         ):
             unchanged_entry_count += 1
@@ -544,6 +618,8 @@ def build_compile_report_diff(
             entry_view["workload"] = entry_workload
         if move_causes is not None:
             entry_view["move_causes"] = move_causes
+        if wait_reason_diff_has_changes(wait_reasons):
+            entry_view["wait_reasons"] = wait_reasons
         if residency is not None:
             entry_view["residency"] = residency
         if force:
@@ -659,6 +735,12 @@ def format_compile_report_show_text(view: dict[str, object]) -> str:
             lines.append(f"    {binding['key']} = {binding['value']}")
     lines.append("")
     append_workload_show_text(lines, _expect_dict(view["workload"]))
+    expansions = view.get("expansions")
+    if isinstance(expansions, dict):
+        append_expansion_show_text(lines, expansions)
+    scalarization = view.get("scalarization")
+    if isinstance(scalarization, dict):
+        append_scalarization_show_text(lines, scalarization)
 
     entries = _expect_list(view["entries"])
     if not entries:
@@ -689,12 +771,21 @@ def format_compile_report_show_text(view: dict[str, object]) -> str:
         move_causes = entry.get("move_causes")
         if isinstance(move_causes, dict):
             append_move_cause_show_text(lines, move_causes)
+        wait_reasons = entry.get("wait_reasons")
+        if isinstance(wait_reasons, dict):
+            append_wait_reason_show_text(lines, wait_reasons)
         residency = entry.get("residency")
         if isinstance(residency, dict):
             append_residency_show_text(lines, residency)
     loop_pipelines = view.get("loop_pipelines")
     if isinstance(loop_pipelines, dict):
         append_loop_pipeline_show_text(lines, loop_pipelines)
+    pipelines = view.get("pipelines")
+    if isinstance(pipelines, dict):
+        append_pipeline_show_text(lines, pipelines)
+    barriers = view.get("barriers")
+    if isinstance(barriers, dict):
+        append_barrier_show_text(lines, barriers)
     boundary_projections = view.get("boundary_projections")
     if isinstance(boundary_projections, dict):
         append_boundary_projection_show_text(lines, boundary_projections)
@@ -833,6 +924,9 @@ def format_compile_report_diff_text(view: dict[str, object]) -> str:
         move_causes = entry.get("move_causes")
         if isinstance(move_causes, dict):
             append_move_cause_diff_text(lines, move_causes)
+        wait_reasons = entry.get("wait_reasons")
+        if isinstance(wait_reasons, dict):
+            append_wait_reason_diff_text(lines, wait_reasons)
         residency = entry.get("residency")
         if isinstance(residency, dict):
             append_residency_diff_text(lines, residency)
@@ -859,6 +953,7 @@ def _show_entry_json(
     report_target_resources_value: object,
     source: str,
     residency_constraints_by_function: dict[str, tuple[dict[str, object], ...]],
+    wait_reasons: CompileReportWaitReasonInventory | None,
 ) -> dict[str, object]:
     entry_workload = build_workload_show(
         entry.get("workload", report_workload_value),
@@ -878,6 +973,9 @@ def _show_entry_json(
     move_causes = build_move_cause_show(entry, source)
     if move_causes is not None:
         view["move_causes"] = move_causes
+    wait_reason_view = build_wait_reason_show(wait_reasons, identity.function)
+    if wait_reason_view is not None:
+        view["wait_reasons"] = wait_reason_view
     residency = build_residency_show(
         entry, residency_constraints_by_function.get(identity.function or "", ())
     )

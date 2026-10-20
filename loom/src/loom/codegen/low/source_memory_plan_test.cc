@@ -9,6 +9,96 @@
 namespace loom {
 namespace {
 
+TEST(SourceMemoryAccessPlanTest, ClassifiesRetainedRejectionBits) {
+  const struct {
+    loom_low_source_memory_access_rejection_flags_t bit;
+    loom_low_source_memory_rejection_reason_t reason;
+    iree_string_view_t key;
+  } cases[] = {
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_UNSUPPORTED_OP,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_UNSUPPORTED_OP,
+       IREE_SV("source_memory.unsupported_op")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_DESCRIBE_FAILED,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DESCRIBE_FAILED,
+       IREE_SV("source_memory.describe_failed")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_LAYOUT,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_LAYOUT,
+       IREE_SV("source_memory.layout")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_ELEMENT_WIDTH,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ELEMENT_WIDTH,
+       IREE_SV("source_memory.element_width")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_VECTOR_RANK,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VECTOR_RANK,
+       IREE_SV("source_memory.vector_rank")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_VECTOR_LANE_COUNT,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VECTOR_LANE_COUNT,
+       IREE_SV("source_memory.vector_lane_count")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_VECTOR_AXIS_STRIDE,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VECTOR_AXIS_STRIDE,
+       IREE_SV("source_memory.vector_axis_stride")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_STATIC_OFFSET,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_STATIC_OFFSET,
+       IREE_SV("source_memory.static_offset")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_DYNAMIC_INDEX_COUNT,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_INDEX_COUNT,
+       IREE_SV("source_memory.dynamic_index_count")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_DYNAMIC_AXIS,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_AXIS,
+       IREE_SV("source_memory.dynamic_axis")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_DYNAMIC_STRIDE,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_STRIDE,
+       IREE_SV("source_memory.dynamic_stride")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_VIEW_SOURCE,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VIEW_SOURCE,
+       IREE_SV("source_memory.view_source")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_VIEW_BASE,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VIEW_BASE,
+       IREE_SV("source_memory.view_base")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_VIEW_BASE_OVERFLOW,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VIEW_BASE_OVERFLOW,
+       IREE_SV("source_memory.view_base_overflow")},
+      {LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_CACHE_POLICY,
+       LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_CACHE_POLICY,
+       IREE_SV("source_memory.cache_policy")},
+  };
+
+  for (const auto& test_case : cases) {
+    EXPECT_EQ(loom_low_source_memory_access_rejection_reason(test_case.bit),
+              test_case.reason);
+    EXPECT_TRUE(iree_string_view_equal(
+        loom_low_source_memory_access_rejection_key(test_case.bit),
+        test_case.key));
+  }
+  EXPECT_EQ(loom_low_source_memory_access_rejection_reason(0),
+            LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_REPRESENTABILITY);
+  EXPECT_EQ(loom_low_source_memory_access_rejection_reason(
+                LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_LAYOUT |
+                LOOM_LOW_SOURCE_MEMORY_ACCESS_REJECTION_CACHE_POLICY),
+            LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_LAYOUT);
+}
+
+TEST(SourceMemoryAccessPlanTest, IncludesPhysicalRootByteOffset) {
+  loom_low_source_memory_access_plan_t plan = {.static_byte_offset = 12};
+  EXPECT_TRUE(
+      loom_low_source_memory_access_plan_include_root_byte_offset(&plan, 20));
+  EXPECT_EQ(plan.static_byte_offset, 32);
+  EXPECT_EQ(plan.physical_root_byte_offset, 20);
+  EXPECT_TRUE(
+      loom_low_source_memory_access_plan_include_root_byte_offset(&plan, 8));
+  EXPECT_EQ(plan.static_byte_offset - plan.physical_root_byte_offset, 12);
+  EXPECT_EQ(plan.physical_root_byte_offset, 28);
+}
+
+TEST(SourceMemoryAccessPlanTest, RejectsPhysicalRootByteOffsetOverflow) {
+  loom_low_source_memory_access_plan_t plan = {
+      .static_byte_offset = INT64_MAX - 4,
+  };
+  EXPECT_FALSE(
+      loom_low_source_memory_access_plan_include_root_byte_offset(&plan, 8));
+  EXPECT_EQ(plan.static_byte_offset, INT64_MAX - 4);
+  EXPECT_EQ(plan.physical_root_byte_offset, 0);
+}
+
 TEST_F(SourceMemoryPlanTest, DynamicViewOriginRetainsCompleteAddress) {
   const loom_value_id_t buffer = DefineBufferArg();
   const loom_value_id_t extent = DefineIndexArg();
@@ -411,6 +501,44 @@ TEST_F(SourceMemoryPlanTest, DynamicStridedLayoutScalesDynamicOrigin) {
   EXPECT_EQ(plan.source_index_byte_stride, 0);
 }
 
+TEST_F(SourceMemoryPlanTest, RetainsRuntimeStrideAtFoldedZeroOrigin) {
+  const loom_value_id_t buffer = DefineBufferArg();
+  const loom_value_id_t row_stride = DefineIndexArg();
+  const loom_value_id_t layout = BuildDynamicStridedLayout(row_stride, 1);
+  const loom_value_id_t base_offset =
+      loom_index_constant_result(BuildOffsetConstant(0));
+  const loom_value_id_t zero =
+      loom_index_constant_result(BuildIndexConstant(0));
+  loom_op_t* view_op = nullptr;
+  IREE_ASSERT_OK(loom_buffer_view_build(&builder_, buffer, base_offset,
+                                        ViewType2D(16, 16, layout),
+                                        LOOM_LOCATION_UNKNOWN, &view_op));
+  const int64_t static_indices[] = {INT64_MIN, INT64_MIN};
+  const loom_value_id_t indices[] = {zero, zero};
+  loom_op_t* load_op = nullptr;
+  IREE_ASSERT_OK(loom_vector_load_build(
+      &builder_, 0, /*instance_flags=*/0, loom_buffer_view_result(view_op),
+      indices, IREE_ARRAYSIZE(indices), static_indices,
+      IREE_ARRAYSIZE(static_indices), 0, 0, VectorType1D(1),
+      LOOM_LOCATION_UNKNOWN, &load_op));
+  loom_value_fact_table_t facts = {};
+  ComputeFacts(&facts);
+  loom_low_source_memory_axis_byte_stride_t strides[2];
+  loom_low_source_memory_access_plan_t plan = {};
+  loom_low_source_memory_access_diagnostic_t diagnostic = {};
+  ASSERT_TRUE(BuildPlan(&facts, load_op, &plan, &diagnostic, strides));
+  EXPECT_EQ(plan.dynamic_term_count, 0u);
+  EXPECT_EQ(plan.static_byte_offset, 0);
+  ASSERT_EQ(plan.view_rank, 2u);
+  ASSERT_EQ(plan.axis_byte_strides, strides);
+  EXPECT_EQ(strides[0].kind, LOOM_LOW_SOURCE_MEMORY_AXIS_BYTE_STRIDE_DYNAMIC);
+  EXPECT_EQ(strides[0].static_byte_coefficient, 4);
+  ASSERT_EQ(strides[0].dynamic_factor_count, 1u);
+  EXPECT_EQ(strides[0].dynamic_factors[0], row_stride);
+  EXPECT_EQ(strides[1].kind, LOOM_LOW_SOURCE_MEMORY_AXIS_BYTE_STRIDE_STATIC);
+  EXPECT_EQ(strides[1].static_byte_coefficient, 4);
+}
+
 TEST_F(SourceMemoryPlanTest, DynamicStridedLayoutScalesStaticOrigin) {
   const loom_value_id_t buffer = DefineBufferArg();
   const loom_value_id_t row_stride = DefineIndexArg();
@@ -753,7 +881,8 @@ TEST_F(SourceMemoryPlanTest, VectorAtomicRmwClassifiesNonIdentityOffsets) {
 
 TEST_F(SourceMemoryPlanTest, DynamicDenseLoadTracksViewBaseBoundary) {
   loom_value_id_t buffer = DefineBufferArg();
-  loom_value_id_t base = DefineOffsetArg();
+  loom_value_id_t raw_base = DefineOffsetArg();
+  loom_value_id_t base = BuildOffsetAssumeRange(raw_base, 0, 4096);
   loom_value_id_t layout = BuildDenseLayout();
   loom_value_id_t header = loom_index_constant_result(BuildOffsetConstant(16));
   loom_op_t* base_op = nullptr;
@@ -779,8 +908,11 @@ TEST_F(SourceMemoryPlanTest, DynamicDenseLoadTracksViewBaseBoundary) {
   ASSERT_TRUE(BuildPlan(&facts, load_op, &plan, &diagnostic));
   EXPECT_EQ(plan.static_byte_offset, 28);
   EXPECT_EQ(plan.static_view_base_byte_offset, 16);
-  EXPECT_EQ(plan.dynamic_view_base_value_id, loom_index_add_result(base_op));
-  EXPECT_EQ(plan.dynamic_view_base_value_static_byte_offset, 16);
+  EXPECT_EQ(plan.dynamic_view_base_value_id, base);
+  EXPECT_EQ(plan.dynamic_view_base_value_static_byte_offset, 0);
+  EXPECT_TRUE(
+      loom_low_source_memory_access_dynamic_offset_has_materialized_view_base(
+          &plan));
   ASSERT_EQ(plan.dynamic_term_count, 1u);
   EXPECT_EQ(plan.dynamic_view_base_term_count, 1u);
   EXPECT_EQ(plan.dynamic_terms[0].index, base);
@@ -795,7 +927,8 @@ TEST_F(SourceMemoryPlanTest, DynamicDenseLoadTracksViewBaseBoundary) {
 
 TEST_F(SourceMemoryPlanTest, DynamicDenseLoadFactorsScaledViewBase) {
   loom_value_id_t buffer = DefineBufferArg();
-  loom_value_id_t element = DefineIndexArg();
+  loom_value_id_t raw_element = DefineIndexArg();
+  loom_value_id_t element = BuildIndexAssumeRange(raw_element, 0, 1023);
   loom_value_id_t layout = BuildDenseLayout();
   loom_value_id_t byte_stride =
       loom_index_constant_result(BuildOffsetConstant(4));
@@ -834,7 +967,8 @@ TEST_F(SourceMemoryPlanTest, DynamicDenseLoadFactorsScaledViewBase) {
 
 TEST_F(SourceMemoryPlanTest, DynamicDenseLoadPreservesWidePowerOfTwoStride) {
   loom_value_id_t buffer = DefineBufferArg();
-  loom_value_id_t element = DefineIndexArg();
+  loom_value_id_t raw_element = DefineIndexArg();
+  loom_value_id_t element = BuildIndexAssumeRange(raw_element, 0, 1023);
   loom_value_id_t layout = BuildDenseLayout();
   loom_value_id_t byte_stride =
       loom_index_constant_result(BuildOffsetConstant(INT64_C(1) << 40));
@@ -873,7 +1007,8 @@ TEST_F(SourceMemoryPlanTest, DynamicDenseLoadPreservesWidePowerOfTwoStride) {
 
 TEST_F(SourceMemoryPlanTest, SubtractedViewBaseKeepsSignedByteTerms) {
   loom_value_id_t buffer = DefineBufferArg();
-  loom_value_id_t offset = DefineOffsetArg();
+  loom_value_id_t raw_offset = DefineOffsetArg();
+  loom_value_id_t offset = BuildOffsetAssumeRange(raw_offset, 0, 64);
   loom_value_id_t end = loom_index_constant_result(BuildOffsetConstant(64));
   loom_op_t* base_op = nullptr;
   IREE_ASSERT_OK(loom_index_sub_build(&builder_, end, offset,
@@ -904,6 +1039,45 @@ TEST_F(SourceMemoryPlanTest, SubtractedViewBaseKeepsSignedByteTerms) {
   EXPECT_EQ(plan.dynamic_terms[0].byte_stride, -1);
   EXPECT_EQ(plan.dynamic_terms[0].byte_shift,
             LOOM_LOW_SOURCE_MEMORY_ACCESS_BYTE_SHIFT_NONE);
+}
+
+TEST_F(SourceMemoryPlanTest, PotentiallyWrappingViewBaseRetainsCompleteOrigin) {
+  const loom_value_id_t buffer = DefineBufferArg();
+  const loom_value_id_t offset = DefineOffsetArg();
+  const loom_value_id_t end =
+      loom_index_constant_result(BuildOffsetConstant(64));
+  loom_op_t* base_op = nullptr;
+  IREE_ASSERT_OK(loom_index_sub_build(&builder_, end, offset,
+                                      loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET),
+                                      LOOM_LOCATION_UNKNOWN, &base_op));
+  const loom_value_id_t origin = loom_index_sub_result(base_op);
+  loom_op_t* view_op = nullptr;
+  IREE_ASSERT_OK(loom_buffer_view_build(
+      &builder_, buffer, origin,
+      ViewType1D(LOOM_SCALAR_TYPE_I32, 1, BuildDenseLayout()),
+      LOOM_LOCATION_UNKNOWN, &view_op));
+  int64_t indices[] = {0};
+  loom_op_t* load_op = nullptr;
+  IREE_ASSERT_OK(loom_view_load_build(
+      &builder_, 0, /*instance_flags=*/0, loom_buffer_view_result(view_op),
+      nullptr, 0, indices, IREE_ARRAYSIZE(indices), 0, 0,
+      loom_type_scalar(LOOM_SCALAR_TYPE_I32), LOOM_LOCATION_UNKNOWN, &load_op));
+
+  loom_value_fact_table_t facts = {};
+  ComputeFacts(&facts);
+  loom_low_source_memory_access_plan_t plan = {};
+  loom_low_source_memory_access_diagnostic_t diagnostic = {};
+  ASSERT_TRUE(BuildPlan(&facts, load_op, &plan, &diagnostic));
+  EXPECT_EQ(plan.root_value_id, buffer);
+  EXPECT_EQ(plan.static_byte_offset, 0);
+  EXPECT_EQ(plan.static_view_base_byte_offset, 0);
+  EXPECT_EQ(plan.dynamic_view_base_value_id, origin);
+  EXPECT_EQ(plan.dynamic_view_base_value_static_byte_offset, 0);
+  ASSERT_EQ(plan.dynamic_term_count, 1u);
+  EXPECT_EQ(plan.dynamic_view_base_term_count, 1u);
+  EXPECT_EQ(plan.dynamic_terms[0].index, origin);
+  EXPECT_EQ(plan.dynamic_terms[0].byte_stride, 1);
+  EXPECT_EQ(plan.dynamic_terms[0].byte_shift, 0u);
 }
 
 TEST_F(SourceMemoryPlanTest, RetreatingViewBaseRetainsCompleteOrigin) {
@@ -999,8 +1173,8 @@ TEST_F(SourceMemoryPlanTest,
   loom_low_source_memory_access_diagnostic_t diagnostic = {0};
   ASSERT_TRUE(BuildPlan(&facts, load_op, &plan, &diagnostic));
   EXPECT_EQ(plan.static_byte_offset, 16);
-  EXPECT_EQ(plan.dynamic_view_base_value_id, payload_offset);
-  EXPECT_EQ(plan.dynamic_view_base_value_static_byte_offset, 16);
+  EXPECT_EQ(plan.dynamic_view_base_value_id, byte_offset);
+  EXPECT_EQ(plan.dynamic_view_base_value_static_byte_offset, 0);
   ASSERT_EQ(plan.dynamic_term_count, 2u);
   EXPECT_EQ(plan.dynamic_view_base_term_count, 2u);
   EXPECT_EQ(plan.dynamic_terms[0].index, base);
@@ -1187,15 +1361,16 @@ TEST_F(SourceMemoryPlanTest, NoaliasBufferArgFeedsComparableAliasScope) {
 }
 
 TEST_F(SourceMemoryPlanTest, SummaryCapturesStridedPacketSlot) {
-  loom_low_source_memory_access_plan_t plan = {};
-  plan.operation_kind = LOOM_LOW_SOURCE_MEMORY_OPERATION_STORE;
-  plan.memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP;
-  plan.alias_scope_id = 7;
-  plan.element_byte_count = 2;
-  plan.vector_lane_count = 8;
-  plan.vector_lane_byte_stride = 2;
-  plan.static_byte_offset = 16;
-  plan.dynamic_term_count = 1;
+  loom_low_source_memory_access_plan_t plan = {
+      .operation_kind = LOOM_LOW_SOURCE_MEMORY_OPERATION_STORE,
+      .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP,
+      .alias_scope_id = 7,
+      .element_byte_count = 2,
+      .vector_lane_count = 8,
+      .vector_lane_byte_stride = 2,
+      .static_byte_offset = 16,
+      .dynamic_term_count = 1,
+  };
   plan.dynamic_terms[0].byte_stride = 64;
   plan.dynamic_terms[0].byte_facts = loom_value_facts_exact_i64(0);
 
@@ -1209,24 +1384,69 @@ TEST_F(SourceMemoryPlanTest, SummaryCapturesStridedPacketSlot) {
   EXPECT_EQ(summary.strided_interval.begin_bytes, 16u);
   EXPECT_EQ(summary.strided_interval.end_bytes, 32u);
 
-  plan.static_byte_offset = 0;
+  ASSERT_TRUE(
+      loom_low_source_memory_access_plan_include_root_byte_offset(&plan, 280));
+  loom_low_byte_interval_t placed_interval = {};
+  loom_low_memory_access_summary_t placed_summary = {};
+  loom_low_source_memory_access_plan_make_summary(&plan, &placed_interval,
+                                                  &placed_summary);
+  EXPECT_EQ(placed_interval.begin_facts.range_lo, 16);
+  EXPECT_EQ(placed_interval.end_facts.range_hi, 32);
+  EXPECT_EQ(placed_summary.strided_interval.begin_bytes, 16u);
+  EXPECT_EQ(placed_summary.strided_interval.end_bytes, 32u);
+
+  plan.static_byte_offset = plan.physical_root_byte_offset;
   loom_low_byte_interval_t preceding_interval = {};
   loom_low_memory_access_summary_t preceding_summary = {};
   loom_low_source_memory_access_plan_make_summary(&plan, &preceding_interval,
                                                   &preceding_summary);
-  EXPECT_FALSE(
-      loom_low_memory_access_summaries_may_alias(&preceding_summary, &summary));
+  EXPECT_FALSE(loom_low_memory_access_summaries_may_alias(
+      &preceding_summary, &summary, LOOM_LOW_MEMORY_COMPARISON_INDEPENDENT));
+}
+
+TEST(SourceMemoryPlan, SummaryRetainsAtomicObservationSemantics) {
+  const loom_low_source_memory_operation_kind_t atomic_observations[] = {
+      LOOM_LOW_SOURCE_MEMORY_OPERATION_ATOMIC_LOAD,
+      LOOM_LOW_SOURCE_MEMORY_OPERATION_ATOMIC_STORE,
+  };
+  for (const auto operation_kind : atomic_observations) {
+    loom_low_source_memory_access_plan_t plan = {
+        .operation_kind = operation_kind,
+    };
+    loom_low_byte_interval_t interval = {};
+    loom_low_memory_access_summary_t summary = {};
+    loom_low_source_memory_access_plan_make_summary(&plan, &interval, &summary);
+    EXPECT_EQ(summary.source_flags,
+              LOOM_LOW_MEMORY_ACCESS_SOURCE_FLAG_ATOMIC_OBSERVATION);
+  }
+
+  const loom_low_source_memory_operation_kind_t non_observations[] = {
+      LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD,
+      LOOM_LOW_SOURCE_MEMORY_OPERATION_STORE,
+      LOOM_LOW_SOURCE_MEMORY_OPERATION_ATOMIC_RMW,
+      LOOM_LOW_SOURCE_MEMORY_OPERATION_ATOMIC_CMPXCHG,
+  };
+  for (const auto operation_kind : non_observations) {
+    loom_low_source_memory_access_plan_t plan = {
+        .operation_kind = operation_kind,
+    };
+    loom_low_byte_interval_t interval = {};
+    loom_low_memory_access_summary_t summary = {};
+    loom_low_source_memory_access_plan_make_summary(&plan, &interval, &summary);
+    EXPECT_EQ(summary.source_flags, 0);
+  }
 }
 
 TEST(SourceMemoryPlan, DynamicPacketOffsetsPreserveDivisibility) {
-  loom_low_source_memory_access_plan_t plan = {};
-  plan.operation_kind = LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD;
-  plan.memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL;
-  plan.alias_scope_id = LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE;
-  plan.element_byte_count = 4;
-  plan.vector_lane_count = 4;
-  plan.vector_lane_byte_stride = 4;
-  plan.dynamic_term_count = 1;
+  loom_low_source_memory_access_plan_t plan = {
+      .operation_kind = LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD,
+      .memory_space = LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL,
+      .alias_scope_id = LOOM_VALUE_FACT_ALIAS_SCOPE_ID_NONE,
+      .element_byte_count = 4,
+      .vector_lane_count = 4,
+      .vector_lane_byte_stride = 4,
+      .dynamic_term_count = 1,
+  };
   plan.dynamic_terms[0].byte_stride = 16;
   plan.dynamic_terms[0].byte_facts = loom_value_facts_make(16, 64, 16);
 
@@ -1254,6 +1474,38 @@ TEST(SourceMemoryPlan, DynamicPacketOffsetsPreserveDivisibility) {
   EXPECT_EQ(interval.end_facts.range_lo, 20);
   EXPECT_EQ(interval.end_facts.range_hi, 68);
   EXPECT_EQ(interval.end_facts.known_divisor, 4);
+}
+
+TEST(SourceMemoryComponentTest, RetainedComponentConvertsExactCoordinateUnits) {
+  loom_low_source_memory_dynamic_term_t term = {
+      .byte_stride = 4,
+  };
+  loom_low_source_memory_access_plan_t access = {
+      .retained_component = {&term, 0b1010},
+  };
+  EXPECT_EQ(loom_low_source_memory_access_retained_component(&access, 0, 1),
+            &access.retained_component);
+  EXPECT_EQ(loom_low_source_memory_access_retained_component(&access, 0, 4),
+            &access.retained_component);
+  EXPECT_EQ(loom_low_source_memory_access_retained_component(&access, 0, 8),
+            nullptr);
+  term.byte_stride = -4;
+  EXPECT_EQ(loom_low_source_memory_access_retained_component(&access, 0, 4),
+            &access.retained_component);
+}
+
+TEST(SourceMemoryComponentTest, MaterializedPrefixCannotOverlapComponent) {
+  loom_low_source_memory_dynamic_term_t term = {.byte_stride = 4};
+  loom_low_source_memory_access_plan_t access = {
+      .retained_component = {&term, 0b1010},
+  };
+  EXPECT_EQ(loom_low_source_memory_access_retained_component(&access, 1, 1),
+            &access.retained_component);
+  EXPECT_EQ(loom_low_source_memory_access_retained_component(&access, 2, 1),
+            nullptr);
+  access.retained_component = {};
+  EXPECT_EQ(loom_low_source_memory_access_retained_component(&access, 0, 1),
+            nullptr);
 }
 
 }  // namespace

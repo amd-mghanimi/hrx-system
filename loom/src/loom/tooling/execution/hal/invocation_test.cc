@@ -6,6 +6,7 @@
 
 #include "loom/tooling/execution/hal/invocation.h"
 
+#include "iree/hal/memory/heap_pool.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
 
@@ -13,6 +14,16 @@ namespace loom {
 namespace {
 
 class HalInvocationTest : public ::testing::Test {};
+
+static iree_status_t CreateHostTestPool(iree_hal_pool_t** out_pool) {
+  const iree_hal_pool_host_access_t host_access = {
+      .access = IREE_HAL_MEMORY_ACCESS_ALL,
+      .modes = IREE_HAL_MAPPING_MODE_SCOPED,
+      .cacheability = IREE_HAL_HOST_CACHEABILITY_WRITE_BACK,
+  };
+  return iree_hal_heap_pool_create(host_access, iree_allocator_system(),
+                                   iree_allocator_system(), out_pool);
+}
 
 static void RetainedStorageBinding(iree_hal_buffer_t* buffer,
                                    iree_device_size_t byte_offset,
@@ -47,7 +58,7 @@ TEST_F(HalInvocationTest, RequestInitializeDefaultsToSingleWorkgroup) {
   EXPECT_EQ(request.options.workgroup_count[0], 1u);
   EXPECT_EQ(request.options.workgroup_count[1], 1u);
   EXPECT_EQ(request.options.workgroup_count[2], 1u);
-  EXPECT_EQ(request.options.constant_count, 0u);
+  EXPECT_EQ(request.options.constant_byte_length, 0u);
 }
 
 TEST_F(HalInvocationTest, DispatchBatchOptionsUseFastReusableDefaults) {
@@ -64,6 +75,92 @@ TEST_F(HalInvocationTest, DispatchBatchOptionsUseFastReusableDefaults) {
   EXPECT_TRUE(iree_all_bits_set(
       options.execute_flags,
       IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME));
+}
+
+TEST_F(HalInvocationTest, DispatchSequenceInitializeIsNotPrepared) {
+  loom_run_hal_dispatch_sequence_t sequence = {};
+  loom_run_hal_dispatch_sequence_initialize(&sequence);
+
+  EXPECT_FALSE(loom_run_hal_dispatch_sequence_is_prepared(&sequence));
+
+  loom_run_hal_dispatch_sequence_deinitialize(&sequence);
+}
+
+TEST_F(HalInvocationTest, DispatchSequenceOptionsPreserveBorrowedBindings) {
+  loom_run_hal_dispatch_sequence_options_t options = {};
+  loom_run_hal_dispatch_sequence_options_initialize(&options);
+
+  EXPECT_EQ(options.command_buffer_mode, IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT);
+  EXPECT_TRUE(iree_all_bits_set(
+      options.execute_flags,
+      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME));
+}
+
+TEST_F(HalInvocationTest,
+       DispatchSequenceRejectsMixedRepresentationsBeforeDeviceUse) {
+  const loom_run_hal_prepared_candidate_t kernel_candidate = {
+      .executable = reinterpret_cast<iree_hal_executable_t*>(1),
+  };
+  const loom_run_hal_prepared_candidate_t array_candidate = {
+      .executable = reinterpret_cast<iree_hal_executable_t*>(1),
+  };
+  loom_run_hal_dispatch_sequence_step_t steps[2] = {
+      {
+          .candidate = &array_candidate,
+          .representation =
+              LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_DIRECT,
+          .execution_epoch = 0,
+      },
+      {
+          .candidate = &kernel_candidate,
+          .representation =
+              LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_COMMAND_BUFFER,
+          .execution_epoch = 1,
+      },
+  };
+  loom_run_hal_invocation_options_initialize(&steps[0].options);
+  loom_run_hal_invocation_options_initialize(&steps[1].options);
+
+  loom_run_hal_runtime_t runtime = {};
+  loom_run_hal_dispatch_sequence_t sequence = {};
+  loom_run_hal_dispatch_sequence_options_t sequence_options = {};
+  loom_run_hal_dispatch_sequence_options_initialize(&sequence_options);
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      loom_run_hal_dispatch_sequence_prepare(
+          &runtime, IREE_ARRAYSIZE(steps), steps, &sequence_options,
+          iree_allocator_system(), &sequence));
+  EXPECT_FALSE(loom_run_hal_dispatch_sequence_is_prepared(&sequence));
+
+  loom_run_hal_dispatch_sequence_deinitialize(&sequence);
+}
+
+TEST_F(HalInvocationTest,
+       DispatchSequenceRejectsOversizedConstantsBeforeDeviceUse) {
+  const loom_run_hal_prepared_candidate_t candidate = {
+      .executable = reinterpret_cast<iree_hal_executable_t*>(1),
+  };
+  loom_run_hal_dispatch_sequence_step_t step = {
+      .candidate = &candidate,
+      .representation =
+          LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_COMMAND_BUFFER,
+      .execution_epoch = 0,
+  };
+  loom_run_hal_invocation_options_initialize(&step.options);
+  step.options.constant_byte_length = LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH + 1;
+
+  loom_run_hal_runtime_t runtime = {};
+  loom_run_hal_dispatch_sequence_t sequence = {};
+  loom_run_hal_dispatch_sequence_options_t sequence_options = {};
+  loom_run_hal_dispatch_sequence_options_initialize(&sequence_options);
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_OUT_OF_RANGE,
+      loom_run_hal_dispatch_sequence_prepare(
+          &runtime, /*step_count=*/1, &step, &sequence_options,
+          iree_allocator_system(), &sequence));
+  EXPECT_FALSE(loom_run_hal_dispatch_sequence_is_prepared(&sequence));
+
+  loom_run_hal_dispatch_sequence_deinitialize(&sequence);
 }
 
 TEST_F(HalInvocationTest, ResultOwnsOutputBuilder) {
@@ -127,13 +224,13 @@ TEST_F(HalInvocationTest,
   loom_run_hal_invocation_request_initialize(&request);
   request.runtime = &runtime;
   request.artifact = &executable;
-  request.bindings = (loom_run_hal_binding_specs_t){
-      /*.values=*/bindings,
-      /*.count=*/IREE_ARRAYSIZE(bindings),
+  request.bindings = loom_run_hal_binding_specs_t{
+      .values = bindings,
+      .count = IREE_ARRAYSIZE(bindings),
   };
-  request.expected_bindings = (loom_run_hal_binding_specs_t){
-      /*.values=*/expected_bindings,
-      /*.count=*/IREE_ARRAYSIZE(expected_bindings),
+  request.expected_bindings = loom_run_hal_binding_specs_t{
+      .values = expected_bindings,
+      .count = IREE_ARRAYSIZE(expected_bindings),
   };
 
   loom_run_hal_invocation_result_t result = {};
@@ -221,18 +318,12 @@ TEST_F(HalInvocationTest, PreparePlanFromListsRetainsBindings) {
   loom_run_hal_invocation_options_t options = {};
   loom_run_hal_invocation_options_initialize(&options);
 
-  iree_hal_allocator_t* allocator = nullptr;
-  IREE_ASSERT_OK(iree_hal_allocator_create_heap(
-      IREE_SV("hal_invocation_test"), iree_allocator_system(),
-      iree_allocator_system(), &allocator));
-  iree_hal_buffer_params_t buffer_params = {};
-  buffer_params.type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL;
-  buffer_params.access = IREE_HAL_MEMORY_ACCESS_ALL;
-  buffer_params.usage =
-      IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
+  iree_hal_pool_t* pool = nullptr;
+  IREE_ASSERT_OK(CreateHostTestPool(&pool));
   iree_hal_buffer_t* buffer = nullptr;
-  IREE_ASSERT_OK(iree_hal_allocator_allocate_buffer(
-      allocator, buffer_params, /*allocation_size=*/4, &buffer));
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      pool, iree_hal_make_pool_reservation_request(/*allocation_size=*/4, 1),
+      iree_infinite_timeout(), &buffer));
 
   loom_run_hal_binding_list_t bindings = {};
   IREE_ASSERT_OK(loom_run_hal_binding_list_initialize_count(
@@ -251,23 +342,16 @@ TEST_F(HalInvocationTest, PreparePlanFromListsRetainsBindings) {
   EXPECT_NE(plan.bindings.values[0].buffer, nullptr);
 
   loom_run_hal_invocation_plan_deinitialize(&plan);
-  iree_hal_allocator_release(allocator);
+  iree_hal_pool_release(pool);
 }
 
 TEST_F(HalInvocationTest, BindingListTotalByteLengthUsesLogicalBufferExtents) {
-  iree_hal_allocator_t* allocator = nullptr;
-  IREE_ASSERT_OK(iree_hal_allocator_create_heap(
-      IREE_SV("hal_invocation_test"), iree_allocator_system(),
-      iree_allocator_system(), &allocator));
-
-  iree_hal_buffer_params_t buffer_params = {};
-  buffer_params.type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL;
-  buffer_params.access = IREE_HAL_MEMORY_ACCESS_ALL;
-  buffer_params.usage =
-      IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
+  iree_hal_pool_t* pool = nullptr;
+  IREE_ASSERT_OK(CreateHostTestPool(&pool));
   iree_hal_buffer_t* allocation = nullptr;
-  IREE_ASSERT_OK(iree_hal_allocator_allocate_buffer(
-      allocator, buffer_params, /*allocation_size=*/256, &allocation));
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      pool, iree_hal_make_pool_reservation_request(/*allocation_size=*/256, 1),
+      iree_infinite_timeout(), &allocation));
 
   iree_hal_buffer_t* subspan = nullptr;
   IREE_ASSERT_OK(iree_hal_buffer_subspan(allocation, /*byte_offset=*/64,
@@ -297,7 +381,7 @@ TEST_F(HalInvocationTest, BindingListTotalByteLengthUsesLogicalBufferExtents) {
   iree_hal_buffer_view_release(buffer_view);
   iree_hal_buffer_release(subspan);
   iree_hal_buffer_release(allocation);
-  iree_hal_allocator_release(allocator);
+  iree_hal_pool_release(pool);
 }
 
 TEST_F(HalInvocationTest, PreparePlanFromListsRejectsTooManyBindings) {
@@ -320,12 +404,13 @@ TEST_F(HalInvocationTest, PreparePlanFromListsRejectsTooManyBindings) {
   loom_run_hal_binding_list_deinitialize(&bindings);
 }
 
-TEST_F(HalInvocationTest, DispatchPlanRejectsTooManyConstantsBeforeDeviceUse) {
+TEST_F(HalInvocationTest,
+       DispatchPlanRejectsOversizedConstantsBeforeDeviceUse) {
   loom_run_hal_runtime_t runtime = {};
   loom_run_hal_prepared_candidate_t candidate = {};
   loom_run_hal_invocation_plan_t plan = {};
   loom_run_hal_invocation_plan_initialize(&plan);
-  plan.options.constant_count = LOOM_RUN_HAL_MAX_CONSTANT_COUNT + 1;
+  plan.options.constant_byte_length = LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH + 1;
 
   loom_run_hal_iteration_t iteration = {};
   IREE_EXPECT_STATUS_IS(
@@ -341,8 +426,7 @@ TEST_F(HalInvocationTest,
        DispatchBatchRejectsZeroDispatchCountBeforeDeviceUse) {
   loom_run_hal_runtime_t runtime = {};
   loom_run_hal_prepared_candidate_t candidate = {
-      /*.target_bundle=*/{},
-      /*.executable=*/reinterpret_cast<iree_hal_executable_t*>(1),
+      .executable = reinterpret_cast<iree_hal_executable_t*>(1),
   };
   loom_run_hal_invocation_plan_t plan = {};
   loom_run_hal_invocation_plan_initialize(&plan);
@@ -359,59 +443,6 @@ TEST_F(HalInvocationTest,
 
   candidate.executable = nullptr;
   loom_run_hal_dispatch_batch_deinitialize(&batch);
-  loom_run_hal_invocation_plan_deinitialize(&plan);
-}
-
-TEST_F(HalInvocationTest,
-       DispatchPlanRejectsTargetLimitViolationBeforeDeviceUse) {
-  static const loom_target_snapshot_t snapshot = {
-      /*.name=*/IREE_SVL("test-snapshot"),
-      /*.codegen_format=*/{},
-      /*.artifact_format=*/{},
-      /*.default_pointer_bitwidth=*/{},
-      /*.index_bitwidth=*/{},
-      /*.offset_bitwidth=*/{},
-      /*.max_workgroup_size=*/{},
-      /*.max_flat_workgroup_size=*/{},
-      /*.max_workgroup_storage_bytes=*/{},
-      /*.subgroup_size=*/{},
-      /*.max_grid_size=*/{},
-      /*.max_flat_grid_size=*/{},
-      /*.max_workgroup_count=*/{/*.x=*/4, /*.y=*/4, /*.z=*/4},
-  };
-  static const loom_target_export_plan_t export_plan = {
-      /*.name=*/IREE_SVL("test-export"),
-      /*.export_symbol=*/{},
-      /*.abi_kind=*/LOOM_TARGET_ABI_HAL_KERNEL,
-      /*.linkage=*/{},
-      /*.hal_kernel=*/
-      {
-          /*.required_workgroup_size=*/{/*.x=*/0, /*.y=*/0, /*.z=*/0},
-      },
-  };
-  static const loom_target_bundle_t target_bundle = {
-      /*.name=*/IREE_SVL("test-bundle"),
-      /*.snapshot=*/&snapshot,
-      /*.export_plan=*/&export_plan,
-  };
-
-  loom_run_hal_runtime_t runtime = {};
-  loom_run_hal_prepared_candidate_t candidate = {
-      /*.target_bundle=*/&target_bundle,
-      /*.executable=*/reinterpret_cast<iree_hal_executable_t*>(1),
-  };
-  loom_run_hal_invocation_plan_t plan = {};
-  loom_run_hal_invocation_plan_initialize(&plan);
-  plan.options.workgroup_count[0] = 5;
-
-  loom_run_hal_iteration_t iteration = {};
-  IREE_EXPECT_STATUS_IS(
-      IREE_STATUS_OUT_OF_RANGE,
-      loom_run_hal_invocation_dispatch_plan(
-          &runtime, &candidate, &plan, iree_allocator_system(), &iteration));
-
-  candidate.executable = nullptr;
-  loom_run_hal_iteration_deinitialize(&iteration);
   loom_run_hal_invocation_plan_deinitialize(&plan);
 }
 

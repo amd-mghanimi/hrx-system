@@ -10,6 +10,10 @@ load(
     "loom_target_contract_cc_libraries",
     "loom_target_contract_file_family",
 )
+load(
+    "//loom/build_tools/bazel:loom_check.bzl",
+    "loom_check_test_suite",
+)
 
 package(
     default_visibility = ["//visibility:public"],
@@ -20,29 +24,58 @@ package(
 loom_target_contract_file_family(
     name = "contract_tables_gen",
     args = [
-        "--contract-index=LOOM_X86_SCALAR_CONTRACT:x86.scalar",
-        "--contract-index=LOOM_X86_AVX2_CONTRACT:x86.scalar,x86.avx2",
-        "--contract-index=LOOM_X86_AVX512_CONTRACT:x86.scalar,x86.avx2,x86.avx512",
+        "--shared-strings-public-header=loom/target/arch/x86/contracts/instruction_strings.h",
+        "--shared-strings-symbol=loom_x86_instruction_strings",
+        "--contract-index=LOOM_X86_SCALAR_CONTRACT:x86.bmi2,x86.scalar,x86.scalar.read_memory",
+        "--contract-index=LOOM_X86_AVX2_CONTRACT:x86.scalar,x86.scalar.read_memory,x86.avx2",
+        "--contract-index=LOOM_X86_AVX512_CONTRACT:x86.scalar,x86.scalar.read_memory,x86.avx2,x86.avx512",
         "--contract-index=LOOM_X86_PACKED_DOT_CONTRACT:x86.packed_dot",
-        "--contract-index=LOOM_X86_AVX512_PACKED_DOT_CONTRACT:x86.scalar,x86.avx2,x86.avx512,x86.packed_dot",
+        "--contract-index=LOOM_X86_AVX2_FEATURES_CONTRACT:x86.bmi2,x86.scalar,x86.scalar.read_memory,x86.avx2,x86.f16c,x86.avx_ne_convert,x86.packed_dot",
+        "--contract-index=LOOM_X86_AVX512_FEATURES_CONTRACT:x86.bmi2,x86.scalar,x86.scalar.read_memory,x86.avx2,x86.avx512,x86.avx512_fp16,x86.avx_ne_convert,x86.avx512_bf16,x86.packed_dot",
     ],
     comment = "Generating x86 contract table families",
     fragments = {
         "avx2": "x86.avx2",
         "avx512": "x86.avx512",
+        "avx512_bf16": "x86.avx512_bf16",
+        "avx512_fp16": "x86.avx512_fp16",
+        "avx_ne_convert": "x86.avx_ne_convert",
+        "bmi2": "x86.bmi2",
+        "f16c": "x86.f16c",
         "packed_dot": "x86.packed_dot",
         "scalar": "x86.scalar",
+        "scalar_read_memory": "x86.scalar.read_memory",
     },
     generator = "//loom/py/loom/gen/target/contracts:x86_contract_table_family",
     index_output = "tables.inl",
+    shared_strings = "instruction_strings",
+)
+
+loom_cc_library(
+    name = "instruction_strings",
+    srcs = ["instruction_strings.c"],
+    hdrs = ["instruction_strings.h"],
+)
+
+loom_target_contract_cc_libraries(
+    name = "bmi2",
+    contract_deps = ["//loom/src/loom/target:contract"],
+    lower_rule_deps = [
+        "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/scalar",
+    ],
 )
 
 loom_target_contract_cc_libraries(
     name = "scalar",
     contract_deps = ["//loom/src/loom/target:contract"],
     lower_rule_deps = [
+        ":instruction_strings",
         "//loom/src/loom/codegen/low/lower",
         "//loom/src/loom/ops/buffer",
+        "//loom/src/loom/ops/cfg",
+        "//loom/src/loom/ops/global",
         "//loom/src/loom/ops/index",
         "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/scf",
@@ -51,13 +84,25 @@ loom_target_contract_cc_libraries(
 )
 
 loom_target_contract_cc_libraries(
-    name = "avx2",
+    name = "scalar_read_memory",
     contract_deps = ["//loom/src/loom/target:contract"],
     lower_rule_deps = [
         "//loom/src/loom/codegen/low/lower",
         "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/view",
+    ],
+)
+
+loom_target_contract_cc_libraries(
+    name = "avx2",
+    contract_deps = ["//loom/src/loom/target:contract"],
+    lower_rule_deps = [
+        ":instruction_strings",
+        "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/scf",
         "//loom/src/loom/ops/vector",
+        "//loom/src/loom/ops/view",
     ],
 )
 
@@ -65,7 +110,56 @@ loom_target_contract_cc_libraries(
     name = "avx512",
     contract_deps = ["//loom/src/loom/target:contract"],
     lower_rule_deps = [
+        ":instruction_strings",
         "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/vector",
+    ],
+)
+
+loom_target_contract_cc_libraries(
+    name = "avx512_bf16",
+    contract_deps = ["//loom/src/loom/target:contract"],
+    lower_rule_deps = [
+        ":instruction_strings",
+        "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/ops/view",
+    ],
+)
+
+loom_target_contract_cc_libraries(
+    name = "avx512_fp16",
+    contract_deps = ["//loom/src/loom/target:contract"],
+    lower_rule_deps = [
+        ":instruction_strings",
+        "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/scf",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/ops/view",
+    ],
+)
+
+loom_target_contract_cc_libraries(
+    name = "avx_ne_convert",
+    contract_deps = ["//loom/src/loom/target:contract"],
+    lower_rule_deps = [
+        "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ops/scalar",
+        "//loom/src/loom/ops/vector",
+        "//loom/src/loom/ops/view",
+    ],
+)
+
+loom_target_contract_cc_libraries(
+    name = "f16c",
+    contract_deps = ["//loom/src/loom/target:contract"],
+    lower_rule_deps = [
+        ":instruction_strings",
+        "//loom/src/loom/codegen/low/lower",
+        "//loom/src/loom/ops/scalar",
         "//loom/src/loom/ops/vector",
     ],
 )
@@ -85,20 +179,52 @@ loom_cc_library(
         "avx2.h",
         "avx2_lower_rules.h",
         "avx512.h",
+        "avx512_bf16.h",
+        "avx512_bf16_lower_rules.h",
+        "avx512_fp16.h",
+        "avx512_fp16_lower_rules.h",
         "avx512_lower_rules.h",
+        "avx_ne_convert.h",
+        "avx_ne_convert_lower_rules.h",
+        "bmi2.h",
+        "bmi2_lower_rules.h",
+        "f16c.h",
+        "f16c_lower_rules.h",
         "packed_dot.h",
         "packed_dot_lower_rules.h",
         "scalar.h",
         "scalar_lower_rules.h",
+        "scalar_read_memory.h",
+        "scalar_read_memory_lower_rules.h",
     ],
     deps = [
         ":avx2",
         ":avx2_lower_rules",
         ":avx512",
+        ":avx512_bf16",
+        ":avx512_bf16_lower_rules",
+        ":avx512_fp16",
+        ":avx512_fp16_lower_rules",
         ":avx512_lower_rules",
+        ":avx_ne_convert",
+        ":avx_ne_convert_lower_rules",
+        ":bmi2",
+        ":bmi2_lower_rules",
+        ":f16c",
+        ":f16c_lower_rules",
         ":packed_dot",
         ":packed_dot_lower_rules",
         ":scalar",
         ":scalar_lower_rules",
+        ":scalar_read_memory",
+        ":scalar_read_memory_lower_rules",
     ],
+)
+
+loom_check_test_suite(
+    name = "loom_check_file_test",
+    srcs = [
+        "test/floating_reduction.loom-test",
+    ],
+    test_name_prefix_to_strip = "test/",
 )

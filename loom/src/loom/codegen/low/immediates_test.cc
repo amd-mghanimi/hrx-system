@@ -16,9 +16,9 @@ namespace loom {
 namespace {
 
 static const char kStrings[] = "modereverseforward";
-static constexpr loom_string_ref_t kMode = LOOM_STRING_REF(0, 4);
-static constexpr loom_string_ref_t kReverse = LOOM_STRING_REF(4, 7);
-static constexpr loom_string_ref_t kForward = LOOM_STRING_REF(11, 7);
+static constexpr loom_string_ref_t kMode = LOOM_STRING_REF(0, 0, 4);
+static constexpr loom_string_ref_t kReverse = LOOM_STRING_REF(0, 4, 7);
+static constexpr loom_string_ref_t kForward = LOOM_STRING_REF(0, 11, 7);
 
 class LowImmediatesTest : public ::testing::Test {
  protected:
@@ -34,14 +34,16 @@ class LowImmediatesTest : public ::testing::Test {
     immediate_.kind = LOOM_LOW_IMMEDIATE_KIND_ENUM;
     immediate_.value_step = 1;
     domain_.value_count = IREE_ARRAYSIZE(values_);
-    descriptor_set_.string_pool = {kStrings, sizeof(kStrings) - 1};
+    descriptor_set_.string_pool = {{kStrings}, {sizeof(kStrings) - 1}};
     descriptor_set_.immediates = &immediate_;
+    descriptor_set_.descriptor_layouts = &layout_;
+    descriptor_set_.descriptor_layout_count = 1;
     descriptor_set_.immediate_count = 1;
     descriptor_set_.enum_domains = &domain_;
     descriptor_set_.enum_domain_count = 1;
     descriptor_set_.enum_values = values_;
     descriptor_set_.enum_value_count = IREE_ARRAYSIZE(values_);
-    descriptor_.immediate_count = 1;
+    layout_.immediate_count = 1;
     descriptor_.flags = LOOM_LOW_DESCRIPTOR_FLAG_ENUM_IMMEDIATES;
   }
 
@@ -73,18 +75,24 @@ class LowImmediatesTest : public ::testing::Test {
   loom_low_descriptor_set_t descriptor_set_ = {};
   // Descriptor owning the mode field.
   loom_low_descriptor_t descriptor_ = {};
+  // Shared structural metadata for the descriptor.
+  loom_low_descriptor_layout_t layout_ = {};
 };
 
 TEST_F(LowImmediatesTest, ResolvesSemanticValuesWithoutMutatingSharedInput) {
   for (const auto& value : values_) {
     loom_named_attr_t entries[] = {
-        {/*.name_id=*/Intern(IREE_SV("mode")),
-         /*.reserved=*/0, /*.value=*/
-         loom_attr_string(Intern(loom_low_descriptor_set_string(
-             &descriptor_set_, value.token_string_ref)))},
-        {/*.name_id=*/Intern(IREE_SV("other")),
-         /*.reserved=*/0,
-         /*.value=*/loom_attr_string(Intern(IREE_SV("forward")))},
+        {
+            .name_id = Intern(IREE_SV("mode")),
+            .reserved = 0,
+            .value = loom_attr_string(Intern(loom_low_descriptor_set_string(
+                &descriptor_set_, value.token_string_ref))),
+        },
+        {
+            .name_id = Intern(IREE_SV("other")),
+            .reserved = 0,
+            .value = loom_attr_string(Intern(IREE_SV("forward"))),
+        },
     };
     loom_attribute_t original = {};
     IREE_ASSERT_OK(loom_module_make_canonical_attr_dict(
@@ -114,17 +122,17 @@ TEST_F(LowImmediatesTest, BindsEverySparseDictionaryShape) {
   const uint32_t masks[] = {8, 1, 4, 2};
   const char* names[] = {"z", "a", "m", "b"};
   for (uint32_t i = 0; i < IREE_ARRAYSIZE(fields); ++i) {
-    fields[i].field_name_string_ref = LOOM_STRING_REF(i, 1);
+    fields[i].field_name_string_ref = LOOM_STRING_REF(0, i, 1);
     fields[i].attribute_mask = masks[i];
     fields[i].kind = LOOM_LOW_IMMEDIATE_KIND_UNSIGNED;
     fields[i].flags = LOOM_LOW_IMMEDIATE_FLAG_DEFAULT_VALUE;
     fields[i].value_step = 1;
     fields[i].unsigned_max = UINT32_MAX;
   }
-  descriptor_set_.string_pool = {strings, sizeof(strings) - 1};
+  descriptor_set_.string_pool = {{strings}, {sizeof(strings) - 1}};
   descriptor_set_.immediates = fields;
   descriptor_set_.immediate_count = IREE_ARRAYSIZE(fields);
-  descriptor_.immediate_count = IREE_ARRAYSIZE(fields);
+  layout_.immediate_count = IREE_ARRAYSIZE(fields);
   descriptor_.flags = 0;
 
   // Declaration order, canonical key order, and sparse entry positions differ.
@@ -154,8 +162,11 @@ TEST_F(LowImmediatesTest, PreservesNumericAndUnrecognizedInputForVerification) {
       loom_attr_i64(7), loom_attr_i64(99),
       loom_attr_string(Intern(IREE_SV("unknown"))), loom_attr_bool(true)};
   for (const auto& value : values) {
-    loom_named_attr_t entry = {/*.name_id=*/Intern(IREE_SV("mode")),
-                               /*.reserved=*/0, /*.value=*/value};
+    loom_named_attr_t entry = {
+        .name_id = Intern(IREE_SV("mode")),
+        .reserved = 0,
+        .value = value,
+    };
     loom_attribute_t attrs = {};
     IREE_ASSERT_OK(loom_module_make_canonical_attr_dict(
         module_, loom_make_named_attr_slice(&entry, 1), &attrs));

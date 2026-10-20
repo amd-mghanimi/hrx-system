@@ -1,0 +1,214 @@
+// RUN: roundtrip
+#include <loomcxx/encoding_type.h>
+#include <loomcxx/vector.h>
+
+namespace fragment = loom::vector::fragment;
+using Schema = loom::type::encoding<loom::encoding::role::schema>;
+using Half16 = _Float16 __attribute__((ext_vector_type(16)));
+using Float8 = float __attribute__((ext_vector_type(8)));
+using Scale2 = unsigned __attribute__((ext_vector_type(2)));
+
+struct Parameters {
+  Scale2 scale;
+  Schema schema;
+};
+
+Float8 scaled_mma(Half16 lhs_data, Half16 rhs_data, Float8 init_data,
+                  Scale2 lhs_scale, Scale2 rhs_scale, Schema schema,
+                  loom::type::size_type m, loom::type::size_type n,
+                  loom::type::size_type k) {
+  auto lhs = fragment::attach<fragment::role::lhs>(
+      lhs_data, fragment::shape{m, k},
+      Parameters{lhs_scale, schema});
+  auto rhs = fragment::attach<fragment::role::rhs>(
+      rhs_data, fragment::shape{k, n},
+      Parameters{rhs_scale, schema});
+  auto init = fragment::attach<fragment::role::init>(
+      init_data, fragment::shape{m, n});
+  return loom::vector::mma(lhs, rhs, init);
+}
+
+// ----
+func.def public @scaled_mma(%lhs_data: vector<16xf16>, %rhs_data: vector<16xf16>, %init_data: vector<8xf32>, %lhs_scale: vector<2xi32>, %rhs_scale: vector<2xi32>, %schema: encoding<schema>, %m: i64, %n: i64, %k: i64) -> (vector<8xf32>) {
+  %10 = index.cast %m : i64 to index
+  %11 = index.cast %k : i64 to index
+  %lhs = vector.fragment<lhs> %lhs_data shape [%10, %11] using {scale = %lhs_scale : vector<2xi32>, schema = %schema : encoding<schema>} : vector<16xf16>
+  %13 = index.cast %k : i64 to index
+  %14 = index.cast %n : i64 to index
+  %rhs = vector.fragment<rhs> %rhs_data shape [%13, %14] using {scale = %rhs_scale : vector<2xi32>, schema = %schema : encoding<schema>} : vector<16xf16>
+  %16 = index.cast %m : i64 to index
+  %17 = index.cast %n : i64 to index
+  %init = vector.fragment<init> %init_data shape [%16, %17] : vector<8xf32>
+  %19 = vector.mma %lhs, %rhs, %init : vector<16xf16>, vector<16xf16>, vector<8xf32>
+  func.return %19 : vector<8xf32>
+}
+
+// ====
+// Batched shape remains explicit while the target provider changes physical
+// carrier type and role without a memory round trip.
+#include <loomcxx/vector.h>
+
+namespace fragment = loom::vector::fragment;
+using Float8 = float __attribute__((ext_vector_type(8)));
+using BFloat16 = __bf16 __attribute__((ext_vector_type(16)));
+
+BFloat16 repack(Float8 source, loom::type::size_type blocks,
+                loom::type::size_type rows,
+                loom::type::size_type columns) {
+  auto init = fragment::attach<fragment::role::init>(
+      source, fragment::batched_shape{blocks, rows, columns});
+  return fragment::repack<fragment::role::lhs, BFloat16>(
+      init, fragment::batched_shape{blocks, rows, columns});
+}
+
+// ----
+func.def public @repack(%source: vector<8xf32>, %blocks: i64, %rows: i64, %columns: i64) -> (vector<16xbf16>) {
+  %5 = index.cast %blocks : i64 to index
+  %6 = index.cast %rows : i64 to index
+  %7 = index.cast %columns : i64 to index
+  %init = vector.fragment<init> %source shape [blocks(%5), %6, %7] : vector<8xf32>
+  %9 = index.cast %blocks : i64 to index
+  %10 = index.cast %rows : i64 to index
+  %11 = index.cast %columns : i64 to index
+  %12 = vector.fragment.repack<lhs> %init shape [blocks(%9), %10, %11] : vector<8xf32> -> vector<16xbf16>
+  func.return %12 : vector<16xbf16>
+}
+
+// ====
+// Fragment memory operations retain full-rank origins, storage auxiliaries,
+// logical matrix shapes, and physical target carriers as separate values.
+#include <loomcxx/vector.h>
+
+namespace fragment = loom::vector::fragment;
+namespace loomt = loom::type;
+using Half16 = _Float16 __attribute__((ext_vector_type(16)));
+using Float8 = float __attribute__((ext_vector_type(8)));
+using Scale2 = unsigned __attribute__((ext_vector_type(2)));
+using Input = loomt::view<loomt::shape<loomt::dynamic, loomt::dynamic>,
+                          const _Float16>;
+using EncodedInput =
+    loomt::view<loomt::shape<loomt::dynamic, loomt::dynamic>, const _Float16,
+                loom::encoding::role::storage>;
+using Accumulator = loomt::view<loomt::shape<loomt::dynamic, loomt::dynamic>,
+                                const float>;
+using Output =
+    loomt::view<loomt::shape<loomt::dynamic, loomt::dynamic>, float>;
+
+struct Auxiliary {
+  Scale2 scale;
+};
+
+void load_mma_store(Input lhs_source, EncodedInput rhs_source,
+                    Accumulator init_source, Output output, loomt::size_type row,
+                    loomt::size_type column, loomt::size_type m,
+                    loomt::size_type n, loomt::size_type k, Scale2 rhs_scale) {
+  auto lhs = fragment::load<fragment::role::lhs, Half16>(
+      lhs_source, {row, column}, fragment::shape{m, k});
+  auto rhs = fragment::load<fragment::role::rhs, Half16>(
+      rhs_source, {row, column}, fragment::shape{k, n},
+      Auxiliary{rhs_scale});
+  auto init = fragment::load<fragment::role::init, Float8>(
+      init_source, {row, column}, fragment::shape{m, n});
+  auto result = loom::vector::mma(lhs, rhs, init);
+  fragment::store<fragment::role::result>(
+      result, output, {row, column}, fragment::shape{m, n});
+}
+
+// ----
+func.def public @load_mma_store(%lhs_source_dim0: index, %lhs_source_dim1: index, %lhs_source_layout: encoding<layout>, %lhs_source: view<[%lhs_source_dim0]x[%lhs_source_dim1]xf16, %lhs_source_layout>, %rhs_source_dim0: index, %rhs_source_dim1: index, %rhs_source_storage: encoding<storage>, %rhs_source: view<[%rhs_source_dim0]x[%rhs_source_dim1]xf16, %rhs_source_storage>, %init_source_dim0: index, %init_source_dim1: index, %init_source_layout: encoding<layout>, %init_source: view<[%init_source_dim0]x[%init_source_dim1]xf32, %init_source_layout>, %output_dim0: index, %output_dim1: index, %output_layout: encoding<layout>, %output: view<[%output_dim0]x[%output_dim1]xf32, %output_layout>, %row: i64, %column: i64, %m: i64, %n: i64, %k: i64, %rhs_scale: vector<2xi32>) {
+  %22 = index.cast %m : i64 to index
+  %23 = index.cast %k : i64 to index
+  %24 = index.cast %row : i64 to index
+  %25 = index.cast %column : i64 to index
+  %lhs = vector.fragment.load<lhs> %lhs_source[%24, %25] shape [%22, %23] : view<[%lhs_source_dim0]x[%lhs_source_dim1]xf16, %lhs_source_layout> -> vector<16xf16>
+  %27 = index.cast %k : i64 to index
+  %28 = index.cast %n : i64 to index
+  %29 = index.cast %row : i64 to index
+  %30 = index.cast %column : i64 to index
+  %rhs = vector.fragment.load<rhs> %rhs_source[%29, %30] shape [%27, %28] using {scale = %rhs_scale : vector<2xi32>} : view<[%rhs_source_dim0]x[%rhs_source_dim1]xf16, %rhs_source_storage> -> vector<16xf16>
+  %32 = index.cast %m : i64 to index
+  %33 = index.cast %n : i64 to index
+  %34 = index.cast %row : i64 to index
+  %35 = index.cast %column : i64 to index
+  %init = vector.fragment.load<init> %init_source[%34, %35] shape [%32, %33] : view<[%init_source_dim0]x[%init_source_dim1]xf32, %init_source_layout> -> vector<8xf32>
+  %result = vector.mma %lhs, %rhs, %init : vector<16xf16>, vector<16xf16>, vector<8xf32>
+  %38 = index.cast %m : i64 to index
+  %39 = index.cast %n : i64 to index
+  %40 = index.cast %row : i64 to index
+  %41 = index.cast %column : i64 to index
+  vector.fragment.store<result> %result, %output[%40, %41] shape [%38, %39] : vector<8xf32>, view<[%output_dim0]x[%output_dim1]xf32, %output_layout>
+  func.return
+}
+
+// ====
+// Saturation is an explicit numerical permission on integer MMA.
+#include <loomcxx/vector.h>
+
+using Bytes32 = signed char __attribute__((ext_vector_type(32)));
+using Ints8 = int __attribute__((ext_vector_type(8)));
+
+Ints8 saturating_mma(Bytes32 lhs, Bytes32 rhs, Ints8 init) {
+  return loom::vector::mma<loom::vector::mma_flags::saturate>(lhs, rhs, init);
+}
+
+// ----
+func.def public @saturating_mma(%lhs: vector<32xi8>, %rhs: vector<32xi8>, %init: vector<8xi32>) -> (vector<8xi32>) {
+  %4 = vector.mma<saturate> %lhs, %rhs, %init : vector<32xi8>, vector<32xi8>, vector<8xi32>
+  func.return %4 : vector<8xi32>
+}
+
+// ====
+// Target providers can describe native FP4 carriers with FP8 block scales
+// without exposing a vendor instruction or carrier type to portable callers.
+#include <loomcxx/encoding.h>
+#include <loomcxx/vector.h>
+
+namespace fragment = loom::vector::fragment;
+using Words8 = unsigned __attribute__((ext_vector_type(8)));
+using Scale2 = unsigned __attribute__((ext_vector_type(2)));
+using Float8 = float __attribute__((ext_vector_type(8)));
+using Schema = loom::type::encoding<loom::encoding::role::schema>;
+
+struct Parameters {
+  Scale2 scale;
+  Schema schema;
+};
+
+Float8 fp4_e4m3_mma(Words8 lhs_data, Words8 rhs_data, Scale2 lhs_scale,
+                    Scale2 rhs_scale, Float8 init_data) {
+  auto schema = loom::encoding::define<loom::encoding::f4e2m1{
+      .payload_elements = 64,
+      .payload_registers = 8,
+      .payload_packing = loom::encoding::payload_packing::target_fragment,
+      .scale_format = loom::encoding::numeric_format::f8e4m3,
+      .scale_group_elements = 16}>();
+  auto lhs = fragment::attach<fragment::role::lhs>(
+      lhs_data, fragment::shape{16, 128}, Parameters{lhs_scale, schema});
+  auto rhs = fragment::attach<fragment::role::rhs>(
+      rhs_data, fragment::shape{128, 16}, Parameters{rhs_scale, schema});
+  auto init = fragment::attach<fragment::role::init>(
+      init_data, fragment::shape{16, 16});
+  return loom::vector::mma(lhs, rhs, init);
+}
+
+// ----
+func.def public @fp4_e4m3_mma(%lhs_data: vector<8xi32>, %rhs_data: vector<8xi32>, %lhs_scale: vector<2xi32>, %rhs_scale: vector<2xi32>, %init_data: vector<8xf32>) -> (vector<8xf32>) {
+  %schema = encoding.define #encoding.f4e2m1<affine=scale_only, payload_elements=64, payload_packing=target_fragment, payload_registers=8, scale_format=f8e4m3, scale_group_elements=16, scale_operands=1, scale_topology=block_1d, zero_scale_fallback=true> : encoding<schema>
+  %7 = scalar.constant 16 : i32
+  %8 = scalar.constant 128 : i32
+  %9 = index.cast %7 : i32 to index
+  %10 = index.cast %8 : i32 to index
+  %lhs = vector.fragment<lhs> %lhs_data shape [%9, %10] using {scale = %lhs_scale : vector<2xi32>, schema = %schema : encoding<schema>} : vector<8xi32>
+  %12 = scalar.constant 128 : i32
+  %13 = scalar.constant 16 : i32
+  %14 = index.cast %12 : i32 to index
+  %15 = index.cast %13 : i32 to index
+  %rhs = vector.fragment<rhs> %rhs_data shape [%14, %15] using {scale = %rhs_scale : vector<2xi32>, schema = %schema : encoding<schema>} : vector<8xi32>
+  %17 = scalar.constant 16 : i32
+  %18 = scalar.constant 16 : i32
+  %19 = index.cast %17 : i32 to index
+  %20 = index.cast %18 : i32 to index
+  %init = vector.fragment<init> %init_data shape [%19, %20] : vector<8xf32>
+  %22 = vector.mma %lhs, %rhs, %init : vector<8xi32>, vector<8xi32>, vector<8xf32>
+  func.return %22 : vector<8xf32>
+}

@@ -66,7 +66,7 @@ pool_load = Op(
         ResultType("result"),
     ],
     examples=[
-        "%tile = pool.load %pool, %pid, %pb : pool<[%BS]>, i32, offset -> tile<[16, 128]xf16>",
+        "%tile = pool.load %pool, %pid, %pb : pool, i32, offset -> tile<[16, 128]xf16>",
     ],
 )
 
@@ -109,7 +109,7 @@ pool_store = Op(
         TypeOf("data"),
     ],
     examples=[
-        "pool.store %pool, %pid, %pb, %off, %data : pool<[%BS]>, i32, offset, offset, tile<[16, 128]xf16>",
+        "pool.store %pool, %pid, %pb, %off, %data : pool, i32, offset, offset, tile<[16, 128]xf16>",
     ],
 )
 
@@ -137,7 +137,7 @@ pool_pin = Op(
         TypeOf("block_id"),
     ],
     examples=[
-        "pool.pin %pool, %bid : pool<[%BS]>, i32",
+        "pool.pin %pool, %bid : pool, i32",
     ],
 )
 
@@ -165,7 +165,7 @@ pool_unpin = Op(
         TypeOf("block_id"),
     ],
     examples=[
-        "pool.unpin %pool, %bid : pool<[%BS]>, i32",
+        "pool.unpin %pool, %bid : pool, i32",
     ],
 )
 
@@ -190,7 +190,7 @@ pool_buffer = Op(
         ResultType("buffer"),
     ],
     examples=[
-        "%buf = pool.buffer %pool : pool<[%BS]> -> hal.buffer",
+        "%buf = pool.buffer %pool : pool -> hal.buffer",
     ],
 )
 

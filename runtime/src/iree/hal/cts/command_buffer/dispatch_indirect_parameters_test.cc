@@ -53,13 +53,7 @@ class DispatchIndirectParametersTest : public CtsTestBase<> {
   }
 
   iree_status_t CreateIndirectParameterBuffer(iree_hal_buffer_t** out_buffer) {
-    iree_hal_buffer_params_t params = {0};
-    params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
-    params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_INDIRECT_PARAMETERS |
-                   IREE_HAL_BUFFER_USAGE_STORAGE |
-                   IREE_HAL_BUFFER_USAGE_TRANSFER;
-    return iree_hal_allocator_allocate_buffer(device_allocator_, params,
-                                              kParameterByteLength, out_buffer);
+    return CreateUninitializedDeviceBuffer(kParameterByteLength, out_buffer);
   }
 
   iree_status_t CreateSentinelOutputBuffer(iree_hal_buffer_t** out_buffer) {
@@ -131,8 +125,8 @@ class DispatchIndirectParametersTest : public CtsTestBase<> {
       iree_device_size_t parameter_ref_length = kParameterByteLength) {
     iree_hal_buffer_ref_t binding_refs[1] = {OutputRef(output_buffer)};
     iree_hal_buffer_ref_list_t bindings = {
-        /*.count=*/IREE_ARRAYSIZE(binding_refs),
-        /*.values=*/binding_refs,
+        .count = IREE_ARRAYSIZE(binding_refs),
+        .values = binding_refs,
     };
     IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
         command_buffer, workgroup_id_executable_,
@@ -150,18 +144,23 @@ class DispatchIndirectParametersTest : public CtsTestBase<> {
             IREE_HAL_ACCESS_SCOPE_DISPATCH_READ |
             IREE_HAL_ACCESS_SCOPE_MEMORY_READ,
     };
-    IREE_ASSERT_OK(iree_hal_command_buffer_execution_barrier(
-        command_buffer,
-        /*source_stage_mask=*/IREE_HAL_EXECUTION_STAGE_DISPATCH |
-            IREE_HAL_EXECUTION_STAGE_TRANSFER |
-            IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-        /*target_stage_mask=*/IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
-            IREE_HAL_EXECUTION_STAGE_COMMAND_PROCESS |
-            IREE_HAL_EXECUTION_STAGE_DISPATCH |
-            IREE_HAL_EXECUTION_STAGE_TRANSFER,
-        IREE_HAL_EXECUTION_BARRIER_FLAG_NONE, /*memory_barrier_count=*/1,
-        /*memory_barriers=*/&memory_barrier,
-        /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr));
+    const iree_hal_barrier_t execution_barrier = {
+        .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                             IREE_HAL_EXECUTION_STAGE_TRANSFER |
+                             IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+        .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
+                             IREE_HAL_EXECUTION_STAGE_COMMAND_PROCESS |
+                             IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                             IREE_HAL_EXECUTION_STAGE_TRANSFER,
+        .flags = IREE_HAL_BARRIER_FLAG_NONE,
+        .effects = {},
+        .memory_barrier_count = 1,
+        .memory_barriers = &memory_barrier,
+        .buffer_barrier_count = 0,
+        .buffer_barriers = nullptr,
+    };
+    IREE_ASSERT_OK(
+        iree_hal_command_buffer_barrier(command_buffer, &execution_barrier));
   }
 
   void SubmitAndCheck(iree_hal_command_buffer_t* command_buffer,
@@ -209,7 +208,7 @@ TEST_P(DispatchIndirectParametersTest, StaticParametersFromQueueUpdate) {
   IREE_ASSERT_OK(iree_hal_queue_update(
       transfer_queue_, empty_wait, update_signal, parameter_data,
       /*source_offset=*/0, parameter_buffer, /*target_offset=*/0,
-      sizeof(parameter_data), IREE_HAL_UPDATE_FLAG_NONE));
+      sizeof(parameter_data), /*barriers=*/NULL, IREE_HAL_UPDATE_FLAG_NONE));
 
   iree_hal_buffer_binding_t binding_table_values[2];
   iree_hal_buffer_binding_table_t binding_table =
@@ -254,7 +253,7 @@ TEST_P(DispatchIndirectParametersTest, WholeBufferParameterRef) {
   IREE_ASSERT_OK(iree_hal_queue_update(
       transfer_queue_, empty_wait, update_signal, parameter_data,
       /*source_offset=*/0, parameter_buffer, /*target_offset=*/0,
-      sizeof(parameter_data), IREE_HAL_UPDATE_FLAG_NONE));
+      sizeof(parameter_data), /*barriers=*/NULL, IREE_HAL_UPDATE_FLAG_NONE));
 
   iree_hal_buffer_binding_t binding_table_values[2];
   iree_hal_buffer_binding_table_t binding_table =
@@ -349,8 +348,8 @@ TEST_P(DispatchIndirectParametersTest, DynamicParametersFromDispatch) {
   {
     iree_hal_buffer_ref_t binding_refs[1] = {ParameterRef(parameter_buffer)};
     iree_hal_buffer_ref_list_t bindings = {
-        /*.count=*/IREE_ARRAYSIZE(binding_refs),
-        /*.values=*/binding_refs,
+        .count = IREE_ARRAYSIZE(binding_refs),
+        .values = binding_refs,
     };
     IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
         command_buffer, parameter_producer_executable_,

@@ -18,6 +18,7 @@
 #include "loom/target/arch/amdgpu/planning/descriptor_semantics.h"
 #include "loom/target/arch/amdgpu/planning/matrix_coexecution.h"
 #include "loom/target/arch/amdgpu/planning/structural_packet.h"
+#include "loom/target/arch/amdgpu/planning/trans_result_window.h"
 #include "loom/target/arch/amdgpu/planning/vopd_data.h"
 #include "loom/target/arch/amdgpu/refs/target_refs.h"
 #include "loom/target/arch/amdgpu/target_info.h"
@@ -90,23 +91,6 @@ typedef enum loom_amdgpu_vopd_packet_flag_bits_e {
 } loom_amdgpu_vopd_packet_flag_bits_t;
 typedef uint8_t loom_amdgpu_vopd_packet_flags_t;
 
-typedef enum loom_amdgpu_vopd_trans_result_vgpr_flag_bits_e {
-  // Physical VGPR currently holds a result in the TRANS hazard window.
-  LOOM_AMDGPU_VOPD_TRANS_RESULT_VGPR_FLAG_VALID = 1u << 0,
-} loom_amdgpu_vopd_trans_result_vgpr_flag_bits_t;
-typedef uint8_t loom_amdgpu_vopd_trans_result_vgpr_flags_t;
-
-typedef struct loom_amdgpu_vopd_trans_result_vgpr_t {
-  // State bits for this physical VGPR.
-  loom_amdgpu_vopd_trans_result_vgpr_flags_t flags;
-  // Number of vector ALU packets since the TRANS result was produced.
-  uint8_t valu_interval;
-  // Number of TRANS packets since the TRANS result was produced.
-  uint8_t trans_interval;
-  // Dense active-list position for this physical VGPR while valid.
-  uint32_t active_list_index;
-} loom_amdgpu_vopd_trans_result_vgpr_t;
-
 typedef struct loom_amdgpu_vopd_plan_builder_t {
   // Schedule table being analyzed.
   const loom_low_schedule_table_t* schedule;
@@ -132,14 +116,8 @@ typedef struct loom_amdgpu_vopd_plan_builder_t {
   loom_amdgpu_vopd_packet_flags_t* packet_flags;
   // True when the target requires VALU/TRANS result-window tracking.
   bool tracks_trans_result_windows;
-  // Per-physical-VGPR state for GFX11 TRANS-result packetization windows.
-  loom_amdgpu_vopd_trans_result_vgpr_t* trans_result_vgprs;
-  // Active physical VGPR indices with valid TRANS-result state.
-  uint32_t* active_trans_result_vgpr_indices;
-  // Number of entries in |trans_result_vgprs|.
-  iree_host_size_t trans_result_vgpr_count;
-  // Number of currently active TRANS-result VGPR records.
-  iree_host_size_t active_trans_result_vgpr_count;
+  // Active GFX11 transcendental-result windows by physical VGPR.
+  loom_amdgpu_trans_result_window_t trans_result_window;
   // Output VOPD pair records.
   loom_amdgpu_vopd_pair_t* pairs;
   // Number of populated VOPD pair records.
@@ -246,6 +224,8 @@ static const loom_amdgpu_vopd_register_constraint_flag_name_t
          IREE_SVL("src0_bank")},
         {LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_VSRC1_BANK,
          IREE_SVL("vsrc1_bank")},
+        {LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_SRC2_BANK,
+         IREE_SVL("src2_bank")},
         {LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_X_DESTINATION_Y_SRC0,
          IREE_SVL("x_destination_y_src0_alias")},
         {LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_X_DESTINATION_Y_VSRC1,
@@ -509,7 +489,9 @@ static loom_amdgpu_vopd_visible_packet_t loom_amdgpu_vopd_classify_packet(
                           LOOM_AMDGPU_VOPD_PACKET_FLAG_INSERTION_BLOCKED) &&
         iree_any_bit_set(
             visible.structural.flags,
-            LOOM_AMDGPU_STRUCTURAL_PACKET_FLAG_FORWARDS_DEPENDENCIES)) {
+            LOOM_AMDGPU_STRUCTURAL_PACKET_FLAG_FORWARDS_DEPENDENCIES) &&
+        !iree_any_bit_set(visible.structural.flags,
+                          LOOM_AMDGPU_STRUCTURAL_PACKET_FLAG_MATERIALIZES)) {
       *packet_flags |= LOOM_AMDGPU_VOPD_PACKET_FLAG_TRANSPARENT;
     }
   }
@@ -518,27 +500,16 @@ static loom_amdgpu_vopd_visible_packet_t loom_amdgpu_vopd_classify_packet(
 
 static iree_status_t loom_amdgpu_vopd_plan_initialize_trans_result_guard(
     loom_amdgpu_vopd_plan_builder_t* builder) {
-  if (builder->trans_result_vgprs != NULL) {
+  if (loom_amdgpu_trans_result_window_is_initialized(
+          &builder->trans_result_window)) {
     return iree_ok_status();
   }
   const iree_host_size_t vgpr_count =
       builder->allocation->physical_extents
           .ends_by_reg_class[LOOM_AMDGPU_REG_CLASS_ID_VGPR];
-  if (vgpr_count == 0) {
-    return iree_ok_status();
-  }
-  IREE_RETURN_IF_ERROR(
-      iree_arena_allocate_array(builder->transient_arena, vgpr_count,
-                                sizeof(*builder->trans_result_vgprs),
-                                (void**)&builder->trans_result_vgprs));
-  memset(builder->trans_result_vgprs, 0,
-         vgpr_count * sizeof(*builder->trans_result_vgprs));
-  IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
-      builder->transient_arena, vgpr_count,
-      sizeof(*builder->active_trans_result_vgpr_indices),
-      (void**)&builder->active_trans_result_vgpr_indices));
-  builder->trans_result_vgpr_count = vgpr_count;
-  return iree_ok_status();
+  return loom_amdgpu_trans_result_window_initialize(
+      vgpr_count, /*flags=*/0, builder->transient_arena,
+      &builder->trans_result_window);
 }
 
 static iree_status_t loom_amdgpu_vopd_plan_allocate(
@@ -607,176 +578,16 @@ static bool loom_amdgpu_vopd_assignments_match(
          lhs->location_count == rhs->location_count;
 }
 
-static bool loom_amdgpu_vopd_assignment_is_physical_vgpr(
-    const loom_low_allocation_assignment_t* assignment) {
-  return assignment != NULL &&
-         assignment->location_kind ==
-             LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER &&
-         assignment->descriptor_reg_class_id == LOOM_AMDGPU_REG_CLASS_ID_VGPR;
-}
-
 static bool loom_amdgpu_vopd_has_trans_result_guard(
     const loom_amdgpu_vopd_plan_builder_t* builder) {
-  return builder->trans_result_vgprs != NULL &&
-         builder->active_trans_result_vgpr_indices != NULL &&
-         builder->trans_result_vgpr_count != 0;
-}
-
-static bool loom_amdgpu_vopd_trans_result_vgpr_is_tracked(
-    const loom_amdgpu_vopd_trans_result_vgpr_t* vgpr) {
-  return iree_any_bit_set(vgpr->flags,
-                          LOOM_AMDGPU_VOPD_TRANS_RESULT_VGPR_FLAG_VALID);
-}
-
-static bool loom_amdgpu_vopd_trans_result_vgpr_is_active(
-    const loom_amdgpu_vopd_trans_result_vgpr_t* vgpr) {
-  return loom_amdgpu_vopd_trans_result_vgpr_is_tracked(vgpr) &&
-         vgpr->valu_interval <=
-             LOOM_AMDGPU_VALU_TRANS_USE_DEPCTR_MAX_VALU_INTERVAL &&
-         vgpr->trans_interval <=
-             LOOM_AMDGPU_VALU_TRANS_USE_DEPCTR_MAX_TRANS_INTERVAL;
+  return loom_amdgpu_trans_result_window_is_initialized(
+      &builder->trans_result_window);
 }
 
 static bool loom_amdgpu_vopd_has_active_trans_result_window(
     const loom_amdgpu_vopd_plan_builder_t* builder) {
-  return loom_amdgpu_vopd_has_trans_result_guard(builder) &&
-         builder->active_trans_result_vgpr_count != 0;
-}
-
-static void loom_amdgpu_vopd_clear_trans_result_windows(
-    loom_amdgpu_vopd_plan_builder_t* builder) {
-  if (!loom_amdgpu_vopd_has_active_trans_result_window(builder)) {
-    return;
-  }
-  while (builder->active_trans_result_vgpr_count != 0) {
-    const uint32_t active_list_index =
-        (uint32_t)(builder->active_trans_result_vgpr_count - 1);
-    const uint32_t vgpr_index =
-        builder->active_trans_result_vgpr_indices[active_list_index];
-    builder->trans_result_vgprs[vgpr_index] =
-        (loom_amdgpu_vopd_trans_result_vgpr_t){0};
-    --builder->active_trans_result_vgpr_count;
-  }
-}
-
-static uint8_t loom_amdgpu_vopd_saturated_increment(uint8_t value,
-                                                    uint8_t limit) {
-  return value <= limit ? (uint8_t)(value + 1u) : value;
-}
-
-static void loom_amdgpu_vopd_remove_active_trans_result_vgpr(
-    loom_amdgpu_vopd_plan_builder_t* builder, uint32_t vgpr_index) {
-  IREE_ASSERT_LT(vgpr_index, builder->trans_result_vgpr_count);
-  loom_amdgpu_vopd_trans_result_vgpr_t* vgpr =
-      &builder->trans_result_vgprs[vgpr_index];
-  if (!loom_amdgpu_vopd_trans_result_vgpr_is_tracked(vgpr)) {
-    *vgpr = (loom_amdgpu_vopd_trans_result_vgpr_t){0};
-    return;
-  }
-  IREE_ASSERT_NE(builder->active_trans_result_vgpr_count, 0);
-  const uint32_t removed_list_index = vgpr->active_list_index;
-  const uint32_t last_list_index =
-      (uint32_t)(builder->active_trans_result_vgpr_count - 1);
-  IREE_ASSERT_LT(removed_list_index, builder->active_trans_result_vgpr_count);
-  if (removed_list_index != last_list_index) {
-    const uint32_t moved_vgpr_index =
-        builder->active_trans_result_vgpr_indices[last_list_index];
-    builder->active_trans_result_vgpr_indices[removed_list_index] =
-        moved_vgpr_index;
-    builder->trans_result_vgprs[moved_vgpr_index].active_list_index =
-        removed_list_index;
-  }
-  --builder->active_trans_result_vgpr_count;
-  *vgpr = (loom_amdgpu_vopd_trans_result_vgpr_t){0};
-}
-
-static void loom_amdgpu_vopd_activate_trans_result_vgpr(
-    loom_amdgpu_vopd_plan_builder_t* builder, uint32_t vgpr_index) {
-  IREE_ASSERT_LT(vgpr_index, builder->trans_result_vgpr_count);
-  loom_amdgpu_vopd_trans_result_vgpr_t* vgpr =
-      &builder->trans_result_vgprs[vgpr_index];
-  if (loom_amdgpu_vopd_trans_result_vgpr_is_tracked(vgpr)) {
-    return;
-  }
-  IREE_ASSERT_LT(builder->active_trans_result_vgpr_count,
-                 builder->trans_result_vgpr_count);
-  const uint32_t active_list_index =
-      (uint32_t)builder->active_trans_result_vgpr_count++;
-  builder->active_trans_result_vgpr_indices[active_list_index] = vgpr_index;
-  vgpr->active_list_index = active_list_index;
-}
-
-static void loom_amdgpu_vopd_increment_trans_result_windows(
-    loom_amdgpu_vopd_plan_builder_t* builder, bool is_vector_alu,
-    bool is_transcendental) {
-  if (!loom_amdgpu_vopd_has_active_trans_result_window(builder) ||
-      (!is_vector_alu && !is_transcendental)) {
-    return;
-  }
-  for (iree_host_size_t i = 0; i < builder->active_trans_result_vgpr_count;) {
-    const uint32_t vgpr_index = builder->active_trans_result_vgpr_indices[i];
-    loom_amdgpu_vopd_trans_result_vgpr_t* vgpr =
-        &builder->trans_result_vgprs[vgpr_index];
-    IREE_ASSERT(loom_amdgpu_vopd_trans_result_vgpr_is_tracked(vgpr));
-    if (is_vector_alu) {
-      vgpr->valu_interval = loom_amdgpu_vopd_saturated_increment(
-          vgpr->valu_interval,
-          LOOM_AMDGPU_VALU_TRANS_USE_DEPCTR_MAX_VALU_INTERVAL);
-    }
-    if (is_transcendental) {
-      vgpr->trans_interval = loom_amdgpu_vopd_saturated_increment(
-          vgpr->trans_interval,
-          LOOM_AMDGPU_VALU_TRANS_USE_DEPCTR_MAX_TRANS_INTERVAL);
-    }
-    if (!loom_amdgpu_vopd_trans_result_vgpr_is_active(vgpr)) {
-      loom_amdgpu_vopd_remove_active_trans_result_vgpr(builder, vgpr_index);
-      continue;
-    }
-    ++i;
-  }
-}
-
-static void loom_amdgpu_vopd_clear_trans_result_assignment(
-    loom_amdgpu_vopd_plan_builder_t* builder,
-    const loom_low_allocation_assignment_t* assignment) {
-  if (!loom_amdgpu_vopd_has_trans_result_guard(builder) ||
-      !loom_amdgpu_vopd_assignment_is_physical_vgpr(assignment)) {
-    return;
-  }
-  const uint64_t end =
-      (uint64_t)assignment->location_base + assignment->location_count;
-  if (end > builder->trans_result_vgpr_count) {
-    return;
-  }
-  for (uint32_t i = 0; i < assignment->location_count; ++i) {
-    loom_amdgpu_vopd_remove_active_trans_result_vgpr(
-        builder, assignment->location_base + i);
-  }
-}
-
-static void loom_amdgpu_vopd_record_trans_result_assignment(
-    loom_amdgpu_vopd_plan_builder_t* builder,
-    const loom_low_allocation_assignment_t* assignment) {
-  if (!loom_amdgpu_vopd_has_trans_result_guard(builder) ||
-      !loom_amdgpu_vopd_assignment_is_physical_vgpr(assignment)) {
-    return;
-  }
-  const uint64_t end =
-      (uint64_t)assignment->location_base + assignment->location_count;
-  if (end > builder->trans_result_vgpr_count) {
-    return;
-  }
-  for (uint32_t i = 0; i < assignment->location_count; ++i) {
-    const uint32_t vgpr_index = assignment->location_base + i;
-    loom_amdgpu_vopd_activate_trans_result_vgpr(builder, vgpr_index);
-    loom_amdgpu_vopd_trans_result_vgpr_t* vgpr =
-        &builder->trans_result_vgprs[vgpr_index];
-    const uint32_t active_list_index = vgpr->active_list_index;
-    *vgpr = (loom_amdgpu_vopd_trans_result_vgpr_t){
-        .flags = LOOM_AMDGPU_VOPD_TRANS_RESULT_VGPR_FLAG_VALID,
-        .active_list_index = active_list_index,
-    };
-  }
+  return loom_amdgpu_trans_result_window_has_active(
+      &builder->trans_result_window);
 }
 
 static void loom_amdgpu_vopd_clear_trans_result_packet_results(
@@ -790,7 +601,8 @@ static void loom_amdgpu_vopd_clear_trans_result_packet_results(
   for (uint16_t i = 0; i < op->result_count; ++i) {
     const loom_low_allocation_assignment_t* assignment =
         loom_low_packet_result_assignment(builder->allocation, packet, i);
-    loom_amdgpu_vopd_clear_trans_result_assignment(builder, assignment);
+    loom_amdgpu_trans_result_window_clear_assignment(
+        &builder->trans_result_window, assignment);
   }
 }
 
@@ -805,7 +617,8 @@ static void loom_amdgpu_vopd_record_trans_result_packet_results(
   for (uint16_t i = 0; i < op->result_count; ++i) {
     const loom_low_allocation_assignment_t* assignment =
         loom_low_packet_result_assignment(builder->allocation, packet, i);
-    loom_amdgpu_vopd_record_trans_result_assignment(builder, assignment);
+    loom_amdgpu_trans_result_window_record_assignment(
+        &builder->trans_result_window, assignment, /*origin=*/0);
   }
 }
 
@@ -817,7 +630,22 @@ static void loom_amdgpu_vopd_apply_trans_result_insertion(
                         LOOM_AMDGPU_VOPD_PACKET_FLAG_TRANS_RESULT_CLEAR)) {
     return;
   }
-  loom_amdgpu_vopd_clear_trans_result_windows(builder);
+  loom_amdgpu_trans_result_window_clear(&builder->trans_result_window);
+}
+
+static loom_amdgpu_trans_result_packet_flags_t
+loom_amdgpu_vopd_trans_result_packet_flags(
+    loom_amdgpu_descriptor_traits_t descriptor_traits) {
+  loom_amdgpu_trans_result_packet_flags_t packet_flags = 0;
+  if (iree_any_bit_set(descriptor_traits,
+                       LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_ALU)) {
+    packet_flags |= LOOM_AMDGPU_TRANS_RESULT_PACKET_FLAG_VECTOR_ALU;
+  }
+  if (iree_any_bit_set(descriptor_traits,
+                       LOOM_AMDGPU_DESCRIPTOR_TRAIT_TRANSCENDENTAL)) {
+    packet_flags |= LOOM_AMDGPU_TRANS_RESULT_PACKET_FLAG_TRANSCENDENTAL;
+  }
+  return packet_flags;
 }
 
 static iree_status_t loom_amdgpu_vopd_advance_trans_result_packet(
@@ -841,13 +669,11 @@ static iree_status_t loom_amdgpu_vopd_advance_trans_result_packet(
   }
   if (iree_any_bit_set(descriptor_traits,
                        LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_MEMORY)) {
-    loom_amdgpu_vopd_clear_trans_result_windows(builder);
+    loom_amdgpu_trans_result_window_clear(&builder->trans_result_window);
   }
-  loom_amdgpu_vopd_increment_trans_result_windows(
-      builder,
-      iree_any_bit_set(descriptor_traits,
-                       LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_ALU),
-      is_transcendental);
+  loom_amdgpu_trans_result_window_advance(
+      &builder->trans_result_window,
+      loom_amdgpu_vopd_trans_result_packet_flags(descriptor_traits));
   loom_amdgpu_vopd_clear_trans_result_packet_results(builder, packet);
   if (is_transcendental) {
     loom_amdgpu_vopd_record_trans_result_packet_results(builder, packet);
@@ -879,11 +705,9 @@ static iree_status_t loom_amdgpu_vopd_advance_trans_result_pair(
   if (!loom_amdgpu_vopd_has_trans_result_guard(builder)) {
     return iree_ok_status();
   }
-  loom_amdgpu_vopd_increment_trans_result_windows(
-      builder,
-      iree_any_bit_set(first_traits | second_traits,
-                       LOOM_AMDGPU_DESCRIPTOR_TRAIT_VECTOR_ALU),
-      first_trans || second_trans);
+  loom_amdgpu_trans_result_window_advance(
+      &builder->trans_result_window,
+      loom_amdgpu_vopd_trans_result_packet_flags(first_traits | second_traits));
   loom_amdgpu_vopd_clear_trans_result_packet_results(builder, first);
   loom_amdgpu_vopd_clear_trans_result_packet_results(builder, second);
   if (first_trans) {
@@ -920,7 +744,9 @@ static uint32_t loom_amdgpu_vopd_read_immediate_u32(
   const loom_low_descriptor_set_t* descriptor_set =
       builder->schedule->target.descriptor_set;
   const loom_low_immediate_t* immediate =
-      &descriptor_set->immediates[packet->descriptor->immediate_start +
+      &descriptor_set->immediates[loom_low_descriptor_layout(descriptor_set,
+                                                             packet->descriptor)
+                                      ->immediate_start +
                                   descriptor_immediate_index];
   return (uint32_t)loom_low_packet_immediate_attr(packet, immediate).i64;
 }
@@ -931,20 +757,6 @@ static bool loom_amdgpu_vopd_bank_compatible(uint16_t x_register,
   return (x_register & bank_mask) != (y_register & bank_mask);
 }
 
-static bool loom_amdgpu_vopd_components_share_source_cache(
-    const loom_amdgpu_vopd_candidate_component_t* x,
-    const loom_amdgpu_vopd_candidate_component_t* y,
-    loom_amdgpu_vopd_component_source_mask_t source_mask) {
-  if (source_mask != LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_SRC0 ||
-      x->rule->info->op != y->rule->info->op) {
-    return true;
-  }
-  const loom_amdgpu_vopd_component_rule_flags_t shared_flags =
-      x->rule->flags & y->rule->flags;
-  return !iree_any_bit_set(shared_flags,
-                           LOOM_AMDGPU_VOPD_COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE);
-}
-
 static loom_amdgpu_vopd_register_constraint_flags_t
 loom_amdgpu_vopd_register_constraint_flags(
     const loom_amdgpu_vopd_candidate_pair_t* candidate) {
@@ -952,23 +764,36 @@ loom_amdgpu_vopd_register_constraint_flags(
   if (((candidate->x.vdst ^ candidate->y.vdst) & 1u) == 0) {
     flags |= LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_DESTINATION_PARITY;
   }
-  const loom_amdgpu_vopd_component_source_mask_t paired_source_registers =
-      candidate->x.rule->source_register_mask &
-      candidate->y.rule->source_register_mask;
-  if (iree_any_bit_set(paired_source_registers,
-                       LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_SRC0) &&
-      loom_amdgpu_vopd_components_share_source_cache(
-          &candidate->x, &candidate->y,
-          LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_SRC0) &&
-      !loom_amdgpu_vopd_bank_compatible(candidate->x.src0, candidate->y.src0,
-                                        3)) {
-    flags |= LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_SRC0_BANK;
-  }
-  if (iree_any_bit_set(paired_source_registers,
-                       LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_VSRC1) &&
-      !loom_amdgpu_vopd_bank_compatible(candidate->x.vsrc1, candidate->y.vsrc1,
-                                        3)) {
-    flags |= LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_VSRC1_BANK;
+  const uint16_t x_registers[] = {0, candidate->x.src0, candidate->x.vsrc1,
+                                  candidate->x.vdst};
+  const uint16_t y_registers[] = {0, candidate->y.src0, candidate->y.vsrc1,
+                                  candidate->y.vdst};
+  const bool dual_move_separate_caches =
+      candidate->x.rule->info->op == candidate->y.rule->info->op &&
+      iree_all_bits_set(candidate->x.rule->flags & candidate->y.rule->flags,
+                        LOOM_AMDGPU_VOPD_COMPONENT_FLAG_DUAL_MOV_SRC2_CACHE);
+  const uint8_t source_bank_mask =
+      iree_any_bit_set(candidate->x.rule->flags | candidate->y.rule->flags,
+                       LOOM_AMDGPU_VOPD_COMPONENT_FLAG_SOURCE_PARITY)
+          ? 1
+          : 3;
+  static const loom_amdgpu_vopd_register_constraint_flags_t cache_flags[] = {
+      LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_SRC0_BANK,
+      LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_VSRC1_BANK,
+      LOOM_AMDGPU_VOPD_REGISTER_CONSTRAINT_FLAG_SRC2_BANK};
+  for (iree_host_size_t cache = 0; cache < 3; ++cache) {
+    uint8_t x_source = candidate->x.rule->cache_registers[cache];
+    uint8_t y_source = candidate->y.rule->cache_registers[cache];
+    if (dual_move_separate_caches) {
+      y_source = cache == 2 ? LOOM_AMDGPU_VOPD_CACHE_REGISTER_SRC0
+                            : LOOM_AMDGPU_VOPD_CACHE_REGISTER_NONE;
+    }
+    if (x_source && y_source &&
+        !loom_amdgpu_vopd_bank_compatible(x_registers[x_source],
+                                          y_registers[y_source],
+                                          cache == 2 ? 1 : source_bank_mask)) {
+      flags |= cache_flags[cache];
+    }
   }
   if (iree_any_bit_set(candidate->y.rule->source_register_mask,
                        LOOM_AMDGPU_VOPD_COMPONENT_SOURCE_SRC0) &&
@@ -1064,7 +889,7 @@ static bool loom_amdgpu_vopd_literal_immediate_index(
   const loom_amdgpu_descriptor_immediate_slots_t immediate_slots =
       loom_amdgpu_descriptor_immediate_slots(
           builder->schedule->target.descriptor_set, packet->descriptor);
-  if (immediate_slots.literal == LOOM_LOW_ID_NONE) {
+  if (immediate_slots.literal == LOOM_AMDGPU_DESCRIPTOR_IMMEDIATE_SLOT_NONE) {
     return false;
   }
   *out_immediate_index = immediate_slots.literal;
@@ -1079,7 +904,10 @@ static bool loom_amdgpu_vopd_read_tied_accumulate_component(
   *out_component = (loom_amdgpu_vopd_candidate_component_t){0};
 
   const loom_op_t* op = packet->node->op;
-  if (op->result_count != 1 || packet->descriptor->immediate_count != 0 ||
+  if (op->result_count != 1 ||
+      loom_low_descriptor_layout(builder->schedule->target.descriptor_set,
+                                 packet->descriptor)
+              ->immediate_count != 0 ||
       rule->operands.accumulator_index >= op->operand_count ||
       rule->operands.src0_index >= op->operand_count ||
       rule->operands.vsrc1_index >= op->operand_count) {
@@ -1162,7 +990,9 @@ static bool loom_amdgpu_vopd_read_binary_vgpr_component_with_operand_count(
 
   const loom_op_t* op = packet->node->op;
   if (op->result_count != 1 || op->operand_count != expected_operand_count ||
-      packet->descriptor->immediate_count != 0) {
+      loom_low_descriptor_layout(builder->schedule->target.descriptor_set,
+                                 packet->descriptor)
+              ->immediate_count != 0) {
     return false;
   }
   const loom_low_allocation_assignment_t* result_assignment =
@@ -1238,7 +1068,9 @@ static bool loom_amdgpu_vopd_read_register_mov_component(
 
   const loom_op_t* op = packet->node->op;
   if (op->result_count != 1 || op->operand_count != 1 ||
-      packet->descriptor->immediate_count != 0) {
+      loom_low_descriptor_layout(builder->schedule->target.descriptor_set,
+                                 packet->descriptor)
+              ->immediate_count != 0) {
     return false;
   }
   const loom_low_allocation_assignment_t* result_assignment =
@@ -1537,7 +1369,7 @@ static void loom_amdgpu_vopd_commit_static_packet(
 static iree_status_t loom_amdgpu_vopd_plan_block(
     loom_amdgpu_vopd_plan_builder_t* builder, uint16_t block_index,
     const loom_low_schedule_block_t* block) {
-  loom_amdgpu_vopd_clear_trans_result_windows(builder);
+  loom_amdgpu_trans_result_window_clear(&builder->trans_result_window);
   if (builder->matrix_coexecution != NULL) {
     loom_amdgpu_matrix_coexecution_begin_static_block(
         builder->matrix_coexecution, block_index);

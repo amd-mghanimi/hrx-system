@@ -109,6 +109,12 @@ TEST_F(LocalValueDomainTest, RetainsNestedDefinitionsAndCapturedTypeProviders) {
   loom_builder_ip_t previous =
       loom_builder_enter_region(&builder_, inner, inner_body);
   const auto inner_value = Constant(2, LOOM_SCALAR_TYPE_INDEX);
+  const auto lhs = Constant(2, LOOM_SCALAR_TYPE_I32);
+  const auto rhs = Constant(3, LOOM_SCALAR_TYPE_I32);
+  loom_op_t* sum = nullptr;
+  IREE_ASSERT_OK(loom_test_addi_build(&builder_, lhs, rhs,
+                                      loom_type_scalar(LOOM_SCALAR_TYPE_I32),
+                                      LOOM_LOCATION_UNKNOWN, &sum));
   const loom_type_t tensor_type = loom_type_shaped_1d(
       LOOM_TYPE_TENSOR, LOOM_SCALAR_TYPE_I32, loom_dim_pack_dynamic(width), 0);
   loom_value_id_t argument = LOOM_VALUE_ID_INVALID;
@@ -122,13 +128,22 @@ TEST_F(LocalValueDomainTest, RetainsNestedDefinitionsAndCapturedTypeProviders) {
   IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region(module_, body,
                                                             &arena_, &domain_));
   ExpectPartition({outer_value}, {condition, width});
+  EXPECT_TRUE(
+      iree_all_bits_set(domain_.operation_traits, LOOM_TRAIT_CONSTANT_LIKE));
+  EXPECT_FALSE(
+      iree_any_bit_set(domain_.operation_traits, LOOM_TRAIT_COMMUTATIVE));
   EXPECT_EQ(loom_local_value_domain_try_ordinal(&domain_, inner_value),
             LOOM_VALUE_ORDINAL_INVALID);
   loom_local_value_domain_release(&domain_);
 
   IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region_tree(
       module_, body, &arena_, &domain_));
-  ExpectPartition({outer_value, inner_value, argument}, {condition, width});
+  ExpectPartition({outer_value, inner_value, lhs, rhs,
+                   loom_test_addi_result(sum), argument},
+                  {condition, width});
+  EXPECT_TRUE(
+      iree_all_bits_set(domain_.operation_traits,
+                        LOOM_TRAIT_CONSTANT_LIKE | LOOM_TRAIT_COMMUTATIVE));
   const std::vector<loom_value_id_t> ids(
       domain_.value_ids, domain_.value_ids + domain_.value_count);
   loom_local_value_domain_release(&domain_);
@@ -136,6 +151,56 @@ TEST_F(LocalValueDomainTest, RetainsNestedDefinitionsAndCapturedTypeProviders) {
     EXPECT_EQ(loom_value_u32_scratch_load(&module_->scratch.values, id),
               LOOM_VALUE_ORDINAL_INVALID);
   }
+}
+
+TEST_F(LocalValueDomainTest,
+       RetainsValuesCapturedOnlyByDirectAndNestedPredicates) {
+  const auto condition = Constant(1, LOOM_SCALAR_TYPE_I1);
+  const auto direct_limit = Constant(8, LOOM_SCALAR_TYPE_INDEX);
+  const auto nested_limit = Constant(8, LOOM_SCALAR_TYPE_INDEX);
+  loom_op_t* outer = Region(condition);
+  loom_region_t* body = loom_test_optional_region_body(outer);
+  loom_builder_enter_region(&builder_, outer, body);
+  const auto input = Constant(8, LOOM_SCALAR_TYPE_INDEX);
+  const loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
+  const loom_predicate_t direct_predicate = {
+      LOOM_PREDICATE_EQ,     2, {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE}, {},
+      {input, direct_limit},
+  };
+  loom_op_t* direct_assume = nullptr;
+  IREE_ASSERT_OK(loom_test_assume_build(&builder_, &input, 1, &direct_predicate,
+                                        1, &index_type, 1,
+                                        LOOM_LOCATION_UNKNOWN, &direct_assume));
+  const auto direct_value = loom_op_results(direct_assume)[0];
+  loom_op_t* inner = Region(condition);
+  const loom_builder_ip_t previous = loom_builder_enter_region(
+      &builder_, inner, loom_test_optional_region_body(inner));
+  const loom_predicate_t nested_predicate = {
+      LOOM_PREDICATE_EQ,
+      2,
+      {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_VALUE},
+      {},
+      {direct_value, nested_limit},
+  };
+  loom_op_t* nested_assume = nullptr;
+  IREE_ASSERT_OK(loom_test_assume_build(&builder_, &direct_value, 1,
+                                        &nested_predicate, 1, &index_type, 1,
+                                        LOOM_LOCATION_UNKNOWN, &nested_assume));
+  const auto nested_value = loom_op_results(nested_assume)[0];
+  Yield(nested_value);
+  loom_builder_restore(&builder_, previous);
+  Yield(direct_value);
+
+  IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region(module_, body,
+                                                            &arena_, &domain_));
+  ExpectPartition({input, direct_value},
+                  {condition, direct_limit, nested_limit});
+  loom_local_value_domain_release(&domain_);
+
+  IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region_tree(
+      module_, body, &arena_, &domain_));
+  ExpectPartition({input, direct_value, nested_value},
+                  {condition, direct_limit, nested_limit});
 }
 
 TEST_F(LocalValueDomainTest,
@@ -167,23 +232,94 @@ TEST_F(LocalValueDomainTest,
   IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region_tree(
       module_, body, &arena_, &domain_));
   ExpectPartition({definition, loom_test_addi_result(sum)}, {capture});
+  EXPECT_EQ(domain_.value_ids[0], loom_test_addi_result(sum));
+  EXPECT_EQ(domain_.value_ids[1], definition);
   const std::vector<loom_value_id_t> ids(
       domain_.value_ids, domain_.value_ids + domain_.value_count);
   loom_value_id_t new_value = LOOM_VALUE_ID_INVALID;
   IREE_ASSERT_OK(loom_module_define_value(
       module_, loom_type_scalar(LOOM_SCALAR_TYPE_INDEX), &new_value));
   loom_value_ordinal_t ordinal = LOOM_VALUE_ORDINAL_INVALID;
-  IREE_ASSERT_OK(loom_local_value_domain_register_value(&domain_, &arena_,
-                                                        new_value, &ordinal));
+  IREE_ASSERT_OK(
+      loom_local_value_domain_register_value(&domain_, new_value, &ordinal));
   EXPECT_EQ(ordinal, ids.size());
   EXPECT_EQ(domain_.definition_count, 2u);
   for (loom_value_ordinal_t i = 0; i < ids.size(); ++i) {
     EXPECT_EQ(loom_local_value_domain_ordinal(&domain_, ids[i]), i);
   }
-  IREE_ASSERT_OK(loom_local_value_domain_register_value(&domain_, &arena_,
-                                                        definition, &ordinal));
+  IREE_ASSERT_OK(
+      loom_local_value_domain_register_value(&domain_, definition, &ordinal));
   EXPECT_EQ(domain_.value_ids[ordinal], definition);
   EXPECT_EQ(domain_.value_count, ids.size() + 1);
+}
+
+TEST_F(LocalValueDomainTest, RelocatesEmptyDomainWithoutAllocating) {
+  const auto condition = Constant(1, LOOM_SCALAR_TYPE_I1);
+  auto* region = loom_test_optional_region_body(Region(condition));
+  iree_arena_allocator_t construction_arena;
+  iree_arena_initialize(&pool_, &construction_arena);
+  IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region(
+      module_, region, &construction_arena, &domain_));
+  ASSERT_EQ(domain_.value_count, 0u);
+  const auto allocated = arena_.total_allocation_size;
+  IREE_ASSERT_OK(loom_local_value_domain_relocate(&domain_, &arena_));
+  EXPECT_EQ(arena_.total_allocation_size, allocated);
+  iree_arena_deinitialize(&construction_arena);
+  loom_value_ordinal_t ordinal = LOOM_VALUE_ORDINAL_INVALID;
+  IREE_ASSERT_OK(
+      loom_local_value_domain_register_value(&domain_, condition, &ordinal));
+  EXPECT_EQ(ordinal, 0u);
+  EXPECT_EQ(loom_local_value_domain_ordinal(&domain_, condition), ordinal);
+}
+
+TEST_F(LocalValueDomainTest,
+       RestoresRelocatedOrdinalsAcrossOtherFramesAndGrowth) {
+  const auto condition = Constant(1, LOOM_SCALAR_TYPE_I1);
+  auto* first = Region(condition);
+  auto* first_body = loom_test_optional_region_body(first);
+  loom_builder_enter_region(&builder_, first, first_body);
+  const auto value = Constant(17, LOOM_SCALAR_TYPE_I32);
+  Yield(condition);
+  iree_arena_allocator_t construction_arena;
+  iree_arena_initialize(&pool_, &construction_arena);
+  IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region_tree(
+      module_, first_body, &construction_arena, &domain_));
+  const auto original = loom_local_value_domain_ordinal(&domain_, value);
+  const auto captured = loom_local_value_domain_ordinal(&domain_, condition);
+  IREE_ASSERT_OK(loom_local_value_domain_relocate(&domain_, &arena_));
+  EXPECT_EQ(domain_.value_capacity, domain_.value_count);
+  iree_arena_deinitialize(&construction_arena);
+  loom_local_value_domain_release(&domain_);
+
+  loom_builder_set_block(&builder_, loom_module_block(module_));
+  builder_.ip.parent_op = nullptr;
+  auto* second = Region(condition);
+  auto* second_body = loom_test_optional_region_body(second);
+  loom_builder_enter_region(&builder_, second, second_body);
+  const auto other = Constant(29, LOOM_SCALAR_TYPE_I32);
+  Constant(31, LOOM_SCALAR_TYPE_I32);
+  Yield(condition);
+  loom_local_value_domain_t other_domain;
+  IREE_ASSERT_OK(loom_local_value_domain_acquire_for_region(
+      module_, second_body, &arena_, &other_domain));
+  EXPECT_EQ(loom_local_value_domain_try_ordinal(&other_domain, value),
+            LOOM_VALUE_ORDINAL_INVALID);
+  loom_local_value_domain_release(&other_domain);
+
+  loom_local_value_domain_restore(&domain_);
+  EXPECT_EQ(loom_local_value_domain_ordinal(&domain_, value), original);
+  EXPECT_EQ(loom_local_value_domain_ordinal(&domain_, condition), captured);
+  EXPECT_EQ(loom_local_value_domain_try_ordinal(&domain_, other),
+            LOOM_VALUE_ORDINAL_INVALID);
+  EXPECT_TRUE(iree_any_bit_set(domain_.flags,
+                               LOOM_LOCAL_VALUE_DOMAIN_FLAG_REGION_TREE));
+  const auto original_count = domain_.value_count;
+  loom_value_ordinal_t ordinal = LOOM_VALUE_ORDINAL_INVALID;
+  IREE_ASSERT_OK(
+      loom_local_value_domain_register_value(&domain_, other, &ordinal));
+  EXPECT_EQ(ordinal, original_count);
+  EXPECT_EQ(loom_local_value_domain_ordinal(&domain_, value), original);
+  EXPECT_EQ(loom_local_value_domain_ordinal(&domain_, condition), captured);
 }
 
 }  // namespace

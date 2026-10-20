@@ -1,0 +1,169 @@
+// RUN: emit source-low target=x86:avx2 output=low
+
+func.def @scalar_i32_counts(%input: i32) -> (i32, i32, i32) {
+  %leading = scalar.ctlzi %input : i32
+  %trailing = scalar.cttzi %input : i32
+  %population = scalar.ctpopi %input : i32
+  func.return %leading, %trailing, %population : i32, i32, i32
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @scalar_i32_counts(%input: reg<x86.gpr32>) -> (reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>) asm {
+  %11 = bsr.gpr32 %input
+  %12 = xor.imm.gpr32 %11 {imm32 = 31}
+  %13 = mov.imm32 32
+  %leading = cmp.select.imm.gpr32.gpr32 %input, %13, %12, 0, "eq"
+  %15 = bsf.gpr32 %input
+  %trailing = cmp.select.imm.gpr32.gpr32 %input, %13, %15, 0, "eq"
+  %18 = copy %input : reg<x86.gpr32> -> reg<x86.gpr32>
+  %19 = shr.imm.gpr32 %18 {shift = 1}
+  %20 = and.imm.gpr32 %19 {imm32 = 1431655765}
+  %21 = copy %input : reg<x86.gpr32> -> reg<x86.gpr32>
+  %22 = sub.gpr32 %21, %20
+  %23 = copy %22 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %24 = and.imm.gpr32 %23 {imm32 = 858993459}
+  %25 = shr.imm.gpr32 %22 {shift = 2}
+  %26 = and.imm.gpr32 %25 {imm32 = 858993459}
+  %27 = add.gpr32 %24, %26
+  %28 = copy %27 : reg<x86.gpr32> -> reg<x86.gpr32>
+  %29 = shr.imm.gpr32 %28 {shift = 4}
+  %30 = add.gpr32 %27, %29
+  %31 = and.imm.gpr32 %30 {imm32 = 252645135}
+  %32 = imul.imm.gpr32 %31 {imm32 = 16843009}
+  %population = shr.imm.gpr32 %32 {shift = 24}
+  return %leading, %trailing, %population
+}
+
+// ====
+
+func.def @scalar_i64_counts(%input: i64) -> (i64, i64, i64) {
+  %leading = scalar.ctlzi %input : i64
+  %trailing = scalar.cttzi %input : i64
+  %population = scalar.ctpopi %input : i64
+  func.return %leading, %trailing, %population : i64, i64, i64
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) @scalar_i64_counts(%input: reg<x86.gpr64>) -> (reg<x86.gpr64>, reg<x86.gpr64>, reg<x86.gpr64>) asm {
+  %11 = bsr.gpr64 %input
+  %12 = xor.imm.gpr64 %11 {imm32 = 63}
+  %13 = mov.imm64 64
+  %leading = cmp.select.imm.gpr64.gpr64 %input, %13, %12, 0, "eq"
+  %15 = bsf.gpr64 %input
+  %trailing = cmp.select.imm.gpr64.gpr64 %input, %13, %15, 0, "eq"
+  %18 = mov.imm64 6148914691236517205
+  %19 = mov.imm64 3689348814741910323
+  %20 = mov.imm64 1085102592571150095
+  %21 = copy %input : reg<x86.gpr64> -> reg<x86.gpr64>
+  %22 = shr.imm.gpr64 %21 {shift = 1}
+  %23 = and.gpr64 %22, %18
+  %24 = copy %input : reg<x86.gpr64> -> reg<x86.gpr64>
+  %25 = sub.gpr64 %24, %23
+  %26 = copy %25 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %27 = and.gpr64 %26, %19
+  %28 = shr.imm.gpr64 %25 {shift = 2}
+  %29 = and.gpr64 %28, %19
+  %30 = add.gpr64 %27, %29
+  %31 = copy %30 : reg<x86.gpr64> -> reg<x86.gpr64>
+  %32 = shr.imm.gpr64 %31 {shift = 4}
+  %33 = add.gpr64 %30, %32
+  %34 = and.gpr64 %33, %20
+  %35 = mov.imm64 72340172838076673
+  %36 = imul.gpr64 %34, %35
+  %population = shr.imm.gpr64 %36 {shift = 56}
+  return %leading, %trailing, %population
+}
+
+// ====
+
+func.def @vector_i8x4_counts(%input: vector<4xi8>) -> (vector<4xi8>, vector<4xi8>, vector<4xi8>) {
+  %leading = vector.ctlzi %input : vector<4xi8>
+  %trailing = vector.cttzi %input : vector<4xi8>
+  %population = vector.ctpopi %input : vector<4xi8>
+  func.return %leading, %trailing, %population : vector<4xi8>, vector<4xi8>, vector<4xi8>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<4xi8>) -> (vector<4xi8>, vector<4xi8>, vector<4xi8>)}) @vector_i8x4_counts(%input: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %11 = vpcmpeqd.xmm %input, %input
+  %12 = vpsrlw.xmm %input, 1
+  %13 = avx2.vmovdqu.rodata.xmm @__low_rodata_e27de4ff
+  %14 = vpand.xmm %12, %13
+  %15 = vpor.xmm %input, %14
+  %16 = vpsrlw.xmm %15, 2
+  %17 = avx2.vmovdqu.rodata.xmm @__low_rodata_db64c1ff
+  %18 = vpand.xmm %16, %17
+  %19 = vpor.xmm %15, %18
+  %20 = vpsrlw.xmm %19, 4
+  %21 = avx2.vmovdqu.rodata.xmm @__low_rodata_1326489f
+  %22 = vpand.xmm %20, %21
+  %23 = vpor.xmm %19, %22
+  %24 = vpxor.xmm %23, %11
+  %25 = avx2.vmovdqu.rodata.xmm @__low_rodata_45cbf323
+  %26 = vpand.xmm %24, %21
+  %27 = vpsrlw.xmm %24, 4
+  %28 = vpand.xmm %27, %21
+  %29 = vpshufb.xmm %25, %26
+  %30 = vpshufb.xmm %25, %28
+  %leading = vpaddb.xmm %29, %30
+  %33 = vpaddb.xmm %input, %11
+  %34 = vpxor.xmm %input, %11
+  %35 = vpand.xmm %33, %34
+  %38 = vpand.xmm %35, %21
+  %39 = vpsrlw.xmm %35, 4
+  %40 = vpand.xmm %39, %21
+  %41 = vpshufb.xmm %25, %38
+  %42 = vpshufb.xmm %25, %40
+  %trailing = vpaddb.xmm %41, %42
+  %46 = vpand.xmm %input, %21
+  %47 = vpsrlw.xmm %input, 4
+  %48 = vpand.xmm %47, %21
+  %49 = vpshufb.xmm %25, %46
+  %50 = vpshufb.xmm %25, %48
+  %population = vpaddb.xmm %49, %50
+  return %leading, %trailing, %population
+}
+
+// ====
+
+func.def @vector_i64x2_population(%input: vector<2xi64>) -> (vector<2xi64>) {
+  %population = vector.ctpopi %input : vector<2xi64>
+  func.return %population : vector<2xi64>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<2xi64>) -> (vector<2xi64>)}) @vector_i64x2_population(%input: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  %5 = avx2.vmovdqu.rodata.xmm @__low_rodata_45cbf323
+  %6 = avx2.vmovdqu.rodata.xmm @__low_rodata_1326489f
+  %7 = vpand.xmm %input, %6
+  %8 = vpsrlw.xmm %input, 4
+  %9 = vpand.xmm %8, %6
+  %10 = vpshufb.xmm %5, %7
+  %11 = vpshufb.xmm %5, %9
+  %12 = vpaddb.xmm %10, %11
+  %13 = vpsrlq.xmm %12, 8
+  %14 = vpaddq.xmm %12, %13
+  %15 = vpsrlq.xmm %14, 16
+  %16 = vpaddq.xmm %14, %15
+  %17 = vpsrlq.xmm %16, 32
+  %18 = vpaddq.xmm %16, %17
+  %19 = vpsllq.xmm %18, 57
+  %population = vpsrlq.xmm %19, 57
+  return %population
+}
+
+// ====
+
+func.def @predicate_i1x8_counts(%input: vector<8xi1>) -> (vector<8xi1>, vector<8xi1>, vector<8xi1>) {
+  %leading = vector.ctlzi %input : vector<8xi1>
+  %trailing = vector.cttzi %input : vector<8xi1>
+  %population = vector.ctpopi %input : vector<8xi1>
+  func.return %leading, %trailing, %population : vector<8xi1>, vector<8xi1>, vector<8xi1>
+}
+
+// ----
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<8xi1>) -> (vector<8xi1>, vector<8xi1>, vector<8xi1>)}) @predicate_i1x8_counts(%population: reg<x86.xmm>) -> (reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>) asm {
+  %11 = vpcmpeqd.xmm %population, %population
+  %leading = vpxor.xmm %population, %11
+  return %leading, %leading, %population
+}

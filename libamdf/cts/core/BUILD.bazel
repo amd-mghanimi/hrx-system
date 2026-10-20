@@ -15,6 +15,12 @@ package(
 [amdf_cts_test_suite(
     name = name,
     srcs = [name + "_test.cc"],
+    # API negotiation covers each binding; native behavior uses one provider.
+    linkage_modes = [
+        "static",
+        "shared",
+        "dynamic",
+    ] if name == "query" else ["dynamic"],
     target_compatible_with = select({
         "@platforms//os:linux": [],
         "@platforms//os:windows": [],
@@ -30,6 +36,8 @@ package(
     "allocator",
     "discovery",
     "memory",
+    "memory_reservation",
+    "observation",
     "query",
 ]]
 
@@ -39,6 +47,8 @@ test_suite(
         ":allocator",
         ":discovery",
         ":memory",
+        ":memory_reservation",
+        ":observation",
         ":query",
     ],
     visibility = ["//visibility:public"],

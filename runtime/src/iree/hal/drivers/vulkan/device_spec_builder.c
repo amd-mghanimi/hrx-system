@@ -249,7 +249,7 @@ static iree_status_t iree_hal_vulkan_device_spec_populate_memory(
 static iree_status_t iree_hal_vulkan_device_spec_populate_virtual_memory(
     const iree_hal_vulkan_device_spec_params_t* params,
     iree_hal_device_spec_builder_t* builder) {
-  if (!iree_hal_allocator_supports_virtual_memory(params->device_allocator)) {
+  if (!params->sparse_buffer_requirements.alignment) {
     return iree_ok_status();
   }
 
@@ -278,30 +278,21 @@ static iree_status_t iree_hal_vulkan_device_spec_populate_virtual_memory(
           ? iree_hal_vulkan_device_spec_memory_type_mask(
                 heap_count, memory_types, IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL)
           : 0;
-  iree_hal_buffer_params_t buffer_params = {
-      .type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE |
-              IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-      .usage = IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_STORAGE,
-      .access = IREE_HAL_MEMORY_ACCESS_ALL,
-      .queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
-  };
-  iree_device_size_t minimum_page_size = 0;
-  iree_device_size_t recommended_page_size = 0;
-  if (iree_status_is_ok(status) && compatible_memory_type_mask != 0) {
-    status = iree_hal_allocator_virtual_memory_query_granularity(
-        params->device_allocator, buffer_params, &minimum_page_size,
-        &recommended_page_size);
-  }
+  const iree_device_size_t page_size =
+      params->sparse_buffer_requirements.alignment;
   if (iree_status_is_ok(status) && compatible_memory_type_mask != 0) {
     const VkPhysicalDeviceLimits* limits =
         &params->physical_device->properties2.properties.limits;
     iree_hal_virtual_memory_class_spec_t memory_class = {
         .compatible_memory_type_mask = compatible_memory_type_mask,
-        .allowed_buffer_usage = buffer_params.usage,
-        .allowed_memory_access = buffer_params.access,
-        .minimum_page_size = minimum_page_size,
-        .recommended_page_size = recommended_page_size,
-        .maximum_reservation_size = limits->maxStorageBufferRange,
+        .allowed_buffer_usage =
+            IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_STORAGE,
+        .allowed_memory_access = IREE_HAL_MEMORY_ACCESS_ALL,
+        .minimum_page_size = page_size,
+        .recommended_page_size = page_size,
+        .maximum_reservation_size = iree_min(
+            limits->sparseAddressSpaceSize,
+            params->physical_device->maintenance4_properties.maxBufferSize),
         .maximum_physical_allocation_size =
             params->physical_device->properties11.maxMemoryAllocationSize,
         .operation_flags =
@@ -311,8 +302,7 @@ static iree_status_t iree_hal_vulkan_device_spec_populate_virtual_memory(
             IREE_HAL_VIRTUAL_MEMORY_OPERATION_FLAG_PHYSICAL_FREE |
             IREE_HAL_VIRTUAL_MEMORY_OPERATION_FLAG_MAP |
             IREE_HAL_VIRTUAL_MEMORY_OPERATION_FLAG_UNMAP |
-            IREE_HAL_VIRTUAL_MEMORY_OPERATION_FLAG_PROTECT |
-            IREE_HAL_VIRTUAL_MEMORY_OPERATION_FLAG_ADVISE,
+            IREE_HAL_VIRTUAL_MEMORY_OPERATION_FLAG_PROTECT,
         .protection_flags = IREE_HAL_MEMORY_PROTECTION_READ_WRITE,
         .advice_flags = IREE_HAL_MEMORY_ADVICE_NORMAL,
         .flags = IREE_HAL_VIRTUAL_MEMORY_CLASS_SPEC_FLAG_NONE,
@@ -452,7 +442,11 @@ static iree_status_t iree_hal_vulkan_device_spec_populate_dispatch(
       &params->physical_device->properties2.properties.limits;
   const bool has_subgroup_size_control =
       iree_all_bits_set(params->device_plan->enabled_features.general,
-                        IREE_HAL_VULKAN_FEATURE_ENABLE_SUBGROUP_SIZE_CONTROL);
+                        IREE_HAL_VULKAN_FEATURE_ENABLE_SUBGROUP_SIZE_CONTROL) &&
+      iree_all_bits_set(
+          params->physical_device->subgroup_size_control_properties
+              .requiredSubgroupSizeStages,
+          VK_SHADER_STAGE_COMPUTE_BIT);
   const uint32_t subgroup_size =
       params->physical_device->subgroup_properties.subgroupSize;
   const uint32_t subgroup_size_minimum =
@@ -569,6 +563,11 @@ static iree_status_t iree_hal_vulkan_device_spec_populate_facet(
       .physical_device_type = physical_device_properties->deviceType,
       .enabled_features = params->device_plan->enabled_features,
       .flags = IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_NONE,
+      .subgroup_supported_operations =
+          params->physical_device->subgroup_properties.supportedOperations,
+      .maximum_workgroup_subgroup_count =
+          params->physical_device->subgroup_size_control_properties
+              .maxComputeWorkgroupSubgroups,
   };
   const VkPhysicalDeviceFloatControlsProperties* float_controls =
       &params->physical_device->float_controls_properties;
@@ -577,6 +576,37 @@ static iree_status_t iree_hal_vulkan_device_spec_populate_facet(
           VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE) {
     vulkan_spec.flags |=
         IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_DENORM_PRESERVE;
+  }
+  if (float_controls->shaderDenormPreserveFloat16 &&
+      float_controls->shaderDenormPreserveFloat64 &&
+      float_controls->denormBehaviorIndependence !=
+          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE) {
+    vulkan_spec.flags |=
+        IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_DENORM_PRESERVE;
+  }
+  if (float_controls->shaderRoundingModeRTEFloat16 &&
+      float_controls->shaderRoundingModeRTEFloat64 &&
+      float_controls->roundingModeIndependence !=
+          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE) {
+    vulkan_spec.flags |=
+        IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_64_ROUNDING_RTE;
+  }
+  if (float_controls->shaderRoundingModeRTEFloat32 &&
+      float_controls->roundingModeIndependence !=
+          VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE) {
+    vulkan_spec.flags |= IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_ROUNDING_RTE;
+  }
+  if (float_controls->shaderSignedZeroInfNanPreserveFloat16) {
+    vulkan_spec.flags |=
+        IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT16_SIGNED_ZERO_INF_NAN_PRESERVE;
+  }
+  if (float_controls->shaderSignedZeroInfNanPreserveFloat32) {
+    vulkan_spec.flags |=
+        IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT32_SIGNED_ZERO_INF_NAN_PRESERVE;
+  }
+  if (float_controls->shaderSignedZeroInfNanPreserveFloat64) {
+    vulkan_spec.flags |=
+        IREE_HAL_VULKAN_DEVICE_SPEC_FLAG_FLOAT64_SIGNED_ZERO_INF_NAN_PRESERVE;
   }
 
   iree_host_size_t property_count = 0;

@@ -6,17 +6,19 @@
 
 // Target provider composition shared by tools and compile drivers.
 //
-// A target provider owns the target dialects, descriptor registries, lowering
-// policies, and diagnostic providers linked into a binary. Tool-specific layers
-// may add execution, checking, or artifact-emission providers around this core
-// target contribution, but those layers should not duplicate target registry
-// aggregation.
+// A target provider contributes target dialects, descriptor registries,
+// lowering policies, diagnostics, emitters, or any coherent subset linked into
+// a binary. IR-only providers keep parsing and formatting tools independent of
+// lowering and compilation code. Tool-specific layers may select and invoke
+// provider capabilities for execution or checking; they do not own alternate
+// artifact compilers or duplicate target registry aggregation.
 
 #ifndef LOOM_TARGET_PROVIDER_H_
 #define LOOM_TARGET_PROVIDER_H_
 
 #include "iree/base/api.h"
 #include "iree/base/byte_sequence.h"
+#include "iree/base/cpu_data.h"
 #include "iree/base/internal/arena.h"
 #include "loom/codegen/low/lower/lower.h"
 #include "loom/codegen/low/verify.h"
@@ -70,13 +72,14 @@ typedef iree_status_t (*loom_target_materialize_definition_fn_t)(
     loom_symbol_ref_t symbol, loom_location_id_t location);
 
 // Target disposition for semantic calls and retained low.func.call edges.
-typedef enum loom_target_low_call_policy_e {
-  // The target can preserve and emit the direct Low call boundary.
-  LOOM_TARGET_LOW_CALL_POLICY_DIRECT = 0,
-  // The target has no Low call ABI. Semantic edges must inline before physical
-  // representation selection; authored Low edges inline after normalization.
-  LOOM_TARGET_LOW_CALL_POLICY_REQUIRE_INLINE = 1,
-} loom_target_low_call_policy_t;
+typedef enum loom_target_call_policy_e {
+  // The target can preserve and emit the direct call boundary.
+  LOOM_TARGET_CALL_POLICY_DIRECT = 0,
+  // The target cannot emit this call boundary. Semantic edges inline before
+  // physical representation selection; authored Low edges inline after
+  // normalization.
+  LOOM_TARGET_CALL_POLICY_REQUIRE_INLINE = 1,
+} loom_target_call_policy_t;
 
 // Physical representation policy for source view values that survive across
 // function and CFG boundaries.
@@ -87,32 +90,66 @@ typedef enum loom_target_view_boundary_carrier_e {
   LOOM_TARGET_VIEW_BOUNDARY_CARRIER_BUFFER_OFFSET = 1,
 } loom_target_view_boundary_carrier_t;
 
-// Selects Low call policy for one caller's resolved target context.
+// Physical carrier for lane predicates that cross structured loop boundaries.
+typedef enum loom_target_loop_predicate_carrier_e {
+  // Preserve the semantic i1 value for target-selected direct lowering.
+  LOOM_TARGET_LOOP_PREDICATE_CARRIER_DIRECT = 0,
+  // Transport each lane's Boolean value as an i32 zero-or-one word.
+  LOOM_TARGET_LOOP_PREDICATE_CARRIER_I32 = 1,
+} loom_target_loop_predicate_carrier_t;
+
+// Selects call policy for one verified semantic or Low boundary.
 //
 // The query is intentionally per resolved caller rather than per module: one
-// module may carry versions owned by different target providers.
-typedef loom_target_low_call_policy_t (
-    *loom_target_select_low_call_policy_fn_t)(
-    const loom_resolved_target_t* resolved_target);
+// module may carry versions owned by different target providers. Semantic
+// callees remain source typed; Low callees have their selected physical
+// representation. |kind| makes that stage boundary explicit without requiring
+// every provider record to carry two policy hooks.
+typedef loom_target_call_policy_t (*loom_target_select_call_policy_fn_t)(
+    const loom_resolved_target_t* resolved_target, const loom_module_t* module,
+    loom_call_like_kind_t kind, loom_call_like_t call, loom_func_like_t callee);
 
-// Selects direct Low call preservation for every resolved target.
-static inline loom_target_low_call_policy_t
-loom_target_select_low_call_policy_direct(
-    const loom_resolved_target_t* resolved_target) {
+// Selects direct call preservation for every resolved target and call stage.
+static inline loom_target_call_policy_t loom_target_select_call_policy_direct(
+    const loom_resolved_target_t* resolved_target, const loom_module_t* module,
+    loom_call_like_kind_t kind, loom_call_like_t call,
+    loom_func_like_t callee) {
   (void)resolved_target;
-  return LOOM_TARGET_LOW_CALL_POLICY_DIRECT;
+  (void)module;
+  (void)kind;
+  (void)call;
+  (void)callee;
+  return LOOM_TARGET_CALL_POLICY_DIRECT;
 }
 
-// Selects required Low call inlining for every resolved target.
-static inline loom_target_low_call_policy_t
-loom_target_select_low_call_policy_require_inline(
-    const loom_resolved_target_t* resolved_target) {
+// Selects required call inlining for every resolved target and call stage.
+static inline loom_target_call_policy_t
+loom_target_select_call_policy_require_inline(
+    const loom_resolved_target_t* resolved_target, const loom_module_t* module,
+    loom_call_like_kind_t kind, loom_call_like_t call,
+    loom_func_like_t callee) {
   (void)resolved_target;
-  return LOOM_TARGET_LOW_CALL_POLICY_REQUIRE_INLINE;
+  (void)module;
+  (void)kind;
+  (void)call;
+  (void)callee;
+  return LOOM_TARGET_CALL_POLICY_REQUIRE_INLINE;
 }
 
 // Target emission artifact storage release callback.
 typedef void (*loom_target_emit_artifact_storage_release_fn_t)(void* storage);
+
+// Optional metadata and debug products requested during target emission.
+typedef enum loom_target_emit_request_flag_bits_e {
+  LOOM_TARGET_EMIT_REQUEST_FLAG_NONE = 0u,
+  // Retains the exact target bundle selected by emission in the artifact.
+  LOOM_TARGET_EMIT_REQUEST_FLAG_RETAIN_TARGET_BUNDLE = 1u << 0,
+  // Captures a target-owned textual listing when the emitter supports one.
+  LOOM_TARGET_EMIT_REQUEST_FLAG_TARGET_LISTING = 1u << 1,
+} loom_target_emit_request_flag_bits_t;
+
+// Bitfield of loom_target_emit_request_flag_bits_t values.
+typedef uint32_t loom_target_emit_request_flags_t;
 
 typedef enum loom_target_emit_sidecar_artifact_kind_e {
   // Machine-readable artifact manifest for the primary artifact.
@@ -135,12 +172,24 @@ typedef struct loom_target_emit_sidecar_artifact_t {
 
 // One target artifact produced by an emitter.
 typedef struct loom_target_emit_artifact_t {
+  // Exact target bundle selected by emission when requested by the caller.
+  // The pointer is owned by |storage| and lives until artifact release.
+  const loom_target_bundle_t* target_bundle;
+
   // Target-neutral artifact format produced by the emitter.
   loom_target_artifact_format_t target_artifact_format;
 
   // Immutable primary artifact contents. The artifact owns one reference;
   // callers may retain the sequence when they need it to outlive the artifact.
   iree_byte_sequence_t* contents;
+
+  // Target-owned textual listing format, such as `amdgpu-assembly`.
+  iree_string_view_t target_listing_format;
+
+  // Optional immutable textual target listing. The artifact owns one
+  // reference; callers may retain the sequence when they need it to outlive
+  // the artifact.
+  iree_byte_sequence_t* target_listing_contents;
 
   // Optional emitter-owned sidecar artifacts.
   const loom_target_emit_sidecar_artifact_t* sidecars;
@@ -155,6 +204,18 @@ typedef struct loom_target_emit_artifact_t {
   // Optional callback that releases |storage| after artifact sequences.
   loom_target_emit_artifact_storage_release_fn_t release_storage;
 } loom_target_emit_artifact_t;
+
+// Attaches owned metadata to an artifact whose metadata fields are empty.
+// Copies the optional bundle, all of its strings, sidecar descriptors, and
+// sidecar identifiers into one allocation. Retains each sidecar byte sequence;
+// the caller keeps its original references. All input storage may be released
+// after this call. Primary contents and listing fields are left unchanged.
+// With no bundle or sidecars this performs no allocation. Failure leaves the
+// artifact unchanged. loom_target_emit_artifact_release owns the result.
+iree_status_t loom_target_emit_artifact_retain_metadata(
+    const loom_target_bundle_t* target_bundle, iree_host_size_t sidecar_count,
+    const loom_target_emit_sidecar_artifact_t* sidecars,
+    iree_allocator_t allocator, loom_target_emit_artifact_t* artifact);
 
 // Releases all storage owned by |artifact| and resets it to a zero-initialized
 // value. Safe to call on a zero-initialized artifact.
@@ -192,12 +253,19 @@ typedef struct loom_target_emit_request_t {
   // Optional artifact manifest request.
   loom_target_emit_artifact_manifest_request_t artifact_manifest;
 
+  // Optional metadata and debug artifacts to retain in the emitted artifact.
+  loom_target_emit_request_flags_t flags;
+
   // Optional caller-owned structured compile report to populate.
   loom_target_compile_report_t* compile_report;
 
   // Diagnostic emitter that reports target diagnostics into the operation
   // result.
   iree_diagnostic_emitter_t diagnostic_emitter;
+
+  // Maximum diagnostics to emit before the active target subsystem stops
+  // walking. Zero uses the emitter's conservative default.
+  uint32_t max_errors;
 
   // Invocation-local scratch arena.
   iree_arena_allocator_t* scratch_arena;
@@ -206,17 +274,19 @@ typedef struct loom_target_emit_request_t {
   iree_allocator_t allocator;
 } loom_target_emit_request_t;
 
-// Emits one target artifact from prepared target-low IR.
+// Emits one target artifact from prepared target-low IR. Structured semantic
+// rejection returns OK with |out_emitted| false and no artifact. Infrastructure
+// and output failures return a status and also leave |out_emitted| false.
 typedef iree_status_t (*loom_target_emit_fn_t)(
-    const loom_target_emit_request_t* request,
+    const loom_target_emit_request_t* request, bool* out_emitted,
     loom_target_emit_artifact_t* out_artifact);
 
 // Target-owned emission backend linked into a binary or embedding.
 typedef struct loom_target_emitter_t {
-  // Stable emitter name used in diagnostics.
+  // Stable nonempty emitter name used in diagnostics.
   iree_string_view_t name;
 
-  // Public artifact format string returned by binding layers.
+  // Unique nonempty public artifact format returned by binding layers.
   iree_string_view_t public_artifact_format;
 
   // Default artifact identifier used when the caller leaves it empty.
@@ -228,7 +298,7 @@ typedef struct loom_target_emitter_t {
   // Options for the default compiler pipeline preparing this artifact.
   loom_target_pipeline_options_t default_pipeline_options;
 
-  // Emission callback.
+  // Non-NULL emission callback.
   loom_target_emit_fn_t emit;
 } loom_target_emitter_t;
 
@@ -264,6 +334,12 @@ typedef enum loom_target_pipeline_phase_e {
   // Target-low preparation before the common cleanup and operand-form
   // selection immediately preceding emission.
   LOOM_TARGET_PIPELINE_PHASE_TARGET_LOW_PREPARATION = 4,
+  // Realize source execution abstractions that may introduce new lexical
+  // workers after the initial strand outlining boundary.
+  LOOM_TARGET_PIPELINE_PHASE_SOURCE_EXECUTION_REALIZATION = 5,
+  // Lower realized execution resources after newly introduced lexical workers
+  // have passed through common scheduling and strand outlining.
+  LOOM_TARGET_PIPELINE_PHASE_SOURCE_EXECUTION_LOWERING = 6,
   LOOM_TARGET_PIPELINE_PHASE_COUNT_,
 } loom_target_pipeline_phase_t;
 
@@ -289,6 +365,19 @@ typedef iree_status_t (*loom_target_provider_pipeline_contribution_fn_t)(
 // embedding-owned structured profiles through |profile_type|.
 typedef iree_status_t (*loom_target_provider_select_profile_fn_t)(
     iree_string_view_t selector, const loom_target_profile_t** out_profile);
+
+// Selects a native execution profile from explicit, OS-enabled CPU facts.
+// At most one of |requirement| and |profile| is non-NULL: authored target facts
+// constrain automatic selection, while an explicit profile preserves identity.
+// Returns a process-lifetime or allocator-owned profile through
+// |out_selection|. A successful empty selection means this provider cannot
+// execute the requested representation on the supplied CPU. This query never
+// detects the compiler host; it consumes only the explicit CPU facts supplied
+// by its caller.
+typedef iree_status_t (*loom_target_provider_select_cpu_profile_fn_t)(
+    const iree_cpu_data_t* cpu_data, const loom_target_facts_t* requirement,
+    const loom_target_profile_t* profile,
+    loom_target_profile_selection_t* out_selection, iree_allocator_t allocator);
 
 // Target-owned compiler capability contribution linked into a tool or driver.
 struct loom_target_provider_t {
@@ -327,25 +416,47 @@ struct loom_target_provider_t {
   loom_target_emitter_list_t emitter_list;
   // Default emitter for ordinary function modules compiled for this family,
   // or NULL when callers must select an explicit format. Borrows an emitter
-  // with the provider's lifetime; kernel artifact selection is independent.
+  // with the provider's lifetime and is paired with
+  // |canonical_module_fact_type|; kernel artifact selection is independent.
   const loom_target_emitter_t* canonical_module_emitter;
   // Optional target-owned pass descriptors contributed by this target.
   const loom_pass_registry_t* pass_registry;
   // Optional pass-pipeline contribution callback.
   loom_target_provider_pipeline_contribution_fn_t contribute_pipeline;
-  // Optional per-caller Low call policy selector. Missing permits direct Low
-  // calls. A REQUIRE_INLINE result applies before source-to-Low as well as to
-  // retained Low edges; it is an emission requirement, not an authored hint.
-  loom_target_select_low_call_policy_fn_t select_low_call_policy;
+  // Optional per-caller call policy selector. Missing permits direct calls.
+  // This is an emission requirement, not an authored hint.
+  loom_target_select_call_policy_fn_t select_call_policy;
   // Physical carrier requested for source views that remain at retained
   // function or CFG boundaries after common-root transport.
   loom_target_view_boundary_carrier_t view_boundary_carrier;
+  // Physical carrier requested for lane predicates that cross structured loop
+  // boundaries.
+  loom_target_loop_predicate_carrier_t loop_predicate_carrier;
+  // Maximum number of elements in a vector predicate loop carrier. Zero
+  // disables vector predicate projection for this target.
+  uint32_t loop_predicate_max_vector_element_count;
   // Target-family fact representation owned by this provider. This is required
   // for providers with authored target definitions but no structured profile.
   // When |profile_type| is also present, both must name the same fact type.
   const loom_target_fact_type_t* target_fact_type;
   // Optional allocation-free named-profile selector.
   loom_target_provider_select_profile_fn_t select_profile;
+  // Target fact representation accepted by |canonical_module_emitter|. This
+  // association is independent of target fact ownership so architecture and
+  // emitter contributions can be linked separately. Must be NULL if and only
+  // if |canonical_module_emitter| is NULL.
+  const loom_target_fact_type_t* canonical_module_fact_type;
+  // Default emitter for kernel products compiled for a target family, or NULL
+  // when callers must select an explicit format. The emitter must appear in
+  // |emitter_list|.
+  const loom_target_emitter_t* canonical_kernel_emitter;
+  // Target fact representation accepted by |canonical_kernel_emitter|. This
+  // association is independent of target fact ownership so architecture and
+  // emitter contributions can be linked separately. Must be NULL if and only
+  // if |canonical_kernel_emitter| is NULL.
+  const loom_target_fact_type_t* canonical_kernel_fact_type;
+  // Optional projection from execution-device CPU facts to a native profile.
+  loom_target_provider_select_cpu_profile_fn_t select_cpu_profile;
 };
 
 // Static target provider table linked into a binary or embedding.
@@ -357,6 +468,25 @@ typedef struct loom_target_provider_set_t {
 } loom_target_provider_set_t;
 
 enum {
+  // Maximum number of providers retained by mutable provider-set storage.
+  LOOM_TARGET_PROVIDER_SET_STORAGE_CAPACITY = 64,
+};
+
+// Fixed-capacity storage for assembling a target provider set.
+//
+// The storage must not move or be copied after initialization because
+// |provider_set| points into |providers|. Provider order and duplicates are
+// preserved exactly. Static provider sets may exceed this capacity when they
+// do not require composition.
+typedef struct loom_target_provider_set_storage_t {
+  // Mutable provider table owned by this storage.
+  const loom_target_provider_t*
+      providers[LOOM_TARGET_PROVIDER_SET_STORAGE_CAPACITY];
+  // Provider-set view over the initialized prefix of |providers|.
+  loom_target_provider_set_t provider_set;
+} loom_target_provider_set_storage_t;
+
+enum {
   LOOM_TARGET_PROVIDER_DESCRIPTOR_SET_PROVIDER_CAPACITY = 256,
   LOOM_TARGET_PROVIDER_LOW_LOWER_POLICY_CAPACITY = 128,
   LOOM_TARGET_PROVIDER_MATH_POLICY_CAPACITY = 128,
@@ -366,6 +496,7 @@ enum {
   LOOM_TARGET_PROVIDER_LOW_ASM_DIAGNOSTIC_PROVIDER_CAPACITY = 64,
   LOOM_TARGET_PROVIDER_LOW_VERIFY_PROVIDER_CAPACITY = 64,
   LOOM_TARGET_PROVIDER_EMITTER_CAPACITY = 64,
+  LOOM_TARGET_PROVIDER_CANONICAL_EMITTER_CAPACITY = 64,
   LOOM_TARGET_PROVIDER_PASS_REGISTRY_CAPACITY = 64,
 };
 
@@ -432,8 +563,25 @@ static inline loom_target_provider_set_t loom_target_provider_set_make(
   };
 }
 
+// Initializes empty provider-set |storage|.
+void loom_target_provider_set_storage_initialize(
+    loom_target_provider_set_storage_t* storage);
+
+// Appends non-NULL |provider| to |storage|. Fails without changing |storage|
+// when full.
+iree_status_t loom_target_provider_set_storage_append(
+    loom_target_provider_set_storage_t* storage,
+    const loom_target_provider_t* provider);
+
+// Appends every provider in |provider_set| to |storage| in order. Fails
+// without changing |storage| when the complete set cannot fit.
+iree_status_t loom_target_provider_set_storage_append_set(
+    loom_target_provider_set_storage_t* storage,
+    const loom_target_provider_set_t* provider_set);
+
 // Initializes |out_environment| from |provider_set|. The environment borrows
-// |provider_set| until deinitialized.
+// |provider_set| until deinitialized. Profile families, target fact types, and
+// public artifact formats must each have exactly one owning provider.
 iree_status_t loom_target_environment_initialize(
     const loom_target_provider_set_t* provider_set,
     loom_target_environment_t* out_environment);
@@ -446,20 +594,22 @@ void loom_target_environment_deinitialize(
 iree_status_t loom_target_environment_register_context(
     const loom_target_environment_t* environment, loom_context_t* context);
 
-// Initializes a composed target-low descriptor registry package.
-iree_status_t loom_target_environment_initialize_low_descriptor_registry(
-    const loom_target_environment_t* environment,
-    loom_target_low_descriptor_registry_t* out_registry);
+// Returns the composed target-low descriptor registry package. The returned
+// view borrows tables owned by |environment|.
+loom_target_low_descriptor_registry_t
+loom_target_environment_low_descriptor_registry(
+    const loom_target_environment_t* environment);
 
-// Initializes a composed source-to-target-low lowering policy registry package.
-iree_status_t loom_target_environment_initialize_low_lower_policy_registry(
-    const loom_target_environment_t* environment,
-    loom_low_lower_policy_registry_t* out_registry);
+// Returns the composed source-to-target-low lowering policy registry package.
+// The returned view borrows tables owned by |environment|.
+loom_low_lower_policy_registry_t
+loom_target_environment_low_lower_policy_registry(
+    const loom_target_environment_t* environment);
 
-// Initializes a composed target math legalization policy registry package.
-iree_status_t loom_target_environment_initialize_math_policy_registry(
-    const loom_target_environment_t* environment,
-    loom_target_math_policy_registry_t* out_registry);
+// Returns the composed target math legalization policy registry package. The
+// returned view borrows tables owned by |environment|.
+loom_target_math_policy_registry_t loom_target_environment_math_policy_registry(
+    const loom_target_environment_t* environment);
 
 // Returns target-low source legality providers linked into |environment|.
 loom_target_low_legality_provider_list_t
@@ -486,9 +636,12 @@ loom_low_verify_provider_list_t
 loom_target_environment_low_verify_provider_list(
     const loom_target_environment_t* environment);
 
-// Returns target-owned emitters linked into |environment|.
-loom_target_emitter_list_t loom_target_environment_emitter_list(
-    const loom_target_environment_t* environment);
+// Returns the unique emitter for |public_artifact_format|. An empty format
+// selects the only linked emitter. Returns NULL when no unique emitter exists;
+// environment initialization rejects duplicate nonempty public formats.
+const loom_target_emitter_t* loom_target_environment_lookup_emitter(
+    const loom_target_environment_t* environment,
+    iree_string_view_t public_artifact_format);
 
 // Returns target-owned pass descriptors linked into |environment|.
 const loom_pass_registry_t* loom_target_environment_pass_registry(
@@ -510,6 +663,20 @@ const loom_target_provider_t* loom_target_environment_lookup_profile_provider(
 // profile-based specialization so compiler-created authored roots retain a
 // complete resolved target.
 const loom_target_provider_t* loom_target_environment_lookup_fact_provider(
+    const loom_target_environment_t* environment,
+    const loom_target_fact_type_t* fact_type);
+
+// Returns the canonical ordinary-function module emitter for |fact_type|, or
+// NULL when the configured compiler has no canonical module format for it.
+const loom_target_emitter_t*
+loom_target_environment_lookup_canonical_module_emitter(
+    const loom_target_environment_t* environment,
+    const loom_target_fact_type_t* fact_type);
+
+// Returns the canonical kernel emitter for |fact_type|, or NULL when the
+// configured compiler has no canonical kernel format for it.
+const loom_target_emitter_t*
+loom_target_environment_lookup_canonical_kernel_emitter(
     const loom_target_environment_t* environment,
     const loom_target_fact_type_t* fact_type);
 

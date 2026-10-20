@@ -36,6 +36,8 @@ typedef struct iree_net_rdma_connection_control_options_t {
   uint32_t data_work_capacity;
   // Maximum native records/completions handled in one service visit.
   uint32_t service_batch_size;
+  // Local completion policy for the shared control/data CQ.
+  iree_net_rdma_completion_queue_mode_t completion_mode;
   // Native address/route resolution timeout, in milliseconds, up to INT_MAX.
   // This is a setup policy, not a drain deadline or data-operation timeout.
   uint32_t resolution_timeout_ms;
@@ -73,7 +75,7 @@ typedef struct iree_net_rdma_connection_control_callbacks_t {
 // portable 56-byte RC request extent. Failure leaves output NULL. A CREATED
 // control can be destroyed directly; once started it requires deactivation.
 // All calls, including connect/accept, are serialized with the poll owner.
-iree_status_t iree_net_rdma_connection_control_create(
+iree_status_t iree_net_rdma_connection_control_allocate(
     iree_net_rdma_context_t* context, iree_async_proactor_t* proactor,
     iree_net_rdma_connection_control_options_t options,
     iree_const_byte_span_t private_data,
@@ -123,7 +125,7 @@ void iree_net_rdma_connection_control_deactivate(
     iree_async_event_source_unregistered_callback_t callback);
 
 // Destroys CREATED or fully deactivated control ownership. No implicit waits.
-void iree_net_rdma_connection_control_destroy(
+void iree_net_rdma_connection_control_free(
     iree_net_rdma_connection_control_t* control);
 
 #ifdef __cplusplus

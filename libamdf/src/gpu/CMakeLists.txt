@@ -30,9 +30,11 @@ iree_cc_library(
   HDRS
     "device.h"
     "memory.h"
+    "memory_reservation.h"
   SRCS
     "device.c"
     "memory.c"
+    "memory_reservation.c"
   DEPS
     amdf::headers
     libamdf::src::allocator
@@ -40,11 +42,15 @@ iree_cc_library(
     libamdf::src::endpoint
     libamdf::src::gpu::umd::device
     libamdf::src::gpu::umd::instance
+    libamdf::src::gpu::umd::kernel_queue
     libamdf::src::gpu::umd::memory
+    libamdf::src::gpu::umd::memory_reservation
     libamdf::src::host_mapping
     libamdf::src::instance
     libamdf::src::memory
     libamdf::src::memory_profile
+    libamdf::src::memory_reservation
+    libamdf::src::memory_resource
     libamdf::src::platform
     libamdf::src::structure
   PUBLIC
@@ -102,14 +108,53 @@ endif()
 if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
 iree_cc_library(
   NAME
+    clock
+  HDRS
+    "clock.h"
+  SRCS
+    "clock.c"
+  DEPS
+    ::device
+    amdf::headers
+    libamdf::src::device
+    libamdf::src::endpoint
+    libamdf::src::gpu::umd::clock
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
+iree_cc_library(
+  NAME
+    event
+  HDRS
+    "event.h"
+  SRCS
+    "event.c"
+  DEPS
+    ::device
+    amdf::headers
+    libamdf::src::allocator
+    libamdf::src::device
+    libamdf::src::gpu::umd::event
+    libamdf::src::structure
+  PUBLIC
+)
+endif()
+
+if(AMDF_BUILD AND (AMDF_FAMILY_RDNA OR AMDF_FAMILY_CDNA))
+iree_cc_library(
+  NAME
     extension
   HDRS
     "extension.h"
   SRCS
     "extension.c"
   DEPS
+    ::clock
     ::device
     ::endpoint_profile
+    ::event
     ::kernel_queue
     ::user_queue
     amdf::headers

@@ -743,6 +743,15 @@ _DENSE_MATRIX_DESCRIPTOR_SPECS = (
 _BASE_DESCRIPTOR_SPECS = (
     *_address_descriptor_specs(),
     _DescriptorSpec(
+        "ADD_NC_mv_add_ri",
+        f"{_TARGET_KEY}.add.i32.immediate.shift",
+        "integer.add.i32",
+        "II_ADD_NC_mv_add_ri_eS",
+        storage_overrides=(("dst", "eS"),),
+        asm_mnemonic="add.shift",
+        flags=(DescriptorFlag.SAFE_TO_SPECULATE,),
+    ),
+    _DescriptorSpec(
         "ADD_add_r_ri",
         f"{_TARGET_KEY}.add.i32.immediate",
         "integer.add.i32",
@@ -952,12 +961,24 @@ _BASE_DESCRIPTOR_SPECS = (
         storage_overrides=(("dst", "mBMs"), ("acc1", "mBMs")),
         asm_mnemonic="vmac.bf16x32",
     ),
+    # Packet dot products observe the low sixteen accumulator lanes. The
+    # instruction still clobbers every destination quarter.
+    _DescriptorSpec(
+        "VMAC_f_vmac_bf_vmul_bf_core_X_X",
+        f"{_TARGET_KEY}.accumulate.bf16x16.configured",
+        "floating.accumulate.bf16x16.configured",
+        "II_VMAC_f_vmac_bf_vmul_bf_core_X_X",
+        storage_overrides=(("dst", "mBMs"), ("acc1", "eBMLL")),
+        encoding_adapter_overrides=(("acc1", "LOOM_eBMLL_eDM"),),
+        asm_mnemonic="vmac.bf16x16",
+    ),
     _DescriptorSpec(
         "VEXTBCST_128_vec_extract_broadcast_imm",
         f"{_TARGET_KEY}.broadcast.bf16x8.to.bf16x32",
         "floating.broadcast.bf16x8.to.bf16x32",
         "II_VEXTBCST_128_vec_extract_broadcast_imm",
         asm_mnemonic="vbroadcast.bf16x8.to.bf16x32",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VSHUFFLE_vec_shuffle_x",
@@ -966,6 +987,16 @@ _BASE_DESCRIPTOR_SPECS = (
         "II_VSHUFFLE_vec_shuffle_x",
         storage_overrides=(("dst", "VEC256"),),
         asm_mnemonic="vshuffle",
+    ),
+    # This shuffle form can address BM0-BM3 but not BM4, so retain its exact
+    # 16-register storage domain.
+    _DescriptorSpec(
+        "VSHUFFLE_vec_shuffle_bm",
+        f"{_TARGET_KEY}.shuffle.x.to.accumulator512.configured",
+        "register.shuffle.x.to.accumulator512.configured",
+        "II_VSHUFFLE_vec_shuffle_bm",
+        storage_overrides=(("dst", "mBMSm"),),
+        asm_mnemonic="vshuffle.to.accumulator512",
     ),
     _DescriptorSpec(
         "VSHIFT",
@@ -978,7 +1009,7 @@ _BASE_DESCRIPTOR_SPECS = (
         "VMOV_alu_mv_mv_x",
         f"{_TARGET_KEY}.move.vector512",
         "register.move.vector512",
-        "II_VMOV_alu_mv_mv_x",
+        "II_VMOV_alu_mv_mv_x_eXe_eXe",
         storage_overrides=(("dst", "VEC256"), ("src", "VEC256")),
         asm_mnemonic="vmov.512",
         encoding_adapter_overrides=(
@@ -999,7 +1030,7 @@ _BASE_DESCRIPTOR_SPECS = (
         "VMOV_alu_mv_mv_x",
         f"{_TARGET_KEY}.move.vector512.to.accumulator512",
         "register.move.vector512.to.accumulator512",
-        "II_VMOV_alu_mv_mv_x",
+        "II_VMOV_alu_mv_mv_x_eBMLL_eXe",
         storage_overrides=(("dst", "mBMs"), ("src", "VEC256")),
         asm_mnemonic="vmov.vector512.to.accumulator512",
         rematerializable=True,
@@ -1010,9 +1041,22 @@ _BASE_DESCRIPTOR_SPECS = (
     ),
     _DescriptorSpec(
         "VMOV_alu_mv_mv_x",
+        f"{_TARGET_KEY}.move.vector512.to.accumulator512.low",
+        "register.move.vector512.to.accumulator512.low",
+        "II_VMOV_alu_mv_mv_x_eBMLL_eXe",
+        storage_overrides=(("dst", "eBMLL"), ("src", "VEC256")),
+        asm_mnemonic="vmov.vector512.to.accumulator512.low",
+        rematerializable=True,
+        encoding_adapter_overrides=(
+            ("dst", "LOOM_eBMLL_OP_mMvBMXDst"),
+            ("src", "LOOM_mXm_OP_mMvBMXSrc"),
+        ),
+    ),
+    _DescriptorSpec(
+        "VMOV_alu_mv_mv_x",
         f"{_TARGET_KEY}.move.accumulator512.to.vector512",
         "register.move.accumulator512.to.vector512",
-        "II_VMOV_alu_mv_mv_x",
+        "II_VMOV_alu_mv_mv_x_eXe_eBMLL",
         storage_overrides=(("dst", "VEC256"), ("src", "mBMs")),
         asm_mnemonic="vmov.accumulator512.to.vector512",
         encoding_adapter_overrides=(
@@ -1024,7 +1068,7 @@ _BASE_DESCRIPTOR_SPECS = (
         "VMOV_alu_mv_mv_x",
         f"{_TARGET_KEY}.move.accumulator512",
         "register.move.accumulator512",
-        "II_VMOV_alu_mv_mv_x",
+        "II_VMOV_alu_mv_mv_x_eBMLL_eBMLL",
         storage_overrides=(("dst", "mBMs"), ("src", "mBMs")),
         asm_mnemonic="vmov.accumulator512",
         encoding_adapter_overrides=(
@@ -1075,6 +1119,25 @@ _BASE_DESCRIPTOR_SPECS = (
         ),
         asm_mnemonic="vadd.f32x64",
     ),
+    # F32 arithmetic writes the complete DM accumulator. Packet forms constrain
+    # only the observed low-quarter inputs while retaining the full destination
+    # so allocation accounts for every clobbered accumulator quarter.
+    _DescriptorSpec(
+        "VADD_f_vmac_cm2_add_reg",
+        f"{_TARGET_KEY}.add.f32x16.configured",
+        "floating.add.f32x16.configured",
+        "II_VADD_f_vmac_cm2_add_reg",
+        storage_overrides=(
+            ("dst", "mBMs"),
+            ("acc1", "eBMLL"),
+            ("acc2", "eBMLL"),
+        ),
+        encoding_adapter_overrides=(
+            ("acc1", "LOOM_eBMLL_eDM"),
+            ("acc2", "LOOM_eBMLL_eDM"),
+        ),
+        asm_mnemonic="vadd.f32x16",
+    ),
     _DescriptorSpec(
         "VSUB_f_vmac_cm2_add_reg",
         f"{_TARGET_KEY}.sub.f32x64.configured",
@@ -1086,6 +1149,22 @@ _BASE_DESCRIPTOR_SPECS = (
             ("acc2", "mBMs"),
         ),
         asm_mnemonic="vsub.f32x64",
+    ),
+    _DescriptorSpec(
+        "VSUB_f_vmac_cm2_add_reg",
+        f"{_TARGET_KEY}.sub.f32x16.configured",
+        "floating.sub.f32x16.configured",
+        "II_VSUB_f_vmac_cm2_add_reg",
+        storage_overrides=(
+            ("dst", "mBMs"),
+            ("acc1", "eBMLL"),
+            ("acc2", "eBMLL"),
+        ),
+        encoding_adapter_overrides=(
+            ("acc1", "LOOM_eBMLL_eDM"),
+            ("acc2", "LOOM_eBMLL_eDM"),
+        ),
+        asm_mnemonic="vsub.f32x16",
     ),
     _DescriptorSpec(
         "VNEG_f",
@@ -1252,18 +1331,21 @@ _BASE_DESCRIPTOR_SPECS = (
         f"{_TARGET_KEY}.and.bits512",
         "integer.and.bits512",
         "II_VBAND",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VBOR",
         f"{_TARGET_KEY}.or.bits512",
         "integer.or.bits512",
         "II_VBOR",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VBCST_8",
         f"{_TARGET_KEY}.splat.i8x64",
         "integer.splat.i8x64",
         "II_VBCST_8",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VBCST_16",
@@ -1284,6 +1366,7 @@ _BASE_DESCRIPTOR_SPECS = (
         f"{_TARGET_KEY}.splat.i64x8",
         "integer.splat.i64x8",
         "II_VBCST_64",
+        rematerializable=True,
     ),
     *PREDICATE_DESCRIPTOR_SPECS,
     *BF16_COMPARISON_DESCRIPTOR_SPECS,
@@ -1293,30 +1376,35 @@ _BASE_DESCRIPTOR_SPECS = (
         f"{_TARGET_KEY}.broadcast.i8x64.from-vector",
         "integer.broadcast.i8x64.from-vector",
         "II_VEXTBCST_8_vec_extract_broadcast_imm",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VEXTBCST_16_vec_extract_broadcast_imm",
         f"{_TARGET_KEY}.broadcast.i16x32.from-vector",
         "integer.broadcast.i16x32.from-vector",
         "II_VEXTBCST_16_vec_extract_broadcast_imm",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VEXTBCST_32_vec_extract_broadcast_imm",
         f"{_TARGET_KEY}.broadcast.i32x16.from-vector",
         "integer.broadcast.i32x16.from-vector",
         "II_VEXTBCST_32_vec_extract_broadcast_imm",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VEXTBCST_64_vec_extract_broadcast_imm",
         f"{_TARGET_KEY}.broadcast.i64x8.from-vector",
         "integer.broadcast.i64x8.from-vector",
         "II_VEXTBCST_64_vec_extract_broadcast_imm",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VEXTRACT_8_vec_extract_imm_vaddSign0",
         f"{_TARGET_KEY}.extract.i8.immediate",
         "integer.extract.i8",
         "II_VEXTRACT_8_vec_extract_imm_vaddSign0",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "VEXTRACT_8_vec_extract_r_vaddSign0",
@@ -1420,6 +1508,16 @@ _BASE_DESCRIPTOR_SPECS = (
         "II_VINSERT_64_mR29_insert",
         asm_mnemonic="vinsert.64.reg",
     ),
+    *(
+        _DescriptorSpec(
+            f"VPUSH_{direction}_{width}",
+            f"{_TARGET_KEY}.push.{direction}.i{width}",
+            f"integer.push.{direction}.i{width}",
+            f"II_VPUSH_{direction}_{width}",
+        )
+        for direction in ("hi", "lo")
+        for width in (8, 16, 32, 64)
+    ),
     *_vector_memory_descriptor_specs(),
     # Each gather selects four pointers from one 256-bit vector and returns
     # four 64-bit windows. The mode controls subword selection, not result
@@ -1522,6 +1620,7 @@ _BASE_DESCRIPTOR_SPECS = (
         (("dst", "mCRRnd"),),
         implicit_outputs=("dst",),
         asm_mnemonic="set.rounding",
+        flags=(DescriptorFlag.STATE_ASSIGNMENT,),
     ),
     _DescriptorSpec(
         "MOV_alu_mv_mv_mv_cg",
@@ -1531,6 +1630,7 @@ _BASE_DESCRIPTOR_SPECS = (
         (("dst", "mCRSRSMode"),),
         implicit_outputs=("dst",),
         asm_mnemonic="set.srs-mode",
+        flags=(DescriptorFlag.STATE_ASSIGNMENT,),
     ),
     _DescriptorSpec(
         "MOV_alu_mv_mv_mv_cg",
@@ -1540,6 +1640,7 @@ _BASE_DESCRIPTOR_SPECS = (
         (("dst", "mCRSat"),),
         implicit_outputs=("dst",),
         asm_mnemonic="set.saturation",
+        flags=(DescriptorFlag.STATE_ASSIGNMENT,),
     ),
     _DescriptorSpec(
         "MOV_alu_mv_mv_mv_cg",
@@ -1549,6 +1650,7 @@ _BASE_DESCRIPTOR_SPECS = (
         (("dst", "mCRUnpackSize"),),
         implicit_outputs=("dst",),
         asm_mnemonic="set.unpack-size",
+        flags=(DescriptorFlag.STATE_ASSIGNMENT,),
     ),
     _DescriptorSpec(
         "MOV_alu_mv_mv_mv_cg",
@@ -1558,6 +1660,7 @@ _BASE_DESCRIPTOR_SPECS = (
         (("dst", "mCRUPSMode"),),
         implicit_outputs=("dst",),
         asm_mnemonic="set.ups-mode",
+        flags=(DescriptorFlag.STATE_ASSIGNMENT,),
     ),
     _DescriptorSpec(
         "MOV_alu_mv_mv_mv_cg",
@@ -1567,6 +1670,7 @@ _BASE_DESCRIPTOR_SPECS = (
         (("dst", "mCRPackSize"),),
         implicit_outputs=("dst",),
         asm_mnemonic="set.pack-size",
+        flags=(DescriptorFlag.STATE_ASSIGNMENT,),
     ),
     _DescriptorSpec(
         "MOVXM",
@@ -1594,6 +1698,8 @@ _BASE_DESCRIPTOR_SPECS = (
         "II_MOVXM_eP",
         (("dst", "eP"),),
         asm_mnemonic="mov.local-address",
+        symbolic_immediates=("i",),
+        rematerializable=True,
         flags=(DescriptorFlag.SAFE_TO_SPECULATE,),
     ),
     _DescriptorSpec(
@@ -1735,6 +1841,7 @@ _BASE_DESCRIPTOR_SPECS = (
         f"{_TARGET_KEY}.extend.unsigned.i8",
         "integer.extend.unsigned.i8",
         "II_EXTEND_u8",
+        rematerializable=True,
     ),
     _DescriptorSpec(
         "EXTEND_u16",

@@ -22,6 +22,7 @@ extern "C" {
 
 typedef struct loom_target_facts_t loom_target_facts_t;
 typedef struct iree_arena_allocator_t iree_arena_allocator_t;
+typedef struct loom_low_read_retention_t loom_low_read_retention_t;
 
 // Target-neutral fields whose explicit presence can affect specialization or
 // must survive projection into durable IR.
@@ -89,6 +90,16 @@ typedef bool (*loom_target_fact_satisfies_specialization_requirement_fn_t)(
     const loom_target_facts_t* effective,
     const loom_target_facts_t* requirement);
 
+// Returns whether family-owned state has the same durable semantics after
+// common explicitness and mutual specialization have matched.
+typedef bool (*loom_target_fact_family_state_equivalent_fn_t)(
+    const loom_target_facts_t* lhs, const loom_target_facts_t* rhs);
+
+// Completes family-owned state and derived common facts after applying a
+// satisfied same-type specialization requirement.
+typedef void (*loom_target_fact_apply_specialization_requirement_fn_t)(
+    const loom_target_facts_t* requirement, loom_target_facts_t* effective);
+
 // Rebinds family-owned views after the common fact storage changes.
 typedef void (*loom_target_fact_rebind_fn_t)(loom_target_facts_t* facts);
 
@@ -98,6 +109,15 @@ typedef void (*loom_target_fact_rebind_fn_t)(loom_target_facts_t* facts);
 // Selected choices become constraints so callees and standalone materialization
 // preserve the root's actual execution mode. Only allocation may fail.
 typedef iree_status_t (*loom_target_fact_select_execution_fn_t)(
+    const loom_target_facts_t* facts, iree_arena_allocator_t* arena,
+    const loom_target_facts_t** out_facts);
+
+// Projects a device environment to the code contract for one independently
+// executing worker. Hardware identity and applicable constraints are retained;
+// container ABI and emission contracts do not become worker requirements.
+// Projection is idempotent and returns |facts| for an existing worker contract.
+// New immutable facts belong to |arena|. Only allocation may fail.
+typedef iree_status_t (*loom_target_fact_project_worker_fn_t)(
     const loom_target_facts_t* facts, iree_arena_allocator_t* arena,
     const loom_target_facts_t** out_facts);
 
@@ -124,6 +144,14 @@ struct loom_target_fact_type_t {
   loom_target_fact_satisfies_specialization_requirement_fn_t
       satisfies_specialization_requirement;
 
+  // Optional exact equivalence check for family-owned state not captured by
+  // mutual specialization. This relation must be symmetric.
+  loom_target_fact_family_state_equivalent_fn_t family_state_equivalent;
+
+  // Optional family-owned completion used only while constructing facts.
+  loom_target_fact_apply_specialization_requirement_fn_t
+      apply_specialization_requirement;
+
   // Optional family-owned rebind callback used only while constructing facts.
   loom_target_fact_rebind_fn_t rebind;
 
@@ -133,6 +161,10 @@ struct loom_target_fact_type_t {
   // Optional root-only execution choice policy. Fact projection and ordinary
   // cloning never select a mode for reusable source.
   loom_target_fact_select_execution_fn_t select_execution;
+
+  // Optional device-to-worker projection. Families whose device and worker
+  // environments coincide leave this NULL.
+  loom_target_fact_project_worker_fn_t project_worker;
 };
 
 // Typed target-neutral facts projected from available target information.
@@ -153,6 +185,10 @@ struct loom_target_facts_t {
 
   // Owned common target projection after explicit inputs are applied.
   loom_target_bundle_storage_t storage;
+
+  // Static physical read-retention rule for this processor, or NULL when
+  // register reads end at the instruction's ordinary operand-use points.
+  const loom_low_read_retention_t* read_retention;
 };
 
 // Returns the immutable common target bundle projected into |facts|.
@@ -226,8 +262,9 @@ bool loom_target_facts_structural_satisfy_specialization_requirement(
 
 // Returns whether |effective_snapshot| satisfies the structural requirements
 // in |target_requirement|. Representation widths and address spaces must
-// match, fixed subgroup sizes must agree, and effective capacity limits must
-// meet or exceed nonzero required limits.
+// match, fixed subgroup sizes must agree, required subgroup packing guarantees
+// must hold, and effective capacity limits must meet or exceed nonzero required
+// limits.
 bool loom_target_snapshot_satisfies_specialization_requirement(
     const loom_target_snapshot_t* effective_snapshot,
     const loom_target_snapshot_t* target_requirement);

@@ -34,6 +34,10 @@ typedef struct amdf_memory_vtable_t {
                        const amdf_host_mapping_capabilities_t* capabilities,
                        const amdf_memory_map_info_t* map_info,
                        amdf_host_mapping_t** out_mapping);
+  // Returns the prepared OS source handle when HOST_MAPPING_SOURCE is set.
+  // The handle is borrowed from this backing, with no native work or lookup.
+  uintptr_t (*host_mapping_source)(amdf_memory_t* memory,
+                                   uint32_t access_ordinal);
   // Releases the exact native state owned by a memory implementation.
   amdf_status_t (*destroy_native)(amdf_memory_t* memory,
                                   uint32_t access_ordinal);
@@ -53,6 +57,11 @@ typedef struct amdf_memory_access_state_t {
   uint64_t addresses[AMDF_MEMORY_ADDRESS_XDNA_FIRMWARE + 1];
   // Native operations selected before preparation begins.
   const amdf_memory_vtable_t* vtable;
+  // Site policy from this consumer's resolved native profile. NULL means the
+  // profile cannot describe visibility; the backing owner's policy may differ.
+  amdf_status_t (*describe_site)(
+      const amdf_memory_site_query_t* query,
+      amdf_memory_site_description_t* out_description);
   // Owned native state, including partial preparation, released through vtable.
   void* native;
   // Direct index of the access owning native state for this consumer. Only
@@ -70,10 +79,11 @@ struct amdf_memory_t {
   amdf_memory_scope_t* scope;
   // Immutable properties established before publication.
   amdf_memory_info_t info;
-  // Caller-ordered records in this allocation's tail. CPU-only memory reserves
-  // one private native slot here, with no device or publicly queryable access.
+  // Caller-ordered records in this allocation's tail. Platform-owned host
+  // backing adds a private slot after the public device accesses.
   amdf_memory_access_state_t* accesses;
-  // Slot owning the backing and its host view; zero for CPU-only memory.
+  // Slot owning backing and its host view. Equals access_count for private
+  // host backing; otherwise names the device access that owns native backing.
   uint32_t backing_access_ordinal;
   // Host-view limits selected during construction, independent of consumers.
   amdf_host_mapping_capabilities_t host_mapping;
@@ -83,9 +93,11 @@ struct amdf_memory_t {
 amdf_allocator_t amdf_memory_host_allocator(const amdf_memory_t* memory);
 
 // Allocates one owner and its caller-ordered native/access slots. It contains
-// no native resources yet and retains no instance or device.
+// no native resources yet and retains no instance or device. The backing slot
+// is at most access_count; equality reserves a private host backing slot.
 amdf_status_t amdf_memory_resource_allocate(amdf_allocator_t host_allocator,
                                             uint32_t access_count,
+                                            uint32_t backing_access_ordinal,
                                             amdf_memory_t** out_memory);
 
 // Releases consumers before backing and consumes all library metadata once.

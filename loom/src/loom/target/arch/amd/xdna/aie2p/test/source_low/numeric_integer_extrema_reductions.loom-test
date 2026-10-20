@@ -1,0 +1,26 @@
+// RUN: with-checks compile-report source-to-low,low-dce
+
+// The common corpus executes signed and unsigned extrema across every integer
+// width. These cases pin the distinct packed, padded, and i64 target plans.
+aie2p.target<core> @target
+
+func.def target(@target) @maximum_unsigned_i16x16(%values: vector<16xi16>, %initial: i16) -> (i16) {
+  %result = vector.reduce<maxui> %values, %initial : vector<16xi16>, i16
+  func.return %result : i16
+}
+
+func.def target(@target) @minimum_signed_i8x33(%values: vector<33xi8>, %initial: i8) -> (i8) {
+  %result = vector.reduce<minsi> %values, %initial : vector<33xi8>, i8
+  func.return %result : i8
+}
+
+func.def target(@target) @minimum_unsigned_i64x5(%values: vector<5xi64>, %initial: i64) -> (i64) {
+  %result = vector.reduce<minui> %values, %initial : vector<5xi64>, i64
+  func.return %result : i64
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low selected_ops=3 emitted_ops=79 rows=3 unkeyed_maximum_emitted_ops=0
+CHECK: COMPILE-REPORT: source_low[*] function=maximum_unsigned_i16x16 source_op=vector.reduce selection=rule plan_key=i16_packed_maxui_tree descriptor_key=amd.xdna.aie2p.extract.i16.immediate descriptor_semantic_tag=integer.extract.i16 emitted_ops=15
+CHECK: COMPILE-REPORT: source_low[*] function=minimum_signed_i8x33 source_op=vector.reduce selection=rule plan_key=i8_padded_minsi_tree descriptor_key=amd.xdna.aie2p.extract.i8.immediate descriptor_semantic_tag=integer.extract.i8 emitted_ops=23
+CHECK: COMPILE-REPORT: source_low[*] function=minimum_unsigned_i64x5 source_op=vector.reduce selection=rule plan_key=i64_padded_minui_tree descriptor_key=amd.xdna.aie2p.extract.i32.immediate descriptor_semantic_tag=integer.extract.i32 emitted_ops=41

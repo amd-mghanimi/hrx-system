@@ -36,7 +36,6 @@ iree_py_test(
     loom::py::loom::dialect::pipeline::pipeline
     loom::py::loom::dialect::buffer::buffer
     loom::py::loom::dialect::func::func
-    loom::py::loom::dialect::group::group
     loom::py::loom::dialect::index::index
     loom::py::loom::dialect::scalar::scalar
     loom::py::loom::dialect::test::test

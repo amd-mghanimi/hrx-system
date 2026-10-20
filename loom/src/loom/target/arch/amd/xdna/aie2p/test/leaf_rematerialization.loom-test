@@ -1,8 +1,9 @@
 // Thirteen 512-bit broadcasts exceed the 24 vector-register units at the
 // block boundary. The repaired native program streams each broadcast into
 // the running sum instead of retaining the entire invariant set.
-// RUN: emit aie2p-leaf @broadcast_pressure report=emission
+// RUN: emit aie2p-leaf @broadcast_pressure diagnostics=predicted-spills
 
+// REMARK@+1: BACKEND/045 {function_name="broadcast_pressure", trigger_kind="allocation-failure", repaired_value_count="13", cloned_packet_count="13", rewritten_operand_count="13", retained_placement_count="0"}
 low.func.def target<amd.xdna.aie2p.core> @broadcast_pressure(%input: reg<aie2p.ep>, %output: reg<aie2p.ep>) asm {
   %scalar0 = mov.i32 1
   %vector0 = vbcst.32 %scalar0
@@ -51,18 +52,15 @@ low.func.def target<amd.xdna.aie2p.core> @broadcast_pressure(%input: reg<aie2p.e
 }
 
 // ----
-issue cycles: 50
-code bytes: 210
-coissued bundles: 2
-coissued components: 4
 
 // ====
 
 // Both vector and accumulator materializations exceed their physical classes.
 // Repair accumulator consumers before broadcasts so cloned consumers receive
 // their own short-lived vector setup within the same allocation repair.
-// RUN: emit aie2p-leaf @dependent_cross_block report=emission
+// RUN: emit aie2p-leaf @dependent_cross_block diagnostics=predicted-spills
 
+// REMARK@+1: BACKEND/045 {function_name="dependent_cross_block", trigger_kind="allocation-failure", repaired_value_count="42", cloned_packet_count="42", rewritten_operand_count="42", retained_placement_count="0"}
 low.func.def target<amd.xdna.aie2p.core> @dependent_cross_block(%input: reg<aie2p.ep>, %output: reg<aie2p.ep>) asm {
   %scalar0 = mov.i32 1
   %vector0 = vbcst.32 %scalar0
@@ -179,18 +177,15 @@ low.func.def target<amd.xdna.aie2p.core> @dependent_cross_block(%input: reg<aie2
 }
 
 // ----
-issue cycles: 112
-code bytes: 482
-coissued bundles: 2
-coissued components: 4
 
 // ====
 
 // Shared zero padding has multiple consumers on both sides of an ownership
 // move. Setup ordering must preserve that fan-out and the source-order boundary
 // while keeping the rematerialized broadcasts out of persistent vector storage.
-// RUN: emit aie2p-leaf @bounded_padding report=emission
+// RUN: emit aie2p-leaf @bounded_padding diagnostics=predicted-spills
 
+// REMARK@+1: BACKEND/045 {function_name="bounded_padding", trigger_kind="allocation-failure", repaired_value_count="13", cloned_packet_count="13", rewritten_operand_count="13", retained_placement_count="0"}
 low.func.def target<amd.xdna.aie2p.core> @bounded_padding(%input: reg<aie2p.ep>, %output: reg<aie2p.ep>) asm {
   %zeros = acc.clear.f32x64
   %mode = mova.i32 60
@@ -321,10 +316,6 @@ low.func.def target<amd.xdna.aie2p.core> @bounded_padding(%input: reg<aie2p.ep>,
 }
 
 // ----
-issue cycles: 242
-code bytes: 848
-coissued bundles: 6
-coissued components: 13
 
 // ====
 
@@ -332,8 +323,9 @@ coissued components: 13
 // initial scalar pressure requires rematerializing stream offsets and shifts.
 // Their input-free clones must remain use-local while indexed memory consumers
 // are blocked, or rescheduling exceeds the same 32-register bank again.
-// RUN: emit aie2p-leaf @retained_scalar_stream report=emission
+// RUN: emit aie2p-leaf @retained_scalar_stream diagnostics=predicted-spills uses=retained0,retained1,retained2,retained3,retained4,retained5,retained6,retained7,retained8,retained9,retained10,retained11,retained12,retained13,retained14,retained15,retained16,retained17,retained18,retained19,retained20,retained21,retained22,retained23,retained24,retained25,value0,value1,value2,value3,value4,value5,value6,scaled0,scaled1,scaled2,scaled3,scaled4,scaled5,scaled6,index0,index1,index2,index3,index4,index5,index6
 
+// REMARK@+1: BACKEND/045 {function_name="retained_scalar_stream", trigger_kind="allocation-failure", repaired_value_count="8", cloned_packet_count="14", rewritten_operand_count="14", retained_placement_count="0"}
 low.func.def target<amd.xdna.aie2p.core> @retained_scalar_stream(%record_input: reg<aie2p.ep>, %stream_input: reg<aie2p.ep>, %stream_output: reg<aie2p.ep>, %record_output: reg<aie2p.ep>) asm {
   %retained0, %read1 = lda.i32.post %record_input, 4
   %retained1, %read2 = lda.i32.post %read1, 4
@@ -431,7 +423,473 @@ low.func.def target<amd.xdna.aie2p.core> @retained_scalar_stream(%record_input: 
 }
 
 // ----
-issue cycles: 129
-code bytes: 478
-coissued bundles: 13
-coissued components: 29
+%retained0 -> st.i32.post operand=0 (%retained0, %record_output)
+%retained1 -> st.i32.post operand=0 (%retained1, %write1)
+%retained2 -> st.i32.post operand=0 (%retained2, %write2)
+%retained3 -> st.i32.post operand=0 (%retained3, %write3)
+%retained4 -> st.i32.post operand=0 (%retained4, %write4)
+%retained5 -> st.i32.post operand=0 (%retained5, %write5)
+%retained6 -> st.i32.post operand=0 (%retained6, %write6)
+%retained7 -> st.i32.post operand=0 (%retained7, %write7)
+%retained8 -> st.i32.post operand=0 (%retained8, %write8)
+%retained9 -> st.i32.post operand=0 (%retained9, %write9)
+%retained10 -> st.i32.post operand=0 (%retained10, %write10)
+%retained11 -> st.i32.post operand=0 (%retained11, %write11)
+%retained12 -> st.i32.post operand=0 (%retained12, %write12)
+%retained13 -> st.i32.post operand=0 (%retained13, %write13)
+%retained14 -> st.i32.post operand=0 (%retained14, %write14)
+%retained15 -> st.i32.post operand=0 (%retained15, %write15)
+%retained16 -> st.i32.post operand=0 (%retained16, %write16)
+%retained17 -> st.i32.post operand=0 (%retained17, %write17)
+%retained18 -> st.i32.post operand=0 (%retained18, %write18)
+%retained19 -> st.i32.post operand=0 (%retained19, %write19)
+%retained20 -> st.i32.post operand=0 (%retained20, %write20)
+%retained21 -> st.i32.post operand=0 (%retained21, %write21)
+%retained22 -> st.i32.post operand=0 (%retained22, %write22)
+%retained23 -> st.i32.post operand=0 (%retained23, %write23)
+%retained24 -> st.i32.post operand=0 (%retained24, %write24)
+%retained25 -> st.i32.post operand=0 (%retained25, %write25)
+%value0 -> lshl operand=0 (%value0, %scale_shift_remat)
+%value1 -> lshl operand=0 (%value1, %scale_shift_remat)
+%value2 -> lshl operand=0 (%value2, %scale_shift_remat)
+%value3 -> lshl operand=0 (%value3, %scale_shift_remat)
+%value4 -> lshl operand=0 (%value4, %scale_shift_remat)
+%value5 -> lshl operand=0 (%value5, %scale_shift_remat)
+%value6 -> lshl operand=0 (%value6, %scale_shift_remat)
+%scaled0 -> st.i32.index operand=0 (%scaled0, %stream_output, %index0)
+%scaled1 -> st.i32.index operand=0 (%scaled1, %stream_output, %index1)
+%scaled2 -> st.i32.index operand=0 (%scaled2, %stream_output, %index2)
+%scaled3 -> st.i32.index operand=0 (%scaled3, %stream_output, %index3)
+%scaled4 -> st.i32.index operand=0 (%scaled4, %stream_output, %index4)
+%scaled5 -> st.i32.index operand=0 (%scaled5, %stream_output, %index5)
+%scaled6 -> st.i32.index operand=0 (%scaled6, %stream_output, %index6)
+%index0 -> lda.i32.index operand=1 (%stream_input, %index0)
+%index0 -> st.i32.index operand=2 (%scaled0, %stream_output, %index0)
+%index1 -> lda.i32.index operand=1 (%stream_input, %index1)
+%index1 -> st.i32.index operand=2 (%scaled1, %stream_output, %index1)
+%index2 -> lda.i32.index operand=1 (%stream_input, %index2)
+%index2 -> st.i32.index operand=2 (%scaled2, %stream_output, %index2)
+%index3 -> lda.i32.index operand=1 (%stream_input, %index3)
+%index3 -> st.i32.index operand=2 (%scaled3, %stream_output, %index3)
+%index4 -> lda.i32.index operand=1 (%stream_input, %index4)
+%index4 -> st.i32.index operand=2 (%scaled4, %stream_output, %index4)
+%index5 -> lda.i32.index operand=1 (%stream_input, %index5)
+%index5 -> st.i32.index operand=2 (%scaled5, %stream_output, %index5)
+%index6 -> lda.i32.index operand=1 (%stream_input, %index6)
+%index6 -> st.i32.index operand=2 (%scaled6, %stream_output, %index6)
+
+// ====
+
+// Source-order allocation has no scheduling consumer for retained placement.
+// Each data-dependent index has one user, but all nine results must coexist:
+// genuine per-user cloning cannot make them fit the eight-register class.
+// RUN: pass low-materialize-allocation
+
+low.func.def target<amd.xdna.aie2p.core> @irreducible_private_indices(%position0: reg<aie2p.er>, %position1: reg<aie2p.er>, %position2: reg<aie2p.er>, %position3: reg<aie2p.er>, %position4: reg<aie2p.er>, %position5: reg<aie2p.er>, %position6: reg<aie2p.er>, %position7: reg<aie2p.er>, %position8: reg<aie2p.er>) -> (reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>, reg<aie2p.edj>) asm {
+  %index0 = mov.address-index %position0
+  %index1 = mov.address-index %position1
+  %index2 = mov.address-index %position2
+  %index3 = mov.address-index %position3
+  %index4 = mov.address-index %position4
+  %index5 = mov.address-index %position5
+  %index6 = mov.address-index %position6
+  %index7 = mov.address-index %position7
+  // ERROR@+1: BACKEND/005 "aie2p.edj" "budget 8" "peak 9" "unspillable-register-exhausted"
+  %index8 = mov.address-index %position8
+  return %index0, %index1, %index2, %index3, %index4, %index5, %index6, %index7, %index8
+}
+
+// ----
+
+// ====
+
+// Fifteen two-register live-ins leave two ER registers available. Three early
+// extract/zero-extend pairs exceed the bank until allocation replays both
+// instructions next to their reduction uses. The extracts read immutable
+// vaddSign0 target state, so replay preserves their zero-extension mode.
+// RUN: emit aie2p-leaf @packed_extract_extend_pressure diagnostics=predicted-spills
+
+// Each failed frontier contributes a consumer-first batch. Rebuilding
+// allocation exposes the next set of extraction and extension repairs.
+// REMARK@+4: BACKEND/045 {function_name="packed_extract_extend_pressure", trigger_kind="allocation-failure", repaired_value_count="2", cloned_packet_count="2", rewritten_operand_count="2", retained_placement_count="0"}
+// REMARK@+3: BACKEND/045 {function_name="packed_extract_extend_pressure", trigger_kind="allocation-failure", repaired_value_count="2", cloned_packet_count="2", rewritten_operand_count="2", retained_placement_count="0"}
+// REMARK@+2: BACKEND/045 {function_name="packed_extract_extend_pressure", trigger_kind="allocation-failure", repaired_value_count="1", cloned_packet_count="1", rewritten_operand_count="1", retained_placement_count="0"}
+// REMARK@+1: BACKEND/045 {function_name="packed_extract_extend_pressure", trigger_kind="allocation-failure", repaired_value_count="1", cloned_packet_count="1", rewritten_operand_count="1", retained_placement_count="0"}
+low.func.def schedule(locked) target<amd.xdna.aie2p.core> @packed_extract_extend_pressure(%packed: reg<aie2p.vec256 x2>, %keep0: reg<aie2p.er x2>, %keep1: reg<aie2p.er x2>, %keep2: reg<aie2p.er x2>, %keep3: reg<aie2p.er x2>, %keep4: reg<aie2p.er x2>, %keep5: reg<aie2p.er x2>, %keep6: reg<aie2p.er x2>, %keep7: reg<aie2p.er x2>, %keep8: reg<aie2p.er x2>, %keep9: reg<aie2p.er x2>, %keep10: reg<aie2p.er x2>, %keep11: reg<aie2p.er x2>, %keep12: reg<aie2p.er x2>, %keep13: reg<aie2p.er x2>, %keep14: reg<aie2p.er x2>) -> (reg<aie2p.er>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>, reg<aie2p.er x2>) asm {
+  %byte0 = vextract.8.imm %packed, 0
+  %wide0 = extend.u8 %byte0
+  %byte1 = vextract.8.imm %packed, 1
+  %wide1 = extend.u8 %byte1
+  %byte2 = vextract.8.imm %packed, 2
+  %wide2 = extend.u8 %byte2
+  %sum1 = add.rr %wide0, %wide1
+  %sum2 = add.rr %sum1, %wide2
+  return %sum2, %keep0, %keep1, %keep2, %keep3, %keep4, %keep5, %keep6, %keep7, %keep8, %keep9, %keep10, %keep11, %keep12, %keep13, %keep14
+}
+
+// ----
+
+// ====
+
+// Six record fields and their maximum remain live while binary32
+// multiplication computes a nonzero row's scale. Shared constants use ordinary
+// rematerialization under scalar pressure. A private zero feeding a fixed-r27
+// select must wait for arithmetic to release ordinary storage; exposing the
+// fixed copy alone does not make that setup actionable while it incurs debt.
+// RUN: emit aie2p-leaf @retained_scale_select report=emission
+
+low.func.def target<amd.xdna.aie2p.core> @retained_scale_select(%record_input: reg<aie2p.ep>, %record_output: reg<aie2p.ep>) asm {
+  %retained0, %read1 = lda.i32.post %record_input, 4
+  %retained1, %read2 = lda.i32.post %read1, 4
+  %retained2, %read3 = lda.i32.post %read2, 4
+  %retained3, %read4 = lda.i32.post %read3, 4
+  %retained4, %read5 = lda.i32.post %read4, 4
+  %retained5, %read6 = lda.i32.post %read5, 4
+  %maximum_f32_bits, %read7 = lda.i32.post %read6, 4
+  %zero = mov.short 0
+  %unit_bit = mov.short 1
+  %inverse_code_limit = mov.i32 1006699012
+  %sign_mask = mov.i32 -2147483648
+  %halfword_right_shift = mov.short -16
+  %halfword_left_shift = mov.short 16
+  %product_alignment_shift = mov.short 8
+  %infinity = mov.i32 2139095040
+  low.br ^scale
+^scale:
+  %magnitude_mask = mov.i32 2147483647
+  %fraction_width = mov.short 23
+  %negative_fraction_width = mov.short -23
+  %implicit_bit = mov.i32 8388608
+  %left_magnitude = and %maximum_f32_bits, %magnitude_mask
+  %right_magnitude = and %inverse_code_limit, %magnitude_mask
+  %operand_signs = xor %maximum_f32_bits, %inverse_code_limit
+  %product_sign = and %operand_signs, %sign_mask
+  %left_exponent = lshl %left_magnitude, %negative_fraction_width
+  %left_exponent_bits = lshl %left_exponent, %fraction_width
+  %left_fraction = sub %left_magnitude, %left_exponent_bits
+  %left_leading_zeros = clz %left_fraction
+  %left_normalization = add %left_leading_zeros, -8
+  %left_exponent_condition = copy %left_exponent : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %left_shift = sel.eqz %left_normalization, %zero, %left_exponent_condition
+  %left_shifted_fraction = lshl %left_fraction, %left_shift
+  %left_significand = or %left_shifted_fraction, %implicit_bit
+  %left_negative_normalization = sub %zero, %left_normalization
+  %left_subnormal_exponent = add %left_negative_normalization, 1
+  %left_adjusted_condition = copy %left_exponent : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %left_adjusted_exponent = sel.eqz %left_subnormal_exponent, %left_exponent, %left_adjusted_condition
+  %right_exponent = lshl %right_magnitude, %negative_fraction_width
+  %right_exponent_bits = lshl %right_exponent, %fraction_width
+  %right_fraction = sub %right_magnitude, %right_exponent_bits
+  %right_leading_zeros = clz %right_fraction
+  %right_normalization = add %right_leading_zeros, -8
+  %right_exponent_condition = copy %right_exponent : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %right_shift = sel.eqz %right_normalization, %zero, %right_exponent_condition
+  %right_shifted_fraction = lshl %right_fraction, %right_shift
+  %right_significand = or %right_shifted_fraction, %implicit_bit
+  %right_negative_normalization = sub %zero, %right_normalization
+  %right_subnormal_exponent = add %right_negative_normalization, 1
+  %right_adjusted_condition = copy %right_exponent : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %right_adjusted_exponent = sel.eqz %right_subnormal_exponent, %right_exponent, %right_adjusted_condition
+  %halfword_mask = mov.i32 65535
+  %product_cross_word_shift = mov.short -24
+  %left_lower = and %left_significand, %halfword_mask
+  %left_upper = lshl %left_significand, %halfword_right_shift
+  %right_lower = and %right_significand, %halfword_mask
+  %right_upper = lshl %right_significand, %halfword_right_shift
+  %lower_product = mul %left_lower, %right_lower
+  %cross_product_left = mul %left_lower, %right_upper
+  %cross_product_right = mul %left_upper, %right_lower
+  %cross_product = add.rr %cross_product_left, %cross_product_right
+  %shifted_cross_product = lshl %cross_product, %halfword_left_shift
+  %lower_sum = add.rr %lower_product, %shifted_cross_product
+  %lower_carry = ltu %lower_sum, %lower_product
+  %upper_product = mul %left_upper, %right_upper
+  %cross_upper = lshl %cross_product, %halfword_right_shift
+  %upper_partial = add.rr %upper_product, %cross_upper
+  %upper_sum = add.rr %upper_partial, %lower_carry
+  %upper_shifted = lshl %upper_sum, %product_alignment_shift
+  %lower_high_bits = lshl %lower_sum, %product_cross_word_shift
+  %product_upper = or %upper_shifted, %lower_high_bits
+  %product_lower = lshl %lower_sum, %product_alignment_shift
+  %negative_exponent_bias = mov.short -127
+  %top_bit_shift = mov.short -31
+  %exponent_sum = add.rr %left_adjusted_exponent, %right_adjusted_exponent
+  %unbiased_exponent = add.rr %exponent_sum, %negative_exponent_bias
+  %product_implicit_bit = and %product_upper, %implicit_bit
+  %product_normalization = nez %product_implicit_bit
+  %product_exponent = add.rr %unbiased_exponent, %product_normalization
+  %upper_doubled = lshl %product_upper, %unit_bit
+  %lower_top_bit = lshl %product_lower, %top_bit_shift
+  %normalized_upper = or %upper_doubled, %lower_top_bit
+  %normalized_lower = lshl %product_lower, %unit_bit
+  %upper_normalization_condition = copy %product_implicit_bit : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %upper_word = sel.nez %product_upper, %normalized_upper, %upper_normalization_condition
+  %lower_normalization_condition = copy %product_implicit_bit : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %lower_word = sel.nez %product_lower, %normalized_lower, %lower_normalization_condition
+  %word_shift_mask = mov.short 31
+  %negative_product_exponent = sub %zero, %product_exponent
+  %subnormal_shift = add %negative_product_exponent, 1
+  %wrapped_shift = and %subnormal_shift, %word_shift_mask
+  %negative_shift = sub %zero, %wrapped_shift
+  %complementary_shift = and %negative_shift, %word_shift_mask
+  %shifted_lower = lshl %lower_word, %negative_shift
+  %upper_remainder = lshl %upper_word, %complementary_shift
+  %lower_remainder = lshl %lower_word, %complementary_shift
+  %lower_sticky = nez %lower_remainder
+  %shifted_upper = lshl %upper_word, %negative_shift
+  %joined_lower = or %shifted_lower, %upper_remainder
+  %sticky_lower = or %joined_lower, %lower_sticky
+  %nonzero_shift_condition = copy %wrapped_shift : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %shifted_remainder = sel.nez %upper_remainder, %zero, %nonzero_shift_condition
+  %whole_lower_remainder = or %lower_word, %shifted_remainder
+  %whole_lower_sticky = nez %whole_lower_remainder
+  %sticky_upper = or %shifted_upper, %whole_lower_sticky
+  %whole_product = or %upper_word, %lower_word
+  %whole_product_sticky = nez %whole_product
+  %beyond_first_word = add %subnormal_shift, -32
+  %inside_first_word = lt %beyond_first_word, %zero
+  %beyond_second_word = add %subnormal_shift, -64
+  %inside_second_word = lt %beyond_second_word, %zero
+  %second_word_condition = copy %inside_second_word : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %wide_shift_lower = sel.nez %sticky_upper, %whole_product_sticky, %second_word_condition
+  %first_word_lower_condition = copy %inside_first_word : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %subnormal_lower = sel.nez %sticky_lower, %wide_shift_lower, %first_word_lower_condition
+  %first_word_upper_condition = copy %inside_first_word : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %subnormal_upper = sel.nez %shifted_upper, %zero, %first_word_upper_condition
+  %fraction_mask = add %implicit_bit, -1
+  %normal_fraction = and %upper_word, %fraction_mask
+  %normal_exponent = lshl %product_exponent, %fraction_width
+  %normal_upper = or %normal_fraction, %normal_exponent
+  %is_subnormal = ge %zero, %product_exponent
+  %upper_selection_condition = copy %is_subnormal : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %rounded_upper_source = sel.nez %subnormal_upper, %normal_upper, %upper_selection_condition
+  %lower_selection_condition = copy %is_subnormal : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %rounded_lower_source = sel.nez %subnormal_lower, %lower_word, %lower_selection_condition
+  %above_midpoint = ltu %sign_mask, %rounded_lower_source
+  %at_midpoint = eq %rounded_lower_source, %sign_mask
+  %low_significand_bit = and %rounded_upper_source, %unit_bit
+  %odd_midpoint = and %at_midpoint, %low_significand_bit
+  %round_increment = or %above_midpoint, %odd_midpoint
+  %signed_significand = or %rounded_upper_source, %product_sign
+  %rounded_product = add.rr %signed_significand, %round_increment
+  %negative_exponent_limit = mov.short -255
+  %quiet_nan_bit = mov.i32 4194304
+  %signed_infinity = or %infinity, %product_sign
+  %exponent_overflow = add.rr %product_exponent, %negative_exponent_limit
+  %overflow = ge %exponent_overflow, %zero
+  %overflow_condition = copy %overflow : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %finite_or_overflow = sel.nez %signed_infinity, %rounded_product, %overflow_condition
+  %left_is_zero = eqz %left_magnitude
+  %right_is_zero = eqz %right_magnitude
+  %either_is_zero = or %left_is_zero, %right_is_zero
+  %zero_product_condition = copy %either_is_zero : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %finite_or_zero = sel.nez %product_sign, %finite_or_overflow, %zero_product_condition
+  %canonical_nan = or %infinity, %quiet_nan_bit
+  %left_is_infinite = eq %left_magnitude, %infinity
+  %right_is_infinite = eq %right_magnitude, %infinity
+  %right_zero_condition = copy %right_is_zero : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %left_infinite_result = sel.nez %canonical_nan, %signed_infinity, %right_zero_condition
+  %left_zero_condition = copy %left_is_zero : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %right_infinite_result = sel.nez %canonical_nan, %signed_infinity, %left_zero_condition
+  %right_infinite_condition = copy %right_is_infinite : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %right_special_result = sel.nez %right_infinite_result, %finite_or_zero, %right_infinite_condition
+  %left_infinite_condition = copy %left_is_infinite : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %infinite_result = sel.nez %left_infinite_result, %right_special_result, %left_infinite_condition
+  %left_is_nan = ltu %infinity, %left_magnitude
+  %right_is_nan = ltu %infinity, %right_magnitude
+  %left_nan = or %maximum_f32_bits, %quiet_nan_bit
+  %right_nan = or %inverse_code_limit, %quiet_nan_bit
+  %right_nan_condition = copy %right_is_nan : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %right_nan_result = sel.nez %right_nan, %infinite_result, %right_nan_condition
+  %left_nan_condition = copy %left_is_nan : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %scale_f32 = sel.nez %left_nan, %right_nan_result, %left_nan_condition
+  low.br ^finish
+^finish:
+  %write1 = st.i32.post %retained0, %record_output, 4
+  %write2 = st.i32.post %retained1, %write1, 4
+  %write3 = st.i32.post %retained2, %write2, 4
+  %write4 = st.i32.post %retained3, %write3, 4
+  %write5 = st.i32.post %retained4, %write4, 4
+  %write6 = st.i32.post %retained5, %write5, 4
+  %write7 = st.i32.post %maximum_f32_bits, %write6, 4
+  %write8 = st.i32.post %scale_f32, %write7, 4
+  return
+}
+
+// ----
+issue cycles: 164
+code bytes: 750
+coissued bundles: 40
+coissued components: 80
+
+// ====
+
+// Nine endpoint bases exceed the eight EP registers across the block boundary.
+// Recreate each constant address near its store without retaining all bases.
+// RUN: emit aie2p-leaf @literal_address_pressure report=code uses=payload
+
+low.func.def target<amd.xdna.aie2p.core> @literal_address_pressure(%payload: reg<aie2p.er>) asm {
+  %endpoint0 = mov.local-address 458752
+  %endpoint1 = mov.local-address 458816
+  %endpoint2 = mov.local-address 458880
+  %endpoint3 = mov.local-address 458944
+  %endpoint4 = mov.local-address 459008
+  %endpoint5 = mov.local-address 459072
+  %endpoint6 = mov.local-address 459136
+  %endpoint7 = mov.local-address 459200
+  %endpoint8 = mov.local-address 459264
+  low.br ^publish
+^publish:
+  st %payload, %endpoint0, 0
+  st %payload, %endpoint1, 0
+  st %payload, %endpoint2, 0
+  st %payload, %endpoint3, 0
+  st %payload, %endpoint4, 0
+  st %payload, %endpoint5, 0
+  st %payload, %endpoint6, 0
+  st %payload, %endpoint7, 0
+  st %payload, %endpoint8, 0
+  return
+}
+
+// ----
+code: 44 00 c0 00 07 00 3a 11 20 30 c0 01 00 30 82 00 3a 11 40 30 c0 01 00 30 82 00 3a 11 60 30 c0 01 00 30 82 00 3a 11 80 30 c0 01 00 30 82 00 3a 11 a0 30 c0 01 00 30 82 00 3a 11 c0 30 c0 01 00 30 82 00 3a 11 e0 30 c0 01 00 30 82 00 3a 11 00 31 c0 01 00 30 82 00 5c 00 50 30 82 00 00 00 00 00 00 00 00 00 00 00
+%payload -> st operand=0 (%payload, %endpoint0_remat)
+%payload -> st operand=0 (%payload, %endpoint1_remat)
+%payload -> st operand=0 (%payload, %endpoint2_remat)
+%payload -> st operand=0 (%payload, %endpoint3_remat)
+%payload -> st operand=0 (%payload, %endpoint4_remat)
+%payload -> st operand=0 (%payload, %endpoint5_remat)
+%payload -> st operand=0 (%payload, %endpoint6_remat)
+%payload -> st operand=0 (%payload, %endpoint7_remat)
+%payload -> st operand=0 (%payload, %endpoint8_remat)
+
+// ====
+
+// Symbolic bases have the same EP pressure. Every rematerialized address keeps
+// its data identity, and its absolute relocation follows each worker placement.
+// RUN: emit aie2p-xdna output=sections
+
+global.rodata.def @coefficient0 = align(4) bytes("01000000")
+
+global.rodata.def @coefficient1 = align(4) bytes("02000000")
+
+global.rodata.def @coefficient2 = align(4) bytes("03000000")
+
+global.rodata.def @coefficient3 = align(4) bytes("04000000")
+
+global.rodata.def @coefficient4 = align(4) bytes("05000000")
+
+global.rodata.def @coefficient5 = align(4) bytes("06000000")
+
+global.rodata.def @coefficient6 = align(4) bytes("07000000")
+
+global.rodata.def @coefficient7 = align(4) bytes("08000000")
+
+global.rodata.def @coefficient8 = align(4) bytes("09000000")
+
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+aie2p.target<core> @core
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @symbolic_address_pressure() asm {
+  %columns = constant 2 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  %first_column = constant 0 : reg<aie2p.config.scalar : i64>
+  %second_column = constant 1 : reg<aie2p.config.scalar : i64>
+  %row = constant 3 : reg<aie2p.config.scalar : i64>
+  %origin = constant 0 : reg<aie2p.config.scalar : i64>
+  %bank_bytes = constant 16384 : reg<aie2p.config.scalar : i64>
+  data.reserve %first_column, %row, %origin, %bank_bytes
+  program.load %first_column, %row, @read_coefficients
+  program.load %second_column, %row, @read_coefficients
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core) abi(object_function) @read_coefficients() asm {
+  %scratch = storage {byte_alignment = 64, byte_length = 64} : low.storage<private>
+  %output = storage_address %scratch : low.storage<private> -> reg<aie2p.ep>
+  %table0 = mov.local-address @coefficient0
+  %table1 = mov.local-address @coefficient1
+  %table2 = mov.local-address @coefficient2
+  %table3 = mov.local-address @coefficient3
+  %table4 = mov.local-address @coefficient4
+  %table5 = mov.local-address @coefficient5
+  %table6 = mov.local-address @coefficient6
+  %table7 = mov.local-address @coefficient7
+  %table8 = mov.local-address @coefficient8
+  low.br ^read
+^read:
+  %value0 = lda %table0, 0
+  st %value0, %output, 0
+  %value1 = lda %table1, 0
+  st %value1, %output, 4
+  %value2 = lda %table2, 0
+  st %value2, %output, 8
+  %value3 = lda %table3, 0
+  st %value3, %output, 12
+  %value4 = lda %table4, 0
+  st %value4, %output, 16
+  %value5 = lda %table5, 0
+  st %value5, %output, 20
+  %value6 = lda %table6, 0
+  st %value6, %output, 24
+  %value7 = lda %table7, 0
+  st %value7, %output, 28
+  %value8 = lda %table8, 0
+  %output_end = padda %output, 64
+  st %value8, %output_end, -32
+  return
+}
+
+// ----
+.text.read_coefficients: address=0x00000000 bytes=250 initialized
+  4400c04007004480c0420700ba1022b0d00100d0822000000000000000000000000098110408ba1024b0d00100d0822000000000000000000000000098111408ba1026b0d00100d0822000000000000000000000000098112408ba1028b0d00100d0822000000000000000000000000098113408ba102ab0d00100d0822000000000000000000000000098114408ba102cb0d00100d0822000000000000000000000000098115408ba102eb0d00100d0822000000000000000000000000098116408ba1030b0d00100d082200000000000000000000000000c23e8f08c0398160401000000000000000018002810000098118408000000000000
+.text.read_coefficients: address=0x00000000 bytes=250 initialized
+  4400c00007004480c0020700ba1022b0c00100d0822000000000000000000000000098110408ba1024b0c00100d0822000000000000000000000000098111408ba1026b0c00100d0822000000000000000000000000098112408ba1028b0c00100d0822000000000000000000000000098113408ba102ab0c00100d0822000000000000000000000000098114408ba102cb0c00100d0822000000000000000000000000098115408ba102eb0c00100d0822000000000000000000000000098116408ba1030b0c00100d082200000000000000000000000000c23e8f08c0398160401000000000000000018002810000098118408000000000000
+.rodata.coefficient0: address=0x00074040 bytes=4 initialized
+  01000000
+.rodata.coefficient1: address=0x00074044 bytes=4 initialized
+  02000000
+.rodata.coefficient2: address=0x00074048 bytes=4 initialized
+  03000000
+.rodata.coefficient3: address=0x0007404c bytes=4 initialized
+  04000000
+.rodata.coefficient4: address=0x00074050 bytes=4 initialized
+  05000000
+.rodata.coefficient5: address=0x00074054 bytes=4 initialized
+  06000000
+.rodata.coefficient6: address=0x00074058 bytes=4 initialized
+  07000000
+.rodata.coefficient7: address=0x0007405c bytes=4 initialized
+  08000000
+.rodata.coefficient8: address=0x00074060 bytes=4 initialized
+  09000000
+.storage.read_coefficients.private: address=0x00074000 bytes=64 reserved
+.rodata.coefficient0: address=0x00070040 bytes=4 initialized
+  01000000
+.rodata.coefficient1: address=0x00070044 bytes=4 initialized
+  02000000
+.rodata.coefficient2: address=0x00070048 bytes=4 initialized
+  03000000
+.rodata.coefficient3: address=0x0007004c bytes=4 initialized
+  04000000
+.rodata.coefficient4: address=0x00070050 bytes=4 initialized
+  05000000
+.rodata.coefficient5: address=0x00070054 bytes=4 initialized
+  06000000
+.rodata.coefficient6: address=0x00070058 bytes=4 initialized
+  07000000
+.rodata.coefficient7: address=0x0007005c bytes=4 initialized
+  08000000
+.rodata.coefficient8: address=0x00070060 bytes=4 initialized
+  09000000
+.storage.read_coefficients.private: address=0x00070000 bytes=64 reserved

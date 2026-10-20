@@ -20,34 +20,58 @@ void loom_low_lower_rule_source_memory_state_initialize(
   };
 }
 
-static const loom_low_source_memory_access_plan_t*
-loom_low_lower_rule_source_memory_state_resolve(
+static iree_status_t loom_low_lower_rule_source_memory_state_resolve(
     const loom_low_lower_rule_match_context_t* match_context,
     const loom_op_t* source_op,
-    loom_low_lower_rule_source_memory_state_t* state) {
+    loom_low_lower_rule_source_memory_state_t* state,
+    const loom_low_source_memory_access_plan_t** out_access) {
   IREE_ASSERT_EQ(state->source_op, source_op);
   if (!state->plan_attempted) {
+    const loom_view_region_table_t* view_regions = match_context->view_regions;
+    if (view_regions == NULL && match_context->function_analysis.fn != NULL) {
+      loom_local_value_domain_t* value_domain = NULL;
+      IREE_RETURN_IF_ERROR(match_context->function_analysis.fn(
+          match_context->function_analysis.user_data, &value_domain,
+          &view_regions));
+    }
     state->plan_attempted = true;
-    if (match_context->view_regions != NULL) {
+    if (view_regions != NULL) {
       IREE_ASSERT(state->access_plan != NULL);
-      state->plan_available = loom_low_source_memory_access_plan_build(
-          match_context->view_regions, source_op, state->access_plan,
-          &state->diagnostic);
+      if (state->retained_access != NULL) {
+        *state->access_plan = *state->retained_access;
+        state->plan_available = true;
+      } else {
+        state->plan_available = loom_low_source_memory_access_plan_build(
+            view_regions, source_op, state->axis_byte_strides,
+            state->access_plan, &state->diagnostic);
+      }
+      if (state->plan_available &&
+          match_context->source_memory_root_byte_offset.fn != NULL) {
+        const uint64_t root_byte_offset =
+            match_context->source_memory_root_byte_offset.fn(
+                match_context->source_memory_root_byte_offset.user_data,
+                state->access_plan);
+        state->plan_available =
+            loom_low_source_memory_access_plan_include_root_byte_offset(
+                state->access_plan, root_byte_offset);
+      }
     }
   }
-  return state->plan_available ? state->access_plan : NULL;
+  *out_access = state->plan_available ? state->access_plan : NULL;
+  return iree_ok_status();
 }
 
-uint32_t loom_low_lower_rule_source_memory_minimum_alignment(
+iree_status_t loom_low_lower_rule_source_memory_minimum_alignment(
     const loom_low_lower_rule_match_context_t* match_context,
-    const loom_op_t* source_op) {
+    const loom_op_t* source_op, uint32_t* out_alignment) {
   loom_low_lower_rule_source_memory_state_t* state =
       match_context->source_memory_state;
   IREE_ASSERT(state != NULL);
-  const loom_low_source_memory_access_plan_t* access =
-      loom_low_lower_rule_source_memory_state_resolve(match_context, source_op,
-                                                      state);
-  return access != NULL ? access->minimum_alignment : 0;
+  const loom_low_source_memory_access_plan_t* access = NULL;
+  IREE_RETURN_IF_ERROR(loom_low_lower_rule_source_memory_state_resolve(
+      match_context, source_op, state, &access));
+  *out_alignment = access != NULL ? access->minimum_alignment : 0;
+  return iree_ok_status();
 }
 
 bool loom_low_lower_rule_memory_space_matches(
@@ -96,19 +120,23 @@ static bool loom_low_lower_rule_source_memory_dynamic_index_source_matches(
   return actual_source == required_source;
 }
 
-static bool loom_low_lower_rule_source_memory_dynamic_terms_match(
+static loom_low_source_memory_rejection_reason_t
+loom_low_lower_rule_source_memory_dynamic_terms_rejection_reason(
     const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_lower_source_memory_shape_t* source_memory_shape,
     const loom_low_source_memory_access_plan_t* access) {
   if (source_memory->dynamic_term_count ==
       LOOM_LOW_LOWER_SOURCE_MEMORY_DYNAMIC_TERM_COUNT_ANY) {
-    return access->dynamic_term_count >=
-           source_memory->dynamic_term_count_minimum;
+    return access->dynamic_term_count <
+                   source_memory->dynamic_term_count_minimum
+               ? LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_INDEX_COUNT
+               : LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT;
   }
   if (access->dynamic_term_count != source_memory->dynamic_term_count) {
-    return false;
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_INDEX_COUNT;
   }
   if (source_memory->dynamic_term_count == 0) {
-    return true;
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT;
   }
   const bool any_byte_stride = iree_any_bit_set(
       source_memory->flags,
@@ -120,16 +148,18 @@ static bool loom_low_lower_rule_source_memory_dynamic_terms_match(
     const loom_low_source_memory_dynamic_term_t* term =
         &access->dynamic_terms[i];
     if (!allow_dynamic_stride_values && term->stride_value_count != 0) {
-      return false;
+      return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_STRIDE_VALUES;
     }
     if (!loom_low_lower_rule_source_memory_dynamic_index_source_matches(
-            source_memory->dynamic_index_source, term->source) ||
-        (!any_byte_stride &&
-         term->byte_stride != source_memory->dynamic_byte_stride)) {
-      return false;
+            source_memory->dynamic_index_source, term->source)) {
+      return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_INDEX_SOURCE;
+    }
+    if (!any_byte_stride &&
+        term->byte_stride != source_memory_shape->dynamic_byte_stride) {
+      return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_STRIDE;
     }
   }
-  return true;
+  return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT;
 }
 
 static bool loom_low_lower_rule_source_memory_root_matches(
@@ -153,28 +183,86 @@ static bool loom_low_lower_rule_source_memory_root_matches(
   }
 }
 
-static bool loom_low_lower_rule_source_memory_address_layout_matches(
+static loom_low_source_memory_rejection_reason_t
+loom_low_lower_rule_source_memory_layout_rejection_reason(
     const loom_low_lower_source_memory_t* source_memory,
     const loom_low_source_memory_access_plan_t* access) {
   switch (source_memory->address_layout) {
     case LOOM_LOW_LOWER_SOURCE_MEMORY_ADDRESS_LAYOUT_ANY:
-      return true;
+      return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT;
     case LOOM_LOW_LOWER_SOURCE_MEMORY_ADDRESS_LAYOUT_COMPACT_ROW_MAJOR:
       return access->address_layout ==
-             LOOM_LOW_SOURCE_MEMORY_ADDRESS_LAYOUT_COMPACT_ROW_MAJOR;
+                     LOOM_LOW_SOURCE_MEMORY_ADDRESS_LAYOUT_COMPACT_ROW_MAJOR
+                 ? LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT
+                 : LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_LAYOUT;
+    case LOOM_LOW_LOWER_SOURCE_MEMORY_ADDRESS_LAYOUT_ROW_MAJOR:
+    case LOOM_LOW_LOWER_SOURCE_MEMORY_ADDRESS_LAYOUT_COLUMN_MAJOR: {
+      if (access->view_rank != 2 || access->axis_byte_strides == NULL) {
+        return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_LAYOUT;
+      }
+      const uint8_t leading_axis =
+          source_memory->address_layout ==
+                  LOOM_LOW_LOWER_SOURCE_MEMORY_ADDRESS_LAYOUT_ROW_MAJOR
+              ? 0
+              : 1;
+      const loom_low_source_memory_axis_byte_stride_t* contiguous =
+          &access->axis_byte_strides[1 - leading_axis];
+      const loom_low_source_memory_axis_byte_stride_t* leading =
+          &access->axis_byte_strides[leading_axis];
+      if (contiguous->kind != LOOM_LOW_SOURCE_MEMORY_AXIS_BYTE_STRIDE_STATIC ||
+          contiguous->static_byte_coefficient != access->element_byte_count ||
+          (leading->kind != LOOM_LOW_SOURCE_MEMORY_AXIS_BYTE_STRIDE_STATIC &&
+           leading->kind != LOOM_LOW_SOURCE_MEMORY_AXIS_BYTE_STRIDE_DYNAMIC)) {
+        return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_LAYOUT;
+      }
+      const int64_t minimum_stride =
+          access->operation_kind == LOOM_LOW_SOURCE_MEMORY_OPERATION_LOAD
+              ? 0
+              : access->element_byte_count;
+      if (leading->byte_facts.range_lo < minimum_stride ||
+          (source_memory->minimum_alignment != 0 &&
+           !loom_value_facts_divisible_by(leading->byte_facts,
+                                          source_memory->minimum_alignment))) {
+        return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ELEMENT_STRIDE;
+      }
+      const uint8_t bit_count =
+          source_memory->element_stride_unsigned_bit_count;
+      if (bit_count != 0 &&
+          (uint64_t)leading->byte_facts.range_hi / access->element_byte_count >
+              (UINT64_MAX >> (64 - bit_count))) {
+        return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ELEMENT_STRIDE;
+      }
+      return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT;
+    }
   }
-  return false;
+  IREE_CHECK_UNREACHABLE("generated source memory address layout");
+  return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_LAYOUT;
 }
 
-static bool loom_low_lower_rule_source_memory_dynamic_offset_matches(
+static bool loom_low_lower_rule_source_memory_byte_offset_matches(
     const loom_low_lower_source_memory_t* source_memory,
     const loom_low_source_memory_access_plan_t* access) {
-  const uint8_t bit_count = source_memory->dynamic_offset_unsigned_bit_count;
-  if (bit_count == 0) {
+  const uint8_t complete_bit_count =
+      source_memory->byte_offset_unsigned_bit_count;
+  const uint8_t dynamic_bit_count =
+      source_memory->dynamic_offset_unsigned_bit_count;
+  if (complete_bit_count == 0 && dynamic_bit_count == 0) {
     return true;
   }
-  return loom_low_source_memory_dynamic_offset_fits_unsigned_bit_count(
-      access, access->static_byte_offset, bit_count);
+  loom_value_facts_t byte_facts = loom_low_source_memory_dynamic_offset_facts(
+      access, access->static_byte_offset);
+  if (complete_bit_count != 0 && !loom_value_facts_fit_unsigned_bit_count(
+                                     byte_facts, complete_bit_count)) {
+    return false;
+  }
+  if (dynamic_bit_count == 0) {
+    return true;
+  }
+  const loom_value_facts_t bias = loom_value_facts_exact_i64(
+      loom_low_lower_rule_source_memory_static_byte_offset(source_memory,
+                                                           access));
+  loom_value_facts_subi(&byte_facts, &bias, &byte_facts);
+  return loom_value_facts_fit_unsigned_bit_count(byte_facts, dynamic_bit_count);
 }
 
 static bool loom_low_lower_rule_source_memory_address_input_matches(
@@ -224,8 +312,9 @@ static bool loom_low_lower_rule_emit_materializes_source_memory_address(
        ++operand_ordinal) {
     const uint16_t value_ref_index =
         (uint16_t)(emit->operand_ref_start + operand_ordinal);
-    if (rule_set->value_refs[value_ref_index].kind ==
-        LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ADDRESS) {
+    const uint8_t kind = rule_set->value_refs[value_ref_index].kind;
+    if (kind == LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ADDRESS ||
+        kind == LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ELEMENT_STRIDE) {
       return true;
     }
   }
@@ -233,9 +322,11 @@ static bool loom_low_lower_rule_emit_materializes_source_memory_address(
 }
 
 static bool loom_low_lower_rule_source_memory_reject(
-    uint16_t diagnostic_index, uint16_t* out_diagnostic_index) {
+    const loom_low_lower_source_memory_diagnostics_t* diagnostics,
+    loom_low_source_memory_rejection_reason_t reason,
+    uint16_t* out_diagnostic_index) {
   if (out_diagnostic_index != NULL) {
-    *out_diagnostic_index = diagnostic_index;
+    *out_diagnostic_index = diagnostics->rejection_diagnostic_indices[reason];
   }
   return false;
 }
@@ -248,6 +339,12 @@ static bool loom_low_lower_rule_source_memory_address_matches(
     const loom_low_lower_source_memory_diagnostics_t* diagnostics,
     const loom_low_source_memory_access_plan_t* access,
     uint16_t* out_diagnostic_index) {
+  if (!loom_low_lower_rule_source_memory_byte_offset_matches(source_memory,
+                                                             access)) {
+    return loom_low_lower_rule_source_memory_reject(
+        diagnostics, LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_BYTE_OFFSET_WIDTH,
+        out_diagnostic_index);
+  }
   if (!loom_low_lower_rule_emit_materializes_source_memory_address(rule_set,
                                                                    emit)) {
     return true;
@@ -268,7 +365,9 @@ static bool loom_low_lower_rule_source_memory_address_matches(
                             coordinate_unit_byte_count, &maximum_byte_offset) ||
       access->static_byte_offset % coordinate_unit_byte_count != 0) {
     return loom_low_lower_rule_source_memory_reject(
-        diagnostics->address_diagnostic_index, out_diagnostic_index);
+        diagnostics,
+        LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION,
+        out_diagnostic_index);
   }
 
   const loom_value_facts_t complete_byte_facts =
@@ -277,7 +376,9 @@ static bool loom_low_lower_rule_source_memory_address_matches(
   if (!loom_low_lower_rule_source_memory_address_facts_fit_byte_range(
           complete_byte_facts, minimum_byte_offset, maximum_byte_offset)) {
     return loom_low_lower_rule_source_memory_reject(
-        diagnostics->address_diagnostic_index, out_diagnostic_index);
+        diagnostics,
+        LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION,
+        out_diagnostic_index);
   }
 
   if (address_materializer->base_kind ==
@@ -285,7 +386,9 @@ static bool loom_low_lower_rule_source_memory_address_matches(
       loom_low_source_memory_access_base_view_value_id(access) ==
           LOOM_VALUE_ID_INVALID) {
     return loom_low_lower_rule_source_memory_reject(
-        diagnostics->address_diagnostic_index, out_diagnostic_index);
+        diagnostics,
+        LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION,
+        out_diagnostic_index);
   }
 
   uint8_t first_canonical_term = 0;
@@ -299,7 +402,9 @@ static bool loom_low_lower_rule_source_memory_address_matches(
     if (!loom_type_equal(view_base_type,
                          loom_type_scalar(LOOM_SCALAR_TYPE_OFFSET))) {
       return loom_low_lower_rule_source_memory_reject(
-          diagnostics->address_diagnostic_index, out_diagnostic_index);
+          diagnostics,
+          LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION,
+          out_diagnostic_index);
     }
     first_canonical_term = access->dynamic_view_base_term_count;
   }
@@ -313,7 +418,9 @@ static bool loom_low_lower_rule_source_memory_address_matches(
         !loom_low_lower_rule_source_memory_address_input_matches(
             match_context, address_materializer, term->index)) {
       return loom_low_lower_rule_source_memory_reject(
-          diagnostics->address_diagnostic_index, out_diagnostic_index);
+          diagnostics,
+          LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION,
+          out_diagnostic_index);
     }
     for (uint8_t stride_ordinal = 0; stride_ordinal < term->stride_value_count;
          ++stride_ordinal) {
@@ -321,74 +428,149 @@ static bool loom_low_lower_rule_source_memory_address_matches(
               match_context, address_materializer,
               term->stride_values[stride_ordinal])) {
         return loom_low_lower_rule_source_memory_reject(
-            diagnostics->address_diagnostic_index, out_diagnostic_index);
+            diagnostics,
+            LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION,
+            out_diagnostic_index);
+      }
+    }
+  }
+  for (uint16_t i = 0; i < emit->operand_ref_count; ++i) {
+    const loom_low_lower_value_ref_t* value_ref =
+        &rule_set->value_refs[emit->operand_ref_start + i];
+    if (value_ref->kind !=
+        LOOM_LOW_LOWER_VALUE_REF_SOURCE_MEMORY_ELEMENT_STRIDE) {
+      continue;
+    }
+    const loom_low_source_memory_axis_byte_stride_t* stride =
+        &access->axis_byte_strides[value_ref->index];
+    for (uint8_t factor = 0; factor < stride->dynamic_factor_count; ++factor) {
+      if (!loom_low_lower_rule_source_memory_address_input_matches(
+              match_context, address_materializer,
+              stride->dynamic_factors[factor])) {
+        return loom_low_lower_rule_source_memory_reject(
+            diagnostics,
+            LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ADDRESS_MATERIALIZATION,
+            out_diagnostic_index);
       }
     }
   }
   return true;
 }
 
+static loom_low_source_memory_rejection_reason_t
+loom_low_lower_rule_source_memory_rejection_reason(
+    const loom_low_lower_rule_match_context_t* match_context,
+    const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_lower_source_memory_shape_t* source_memory_shape,
+    const loom_low_source_memory_access_plan_t* access) {
+  if (access->operation_kind != source_memory->operation_kind) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_OPERATION_KIND;
+  }
+  if (access->root_value_id == LOOM_VALUE_ID_INVALID) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ROOT_VALUE;
+  }
+  if (!loom_low_lower_rule_source_memory_root_matches(match_context->module,
+                                                      source_memory, access)) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ROOT_KIND;
+  }
+  if (!loom_low_lower_rule_memory_space_matches(
+          source_memory->memory_space_mask, access->memory_space)) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_MEMORY_SPACE;
+  }
+  if (access->element_byte_count != source_memory->element_byte_count) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_ELEMENT_BYTE_COUNT;
+  }
+  const uint32_t vector_lane_count =
+      loom_target_contract_query_vector_lane_count(
+          match_context->vector_lane_projection, access->vector_lane_count);
+  if (vector_lane_count != source_memory->vector_lane_count) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VECTOR_LANE_COUNT;
+  }
+  if (source_memory->vector_lane_count > 1 &&
+      access->vector_lane_byte_stride !=
+          source_memory_shape->vector_lane_byte_stride) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_VECTOR_LANE_BYTE_STRIDE;
+  }
+  // Alignment is an access-safety constraint shared by every address recipe.
+  // Diagnose it before recipe-specific offset ranges so an alternate
+  // materializer cannot hide a known under-aligned access.
+  if (source_memory->minimum_alignment != 0 &&
+      access->minimum_alignment < source_memory->minimum_alignment) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_MINIMUM_ALIGNMENT;
+  }
+  const int64_t static_byte_offset =
+      loom_low_lower_rule_source_memory_static_byte_offset(source_memory,
+                                                           access);
+  if (static_byte_offset < source_memory_shape->static_byte_offset_minimum ||
+      static_byte_offset > source_memory_shape->static_byte_offset_maximum) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_STATIC_OFFSET;
+  }
+  if (!iree_any_bit_set(source_memory->flags,
+                        LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_CACHE_POLICY_ANY) &&
+      access->cache_policy.build_flags !=
+          source_memory->cache_policy_build_flags) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_CACHE_POLICY;
+  }
+  if (iree_any_bit_set(
+          source_memory->flags,
+          LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_PRESERVE_SOURCE_INDEX) &&
+      (access->source_index_static_offset_extracted ||
+       access->source_index_byte_stride != access->element_byte_count)) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_SOURCE_INDEX_PRESERVATION;
+  }
+  if (source_memory->dynamic_view_base_term_count !=
+          LOOM_LOW_LOWER_SOURCE_MEMORY_DYNAMIC_VIEW_BASE_TERM_COUNT_ANY &&
+      access->dynamic_view_base_term_count !=
+          source_memory->dynamic_view_base_term_count) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_DYNAMIC_VIEW_BASE_TERM_COUNT;
+  }
+  const loom_low_source_memory_rejection_reason_t dynamic_terms_reason =
+      loom_low_lower_rule_source_memory_dynamic_terms_rejection_reason(
+          source_memory, source_memory_shape, access);
+  if (dynamic_terms_reason != LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT) {
+    return dynamic_terms_reason;
+  }
+  const loom_low_source_memory_rejection_reason_t layout_reason =
+      loom_low_lower_rule_source_memory_layout_rejection_reason(source_memory,
+                                                                access);
+  if (layout_reason != LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT) {
+    return layout_reason;
+  }
+  if (iree_any_bit_set(source_memory->flags,
+                       LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_SUBGROUP_UNIFORM) &&
+      loom_low_source_memory_access_uniform_scope(access) <
+          LOOM_VALUE_FACT_UNIFORM_SCOPE_SUBGROUP) {
+    return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_UNIFORMITY;
+  }
+  return LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT;
+}
+
 bool loom_low_lower_rule_source_memory_matches(
     const loom_low_lower_rule_match_context_t* match_context,
     const loom_low_lower_source_memory_t* source_memory,
+    const loom_low_lower_source_memory_shape_t* source_memory_shape,
     const loom_low_lower_source_memory_diagnostics_t* diagnostics,
     const loom_low_source_memory_access_plan_t* access,
+    loom_low_source_memory_access_rejection_flags_t access_rejection_bits,
     uint16_t* out_diagnostic_index) {
-  if (access == NULL) {
-    return loom_low_lower_rule_source_memory_reject(
-        diagnostics->constraint_diagnostic_index, out_diagnostic_index);
+  const loom_low_source_memory_rejection_reason_t reason =
+      access == NULL
+          ? loom_low_source_memory_access_rejection_reason(
+                access_rejection_bits)
+          : loom_low_lower_rule_source_memory_rejection_reason(
+                match_context, source_memory, source_memory_shape, access);
+  if (reason == LOOM_LOW_SOURCE_MEMORY_REJECTION_REASON_COUNT) {
+    return true;
   }
-  if (access->operation_kind != source_memory->operation_kind ||
-      access->root_value_id == LOOM_VALUE_ID_INVALID ||
-      !loom_low_lower_rule_source_memory_root_matches(match_context->module,
-                                                      source_memory, access) ||
-      !loom_low_lower_rule_memory_space_matches(
-          source_memory->memory_space_mask, access->memory_space) ||
-      access->element_byte_count != source_memory->element_byte_count ||
-      access->vector_lane_count != source_memory->vector_lane_count ||
-      (source_memory->vector_lane_count > 1 &&
-       access->vector_lane_byte_stride !=
-           source_memory->vector_lane_byte_stride) ||
-      access->static_byte_offset < source_memory->static_byte_offset_minimum ||
-      access->static_byte_offset > source_memory->static_byte_offset_maximum ||
-      (source_memory->minimum_alignment != 0 &&
-       access->minimum_alignment < source_memory->minimum_alignment) ||
-      (!iree_any_bit_set(source_memory->flags,
-                         LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_CACHE_POLICY_ANY) &&
-       access->cache_policy.build_flags !=
-           source_memory->cache_policy_build_flags) ||
-      (iree_any_bit_set(
-           source_memory->flags,
-           LOOM_LOW_LOWER_SOURCE_MEMORY_FLAG_PRESERVE_SOURCE_INDEX) &&
-       (access->source_index_static_offset_extracted ||
-        access->source_index_byte_stride != access->element_byte_count)) ||
-      (source_memory->dynamic_view_base_term_count !=
-           LOOM_LOW_LOWER_SOURCE_MEMORY_DYNAMIC_VIEW_BASE_TERM_COUNT_ANY &&
-       access->dynamic_view_base_term_count !=
-           source_memory->dynamic_view_base_term_count) ||
-      !loom_low_lower_rule_source_memory_dynamic_terms_match(source_memory,
-                                                             access)) {
-    return loom_low_lower_rule_source_memory_reject(
-        diagnostics->constraint_diagnostic_index, out_diagnostic_index);
-  }
-  if (!loom_low_lower_rule_source_memory_address_layout_matches(source_memory,
-                                                                access)) {
-    return loom_low_lower_rule_source_memory_reject(
-        diagnostics->address_layout_diagnostic_index, out_diagnostic_index);
-  }
-  if (!loom_low_lower_rule_source_memory_dynamic_offset_matches(source_memory,
-                                                                access)) {
-    return loom_low_lower_rule_source_memory_reject(
-        diagnostics->dynamic_offset_diagnostic_index, out_diagnostic_index);
-  }
-  return true;
+  return loom_low_lower_rule_source_memory_reject(diagnostics, reason,
+                                                  out_diagnostic_index);
 }
 
-loom_low_lower_rule_source_memory_match_t
-loom_low_lower_rule_source_memory_emits_match(
+iree_status_t loom_low_lower_rule_source_memory_emits_match(
     const loom_low_lower_rule_match_context_t* match_context,
     const loom_low_lower_rule_set_t* rule_set, const loom_op_t* source_op,
-    const loom_low_lower_rule_t* rule) {
+    const loom_low_lower_rule_t* rule,
+    loom_low_lower_rule_source_memory_match_t* out_match) {
   loom_low_lower_rule_source_memory_match_t match = {
       .has_source_memory = false,
       .constraints_compatible = false,
@@ -408,20 +590,23 @@ loom_low_lower_rule_source_memory_emits_match(
     }
     if (!match.has_source_memory) {
       IREE_ASSERT(state != NULL);
-      source_memory_access = loom_low_lower_rule_source_memory_state_resolve(
-          match_context, source_op, state);
+      IREE_RETURN_IF_ERROR(loom_low_lower_rule_source_memory_state_resolve(
+          match_context, source_op, state, &source_memory_access));
     }
     match.has_source_memory = true;
     const uint16_t source_memory_index =
         (uint16_t)(emit->source_memory_ordinal - 1);
     const loom_low_lower_source_memory_t* source_memory =
         &rule_set->source_memories[source_memory_index];
+    const loom_low_lower_source_memory_shape_t* source_memory_shape =
+        &rule_set->source_memory_shapes[source_memory->shape_index];
     const loom_low_lower_source_memory_diagnostics_t* diagnostics =
         loom_low_lower_rule_set_source_memory_diagnostics(rule_set,
                                                           source_memory);
     uint16_t diagnostic_index = LOOM_LOW_LOWER_DIAGNOSTIC_NONE;
     if (!loom_low_lower_rule_source_memory_matches(
-            match_context, source_memory, diagnostics, source_memory_access,
+            match_context, source_memory, source_memory_shape, diagnostics,
+            source_memory_access, state->diagnostic.rejection_bits,
             &diagnostic_index)) {
       all_constraints_compatible = false;
       match.all_emits_match = false;
@@ -437,5 +622,6 @@ loom_low_lower_rule_source_memory_emits_match(
   }
   match.constraints_compatible =
       match.has_source_memory && all_constraints_compatible;
-  return match;
+  *out_match = match;
+  return iree_ok_status();
 }

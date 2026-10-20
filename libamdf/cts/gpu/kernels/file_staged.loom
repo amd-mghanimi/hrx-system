@@ -1,0 +1,171 @@
+// Three finite AQL streams separate file ingress, SDMA publication and compute.
+// Native dependencies own source/destination reuse; no shader waits for another
+// shader. The file owner waits only on Linux I/O and the uploader only on SDMA.
+template.decl @sdma_copy(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %source: i64, %target: i64, %completion_address: i64, %capacity: offset, %frontier: i64, %generation: i32, %word_count: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) -> (i64)
+
+kernel.def export("file_staged_read") @file_staged_read() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%submission_entries: buffer, %submission_tail: buffer, %completion_entries: buffer, %completion_head: buffer, %completion_tail: buffer, %state: buffer, %result_record: buffer, %request: buffer, %previous_reader: buffer, %host_payload: i64, %submission_mask: i32, %completion_mask: i32, %word_count: i32, %file_index: i32, %generation: i32, %file_block_mask: i32) {
+  %origin = index.constant 0 : offset
+  %sqe_bytes = index.constant 64 : offset
+  %cqe_bytes = index.constant 16 : offset
+  %zero = scalar.constant 0 : i32
+  %one = scalar.constant 1 : i32
+  %four = scalar.constant 4 : i32
+  %shift = scalar.constant 13 : i32
+  %mix = scalar.constant -1640531535 : i32
+  %read_flags = scalar.constant 260 : i32
+  %incomplete = scalar.constant -61 : i32
+  %protocol_error = scalar.constant -71 : i32
+  %zero64 = scalar.constant 0 : i64
+  %sqes = buffer.assume.alignment %submission_entries {minimum_alignment = 64} : buffer
+  %cqes = buffer.assume.alignment %completion_entries {minimum_alignment = 8} : buffer
+  %submission = buffer.view %submission_tail[%origin] : buffer -> view<1xi32>
+  %completion = buffer.view %completion_tail[%origin] : buffer -> view<1xi32>
+  %consumption = buffer.view %completion_head[%origin] : buffer -> view<1xi32>
+  %persistent = buffer.view %state[%origin] : buffer -> view<2xi32>
+  %record = buffer.view %result_record[%origin] : buffer -> view<16xi32>
+  %token = buffer.view %request[%origin] : buffer -> view<1xi32>
+  %reader_value = buffer.view %previous_reader[%origin] : buffer -> view<1xi64>
+  %request_value = view.load %token[0] : view<1xi32> -> i32
+  %salt = scalar.muli %generation, %mix : i32
+  %high = scalar.shrui %request_value, %shift : i32
+  %mixed = scalar.xori %request_value, %high : i32
+  %hash = scalar.xori %mixed, %salt : i32
+  %block = scalar.andi %hash, %file_block_mask : i32
+  %length = scalar.muli %word_count, %four : i32
+  %block64 = scalar.extui %block : i32 to i64
+  %length64 = scalar.extui %length : i32 to i64
+  %block_offset = scalar.muli %block64, %length64 : i64
+  %first_ticket = view.load %persistent[0] : view<2xi32> -> i32
+  %initial_status = view.load %persistent[1] : view<2xi32> -> i32
+  %bytes_read, %next_ticket, %terminal = scf.while(%progress = %zero : i32, %ticket = %first_ticket : i32, %status = %initial_status : i32) -> (i32, i32, i32) {
+    %more = scalar.cmpi ult, %progress, %length : i32
+    %healthy = scalar.cmpi eq, %status, %zero : i32
+    %running = scalar.andi %more, %healthy : i1
+    scf.condition %running, %progress, %ticket, %status : i1, i32, i32, i32
+  } do(%progress: i32, %ticket: i32, %status: i32) {
+    %position = scalar.andi %ticket, %submission_mask : i32
+    %sq_index = index.cast %position : i32 to index
+    %sq_offset = index.scale %sq_index, %sqe_bytes : index, offset -> offset
+    %sq_words = buffer.view %sqes[%sq_offset] : buffer -> view<16xi32>
+    %sq_longwords = buffer.view %sqes[%sq_offset] : buffer -> view<8xi64>
+    %progress64 = scalar.extui %progress : i32 to i64
+    %file_offset = scalar.addi %block_offset, %progress64 : i64
+    %io_address = scalar.addi %host_payload, %progress64 : i64
+    %remaining = scalar.subi %length, %progress : i32
+    %ticket64 = scalar.extui %ticket : i32 to i64
+    view.store %read_flags, %sq_words[0] : i32, view<16xi32>
+    view.store %file_index, %sq_words[1] : i32, view<16xi32>
+    view.store %file_offset, %sq_longwords[1] : i64, view<8xi64>
+    view.store %io_address, %sq_longwords[2] : i64, view<8xi64>
+    view.store %remaining, %sq_words[6] : i32, view<16xi32>
+    view.store %ticket64, %sq_longwords[4] : i64, view<8xi64>
+    %advanced_ticket = scalar.addi %ticket, %one : i32
+    // One outstanding request: completion releases this SQ slot before reuse.
+    view.atomic.store %advanced_ticket, %submission[0] {ordering = release, scope = system} : i32, view<1xi32>
+    %observed_tail = scf.while(%tail = %ticket : i32) -> (i32) {
+      %pending = scalar.cmpi eq, %tail, %ticket : i32
+      scf.condition %pending, %tail : i1, i32
+    } do(%tail: i32) {
+      %observed = view.atomic.load %completion[0] {ordering = relaxed, scope = system} : view<1xi32> -> i32
+      scf.yield %observed : i32
+    }
+    buffer.fence scope(system) ordering(acquire)
+    %cq_position = scalar.andi %ticket, %completion_mask : i32
+    %cq_index = index.cast %cq_position : i32 to index
+    %cq_offset = index.scale %cq_index, %cqe_bytes : index, offset -> offset
+    %cq_words = buffer.view %cqes[%cq_offset] : buffer -> view<4xi32>
+    %cq_longwords = buffer.view %cqes[%cq_offset] : buffer -> view<2xi64>
+    %completed_ticket = view.load %cq_longwords[0] : view<2xi64> -> i64
+    %result = view.load %cq_words[2] : view<4xi32> -> i32
+    view.atomic.store %advanced_ticket, %consumption[0] {ordering = release, scope = system} : i32, view<1xi32>
+    %positive = scalar.cmpi sgt, %result, %zero : i32
+    %within_request = scalar.cmpi sle, %result, %remaining : i32
+    %matching = scalar.cmpi eq, %completed_ticket, %ticket64 : i64
+    %valid = scalar.andi %within_request, %matching : i1
+    %progressed = scalar.andi %positive, %valid : i1
+    %eof = scalar.cmpi eq, %result, %zero : i32
+    %error = scf.select %eof, %incomplete, %result : i32
+    %native_status = scf.select %positive, %zero, %error : i32
+    %next_status = scf.select %valid, %native_status, %protocol_error : i32
+    %advance = scf.select %progressed, %result, %zero : i32
+    %next_progress = scalar.addi %progress, %advance : i32
+    scf.yield %next_progress, %advanced_ticket, %next_status : i32, i32, i32
+  }
+  // The previous reader waits on this dispatch's native completion. This load
+  // observes retention without participating in admission or progress.
+  %prior = view.atomic.load %reader_value[0] {ordering = acquire, scope = system} : view<1xi64> -> i64
+  %pending = scalar.cmpi ne, %prior, %zero64 : i64
+  %pending_word = scf.select %pending, %one, %zero : i32
+  %request_count = scalar.subi %next_ticket, %first_ticket : i32
+  view.store %next_ticket, %persistent[0] : i32, view<2xi32>
+  view.store %terminal, %persistent[1] : i32, view<2xi32>
+  view.store %block, %record[0] : i32, view<16xi32>
+  view.store %word_count, %record[1] : i32, view<16xi32>
+  view.store %hash, %record[2] : i32, view<16xi32>
+  view.store %terminal, %record[3] : i32, view<16xi32>
+  view.store %bytes_read, %record[4] : i32, view<16xi32>
+  view.store %request_count, %record[5] : i32, view<16xi32>
+  view.store %pending_word, %record[6] : i32, view<16xi32>
+  kernel.return
+}
+
+kernel.def export("file_staged_upload") @file_staged_upload() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%ring: buffer, %read_index: buffer, %write_index: buffer, %notification: buffer, %completion: buffer, %state: buffer, %result_record: buffer, %source: i64, %destination: i64, %completion_address: i64, %capacity: offset, %generation: i32, %copy_control: i32, %fence_header: i32, %cache_flags: i32) {
+  %origin = index.constant 0 : offset
+  %frontier_word = buffer.view %state[%origin] : buffer -> view<1xi64>
+  %record = buffer.view %result_record[%origin] : buffer -> view<16xi32>
+  %record64 = buffer.view %result_record[%origin] : buffer -> view<8xi64>
+  %zero = scalar.constant 0 : i32
+  %status = view.load %record[3] : view<16xi32> -> i32
+  %word_count = view.load %record[1] : view<16xi32> -> i32
+  %frontier = view.load %frontier_word[0] : view<1xi64> -> i64
+  %success = scalar.cmpi eq, %status, %zero : i32
+  %next = scf.if %success -> (i64) {
+    %copied = template.apply<@sdma_copy>(%ring, %read_index, %write_index, %notification, %completion, %source, %destination, %completion_address, %capacity, %frontier, %generation, %word_count, %copy_control, %fence_header, %cache_flags) : (buffer, buffer, buffer, buffer, buffer, i64, i64, i64, offset, i64, i32, i32, i32, i32, i32) -> (i64)
+    scf.yield %copied : i64
+  } else {
+    scf.yield %frontier : i64
+  }
+  view.store %next, %frontier_word[0] : i64, view<1xi64>
+  view.store %next, %record64[4] : i64, view<8xi64>
+  kernel.return
+}
+
+kernel.def export("file_staged_reader") @file_staged_reader(%groups_x: index) {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%groups_x, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %result_record: buffer, %reader: i32) {
+  %origin = index.constant 0 : offset
+  %record = buffer.view %result_record[%origin] : buffer -> view<16xi32>
+  %zero = scalar.constant 0 : i32
+  %status = view.load %record[3] : view<16xi32> -> i32
+  %success = scalar.cmpi eq, %status, %zero : i32
+  scf.if %success {
+    %group = kernel.workgroup.id<x> : index
+    %lane = kernel.workitem.id<x> : index
+    %width = kernel.workgroup.size<x> : index
+    %position = index.madd %group, %width, %lane : index
+    %word_count = view.load %record[1] : view<16xi32> -> i32
+    %count_input = index.cast %word_count : i32 to index
+    %count = index.assume %count_input [range(%count_input, 1, 16384)] : index
+    %valid = index.cmp ult, %position, %count : index
+    scf.if %valid {
+      %source = buffer.view %input[%origin] : buffer -> view<[%count]xi32>
+      %target = buffer.view %output[%origin] : buffer -> view<[%count]xi32>
+      %hash = view.load %record[2] : view<16xi32> -> i32
+      %value = view.load %source[%position] : view<[%count]xi32> -> i32
+      %three = scalar.constant 3 : i32
+      %product = scalar.muli %value, %three : i32
+      %biased = scalar.addi %product, %hash : i32
+      %result = scalar.addi %biased, %reader : i32
+      view.store %result, %target[%position] : i32, view<[%count]xi32>
+    }
+  }
+  kernel.return
+}

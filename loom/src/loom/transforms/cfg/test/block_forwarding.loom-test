@@ -136,6 +136,92 @@ func.def @effectful_cycle() {
 // ====
 // RUN: pass cfg-simplify
 
+// A structured diamond exits through one gateway before entering the loop.
+// Keep that gateway so forwarding does not manufacture two external entries.
+func.def @preserves_unique_loop_entry(%choose: i1, %again: i1, %initial: i32) -> (i32) {
+  %c1 = scalar.constant 1 : i32
+  cfg.cond_br %choose, ^leader, ^gateway
+^leader:
+  test.use %initial : i32
+  cfg.br ^gateway
+^gateway:
+  cfg.br ^header(%initial: i32)
+^header(%value: i32):
+  cfg.cond_br %again, ^body, ^exit
+^body:
+  %next = scalar.addi %value, %c1 : i32
+  cfg.br ^header(%next: i32)
+^exit:
+  func.return %value : i32
+}
+
+// ----
+func.def @preserves_unique_loop_entry(%choose: i1, %again: i1, %initial: i32) -> (i32) {
+  %c1 = scalar.constant 1 : i32
+  cfg.cond_br %choose, ^leader, ^gateway
+^leader:
+  test.use %initial : i32
+  cfg.br ^gateway
+^gateway:
+  cfg.br ^header(%initial: i32)
+^header(%value: i32):
+  cfg.cond_br %again, ^body, ^exit
+^body:
+  %next = scalar.addi %value, %c1 : i32
+  cfg.br ^header(%next: i32)
+^exit:
+  func.return %value : i32
+}
+
+// ====
+// RUN: pass cfg-simplify
+
+// Two body paths reconverge before the backedge. Keep their latch gateway so
+// the loop retains one backedge instead of acquiring one from each body path.
+func.def @preserves_unique_loop_backedge(%choose: i1, %again: i1, %initial: i32) -> (i32) {
+  %c1 = scalar.constant 1 : i32
+  cfg.br ^header(%initial: i32)
+^header(%value: i32):
+  cfg.cond_br %again, ^dispatch, ^exit
+^dispatch:
+  %next = scalar.addi %value, %c1 : i32
+  cfg.cond_br %choose, ^left, ^right
+^left:
+  test.use %value : i32
+  cfg.br ^latch
+^right:
+  test.use %next : i32
+  cfg.br ^latch
+^latch:
+  cfg.br ^header(%next: i32)
+^exit:
+  func.return %value : i32
+}
+
+// ----
+func.def @preserves_unique_loop_backedge(%choose: i1, %again: i1, %initial: i32) -> (i32) {
+  %c1 = scalar.constant 1 : i32
+  cfg.br ^header(%initial: i32)
+^header(%value: i32):
+  cfg.cond_br %again, ^dispatch, ^exit
+^dispatch:
+  %next = scalar.addi %value, %c1 : i32
+  cfg.cond_br %choose, ^left, ^right
+^left:
+  test.use %value : i32
+  cfg.br ^latch
+^right:
+  test.use %next : i32
+  cfg.br ^latch
+^latch:
+  cfg.br ^header(%next: i32)
+^exit:
+  func.return %value : i32
+}
+
+// ====
+// RUN: pass cfg-simplify
+
 // Every cycle member has an external incoming edge, so chain fusion cannot
 // remove a member before the forwarding resolver sees the whole odd cycle.
 func.def @multiple_entry_odd_cycle(%first_entry: i1, %second_entry: i1) {
@@ -158,9 +244,9 @@ func.def @multiple_entry_odd_cycle(%first_entry: i1, %second_entry: i1) {
 }
 
 // ====
-// RUN: with-checks pass-report cfg-simplify
+// RUN: pass cfg-simplify
 
-func.def @shared_tail_iteration_count(%first: i1, %second: i1, %third: i1, %value: i32) -> (i32) {
+func.def @shared_tail(%first: i1, %second: i1, %third: i1, %value: i32) -> (i32) {
   cfg.cond_br %first, ^shortcut_first, ^dispatch_second
 ^dispatch_second:
   test.use %value : i32
@@ -183,7 +269,18 @@ func.def @shared_tail_iteration_count(%first: i1, %second: i1, %third: i1, %valu
 }
 
 // ----
-CHECK: *"changed":true,*
-CHECK: *"iterations":3,*
-CHECK: *"edges-forwarded":5,*
-CHECK: *"blocks-removed":3,*
+func.def @shared_tail(%first: i1, %second: i1, %third: i1, %value: i32) -> (i32) {
+  cfg.cond_br %first, ^join, ^dispatch_second
+^dispatch_second:
+  test.use %value : i32
+  cfg.cond_br %second, ^join, ^dispatch_third
+^dispatch_third:
+  test.use %value : i32
+  cfg.cond_br %third, ^join, ^other
+^other:
+  test.use %value : i32
+  cfg.br ^join
+^join:
+  test.use %value : i32
+  func.return %value : i32
+}

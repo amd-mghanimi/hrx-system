@@ -72,9 +72,24 @@ bool loom_amdgpu_fragment_memory_vaddr_static_offset_u32(
     const loom_amdgpu_fragment_memory_plan_t* plan, uint16_t register_index,
     uint16_t element_index, uint64_t* out_static_byte_offset);
 
-// Returns whether runtime fragment terms contribute only a subgroup-uniform
-// common offset to one packet. Source-origin terms are classified separately.
-bool loom_amdgpu_fragment_memory_runtime_packet_offset_is_subgroup_uniform(
+// Adds the selected ABI lane projection to an already materialized source
+// component. Shared planning owns the initializer's source/entry dependencies.
+iree_status_t loom_amdgpu_emit_fragment_memory_lane_offset(
+    loom_low_lower_context_t* context, const loom_op_t* source_op,
+    const loom_amdgpu_fragment_memory_address_layout_t* layout,
+    loom_value_id_t base, loom_value_id_t* out_value);
+
+// Runtime address facts for one packet, excluding source-origin terms.
+typedef struct loom_amdgpu_fragment_memory_packet_offset_t {
+  // Byte offset contributed by the packet's runtime register coordinates.
+  loom_value_facts_t byte_facts;
+  // Whether all runtime terms, including lane coordinates, are uniform.
+  bool is_subgroup_uniform;
+} loom_amdgpu_fragment_memory_packet_offset_t;
+
+// Computes runtime packet facts once for memory analysis and report consumers.
+loom_amdgpu_fragment_memory_packet_offset_t
+loom_amdgpu_fragment_memory_runtime_packet_offset(
     const loom_amdgpu_fragment_memory_plan_t* plan, uint16_t register_index,
     uint16_t element_index);
 
@@ -93,8 +108,9 @@ iree_status_t loom_amdgpu_emit_fragment_memory_vaddr(
     loom_amdgpu_fragment_memory_address_state_t* address_state,
     loom_type_t vgpr_type, loom_amdgpu_fragment_memory_address_t* out_address);
 
-// Emits one physical fragment access's complete memory-space-relative byte
-// offset, including bytes represented by a descriptor immediate.
+// Emits one physical workgroup fragment access's complete byte offset,
+// including bytes represented by a descriptor immediate. Workgroup accesses
+// have no scalar-base partition and their complete address fits U32.
 iree_status_t loom_amdgpu_emit_fragment_memory_byte_offset(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_fragment_memory_plan_t* plan, uint16_t register_index,

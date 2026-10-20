@@ -11,7 +11,7 @@
 #include "loomc/target/spirv/profile.h"
 
 /// @file
-/// SPIR-V target profiles from IREE HAL devices.
+/// SPIR-V compiler-and-loader targets from IREE HAL devices.
 ///
 /// This optional leaf adapts an IREE HAL Vulkan device into the public SPIR-V
 /// target profile fact model. It does not expose Vulkan headers or driver
@@ -26,25 +26,26 @@
 /// infer support from status codes.
 ///
 /// @par Example
-/// Create a SPIR-V profile directly from an IREE HAL Vulkan device:
+/// Select a SPIR-V target directly from an IREE HAL Vulkan device:
 ///
 /// @code{.c}
-/// loomc_spirv_iree_hal_profile_options_t options = {
-///     .type = LOOMC_STRUCTURE_TYPE_SPIRV_IREE_HAL_PROFILE_OPTIONS,
-///     .structure_size = sizeof(loomc_spirv_iree_hal_profile_options_t),
+/// loomc_spirv_iree_hal_target_options_t options = {
+///     .type = LOOMC_STRUCTURE_TYPE_SPIRV_IREE_HAL_TARGET_OPTIONS,
+///     .structure_size = sizeof(loomc_spirv_iree_hal_target_options_t),
 ///     .identifier = loomc_make_cstring_view("jit-vulkan"),
 ///     .device = device,
 ///     .physical_device_affinity = 0,
 /// };
-/// loomc_target_profile_t* profile = NULL;
+/// loomc_iree_hal_target_selection_t selection = {0};
 /// loomc_result_t* result = NULL;
-/// loomc_status_t status = loomc_target_profile_create_spirv_iree_hal(
-///     target_environment, &options, loomc_allocator_system(), &profile,
+/// loomc_status_t status = loomc_target_select_spirv_iree_hal(
+///     target_environment, &options, loomc_allocator_system(), &selection,
 ///     &result);
 /// if (!loomc_status_is_ok(status)) return status;
 /// if (!loomc_result_succeeded(result)) {
 ///   // Inspect diagnostics before deciding whether to fall back or skip.
 /// }
+/// loomc_target_profile_release(selection.target_profile);
 /// loomc_result_release(result);
 /// @endcode
 
@@ -52,10 +53,10 @@
 extern "C" {
 #endif
 
-/// SPIR-V profile options for an IREE HAL Vulkan device.
-typedef struct loomc_spirv_iree_hal_profile_options_t {
+/// SPIR-V target options for an IREE HAL Vulkan device.
+typedef struct loomc_spirv_iree_hal_target_options_t {
   /// Structure type. Must be
-  /// `LOOMC_STRUCTURE_TYPE_SPIRV_IREE_HAL_PROFILE_OPTIONS` when nonzero.
+  /// `LOOMC_STRUCTURE_TYPE_SPIRV_IREE_HAL_TARGET_OPTIONS` when nonzero.
   loomc_structure_type_t type;
 
   /// Size of this structure in bytes.
@@ -73,44 +74,53 @@ typedef struct loomc_spirv_iree_hal_profile_options_t {
   /// Optional physical-device set the selected profile must fully cover.
   iree_hal_physical_device_affinity_t physical_device_affinity;
 
-} loomc_spirv_iree_hal_profile_options_t;
+  /// Optional caller-selected SPIR-V profile. Selection checks its enabled
+  /// features, resource limits, fixed subgroup size, and cooperative operation
+  /// rows against the device, retaining this exact profile on success. Device
+  /// features are never added implicitly. Unknown or false optional features
+  /// do not require their absence on the device. Ordinary source entry-ABI and
+  /// executable-loader validation still applies to compiled artifacts.
+  loomc_target_profile_t* target_profile;
+} loomc_spirv_iree_hal_target_options_t;
 
-/// Creates a SPIR-V target profile from an IREE HAL Vulkan device.
+/// Selects a SPIR-V compiler-and-loader target from an IREE HAL Vulkan device.
 ///
 /// @param target_environment SPIR-V target environment that will own the
 /// profile.
-/// @param options SPIR-V IREE HAL profile options.
+/// @param options SPIR-V IREE HAL target options.
 /// @param allocator Host allocator used for result and profile storage.
-/// @param out_profile Receives one retained profile when the result succeeds.
-/// Receives `NULL` on failed result.
+/// @param out_selection Receives one complete target selection when the result
+/// succeeds. Receives zero on failed result.
 /// @param out_result Receives a retained result containing adapter or SPIR-V
 /// profile diagnostics.
-/// @return OK when profile creation completed far enough to report a result.
+/// @return OK when target selection completed far enough to report a result.
 /// Non-OK statuses represent API misuse or infrastructure failures before a
 /// result could be produced.
 ///
 /// @ownership
 /// The caller owns `out_result` on an OK return and releases it with
 /// `loomc_result_release`. When a profile is produced, the caller owns the
-/// returned reference and releases it with `loomc_target_profile_release`.
+/// returned profile reference with `loomc_target_profile_release`. The
+/// executable target remains borrowed from the device.
 ///
 /// @thread_safety
 /// The adapter holds no mutable process-global state. It may be called
 /// concurrently for different invocations. The supplied HAL device must
 /// satisfy its own thread-safety contract.
-LOOMC_API_EXPORT loomc_status_t loomc_target_profile_create_spirv_iree_hal(
+LOOMC_API_EXPORT loomc_status_t loomc_target_select_spirv_iree_hal(
     loomc_target_environment_t* target_environment,
-    const loomc_spirv_iree_hal_profile_options_t* options,
-    loomc_allocator_t allocator, loomc_target_profile_t** out_profile,
+    const loomc_spirv_iree_hal_target_options_t* options,
+    loomc_allocator_t allocator,
+    loomc_iree_hal_target_selection_t* out_selection,
     loomc_result_t** out_result);
 
 /// Returns the generic IREE HAL router provider for SPIR-V/Vulkan devices.
 ///
 /// @return Process-lifetime provider descriptor. The returned pointer is
 /// immutable and may be placed directly in a
-/// `loomc_iree_hal_profile_options_t::providers` array.
-LOOMC_API_EXPORT const loomc_iree_hal_profile_provider_t*
-loomc_spirv_iree_hal_profile_provider(void);
+/// `loomc_iree_hal_target_options_t::providers` array.
+LOOMC_API_EXPORT const loomc_iree_hal_target_provider_t*
+loomc_spirv_iree_hal_target_provider(void);
 
 #ifdef __cplusplus
 }  // extern "C"

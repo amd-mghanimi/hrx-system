@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "loom/codegen/low/schedule/context.h"
+#include "loom/codegen/low/schedule/pressure.h"
 
 static bool loom_low_schedule_storage_relation_carries_lifetime(
     const loom_low_schedule_storage_relation_t* relation) {
@@ -45,8 +46,8 @@ static void loom_low_schedule_storage_lifetimes_populate(
         const loom_low_schedule_value_record_t* source = &state->values[root];
         const loom_low_schedule_value_record_t* destination =
             &state->values[relation->destination_ordinal];
-        const loom_value_t* value =
-            loom_module_value(state->module, source->value_id);
+        const loom_value_t* value = loom_module_value(
+            state->module, state->value_domain->value_ids[root]);
         if (loom_value_is_block_arg(value) &&
             loom_value_def_block(value) ==
                 state->body->blocks[node->block_index] &&
@@ -64,7 +65,7 @@ static void loom_low_schedule_storage_lifetimes_populate(
       if (lifetimes->block_handoffs != NULL &&
           loom_low_schedule_storage_relation_is_handoff(relation)) {
         const uint32_t producer =
-            state->values[relation->source_ordinal].producer_node;
+            state->value_producer_nodes[relation->source_ordinal];
         if (producer != LOOM_LOW_SCHEDULE_NODE_NONE &&
             state->nodes[producer].block_index != node->block_index) {
           const uint32_t block_index = state->nodes[producer].block_index;
@@ -118,7 +119,7 @@ iree_status_t loom_low_schedule_storage_lifetimes_initialize(
         needs_storage_read_tracking = true;
         needs_edge_source_worklist = true;
         const uint32_t producer =
-            state->values[relation->source_ordinal].producer_node;
+            state->value_producer_nodes[relation->source_ordinal];
         if (producer != LOOM_LOW_SCHEDULE_NODE_NONE &&
             state->nodes[producer].block_index != node->block_index) {
           ++handoff_count;
@@ -176,5 +177,51 @@ iree_status_t loom_low_schedule_storage_lifetimes_initialize(
   if (needs_lifetime_roots || handoff_count != 0) {
     loom_low_schedule_storage_lifetimes_populate(state);
   }
+  if (state->storage_origins != NULL) {
+    for (loom_value_ordinal_t value = 0; value < value_count; ++value) {
+      state->values[state->storage_origins[value]].flags |=
+          state->values[value].flags &
+          LOOM_LOW_SCHEDULE_VALUE_FLAG_STORAGE_READ_TRACKED;
+    }
+  }
   return iree_ok_status();
+}
+
+void loom_low_schedule_storage_lifetimes_set_forwarded_values(
+    loom_low_schedule_build_state_t* state, uint32_t block_index,
+    bool is_forwarded) {
+  const loom_low_schedule_block_t* block = &state->blocks[block_index];
+  if (block->node_count == 0 ||
+      !loom_low_schedule_strategy_uses_pressure(state->options->strategy) ||
+      (state->pressure_limits.unspillable_completion_domain_count == 0 &&
+       state->pressure_limits.active_register_packing_resource_count == 0)) {
+    return;
+  }
+  const loom_low_schedule_value_flags_t forwarding_flags =
+      is_forwarded ? LOOM_LOW_SCHEDULE_VALUE_FLAG_FORWARDED : 0;
+  const loom_liveness_block_relation_t* liveness =
+      &state->liveness_dataflow->blocks[block_index];
+  for (iree_host_size_t i = 0; i < liveness->live_out_count; ++i) {
+    const loom_value_ordinal_t ordinal = loom_local_value_domain_ordinal(
+        state->value_domain, liveness->live_out_values[i]);
+    loom_low_schedule_value_record_t* value = &state->values[ordinal];
+    value->flags = (value->flags & ~LOOM_LOW_SCHEDULE_VALUE_FLAG_FORWARDED) |
+                   forwarding_flags;
+  }
+  const uint32_t endpoint = block->node_start + block->node_count - 1;
+  const uint32_t begin = loom_low_schedule_storage_relation_index_begin(
+      &state->storage_relations, endpoint);
+  const uint32_t end = loom_low_schedule_storage_relation_index_end(
+      &state->storage_relations, endpoint);
+  for (uint32_t i = begin; i < end; ++i) {
+    const loom_low_schedule_storage_relation_t* relation =
+        loom_low_schedule_storage_relation_index_at(&state->storage_relations,
+                                                    i);
+    if (relation->cause == LOOM_LOW_STORAGE_RELATION_CAUSE_LOW_BRANCH) {
+      loom_low_schedule_value_record_t* value =
+          &state->values[relation->source_ordinal];
+      value->flags = (value->flags & ~LOOM_LOW_SCHEDULE_VALUE_FLAG_FORWARDED) |
+                     forwarding_flags;
+    }
+  }
 }

@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 #include <cstdlib>
+#include <cstring>
 
 #include "iree/net/carrier/rdma/factory.h"
 #include "iree/net/cts/transport_backend.h"
@@ -14,13 +15,37 @@
 namespace iree::net::cts {
 namespace {
 
+iree_status_t FactoryOptions(iree_net_rdma_factory_options_t* out_options) {
+  *out_options = iree_net_rdma_factory_options_default();
+  const char* mode = std::getenv("IREE_NET_RDMA_CTS_COMPLETION_MODE");
+  if (mode && strcmp(mode, "busy_poll") == 0) {
+    out_options->connection.completion_mode =
+        IREE_NET_RDMA_COMPLETION_QUEUE_MODE_BUSY_POLL;
+  } else if (mode && strcmp(mode, "readiness") != 0) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "IREE_NET_RDMA_CTS_COMPLETION_MODE must be readiness or busy_poll");
+  }
+#if defined(IREE_NET_RDMA_CTS_MAX_REQUEST_LENGTH)
+  out_options->connection.direct.max_request_length =
+      IREE_NET_RDMA_CTS_MAX_REQUEST_LENGTH;
+#endif
+#if defined(IREE_NET_RDMA_CTS_POST_BATCH_SIZE)
+  out_options->connection.direct.post_batch_size =
+      IREE_NET_RDMA_CTS_POST_BATCH_SIZE;
+#endif
+  return iree_ok_status();
+}
+
 iree_status_t CreateFactory(iree_allocator_t host_allocator,
                             iree_net_transport_factory_t** out_factory) {
   *out_factory = nullptr;
+  iree_net_rdma_factory_options_t options;
+  IREE_RETURN_IF_ERROR(FactoryOptions(&options));
   iree_net_rdma_context_t* context = nullptr;
   IREE_RETURN_IF_ERROR(rdma::TestContextEnvironment::Acquire(0, &context));
   iree_status_t status = iree_net_rdma_factory_create(
-      context, nullptr, host_allocator, out_factory);
+      context, &options, host_allocator, out_factory);
   iree_net_rdma_context_release(context);
   return status;
 }
@@ -31,16 +56,10 @@ iree_status_t CreateRegisteredFactory(
     iree_async_region_t** out_region) {
   *out_factory = nullptr;
   *out_region = nullptr;
+  iree_net_rdma_factory_options_t options;
+  IREE_RETURN_IF_ERROR(FactoryOptions(&options));
   iree_net_rdma_context_t* context = nullptr;
   IREE_RETURN_IF_ERROR(rdma::TestContextEnvironment::Acquire(0, &context));
-  auto options = iree_net_rdma_factory_options_default();
-#if defined(IREE_NET_RDMA_CTS_MAX_REQUEST_LENGTH)
-  options.connection.direct.max_request_length =
-      IREE_NET_RDMA_CTS_MAX_REQUEST_LENGTH;
-#endif
-#if defined(IREE_NET_RDMA_CTS_POST_BATCH_SIZE)
-  options.connection.direct.post_batch_size = IREE_NET_RDMA_CTS_POST_BATCH_SIZE;
-#endif
   iree_status_t status = iree_net_rdma_factory_create(
       context, &options, host_allocator, out_factory);
   if (iree_status_is_ok(status)) {
@@ -73,8 +92,9 @@ iree_status_t MakeBindAddress(std::string* out_address) {
 }  // namespace
 
 const TransportBackend& GetTransportBackend() {
+  const char* mode = std::getenv("IREE_NET_RDMA_CTS_COMPLETION_MODE");
   static const TransportBackend backend = {
-      "rdma",
+      mode && strcmp(mode, "busy_poll") == 0 ? "rdma_busy_poll" : "rdma",
       IREE_NET_TRANSPORT_CAPABILITY_RELIABLE |
           IREE_NET_TRANSPORT_CAPABILITY_ORDERED,
       CreateFactory,

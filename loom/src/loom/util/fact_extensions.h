@@ -86,9 +86,14 @@ typedef struct loom_value_fact_vector_iota_t {
   loom_value_facts_t base;
   // Facts for the logical lane-ordinal delta.
   loom_value_facts_t step;
+  // Fixed-width signed coordinate carrier. Zero retains the mathematical
+  // source-index domain instead of applying modular payload arithmetic.
+  uint8_t bit_count;
 } loom_value_fact_vector_iota_t;
 
-// Vector value is a prefix mask produced by vector.mask.range.
+// Vector value is a range mask produced by vector.mask.range. These operand
+// facts do not establish a prefix: fixed-width coordinate arithmetic may wrap,
+// and a negative step can produce a suffix instead.
 typedef struct loom_value_fact_vector_prefix_mask_t {
   // Facts for the first tested coordinate.
   loom_value_facts_t lower_bound;
@@ -496,7 +501,8 @@ iree_status_t loom_value_fact_table_meet_for_type(
 
 // Widens a loop-carried fact of |type| from |previous| to |next|. This is a
 // convergence accelerator for summary solvers, not a scalar transfer function.
-// Integer ranges widen to their scalar type domain, not beyond it.
+// Expanding integer endpoints widen to their scalar type domain; stable
+// endpoints remain bounded independently of other changing facts.
 iree_status_t loom_value_fact_table_widen_for_type(
     loom_value_fact_table_t* target, const loom_module_t* module,
     loom_type_t type, const loom_value_fact_table_t* previous_table,
@@ -507,7 +513,9 @@ iree_status_t loom_value_fact_table_widen_for_type(
 // Fact extensions
 //===----------------------------------------------------------------------===//
 
-// Creates facts for a vector whose every lane has |element| facts.
+// Creates facts for a vector whose every lane has |element| facts. Float
+// predicates and exact destination formats common to every lane are also
+// available directly on the vector. Execution distribution remains separate.
 iree_status_t loom_value_facts_make_uniform_element(
     loom_fact_context_t* context, loom_value_facts_t element,
     loom_value_facts_t* out);
@@ -519,8 +527,9 @@ bool loom_value_facts_query_uniform_element(
     loom_value_fact_uniform_element_t* out);
 
 // Creates facts for a small all-static vector with explicit per-lane facts.
-// Vectors with more than LOOM_VALUE_FACT_SMALL_STATIC_LANE_LIMIT lanes degrade
-// to unknown facts.
+// Float predicates and exact destination formats common to every lane are also
+// available directly on the vector. Vectors with more than
+// LOOM_VALUE_FACT_SMALL_STATIC_LANE_LIMIT lanes degrade to unknown facts.
 iree_status_t loom_value_facts_make_small_static_lanes(
     loom_fact_context_t* context, loom_value_fact_small_static_lanes_t lanes,
     loom_value_facts_t* out);
@@ -549,6 +558,31 @@ iree_status_t loom_value_facts_make_vector_iota(
 bool loom_value_facts_query_vector_iota(const loom_fact_context_t* context,
                                         loom_value_facts_t facts,
                                         loom_value_fact_vector_iota_t* out);
+
+// Evaluates one coordinate using the sequence's arithmetic domain. Unknown
+// operands or an unrepresentable mathematical index produce unknown facts.
+// Fixed-width coordinates wrap modulo their declared width, including i64.
+loom_value_facts_t loom_value_fact_vector_iota_element(
+    loom_value_fact_vector_iota_t iota, uint64_t lane_ordinal);
+
+// Bounds all coordinates without signed wrap. The lane count is an exact count
+// or an upper bound; UINT64_MAX is unknown. The empty interval is [0, -1].
+// Returns false when the mathematical endpoints cannot be represented in the
+// coordinate domain. This is not a bound on a wrapping sequence.
+bool loom_value_fact_vector_iota_bounds(loom_value_fact_vector_iota_t iota,
+                                        uint64_t maximum_lane_count,
+                                        int64_t* out_lower, int64_t* out_upper);
+
+// Returns inclusive integer bounds across every logical lane represented by a
+// uniform-element, small-static-lanes, or vector-iota extension. Iota bounds
+// use |maximum_lane_count| as either the exact static lane count or a proven
+// upper bound; UINT64_MAX means the lane count is unavailable. Empty explicit
+// lane lists and zero-count iotas report the canonical empty interval [0, -1].
+// Returns false when any lane is floating point or unbounded, an iota may wrap,
+// or |facts| has another extension kind.
+bool loom_value_facts_query_vector_integer_bounds(
+    const loom_fact_context_t* context, loom_value_facts_t facts,
+    uint64_t maximum_lane_count, int64_t* out_lower, int64_t* out_upper);
 
 // Creates facts for a vector.mask.range-style prefix mask.
 iree_status_t loom_value_facts_make_vector_prefix_mask(

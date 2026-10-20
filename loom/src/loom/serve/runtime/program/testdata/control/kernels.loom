@@ -1,0 +1,195 @@
+// Launch counts and device geometry share the serving device's target facts.
+kernel.def @geometry_fill_tiles(%count: index) {
+  %c1 = index.constant 1 : index
+  %size = target.subgroup.size : index
+  %rounding = index.sub %size, %c1 : index
+  %rounded = index.add %count, %rounding : index
+  %groups = index.div %rounded, %size : index
+  kernel.launch.config workgroups(%groups, %c1, %c1) workgroup_size(%size, %c1, %c1) : index
+} launch(%output: buffer) {
+  %c0 = index.constant 0 : offset
+  %count = index.constant 127 : index
+  %output_view = buffer.view %output[%c0] : buffer -> view<129xi32>
+  %group = kernel.workgroup.id<x> : index
+  %size = kernel.workgroup.size<x> : index
+  %local = kernel.workitem.id<x> : index
+  %base = index.mul %group, %size : index
+  %item = index.add %base, %local : index
+  %in_bounds = index.cmp slt, %item, %count : index
+  scf.if %in_bounds {
+    %bounded_item = index.assume %item [range(%item, 0, 126)] : index
+    %value = index.cast %bounded_item : index to i32
+    %c7 = scalar.constant 7 : i32
+    %c3 = scalar.constant 3 : i32
+    %scaled = scalar.muli %value, %c7 : i32
+    %result = scalar.addi %scaled, %c3 : i32
+    view.store %result, %output_view[%bounded_item] : i32, view<129xi32>
+  }
+  kernel.return
+}
+
+command.program.def public @geometry_fill() launch(%output: buffer) {
+  %count = index.constant 127 : index
+  kernel.launch @geometry_fill_tiles[%count](%output) : [index](buffer)
+  command.return
+}
+
+// Token-row transitions used to exercise retained device state.
+// Token history has 128 entries; callers admit work within that capacity.
+kernel.def @prefill_finish_control() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%control: buffer, %token_ids: buffer, %progress: buffer) {
+  %c0 = index.constant 0 : offset
+  %control_view = buffer.view %control[%c0] : buffer -> view<3xi32>
+  %token_ids_view = buffer.view %token_ids[%c0] : buffer -> view<129xi32>
+  %progress_view = buffer.view %progress[%c0] : buffer -> view<8xi32>
+  %token_count = view.load %control_view[0] : view<3xi32> -> i32
+  %position_base = view.load %control_view[1] : view<3xi32> -> i32
+  %eos_token = view.load %control_view[2] : view<3xi32> -> i32
+  %first_token = view.load %token_ids_view[0] : view<129xi32> -> i32
+  %is_eos = scalar.cmpi eq, %first_token, %eos_token : i32
+  %next_position = scalar.addi %position_base, %token_count : i32
+  %c1_i32 = scalar.constant 1 : i32
+  %c0_i32 = scalar.constant 0 : i32
+  %done = scf.select %is_eos, %c1_i32, %c0_i32 : i32
+  view.store %next_position, %control_view[0] : i32, view<3xi32>
+  view.store %c1_i32, %control_view[1] : i32, view<3xi32>
+  view.store %first_token, %token_ids_view[1] : i32, view<129xi32>
+  view.store %c1_i32, %progress_view[0] : i32, view<8xi32>
+  view.store %done, %progress_view[7] : i32, view<8xi32>
+  kernel.return
+}
+
+kernel.def @decode_commit_token() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%control: buffer, %token_ids: buffer, %progress: buffer) {
+  %c0 = index.constant 0 : offset
+  %c1 = index.constant 1 : index
+  %c1_i32 = scalar.constant 1 : i32
+  %c0_i32 = scalar.constant 0 : i32
+  %control_view = buffer.view %control[%c0] : buffer -> view<3xi32>
+  %token_ids_view = buffer.view %token_ids[%c0] : buffer -> view<129xi32>
+  %progress_view = buffer.view %progress[%c0] : buffer -> view<8xi32>
+  %position = view.load %control_view[0] : view<3xi32> -> i32
+  %generated_count = view.load %control_view[1] : view<3xi32> -> i32
+  %eos_token = view.load %control_view[2] : view<3xi32> -> i32
+  %count = index.cast %generated_count : i32 to index
+  %next_index = index.add %count, %c1 : index
+  %history_index = index.assume %next_index [range(%next_index, 1, 128)] : index
+  %token_id = view.load %token_ids_view[0] : view<129xi32> -> i32
+  %is_eos = scalar.cmpi eq, %token_id, %eos_token : i32
+  %done = scf.select %is_eos, %c1_i32, %c0_i32 : i32
+  %next_position = scalar.addi %position, %c1_i32 : i32
+  %next_count = scalar.addi %generated_count, %c1_i32 : i32
+  view.store %token_id, %token_ids_view[%history_index] : i32, view<129xi32>
+  view.store %next_position, %control_view[0] : i32, view<3xi32>
+  view.store %next_count, %control_view[1] : i32, view<3xi32>
+  view.store %next_count, %progress_view[0] : i32, view<8xi32>
+  view.store %done, %progress_view[7] : i32, view<8xi32>
+  kernel.return
+}
+
+// Generic launch arguments retain whole-buffer ranges in the portable artifact.
+command.program.def public @prefill_to_decode() launch(%control: buffer, %token_ids: buffer, %progress: buffer) {
+  command.serial {
+    kernel.launch @prefill_finish_control(%control, %token_ids, %progress) : (buffer, buffer, buffer)
+    kernel.launch @decode_commit_token(%control, %token_ids, %progress) : (buffer, buffer, buffer)
+  }
+  command.return
+}
+
+command.program.def public @decode_transition() launch(%control: buffer, %token_ids: buffer, %progress: buffer) {
+  %c0 = index.constant 0 : offset
+  %control_view = buffer.view %control[%c0] : buffer -> view<3xi32>
+  %token_ids_view = buffer.view %token_ids[%c0] : buffer -> view<129xi32>
+  %progress_view = buffer.view %progress[%c0] : buffer -> view<8xi32>
+  kernel.launch @decode_commit_token(%control_view, %token_ids_view, %progress_view) : (view<3xi32>, view<129xi32>, view<8xi32>)
+  command.return
+}
+
+// The schedule alternates disabled and live grids. State contains the advance,
+// consumer, and heartbeat counts followed by a canary.
+kernel.def @continuation_advance() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%state: buffer) {
+  %c0_offset = index.constant 0 : offset
+  %c1_i32 = scalar.constant 1 : i32
+  %state_view = buffer.view %state[%c0_offset] : buffer -> view<4xi32>
+  %iteration = view.load %state_view[0] : view<4xi32> -> i32
+  %next = scalar.addi %iteration, %c1_i32 : i32
+  view.store %next, %state_view[0] : i32, view<4xi32>
+  kernel.return
+}
+
+kernel.def @continuation_heartbeat() {
+  %c1 = index.constant 1 : index
+  kernel.launch.config workgroups(%c1, %c1, %c1) workgroup_size(%c1, %c1, %c1) : index
+} launch(%state: buffer) {
+  %c0 = index.constant 0 : offset
+  %c1 = scalar.constant 1 : i32
+  %state_view = buffer.view %state[%c0] : buffer -> view<4xi32>
+  %value = view.load %state_view[2] : view<4xi32> -> i32
+  %next = scalar.addi %value, %c1 : i32
+  view.store %next, %state_view[2] : i32, view<4xi32>
+  kernel.return
+}
+
+// This entry has no internal mask: only its configured grid suppresses mutation.
+kernel.def @continuation_consume(%schedule: buffer, %state: buffer) {
+  %c0_offset = index.constant 0 : offset
+  %c1_i32 = scalar.constant 1 : i32
+  %c3 = index.constant 3 : index
+  %c7_i32 = scalar.constant 7 : i32
+  %c1 = index.constant 1 : index
+  %schedule_view = buffer.view %schedule[%c0_offset] : buffer -> view<24xi32>
+  %state_view = buffer.view %state[%c0_offset] : buffer -> view<4xi32>
+  %iteration = view.load %state_view[0] : view<4xi32> -> i32
+  %completed_iteration = scalar.subi %iteration, %c1_i32 : i32
+  %phase_word = scalar.andi %completed_iteration, %c7_i32 : i32
+  %phase_value = index.cast %phase_word : i32 to index
+  %phase = index.assume %phase_value [range(%phase_value, 0, 7)] : index
+  %base = index.mul %phase, %c3 : index
+  %x_raw = view.load %schedule_view[%base] : view<24xi32> -> i32
+  %y_index = index.add %base, %c1 : index
+  %y_raw = view.load %schedule_view[%y_index] : view<24xi32> -> i32
+  %c2 = index.constant 2 : index
+  %z_index = index.add %base, %c2 : index
+  %z_raw = view.load %schedule_view[%z_index] : view<24xi32> -> i32
+  %x_wide = scalar.extui %x_raw : i32 to i64
+  %y_wide = scalar.extui %y_raw : i32 to i64
+  %z_wide = scalar.extui %z_raw : i32 to i64
+  %x_count = scalar.assume %x_wide [range(%x_wide, 0, 1)] : i64
+  %y_count = scalar.assume %y_wide [range(%y_wide, 0, 1)] : i64
+  %z_count = scalar.assume %z_wide [range(%z_wide, 0, 1)] : i64
+  %x = index.cast %x_count : i64 to index
+  %y = index.cast %y_count : i64 to index
+  %z = index.cast %z_count : i64 to index
+  kernel.launch.config workgroups(%x, %y, %z) workgroup_size(%c1, %c1, %c1) : index
+} launch(%state: buffer) {
+  %c0 = index.constant 0 : offset
+  %c1 = scalar.constant 1 : i32
+  %state_view = buffer.view %state[%c0] : buffer -> view<4xi32>
+  %value = view.load %state_view[1] : view<4xi32> -> i32
+  %next = scalar.addi %value, %c1 : i32
+  view.store %next, %state_view[1] : i32, view<4xi32>
+  kernel.return
+}
+
+command.program.def public @device_continuation() launch(%schedule: buffer, %state: buffer) {
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c8 = index.constant 8 : index
+  scf.for %iteration = [%c0 to %c8 step %c1] unroll {
+    command.serial {
+      kernel.launch @continuation_advance(%state) : (buffer)
+      command.concurrent {
+        kernel.launch @continuation_heartbeat(%state) : (buffer)
+        kernel.launch @continuation_consume[%schedule, %state](%state) : [buffer, buffer](buffer)
+      }
+    }
+  }
+  command.return
+}

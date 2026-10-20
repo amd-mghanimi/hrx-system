@@ -4,17 +4,35 @@ aie2p.target<array> @array_target
 
 aie2p.target<core> @core_target
 
-pipeline.def<kernel> public retain target(@array_target) @copy_1_workers_1_records() launch(%input: buffer, %output: buffer) {
-  %lanes = index.constant 1 : index
-  %input_base = index.constant 16 : offset
-  %output_base = index.constant 32 : offset
-  %workers = group.create %lanes : index -> group
-  %input_view = buffer.view %input[%input_base] : buffer -> view<1x1x4xi32, #encoding.layout.strided<strides=[12, 8, 1]>>
-  %output_view = buffer.view %output[%output_base] : buffer -> view<1x1x4xi32, #encoding.layout.strided<strides=[16, 12, 1]>>
-  %input_flow = pipeline.scatter %input_view across %workers : view<1x1x4xi32, #encoding.layout.strided<strides=[12, 8, 1]>>, group -> pipeline.flow<tile<4xi32>>
-  %output_flow = pipeline.stage @copy on %workers(%input_flow) : (group, pipeline.flow<tile<4xi32>>) -> (pipeline.flow<tile<4xi32>>)
-  pipeline.write %output_flow to %output_view : pipeline.flow<tile<4xi32>>, view<1x1x4xi32, #encoding.layout.strided<strides=[16, 12, 1]>>
-  pipeline.return
+low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array_program) abi_layout({binding_count = 2}) @copy_1_workers_1_records() asm {
+  %worker_count = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %workers = group %worker_count
+  %worker_lane = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %worker = worker %workers, %worker_lane, @copy
+  %input = binding 0, "read"
+  %output = binding 1, "write"
+  %input_sender = sender %input, 0 : reg<aie2p.array.sender : tile<1x1x4xi32, #encoding.layout.strided<strides=[12, 8, 1]>>>
+  %input_offset = constant.u64 16 : reg<aie2p.array.offset : offset>
+  %input_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %input_partitions = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %input_partition_sender = partition.sender %input_sender, %input_offset, %input_partition, %input_partitions : reg<aie2p.array.sender : tile<4xi32>>
+  %worker_receiver = receiver %worker, 0 : reg<aie2p.array.receiver : tile<4xi32>>
+  %input_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %input_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %input_channel = channel %input_partition_sender, %worker_receiver, %input_capacity, %input_records : reg<aie2p.array.channel : tile<4xi32>>
+  %worker_sender = sender %worker, 1 : reg<aie2p.array.sender : tile<4xi32>>
+  %output_receiver = receiver %output, 0 : reg<aie2p.array.receiver : tile<1x1x4xi32, #encoding.layout.strided<strides=[16, 12, 1]>>>
+  %output_offset = constant.u64 32 : reg<aie2p.array.offset : offset>
+  %output_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %output_partitions = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %output_partition_receiver = partition.receiver %output_receiver, %output_offset, %output_partition, %output_partitions : reg<aie2p.array.receiver : tile<4xi32>>
+  %output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %output_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %output_channel = channel %worker_sender, %output_partition_receiver, %output_capacity, %output_records : reg<aie2p.array.channel : tile<4xi32>>
+  %worker_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %worker_row = constant.u32 2 : reg<aie2p.array.scalar : index>
+  constrain.location %worker, %worker_column, %worker_row
+  return
 }
 
 func.def target(@core_target) @copy(%input: buffer, %output: buffer) {
@@ -41,24 +59,41 @@ CHECK: binding-patch ordinal=0 channel=0 * partition=0/1 offset=16 span=16 trans
 CHECK: binding-patch ordinal=1 channel=1 * partition=0/1 offset=32 span=16 transfer=16 repeat=1 completion-route=0
 
 // ====
-
 // RUN: with-checks emit aie2p-array-plan @copy_1_workers_3_records
 
 aie2p.target<array> @array_target
 
 aie2p.target<core> @core_target
 
-pipeline.def<kernel> public retain target(@array_target) @copy_1_workers_3_records() launch(%input: buffer, %output: buffer) {
-  %lanes = index.constant 1 : index
-  %input_base = index.constant 16 : offset
-  %output_base = index.constant 32 : offset
-  %workers = group.create %lanes : index -> group
-  %input_view = buffer.view %input[%input_base] : buffer -> view<1x3x4xi32, #encoding.layout.strided<strides=[28, 8, 1]>>
-  %output_view = buffer.view %output[%output_base] : buffer -> view<1x3x4xi32, #encoding.layout.strided<strides=[40, 12, 1]>>
-  %input_flow = pipeline.scatter %input_view across %workers : view<1x3x4xi32, #encoding.layout.strided<strides=[28, 8, 1]>>, group -> pipeline.flow<tile<4xi32>>
-  %output_flow = pipeline.stage @copy on %workers(%input_flow) : (group, pipeline.flow<tile<4xi32>>) -> (pipeline.flow<tile<4xi32>>)
-  pipeline.write %output_flow to %output_view : pipeline.flow<tile<4xi32>>, view<1x3x4xi32, #encoding.layout.strided<strides=[40, 12, 1]>>
-  pipeline.return
+low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array_program) abi_layout({binding_count = 2}) @copy_1_workers_3_records() asm {
+  %worker_count = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %workers = group %worker_count
+  %worker_lane = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %worker = worker %workers, %worker_lane, @copy
+  %input = binding 0, "read"
+  %output = binding 1, "write"
+  %input_sender = sender %input, 0 : reg<aie2p.array.sender : tile<1x3x4xi32, #encoding.layout.strided<strides=[28, 8, 1]>>>
+  %input_offset = constant.u64 16 : reg<aie2p.array.offset : offset>
+  %input_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %input_partitions = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %input_partition_sender = partition.sender %input_sender, %input_offset, %input_partition, %input_partitions : reg<aie2p.array.sender : tile<4xi32>>
+  %worker_receiver = receiver %worker, 0 : reg<aie2p.array.receiver : tile<4xi32>>
+  %input_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %input_records = constant.u32 3 : reg<aie2p.array.scalar : index>
+  %input_channel = channel %input_partition_sender, %worker_receiver, %input_capacity, %input_records : reg<aie2p.array.channel : tile<4xi32>>
+  %worker_sender = sender %worker, 1 : reg<aie2p.array.sender : tile<4xi32>>
+  %output_receiver = receiver %output, 0 : reg<aie2p.array.receiver : tile<1x3x4xi32, #encoding.layout.strided<strides=[40, 12, 1]>>>
+  %output_offset = constant.u64 32 : reg<aie2p.array.offset : offset>
+  %output_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %output_partitions = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %output_partition_receiver = partition.receiver %output_receiver, %output_offset, %output_partition, %output_partitions : reg<aie2p.array.receiver : tile<4xi32>>
+  %output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %output_records = constant.u32 3 : reg<aie2p.array.scalar : index>
+  %output_channel = channel %worker_sender, %output_partition_receiver, %output_capacity, %output_records : reg<aie2p.array.channel : tile<4xi32>>
+  %worker_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %worker_row = constant.u32 2 : reg<aie2p.array.scalar : index>
+  constrain.location %worker, %worker_column, %worker_row
+  return
 }
 
 func.def target(@core_target) @copy(%input: buffer, %output: buffer) {
@@ -85,24 +120,62 @@ CHECK: binding-patch ordinal=0 channel=0 * partition=0/1 offset=16 span=80 trans
 CHECK: binding-patch ordinal=1 channel=1 * partition=0/1 offset=32 span=112 transfer=48 repeat=1 completion-route=0
 
 // ====
-
 // RUN: with-checks emit aie2p-array-plan @copy_2_workers_1_records
 
 aie2p.target<array> @array_target
 
 aie2p.target<core> @core_target
 
-pipeline.def<kernel> public retain target(@array_target) @copy_2_workers_1_records() launch(%input: buffer, %output: buffer) {
-  %lanes = index.constant 2 : index
-  %input_base = index.constant 16 : offset
-  %output_base = index.constant 32 : offset
-  %workers = group.create %lanes : index -> group
-  %input_view = buffer.view %input[%input_base] : buffer -> view<2x1x4xi32, #encoding.layout.strided<strides=[12, 8, 1]>>
-  %output_view = buffer.view %output[%output_base] : buffer -> view<2x1x4xi32, #encoding.layout.strided<strides=[16, 12, 1]>>
-  %input_flow = pipeline.scatter %input_view across %workers : view<2x1x4xi32, #encoding.layout.strided<strides=[12, 8, 1]>>, group -> pipeline.flow<tile<4xi32>>
-  %output_flow = pipeline.stage @copy on %workers(%input_flow) : (group, pipeline.flow<tile<4xi32>>) -> (pipeline.flow<tile<4xi32>>)
-  pipeline.write %output_flow to %output_view : pipeline.flow<tile<4xi32>>, view<2x1x4xi32, #encoding.layout.strided<strides=[16, 12, 1]>>
-  pipeline.return
+low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array_program) abi_layout({binding_count = 2}) @copy_2_workers_1_records() asm {
+  %worker_count = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %workers = group %worker_count
+  %first_lane = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_worker = worker %workers, %first_lane, @copy
+  %second_lane = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_worker = worker %workers, %second_lane, @copy
+  %input = binding 0, "read"
+  %output = binding 1, "write"
+  %input_sender = sender %input, 0 : reg<aie2p.array.sender : tile<2x1x4xi32, #encoding.layout.strided<strides=[12, 8, 1]>>>
+  %first_input_offset = constant.u64 16 : reg<aie2p.array.offset : offset>
+  %first_input_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_input_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_input_sender = partition.sender %input_sender, %first_input_offset, %first_input_partition, %first_input_partitions : reg<aie2p.array.sender : tile<4xi32>>
+  %first_receiver = receiver %first_worker, 0 : reg<aie2p.array.receiver : tile<4xi32>>
+  %first_input_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_input_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %first_input_channel = channel %first_input_sender, %first_receiver, %first_input_capacity, %first_input_records : reg<aie2p.array.channel : tile<4xi32>>
+  %second_input_offset = constant.u64 16 : reg<aie2p.array.offset : offset>
+  %second_input_partition = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_input_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_input_sender = partition.sender %input_sender, %second_input_offset, %second_input_partition, %second_input_partitions : reg<aie2p.array.sender : tile<4xi32>>
+  %second_receiver = receiver %second_worker, 0 : reg<aie2p.array.receiver : tile<4xi32>>
+  %second_input_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_input_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_input_channel = channel %second_input_sender, %second_receiver, %second_input_capacity, %second_input_records : reg<aie2p.array.channel : tile<4xi32>>
+  %first_sender = sender %first_worker, 1 : reg<aie2p.array.sender : tile<4xi32>>
+  %output_receiver = receiver %output, 0 : reg<aie2p.array.receiver : tile<2x1x4xi32, #encoding.layout.strided<strides=[16, 12, 1]>>>
+  %first_output_offset = constant.u64 32 : reg<aie2p.array.offset : offset>
+  %first_output_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_output_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_output_receiver = partition.receiver %output_receiver, %first_output_offset, %first_output_partition, %first_output_partitions : reg<aie2p.array.receiver : tile<4xi32>>
+  %first_output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_output_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %first_output_channel = channel %first_sender, %first_output_receiver, %first_output_capacity, %first_output_records : reg<aie2p.array.channel : tile<4xi32>>
+  %second_sender = sender %second_worker, 1 : reg<aie2p.array.sender : tile<4xi32>>
+  %second_output_offset = constant.u64 32 : reg<aie2p.array.offset : offset>
+  %second_output_partition = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_output_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_output_receiver = partition.receiver %output_receiver, %second_output_offset, %second_output_partition, %second_output_partitions : reg<aie2p.array.receiver : tile<4xi32>>
+  %second_output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_output_records = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_output_channel = channel %second_sender, %second_output_receiver, %second_output_capacity, %second_output_records : reg<aie2p.array.channel : tile<4xi32>>
+  %first_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_row = constant.u32 2 : reg<aie2p.array.scalar : index>
+  constrain.location %first_worker, %first_column, %first_row
+  %second_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %second_row = constant.u32 3 : reg<aie2p.array.scalar : index>
+  constrain.location %second_worker, %second_column, %second_row
+  return
 }
 
 func.def target(@core_target) @copy(%input: buffer, %output: buffer) {
@@ -133,24 +206,62 @@ CHECK: binding-patch ordinal=0 channel=1 * partition=1/2 offset=64 span=16 trans
 CHECK: binding-patch ordinal=1 channel=3 * partition=1/2 offset=96 span=16 transfer=16 repeat=1 completion-route=0
 
 // ====
-
 // RUN: with-checks emit aie2p-array-plan @copy_2_workers_3_records
 
 aie2p.target<array> @array_target
 
 aie2p.target<core> @core_target
 
-pipeline.def<kernel> public retain target(@array_target) @copy_2_workers_3_records() launch(%input: buffer, %output: buffer) {
-  %lanes = index.constant 2 : index
-  %input_base = index.constant 16 : offset
-  %output_base = index.constant 32 : offset
-  %workers = group.create %lanes : index -> group
-  %input_view = buffer.view %input[%input_base] : buffer -> view<2x3x4xi32, #encoding.layout.strided<strides=[28, 8, 1]>>
-  %output_view = buffer.view %output[%output_base] : buffer -> view<2x3x4xi32, #encoding.layout.strided<strides=[40, 12, 1]>>
-  %input_flow = pipeline.scatter %input_view across %workers : view<2x3x4xi32, #encoding.layout.strided<strides=[28, 8, 1]>>, group -> pipeline.flow<tile<4xi32>>
-  %output_flow = pipeline.stage @copy on %workers(%input_flow) : (group, pipeline.flow<tile<4xi32>>) -> (pipeline.flow<tile<4xi32>>)
-  pipeline.write %output_flow to %output_view : pipeline.flow<tile<4xi32>>, view<2x3x4xi32, #encoding.layout.strided<strides=[40, 12, 1]>>
-  pipeline.return
+low.func.def public retain target<amd.xdna.aie2p.array>(@array_target) abi(array_program) abi_layout({binding_count = 2}) @copy_2_workers_3_records() asm {
+  %worker_count = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %workers = group %worker_count
+  %first_lane = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_worker = worker %workers, %first_lane, @copy
+  %second_lane = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_worker = worker %workers, %second_lane, @copy
+  %input = binding 0, "read"
+  %output = binding 1, "write"
+  %input_sender = sender %input, 0 : reg<aie2p.array.sender : tile<2x3x4xi32, #encoding.layout.strided<strides=[28, 8, 1]>>>
+  %first_input_offset = constant.u64 16 : reg<aie2p.array.offset : offset>
+  %first_input_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_input_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_input_sender = partition.sender %input_sender, %first_input_offset, %first_input_partition, %first_input_partitions : reg<aie2p.array.sender : tile<4xi32>>
+  %first_receiver = receiver %first_worker, 0 : reg<aie2p.array.receiver : tile<4xi32>>
+  %first_input_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_input_records = constant.u32 3 : reg<aie2p.array.scalar : index>
+  %first_input_channel = channel %first_input_sender, %first_receiver, %first_input_capacity, %first_input_records : reg<aie2p.array.channel : tile<4xi32>>
+  %second_input_offset = constant.u64 16 : reg<aie2p.array.offset : offset>
+  %second_input_partition = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_input_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_input_sender = partition.sender %input_sender, %second_input_offset, %second_input_partition, %second_input_partitions : reg<aie2p.array.sender : tile<4xi32>>
+  %second_receiver = receiver %second_worker, 0 : reg<aie2p.array.receiver : tile<4xi32>>
+  %second_input_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_input_records = constant.u32 3 : reg<aie2p.array.scalar : index>
+  %second_input_channel = channel %second_input_sender, %second_receiver, %second_input_capacity, %second_input_records : reg<aie2p.array.channel : tile<4xi32>>
+  %first_sender = sender %first_worker, 1 : reg<aie2p.array.sender : tile<4xi32>>
+  %output_receiver = receiver %output, 0 : reg<aie2p.array.receiver : tile<2x3x4xi32, #encoding.layout.strided<strides=[40, 12, 1]>>>
+  %first_output_offset = constant.u64 32 : reg<aie2p.array.offset : offset>
+  %first_output_partition = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_output_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_output_receiver = partition.receiver %output_receiver, %first_output_offset, %first_output_partition, %first_output_partitions : reg<aie2p.array.receiver : tile<4xi32>>
+  %first_output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %first_output_records = constant.u32 3 : reg<aie2p.array.scalar : index>
+  %first_output_channel = channel %first_sender, %first_output_receiver, %first_output_capacity, %first_output_records : reg<aie2p.array.channel : tile<4xi32>>
+  %second_sender = sender %second_worker, 1 : reg<aie2p.array.sender : tile<4xi32>>
+  %second_output_offset = constant.u64 32 : reg<aie2p.array.offset : offset>
+  %second_output_partition = constant.u32 1 : reg<aie2p.array.scalar : index>
+  %second_output_partitions = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_output_receiver = partition.receiver %output_receiver, %second_output_offset, %second_output_partition, %second_output_partitions : reg<aie2p.array.receiver : tile<4xi32>>
+  %second_output_capacity = constant.u32 2 : reg<aie2p.array.scalar : index>
+  %second_output_records = constant.u32 3 : reg<aie2p.array.scalar : index>
+  %second_output_channel = channel %second_sender, %second_output_receiver, %second_output_capacity, %second_output_records : reg<aie2p.array.channel : tile<4xi32>>
+  %first_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %first_row = constant.u32 2 : reg<aie2p.array.scalar : index>
+  constrain.location %first_worker, %first_column, %first_row
+  %second_column = constant.u32 0 : reg<aie2p.array.scalar : index>
+  %second_row = constant.u32 3 : reg<aie2p.array.scalar : index>
+  constrain.location %second_worker, %second_column, %second_row
+  return
 }
 
 func.def target(@core_target) @copy(%input: buffer, %output: buffer) {

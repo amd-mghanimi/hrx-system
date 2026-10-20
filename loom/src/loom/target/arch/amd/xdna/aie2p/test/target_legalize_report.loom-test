@@ -1,0 +1,308 @@
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @leading_broadcast(%values: vector<4xi32>) -> (vector<2x4xi32>) {
+  %result = vector.broadcast %values : vector<4xi32> -> vector<2x4xi32>
+  func.return %result : vector<2x4xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] * source_op=vector.broadcast * action=rewritten * legalizer=aie2p strategy=target * scalarized=false * created_ops=2 erased_ops=1
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @singleton_broadcast(%value: vector<1xf64>) -> (vector<8xf64>) {
+  %result = vector.broadcast %value : vector<1xf64> -> vector<8xf64>
+  func.return %result : vector<8xf64>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] * source_op=vector.broadcast * action=rewritten * legalizer=aie2p strategy=target * scalarized=false * created_ops=2 erased_ops=1
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @packetized_splat(%value: i32) -> (vector<32xi32>) {
+  %result = vector.splat %value : vector<32xi32>
+  func.return %result : vector<32xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] * source_op=vector.splat * action=rewritten * legalizer=vector-packet strategy=target * scalarized=false * created_ops=3 erased_ops=1
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @static_slice(%values: vector<3x4xf32>) -> (vector<1x4xf32>) {
+  %result = vector.slice %values[1, 0] : vector<3x4xf32> -> vector<1x4xf32>
+  func.return %result : vector<1x4xf32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] * source_op=vector.slice * action=rewritten * legalizer=aie2p strategy=target * scalarized=false * created_ops=3 erased_ops=1
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @vector_f64_extrema(%value: vector<2xf64>, %lhs: vector<2xf64>, %rhs: vector<2xf64>) -> (vector<2xf64>, vector<2xf64>) {
+  %minimum = vector.minimumf %lhs, %rhs : vector<2xf64>
+  %ieee = vector.clampf<ieee> %value, %lhs, %rhs : vector<2xf64>
+  func.return %minimum, %ieee : vector<2xf64>, vector<2xf64>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=2 scalarized=0 target_rewritten=2 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=2 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=vector_f64_extrema source_op=vector.minimumf * action=rewritten * legalizer=aie2p strategy=target * scalarized=false *
+CHECK: COMPILE-REPORT: target_legalization[*] function=vector_f64_extrema source_op=vector.clampf * action=rewritten * legalizer=aie2p strategy=target * scalarized=false *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @i64_five_lane_selection(%table: vector<2xi64>, %indices: vector<5xi8>) -> (vector<5xi64>) {
+  %result = vector.table.lookup %table[%indices] : vector<2xi64>, vector<5xi8> -> vector<5xi64>
+  func.return %result : vector<5xi64>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 * rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=i64_five_lane_selection source_op=vector.table.lookup * action=rewritten * legalizer=aie2p strategy=target * scalarized=false *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @i16_word_index_selection(%table: vector<9xi16>, %indices: vector<8xi32>) -> (vector<8xi16>) {
+  %result = vector.table.lookup %table[%indices] : vector<9xi16>, vector<8xi32> -> vector<8xi16>
+  func.return %result : vector<8xi16>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 * rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=i16_word_index_selection source_op=vector.table.lookup * action=rewritten * legalizer=aie2p strategy=target * scalarized=false *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @i64_index_selection(%table: vector<3xf32>, %indices: vector<2xi64>) -> (vector<2xf32>) {
+  %result = vector.table.lookup %table[%indices] : vector<3xf32>, vector<2xi64> -> vector<2xf32>
+  func.return %result : vector<2xf32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 * rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=i64_index_selection source_op=vector.table.lookup * action=rewritten * legalizer=aie2p strategy=target * scalarized=false *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @predicate_table_selection(%table: vector<2xi1>, %indices: vector<4xi8>) -> (vector<4xi1>) {
+  %result = vector.table.lookup %table[%indices] : vector<2xi1>, vector<4xi8> -> vector<4xi1>
+  func.return %result : vector<4xi1>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 * rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=predicate_table_selection source_op=vector.table.lookup * action=rewritten * legalizer=aie2p strategy=target * scalarized=false *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+// Unaligned packet fallback is attributed to the authored store for each
+// physical element width instead of hiding scalarization in generated stores.
+func.def @unaligned_store_i8x64(%value: vector<64xi8>, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %output_view = buffer.view %output[%origin] : buffer -> view<64xi8>
+  vector.store %value, %output_view[0] : vector<64xi8>, view<64xi8>
+  func.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=unaligned_store_i8x64 source_op=vector.store * action=rewritten * legalizer=aie2p strategy=target * scalarized=true *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @unaligned_store_i16x32(%value: vector<32xi16>, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %output_view = buffer.view %output[%origin] : buffer -> view<32xi16>
+  vector.store %value, %output_view[0] : vector<32xi16>, view<32xi16>
+  func.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=unaligned_store_i16x32 source_op=vector.store * action=rewritten * legalizer=aie2p strategy=target * scalarized=true *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @unaligned_store_i32x16(%value: vector<16xi32>, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %output_view = buffer.view %output[%origin] : buffer -> view<16xi32>
+  vector.store %value, %output_view[0] : vector<16xi32>, view<16xi32>
+  func.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=unaligned_store_i32x16 source_op=vector.store * action=rewritten * legalizer=aie2p strategy=target * scalarized=true *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+func.def @unaligned_store_i64x8(%value: vector<8xi64>, %output: buffer) {
+  %origin = index.constant 0 : offset
+  %output_view = buffer.view %output[%origin] : buffer -> view<8xi64>
+  vector.store %value, %output_view[0] : vector<8xi64>, view<8xi64>
+  func.return
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=unaligned_store_i64x8 source_op=vector.store * action=rewritten * legalizer=aie2p strategy=target * scalarized=true *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+// Packet conversion splits the logical vector across the 512-bit carrier
+// boundary. The generated packets remain accounted under this authored
+// rewrite instead of acquiring independent report rows.
+func.def @packetizes_generated_operation(%input: vector<17xi32>) -> (vector<17xf32>) {
+  %result = vector.sitofp %input : vector<17xi32> to vector<17xf32>
+  func.return %result : vector<17xf32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=0 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=packetizes_generated_operation source_op=vector.sitofp * action=rewritten * legalizer=vector-packet strategy=target * scalarized=false * created_ops=5 erased_ops=1
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+// Static partial reduction first builds result-shaped vector combines. The
+// unsupported i64 combine is scalarized on a later greedy visit, but remains
+// owned by the authored reduction report row.
+func.def @attributes_descendant_scalarization_to_source_reduction(%values: vector<2x3xi64>, %init: vector<3xi64>) -> (vector<3xi64>) {
+  %result = vector.reduce.axes<addi> %values, %init axes [0] : vector<2x3xi64>, vector<3xi64>
+  func.return %result : vector<3xi64>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=1 scalarized=1 target_rewritten=1 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=1 *
+CHECK: COMPILE-REPORT: target_legalization[0] function=attributes_descendant_scalarization_to_source_reduction source_op=vector.reduce.axes * action=rewritten * legalizer=aie2p strategy=target * scalarized=true * created_ops=33 erased_ops=12
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=final}
+
+// Unsupported i64 arithmetic and extrema retain their scalar reference path,
+// while the target-native bitwise operations require no legalization row.
+func.def @i64_combining_reference_fallback(%lhs: vector<4xi64>, %rhs: vector<4xi64>) -> (vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>) {
+  %sum = vector.addi %lhs, %rhs : vector<4xi64>
+  %product = vector.muli %lhs, %rhs : vector<4xi64>
+  %signed_minimum = vector.minsi %lhs, %rhs : vector<4xi64>
+  %signed_maximum = vector.maxsi %lhs, %rhs : vector<4xi64>
+  %unsigned_minimum = vector.minui %lhs, %rhs : vector<4xi64>
+  %unsigned_maximum = vector.maxui %lhs, %rhs : vector<4xi64>
+  %bitwise_and = vector.andi %lhs, %rhs : vector<4xi64>
+  %bitwise_or = vector.ori %lhs, %rhs : vector<4xi64>
+  %bitwise_xor = vector.xori %lhs, %rhs : vector<4xi64>
+  func.return %sum, %product, %signed_minimum, %signed_maximum, %unsigned_minimum, %unsigned_maximum, %bitwise_and, %bitwise_or, %bitwise_xor : vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>, vector<4xi64>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=6 scalarized=6 target_rewritten=0 reference_rewritten=6 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=6 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=i64_combining_reference_fallback source_op=vector.addi * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=i64_combining_reference_fallback source_op=vector.muli * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=i64_combining_reference_fallback source_op=vector.minsi * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=i64_combining_reference_fallback source_op=vector.maxsi * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=i64_combining_reference_fallback source_op=vector.minui * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+CHECK: COMPILE-REPORT: target_legalization[*] function=i64_combining_reference_fallback source_op=vector.maxui * action=rewritten * legalizer=vector strategy=reference * scalarized=true *
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=complete}
+
+// Static partial reductions use one structural path for the complete combining
+// vocabulary. Individual target contracts still select how each generated
+// lanewise combine is lowered.
+func.def @integer_partial_reduction_family(%values: vector<2x2xi32>, %init: vector<2xi32>) -> (vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>) {
+  %sum = vector.reduce.axes<addi> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %product = vector.reduce.axes<muli> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %signed_minimum = vector.reduce.axes<minsi> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %signed_maximum = vector.reduce.axes<maxsi> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %unsigned_minimum = vector.reduce.axes<minui> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %unsigned_maximum = vector.reduce.axes<maxui> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %bitwise_and = vector.reduce.axes<andi> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %bitwise_or = vector.reduce.axes<ori> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %bitwise_xor = vector.reduce.axes<xori> %values, %init axes [0] : vector<2x2xi32>, vector<2xi32>
+  func.return %sum, %product, %signed_minimum, %signed_maximum, %unsigned_minimum, %unsigned_maximum, %bitwise_and, %bitwise_or, %bitwise_xor : vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>, vector<2xi32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=9 scalarized=1 target_rewritten=9 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=9 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_partial_reduction_family source_op=vector.reduce.axes * action=rewritten * legalizer=aie2p strategy=target * scalarized=true * created_ops=24 erased_ops=10
+CHECK: COMPILE-REPORT: target_legalization[*] function=integer_partial_reduction_family source_op=vector.reduce.axes * action=rewritten * legalizer=aie2p strategy=target * scalarized=false * created_ops=5 erased_ops=1
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=complete}
+
+func.def @float_partial_reduction_family(%values: vector<2x2xf32>, %init: vector<2xf32>) -> (vector<2xf32>, vector<2xf32>, vector<2xf32>, vector<2xf32>, vector<2xf32>, vector<2xf32>) {
+  %sum = vector.reduce.axes<addf> %values, %init axes [0] : vector<2x2xf32>, vector<2xf32>
+  %product = vector.reduce.axes<mulf> %values, %init axes [0] : vector<2x2xf32>, vector<2xf32>
+  %minimum = vector.reduce.axes<minimumf> %values, %init axes [0] : vector<2x2xf32>, vector<2xf32>
+  %maximum = vector.reduce.axes<maximumf> %values, %init axes [0] : vector<2x2xf32>, vector<2xf32>
+  %min_number = vector.reduce.axes<minnumf> %values, %init axes [0] : vector<2x2xf32>, vector<2xf32>
+  %max_number = vector.reduce.axes<maxnumf> %values, %init axes [0] : vector<2x2xf32>, vector<2xf32>
+  func.return %sum, %product, %minimum, %maximum, %min_number, %max_number : vector<2xf32>, vector<2xf32>, vector<2xf32>, vector<2xf32>, vector<2xf32>, vector<2xf32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=6 scalarized=1 target_rewritten=6 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=6 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_partial_reduction_family source_op=vector.reduce.axes * action=rewritten * legalizer=aie2p strategy=target * scalarized=true * created_ops=32 erased_ops=10
+CHECK: COMPILE-REPORT: target_legalization[*] function=float_partial_reduction_family source_op=vector.reduce.axes * action=rewritten * legalizer=aie2p strategy=target * scalarized=false * created_ops=5 erased_ops=1
+
+// ====
+
+// RUN: with-checks compile-report target=amd.xdna.aie2p:core target-legalize{mode=eager}
+
+// Operation selection and element representation are independent dimensions:
+// the cases above cover every combining kind, while this matrix proves the
+// structural rewrite preserves every numeric source element type.
+func.def @partial_reduction_element_types(%i1_values: vector<2x2xi1>, %i1_init: vector<2xi1>, %i8_values: vector<2x2xi8>, %i8_init: vector<2xi8>, %i16_values: vector<2x2xi16>, %i16_init: vector<2xi16>, %i32_values: vector<2x2xi32>, %i32_init: vector<2xi32>, %i64_values: vector<2x2xi64>, %i64_init: vector<2xi64>, %f8e4m3_values: vector<2x2xf8E4M3>, %f8e4m3_init: vector<2xf8E4M3>, %f8e5m2_values: vector<2x2xf8E5M2>, %f8e5m2_init: vector<2xf8E5M2>, %f16_values: vector<2x2xf16>, %f16_init: vector<2xf16>, %bf16_values: vector<2x2xbf16>, %bf16_init: vector<2xbf16>, %f32_values: vector<2x2xf32>, %f32_init: vector<2xf32>, %f64_values: vector<2x2xf64>, %f64_init: vector<2xf64>) -> (vector<2xi1>, vector<2xi8>, vector<2xi16>, vector<2xi32>, vector<2xi64>, vector<2xf8E4M3>, vector<2xf8E5M2>, vector<2xf16>, vector<2xbf16>, vector<2xf32>, vector<2xf64>) {
+  %i1 = vector.reduce.axes<ori> %i1_values, %i1_init axes [0] : vector<2x2xi1>, vector<2xi1>
+  %i8 = vector.reduce.axes<ori> %i8_values, %i8_init axes [0] : vector<2x2xi8>, vector<2xi8>
+  %i16 = vector.reduce.axes<ori> %i16_values, %i16_init axes [0] : vector<2x2xi16>, vector<2xi16>
+  %i32 = vector.reduce.axes<ori> %i32_values, %i32_init axes [0] : vector<2x2xi32>, vector<2xi32>
+  %i64 = vector.reduce.axes<ori> %i64_values, %i64_init axes [0] : vector<2x2xi64>, vector<2xi64>
+  %f8e4m3 = vector.reduce.axes<maxnumf, nnan|nsz> %f8e4m3_values, %f8e4m3_init axes [0] : vector<2x2xf8E4M3>, vector<2xf8E4M3>
+  %f8e5m2 = vector.reduce.axes<maxnumf, nnan|nsz> %f8e5m2_values, %f8e5m2_init axes [0] : vector<2x2xf8E5M2>, vector<2xf8E5M2>
+  %f16 = vector.reduce.axes<maxnumf, nnan|nsz> %f16_values, %f16_init axes [0] : vector<2x2xf16>, vector<2xf16>
+  %bf16 = vector.reduce.axes<maxnumf, nnan|nsz> %bf16_values, %bf16_init axes [0] : vector<2x2xbf16>, vector<2xbf16>
+  %f32 = vector.reduce.axes<maxnumf, nnan|nsz> %f32_values, %f32_init axes [0] : vector<2x2xf32>, vector<2xf32>
+  %f64 = vector.reduce.axes<maxnumf, nnan|nsz> %f64_values, %f64_init axes [0] : vector<2x2xf64>, vector<2xf64>
+  func.return %i1, %i8, %i16, %i32, %i64, %f8e4m3, %f8e5m2, %f16, %bf16, %f32, %f64 : vector<2xi1>, vector<2xi8>, vector<2xi16>, vector<2xi32>, vector<2xi64>, vector<2xf8E4M3>, vector<2xf8E5M2>, vector<2xf16>, vector<2xbf16>, vector<2xf32>, vector<2xf64>
+}
+
+// ----
+CHECK: COMPILE-REPORT: target_legalization legal=0 rewritten=11 scalarized=0 target_rewritten=11 reference_rewritten=0 deferred=0 invalid_ir=0 unsupported=0 unhandled=0 rows=11 *
+CHECK: COMPILE-REPORT: target_legalization[*] function=partial_reduction_element_types source_op=vector.reduce.axes * action=rewritten * legalizer=aie2p strategy=target * scalarized=false * created_ops=5 erased_ops=1

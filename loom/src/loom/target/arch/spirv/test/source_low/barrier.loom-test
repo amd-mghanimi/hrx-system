@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/sync_barrier.loom-test
 // RUN: emit source-low target=spirv:vulkan1.3+bda output=low control-flow=structured-low
 
 func.def @workgroup_barrier() {
@@ -22,5 +21,83 @@ func.def @subgroup_shared_memory_barrier() {
 // ----
 low.func.def target<spirv.logical.core> abi(shader_entry_point) @subgroup_shared_memory_barrier() asm {
   OpControlBarrier.subgroup.workgroup.acq_rel
+  return
+}
+
+// ====
+
+func.def @subgroup_global_acquire_barrier() {
+  kernel.barrier<global> scope(subgroup) ordering(acquire)
+  func.return
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @subgroup_global_acquire_barrier() asm {
+  OpControlBarrier.subgroup.global.acquire
+  return
+}
+
+// ====
+
+func.def @workgroup_global_acquire_barrier() {
+  kernel.barrier<global> scope(workgroup) ordering(acquire)
+  func.return
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @workgroup_global_acquire_barrier() asm {
+  OpControlBarrier.workgroup.global.acquire
+  return
+}
+
+// ====
+
+func.def @subgroup_global_release_barrier() {
+  kernel.barrier<global> scope(subgroup) ordering(release)
+  func.return
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @subgroup_global_release_barrier() asm {
+  OpControlBarrier.subgroup.global.release
+  return
+}
+
+// ====
+
+func.def @workgroup_global_release_barrier() {
+  kernel.barrier<global> scope(workgroup) ordering(release)
+  func.return
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @workgroup_global_release_barrier() asm {
+  OpControlBarrier.workgroup.global.release
+  return
+}
+
+// ====
+
+func.def @subgroup_global_acq_rel_barrier() {
+  kernel.barrier<global> scope(subgroup) ordering(acq_rel)
+  func.return
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @subgroup_global_acq_rel_barrier() asm {
+  OpControlBarrier.subgroup.global.acq_rel
+  return
+}
+
+// ====
+
+func.def @workgroup_global_acq_rel_barrier() {
+  kernel.barrier<global> scope(workgroup) ordering(acq_rel)
+  func.return
+}
+
+// ----
+low.func.def target<spirv.logical.core> abi(shader_entry_point) @workgroup_global_acq_rel_barrier() asm {
+  OpControlBarrier.workgroup.global.acq_rel
   return
 }

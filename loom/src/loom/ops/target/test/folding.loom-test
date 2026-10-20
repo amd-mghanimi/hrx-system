@@ -1,0 +1,214 @@
+// Construction and worker queries resolve independently. Capturing the
+// construction result preserves that value instead of reinterpreting its target.
+// RUN: pass cse,canonicalize,cse
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+pipeline.def public target(@construction) @publish_widths() run(%output: channel<tile<2xi32>>) {
+  %construction_width = target.subgroup.size : index
+  %construction_value = index.cast %construction_width : index to i32
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %worker_width = target.subgroup.size : index
+    %worker_value = index.cast %worker_width : index to i32
+    view.store %construction_value, %record[0] : i32, view<2xi32>
+    view.store %worker_value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ----
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+pipeline.def public target(@construction) @publish_widths() run(%output: channel<tile<2xi32>>) {
+  %construction_value = scalar.constant 64 : i32
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xi32>> -> (write<tile<2xi32>>, view<2xi32>)
+    %worker_value = scalar.constant 32 : i32
+    view.store %construction_value, %record[0] : i32, view<2xi32>
+    view.store %worker_value, %record[1] : i32, view<2xi32>
+    channel.publish %write : write<tile<2xi32>>
+  }
+}
+
+// ====
+
+// An explicit unresolved target stays independent. An omitted target inherits
+// the construction environment. Ordinary integer facts propagate in both.
+// RUN: pass canonicalize
+test.target<low_core> @construction {subgroup_size = 64}
+
+target.decl @unresolved
+
+pipeline.def public target(@construction) @preserve_unknown_widths() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand target(@unresolved) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %width = target.subgroup.size : index
+    %value = index.cast %width : index to i32
+    %c0 = scalar.constant 0 : i32
+    %result = scalar.addi %value, %c0 : i32
+    view.store %result, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  pipeline.strand workers([1], [1], [1]) {
+    %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %width = target.subgroup.size : index
+    %value = index.cast %width : index to i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ----
+test.target<low_core> @construction {subgroup_size = 64}
+
+target.decl @unresolved
+
+pipeline.def public target(@construction) @preserve_unknown_widths() run(%first: channel<tile<1xi32>>, %second: channel<tile<1xi32>>) {
+  pipeline.strand target(@unresolved) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %first : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %width = target.subgroup.size : index
+    %value = index.cast %width : index to i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  pipeline.strand workers([1], [1], [1]) {
+    %write, %record = channel.reserve %second : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = scalar.constant 64 : i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ====
+
+// The worker context propagates through loops and survives removal of a
+// constant conditional. Newly inserted casts and constants retain that context.
+// RUN: pass canonicalize,cse
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+pipeline.def public target(@construction) @nested_worker() run(%output: channel<tile<1xi32>>, %count: index) {
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    scf.for %record_index = [%begin to %count step %step] {
+      %write, %record = channel.reserve %output : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %enabled = scalar.constant 1 : i1
+      %value = scf.if %enabled -> (i32) {
+        %width = target.subgroup.size : index
+        %result = index.cast %width : index to i32
+        scf.yield %result : i32
+      } else {
+        %disabled = scalar.constant 0 : i32
+        scf.yield %disabled : i32
+      }
+      view.store %value, %record[0] : i32, view<1xi32>
+      channel.publish %write : write<tile<1xi32>>
+    }
+  }
+}
+
+// ----
+test.target<low_core> @construction {subgroup_size = 64}
+
+test.target<low_core> @worker {subgroup_size = 32}
+
+pipeline.def public target(@construction) @nested_worker() run(%output: channel<tile<1xi32>>, %count: index) {
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    scf.for %record_index = [%begin to %count step %step] {
+      %write, %record = channel.reserve %output : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %result = scalar.constant 32 : i32
+      view.store %result, %record[0] : i32, view<1xi32>
+      channel.publish %write : write<tile<1xi32>>
+    }
+  }
+}
+
+// ====
+
+// Signed index rewrites use the worker's carrier width too. Source ranges in
+// the full U32 envelope are not signed-positive proofs on a 32-bit worker.
+// RUN: pass cse,canonicalize,cse
+test.target<low_core> @construction {index_bitwidth = 64}
+
+test.target<low_core> @worker {index_bitwidth = 32}
+
+pipeline.def public target(@construction) @worker_index_carrier() run(%output: channel<tile<2xi64>>, %x: index, %y: index) {
+  %high = index.assume %x [range(%x, 2147483648, 2147483663)] : index
+  %low = index.assume %y [range(%y, 0, 15)] : index
+  %construction_minimum = index.min %high, %low : index
+  %construction_value = index.cast %construction_minimum : index to i64
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xi64>> -> (write<tile<2xi64>>, view<2xi64>)
+    %worker_minimum = index.min %high, %low : index
+    %worker_value = index.cast %worker_minimum : index to i64
+    view.store %construction_value, %record[0] : i64, view<2xi64>
+    view.store %worker_value, %record[1] : i64, view<2xi64>
+    channel.publish %write : write<tile<2xi64>>
+  }
+}
+
+// ----
+test.target<low_core> @construction {index_bitwidth = 64}
+
+test.target<low_core> @worker {index_bitwidth = 32}
+
+pipeline.def public target(@construction) @worker_index_carrier() run(%output: channel<tile<2xi64>>, %x: index, %y: index) {
+  %high = index.assume %x [range(%x, 2147483648, 2147483663)] : index
+  %low = index.assume %y [range(%y, 0, 15)] : index
+  %construction_value = index.cast %low : index to i64
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xi64>> -> (write<tile<2xi64>>, view<2xi64>)
+    %worker_minimum = index.min %high, %low : index
+    %worker_value = index.cast %worker_minimum : index to i64
+    view.store %construction_value, %record[0] : i64, view<2xi64>
+    view.store %worker_value, %record[1] : i64, view<2xi64>
+    channel.publish %write : write<tile<2xi64>>
+  }
+}
+
+// ====
+
+// The construction target may prefer FMA without granting that preference to
+// a worker whose target remains unresolved. Explicit arithmetic remains intact.
+// RUN: pass canonicalize
+test.target<low_core> @construction {contract_set_key = "test.math.prefer_fma"}
+
+target.decl @worker
+
+pipeline.def public target(@construction) @worker_math_policy() run(%output: channel<tile<2xf32>>, %a: f32, %b: f32, %c: f32) {
+  %product = scalar.mulf<contract> %a, %b : f32
+  %construction_value = scalar.addf<contract> %product, %c : f32
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xf32>> -> (write<tile<2xf32>>, view<2xf32>)
+    %worker_product = scalar.mulf<contract> %a, %b : f32
+    %worker_value = scalar.addf<contract> %worker_product, %c : f32
+    view.store %construction_value, %record[0] : f32, view<2xf32>
+    view.store %worker_value, %record[1] : f32, view<2xf32>
+    channel.publish %write : write<tile<2xf32>>
+  }
+}
+
+// ----
+test.target<low_core> @construction {contract_set_key = "test.math.prefer_fma"}
+
+target.decl @worker
+
+pipeline.def public target(@construction) @worker_math_policy() run(%output: channel<tile<2xf32>>, %a: f32, %b: f32, %c: f32) {
+  %construction_value = scalar.fmaf<contract> %a, %b, %c : f32
+  pipeline.strand target(@worker) workers([0], [1], [1]) {
+    %write, %record = channel.reserve %output : channel<tile<2xf32>> -> (write<tile<2xf32>>, view<2xf32>)
+    %worker_product = scalar.mulf<contract> %a, %b : f32
+    %worker_value = scalar.addf<contract> %worker_product, %c : f32
+    view.store %construction_value, %record[0] : f32, view<2xf32>
+    view.store %worker_value, %record[1] : f32, view<2xf32>
+    channel.publish %write : write<tile<2xf32>>
+  }
+}

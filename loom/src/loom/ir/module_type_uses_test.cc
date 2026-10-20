@@ -151,7 +151,7 @@ class ModuleTypeUsesTest : public ::testing::Test {
 
 TEST_F(ModuleTypeUsesTest, StaticTypesDoNotAllocateDependencyState) {
   for (uint32_t extent = 1; extent <= 256; ++extent) {
-    AddArgument(loom_type_pool(loom_dim_pack_static(extent)));
+    AddArgument(loom_type_group_1d(loom_dim_pack_static(extent)));
   }
   EXPECT_EQ(module_->type_uses.index, nullptr);
   EXPECT_EQ(module_->type_uses.arena.used_allocation_size, 0u);
@@ -165,7 +165,7 @@ TEST_F(ModuleTypeUsesTest, StaticTypesDoNotAllocateDependencyState) {
 
 TEST_F(ModuleTypeUsesTest, RebuildAndReinsertReuseFragmentedCapacity) {
   std::array<loom_value_id_t, 256> arguments;
-  const auto type = loom_type_pool(loom_dim_pack_dynamic(width_));
+  const auto type = loom_type_group_1d(loom_dim_pack_dynamic(width_));
   for (auto& argument : arguments) {
     argument = AddArgument(type);
   }
@@ -177,7 +177,7 @@ TEST_F(ModuleTypeUsesTest, RebuildAndReinsertReuseFragmentedCapacity) {
   }
   for (size_t i = 0; i < arguments.size(); i += 2) {
     IREE_ASSERT_OK(loom_module_set_value_type(
-        module_, arguments[i], loom_type_pool(loom_dim_pack_static(4))));
+        module_, arguments[i], loom_type_group_1d(loom_dim_pack_static(4))));
   }
   IREE_ASSERT_OK(loom_module_recompute_type_uses(module_));
   CheckEdges(arguments.size() / 2);
@@ -190,7 +190,7 @@ TEST_F(ModuleTypeUsesTest, RebuildAndReinsertReuseFragmentedCapacity) {
 }
 
 TEST_F(ModuleTypeUsesTest, RepeatedSharedChildrenHaveOneDependency) {
-  auto type_id = Intern(loom_type_pool(loom_dim_pack_dynamic(width_)));
+  auto type_id = Intern(loom_type_group_1d(loom_dim_pack_dynamic(width_)));
   const auto singleton = loom_type_table_dependencies(&module_->types, type_id);
   const auto used_bytes = module_->type_uses.arena.used_allocation_size;
   for (int depth = 0; depth < 48; ++depth) {
@@ -214,7 +214,7 @@ TEST_F(ModuleTypeUsesTest, RepeatedSharedChildrenHaveOneDependency) {
 }
 
 TEST_F(ModuleTypeUsesTest, SharedStaticChildrenRetainEmptyMembership) {
-  auto type_id = Intern(loom_type_pool(loom_dim_pack_static(4)));
+  auto type_id = Intern(loom_type_group_1d(loom_dim_pack_static(4)));
   for (int depth = 0; depth < 48; ++depth) {
     type_id = Pair(type_id, type_id);
     EXPECT_EQ(loom_type_table_dependencies(&module_->types, type_id), 0u);
@@ -328,7 +328,7 @@ TEST_F(ModuleTypeUsesTest, RandomizedAssignmentDropAndRefreshMatchSets) {
   }
   std::array<loom_value_id_t, kCarrierCount> carriers;
   for (auto& carrier : carriers) {
-    carrier = AddArgument(loom_type_pool(loom_dim_pack_static(4)));
+    carrier = AddArgument(loom_type_group_1d(loom_dim_pack_static(4)));
   }
   std::array<std::set<loom_value_id_t>, kCarrierCount> declared;
   std::array<std::set<loom_value_id_t>, kCarrierCount> active;
@@ -391,12 +391,13 @@ TEST_F(ModuleTypeUsesTest, SharedTypeDagsMatchIndependentMembership) {
     std::array<loom_value_id_t, kCarrierCount> carriers;
     std::array<std::set<loom_value_id_t>, kCarrierCount> active;
     for (auto& carrier : carriers) {
-      carrier = AddArgument(loom_type_pool(loom_dim_pack_static(4)));
+      carrier = AddArgument(loom_type_group_1d(loom_dim_pack_static(4)));
     }
     std::vector<loom_type_id_t> types;
     std::vector<std::set<loom_value_id_t>> members;
     for (uint32_t provider = 0; provider < kProviderCount; ++provider) {
-      types.push_back(Intern(loom_type_pool(loom_dim_pack_dynamic(provider))));
+      types.push_back(
+          Intern(loom_type_group_1d(loom_dim_pack_dynamic(provider))));
       members.push_back({provider});
     }
     for (uint32_t step = 0; step < 256; ++step) {
@@ -438,7 +439,7 @@ TEST_F(ModuleTypeUsesTest, FailedAssignmentPreservesTypeAndOwnership) {
     ASSERT_NO_FATAL_FAILURE(ResetModule());
     const auto height = AddArgument(loom_type_scalar(LOOM_SCALAR_TYPE_INDEX));
     const auto carrier =
-        AddArgument(loom_type_pool(loom_dim_pack_dynamic(width_)));
+        AddArgument(loom_type_group_1d(loom_dim_pack_dynamic(width_)));
     const auto old_type = loom_module_value_type(module_, carrier);
     const auto replacement = Matrix(width_, height);
     allocation_count_ = 0;
@@ -464,7 +465,7 @@ TEST_F(ModuleTypeUsesTest, FailedAssignmentPreservesTypeAndOwnership) {
 }
 
 TEST_F(ModuleTypeUsesTest, FailedCarrierGrowthDoesNotDefineAValue) {
-  const auto type = loom_type_pool(loom_dim_pack_dynamic(width_));
+  const auto type = loom_type_group_1d(loom_dim_pack_dynamic(width_));
   for (uint32_t i = 0; i < 128; ++i) {
     AddArgument(type);
   }
@@ -491,7 +492,7 @@ TEST_F(ModuleTypeUsesTest, FailedBulkPrefixGrowthPreservesAllOwnership) {
   // Seven canonical set nodes plus these forward singletons fill the first
   // 128-record page. The new [0, 9) prefix requires another canonical node.
   for (uint32_t i = 0; i < 121; ++i) {
-    Intern(loom_type_pool(loom_dim_pack_dynamic(1024 + i)));
+    Intern(loom_type_group_1d(loom_dim_pack_dynamic(1024 + i)));
   }
   while (module_->values.count < 9) {
     AddArgument(loom_type_scalar(LOOM_SCALAR_TYPE_INDEX));
@@ -521,13 +522,13 @@ TEST_F(ModuleTypeUsesTest,
     const auto first = Intern(Matrix(width_, height));
     const auto second = Intern(Matrix(height, depth));
     for (uint32_t i = 0; i < 123; ++i) {
-      Intern(loom_type_pool(loom_dim_pack_dynamic(1024 + i)));
+      Intern(loom_type_group_1d(loom_dim_pack_dynamic(1024 + i)));
     }
-    Intern(loom_type_pool(loom_dim_pack_static(4)));
+    Intern(loom_type_group_1d(loom_dim_pack_static(4)));
     loom_string_id_t key = LOOM_STRING_ID_INVALID;
     IREE_ASSERT_OK(loom_module_intern_string(module_, IREE_SV("nested"), &key));
     const loom_named_attr_t metadata[] = {
-        {/*.name_id=*/key, /*.reserved=*/0, /*.value=*/loom_attr_type(second)}};
+        {.name_id = key, .reserved = 0, .value = loom_attr_type(second)}};
     const loom_attribute_t parameters[] = {
         loom_attr_type(first), loom_attr_absent(),
         loom_make_canonical_attr_dict(metadata, IREE_ARRAYSIZE(metadata))};

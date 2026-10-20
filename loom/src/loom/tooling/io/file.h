@@ -23,6 +23,24 @@ extern "C" {
 // Returns true when |path| denotes stdin or stdout for command-line tools.
 bool loom_tooling_file_path_is_stdio(iree_string_view_t path);
 
+// Returns true when |path| selects stdout for a tool output.
+bool loom_tooling_output_path_is_stdout(iree_string_view_t path);
+
+// Describes a named CLI output that may be conditionally active.
+typedef struct loom_tooling_output_path_t {
+  // True when this output path is used by the active tool invocation.
+  bool active;
+  // User-visible flag name that owns the output path.
+  iree_string_view_t flag_name;
+  // Output path selected for |flag_name|.
+  iree_string_view_t path;
+} loom_tooling_output_path_t;
+
+// Fails when more than one active output path selects stdout.
+iree_status_t loom_tooling_output_paths_validate_exclusive_stdout(
+    const loom_tooling_output_path_t* output_paths,
+    iree_host_size_t output_path_count);
+
 // Returns true when |path| ends in a platform path separator.
 bool loom_tooling_file_path_has_trailing_separator(iree_string_view_t path);
 
@@ -37,9 +55,21 @@ iree_status_t loom_tooling_file_path_join(iree_string_view_t lhs,
                                           iree_allocator_t allocator,
                                           char** out_path);
 
+// Resolves |path| relative to |base_directory| into allocator-owned
+// NUL-terminated storage. Cross-platform absolute paths are preserved and an
+// empty base leaves relative paths in the working directory.
+iree_status_t loom_tooling_file_path_resolve(iree_string_view_t base_directory,
+                                             iree_string_view_t path,
+                                             iree_allocator_t allocator,
+                                             char** out_path);
+
 // Creates |path| and any missing parent directories.
 iree_status_t loom_tooling_create_directory_if_needed(
     iree_string_view_t path, iree_allocator_t allocator);
+
+// Creates the parent directory for |path| when it is nonempty.
+iree_status_t loom_tooling_create_parent_directory(iree_string_view_t path,
+                                                   iree_allocator_t allocator);
 
 // Reads |path| into |out_contents|, treating empty and "-" paths as stdin.
 iree_status_t loom_tooling_read_input_file(
@@ -50,7 +80,8 @@ iree_status_t loom_tooling_read_input_file(
 iree_string_view_t loom_tooling_file_contents_string_view(
     const iree_io_file_contents_t* contents);
 
-// Writes |contents| to |path|, treating empty and "-" paths as stdout.
+// Writes |contents| to |path|, treating empty and "-" paths as stdout. Standard
+// output is switched to binary mode so every byte is preserved on Windows.
 iree_status_t loom_tooling_write_output_file(iree_string_view_t path,
                                              iree_string_view_t contents,
                                              iree_allocator_t allocator);
@@ -76,7 +107,8 @@ typedef struct loom_tooling_output_stream_t {
   iree_string_view_t path;
 } loom_tooling_output_stream_t;
 
-// Opens an output stream to stderr, stdout/"-", or a file path.
+// Opens an output stream to stderr, stdout/"-"/empty, or a file path. Standard
+// streams are switched to binary mode so every byte is preserved on Windows.
 iree_status_t loom_tooling_output_stream_open(
     iree_string_view_t path, iree_allocator_t allocator,
     loom_tooling_output_stream_t* out_output);

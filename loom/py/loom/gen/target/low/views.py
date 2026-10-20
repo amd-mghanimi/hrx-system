@@ -16,23 +16,39 @@ from loom.gen.target.low.compiled import (
     CompiledAsmForm,
     CompiledDescriptorSet,
     CompiledOperandForm,
+    CompiledScheduleModel,
     DescriptorSetView,
+    append_interned_sequence,
 )
 from loom.target.low_descriptors import (
     Descriptor,
     DescriptorSet,
     InstructionClass,
     RegClass,
-    Resource,
-    ScheduleClass,
+    ScheduleClassFlag,
+    descriptor_stable_id,
 )
 
 
 def _descriptor_refs_for_ordinals(
     descriptors: Sequence[Descriptor],
     descriptor_ordinals: Sequence[int],
-) -> list[tuple[str, int]]:
-    return sorted((descriptors[descriptor_ordinal].key, view_ordinal) for view_ordinal, descriptor_ordinal in enumerate(descriptor_ordinals))
+    uses_storage_ordinals: bool,
+) -> list[int]:
+    ordered = sorted(enumerate(descriptor_ordinals), key=lambda item: descriptor_stable_id(descriptors[item[1]].key))
+    return [storage_ordinal if uses_storage_ordinals else view_ordinal for view_ordinal, storage_ordinal in ordered]
+
+
+def _descriptor_membership_words(
+    descriptor_ordinal_count: int,
+    descriptor_ordinals: Sequence[int],
+) -> tuple[int, ...]:
+    if tuple(sorted(descriptor_ordinals)) == tuple(range(descriptor_ordinal_count)):
+        return ()
+    words = [0] * ((descriptor_ordinal_count + 63) // 64)
+    for descriptor_ordinal in descriptor_ordinals:
+        words[descriptor_ordinal // 64] |= 1 << (descriptor_ordinal % 64)
+    return tuple(words)
 
 
 def _clone_operand_form_for_view(
@@ -96,10 +112,159 @@ def _validate_view_operand_forms_closed(
             raise ValueError(f"descriptor set view '{view_spec.key}' selects descriptor '{storage_descriptor.key}' without operand-form replacement descriptor '{replacement.key}'")
 
 
+def _compile_view_schedule_model(
+    compiled: CompiledDescriptorSet,
+    view_spec: DescriptorSet,
+    descriptors: Sequence[Descriptor],
+) -> CompiledScheduleModel:
+    """Compiles a view's model in the family's canonical ID namespaces."""
+
+    disjoint_schedule_classes, minimum_issue_cycles_by_class = validation.validate_schedule_model(view_spec)
+    schedule_inputs = {schedule_class.name: schedule_class for schedule_class in view_spec.schedule_classes}
+    used_schedule_names = {descriptor.schedule_class for descriptor in descriptors}
+    unknown_schedule_names = sorted(used_schedule_names - schedule_inputs.keys())
+    if unknown_schedule_names:
+        raise ValueError(f"descriptor set view '{view_spec.key}' references unknown schedule classes: {', '.join(unknown_schedule_names)}")
+    missing_storage_schedule_names = sorted(used_schedule_names - compiled.schedule_class_ids.keys())
+    if missing_storage_schedule_names:
+        raise ValueError(f"descriptor set view '{view_spec.key}' references schedule classes absent from storage set '{compiled.spec.key}': {', '.join(missing_storage_schedule_names)}")
+
+    used_resource_names: set[str] = set()
+    for schedule_name in used_schedule_names:
+        schedule_class = schedule_inputs[schedule_name]
+        used_resource_names.update(issue_use.resource for issue_use in schedule_class.issue_uses)
+        used_resource_names.update(hazard.resource for hazard in schedule_class.hazards if hazard.resource is not None)
+        for pressure_delta in schedule_class.pressure_deltas:
+            if pressure_delta.reg_class not in compiled.reg_class_ids:
+                raise ValueError(
+                    f"descriptor set view '{view_spec.key}' schedule class "
+                    f"'{schedule_name}' references pressure register class "
+                    f"'{pressure_delta.reg_class}' absent from storage set "
+                    f"'{compiled.spec.key}'"
+                )
+
+    missing_storage_resource_names = sorted(used_resource_names - compiled.resource_ids.keys())
+    if missing_storage_resource_names:
+        raise ValueError(f"descriptor set view '{view_spec.key}' references resources absent from storage set '{compiled.spec.key}': {', '.join(missing_storage_resource_names)}")
+    view_resources = {resource.name: resource for resource in view_spec.resources}
+    resources = tuple(view_resources[resource.name] if resource.name in used_resource_names else resource for resource in compiled.resources)
+
+    used_timing_event_names = {event_name for descriptor in descriptors for operand in descriptor.operands for event_name in (operand.read_event, operand.write_event) if event_name is not None}
+    used_timing_event_names.update(event_name for descriptor in descriptors for effect in descriptor.effects for event_name in (effect.producer_event, effect.consumer_event) if event_name is not None)
+    missing_timing_event_names = sorted(used_timing_event_names - compiled.timing_event_ids.keys())
+    if missing_timing_event_names:
+        raise ValueError(f"descriptor set view '{view_spec.key}' references timing events absent from storage set '{compiled.spec.key}': {', '.join(missing_timing_event_names)}")
+    event_separations = tuple(
+        sorted(
+            (separation for separation in view_spec.event_separations if separation.producer_event in used_timing_event_names and separation.consumer_event in used_timing_event_names),
+            key=lambda separation: (
+                compiled.timing_event_ids[separation.producer_event],
+                compiled.timing_event_ids[separation.consumer_event],
+            ),
+        )
+    )
+
+    # Descriptors retain family-canonical schedule-class IDs. Complete each
+    # view's table in that same namespace so family emission can pool equal
+    # rows and assign direct physical row IDs only where values differ. Rows
+    # unreachable from the selected descriptor surface retain the storage
+    # model.
+    schedule_classes = tuple(
+        (
+            replace(
+                schedule_inputs[schedule_class.name],
+                flags=(
+                    *schedule_inputs[schedule_class.name].flags,
+                    ScheduleClassFlag.DISJOINT_ISSUE_USES,
+                ),
+            )
+            if schedule_class.name in disjoint_schedule_classes
+            else schedule_inputs[schedule_class.name]
+        )
+        if schedule_class.name in used_schedule_names
+        else schedule_class
+        for schedule_class in compiled.schedule_classes
+    )
+
+    issue_uses = []
+    issue_use_group_starts = {}
+    hazards = []
+    hazard_group_starts = {}
+    pressure_deltas = []
+    pressure_delta_group_starts = {}
+    schedule_rows = []
+    for schedule_class_id, schedule_class in enumerate(schedule_classes):
+        issue_use_start, _ = append_interned_sequence(
+            schedule_class.issue_uses,
+            issue_uses,
+            issue_use_group_starts,
+        )
+        hazard_start, _ = append_interned_sequence(
+            schedule_class.hazards,
+            hazards,
+            hazard_group_starts,
+        )
+        pressure_delta_start, _ = append_interned_sequence(
+            schedule_class.pressure_deltas,
+            pressure_deltas,
+            pressure_delta_group_starts,
+        )
+        schedule_rows.append(
+            {
+                "issue_use_start": issue_use_start,
+                "issue_use_count": len(schedule_class.issue_uses),
+                "hazard_start": hazard_start,
+                "hazard_count": len(schedule_class.hazards),
+                "minimum_issue_cycles": (
+                    minimum_issue_cycles_by_class[schedule_class.name] if schedule_class.name in used_schedule_names else compiled.schedule_rows[schedule_class_id]["minimum_issue_cycles"]
+                ),
+                "pressure_delta_start": pressure_delta_start,
+                "pressure_delta_count": len(schedule_class.pressure_deltas),
+            }
+        )
+
+    for table_name, rows in (
+        ("schedule class", schedule_classes),
+        ("issue use", issue_uses),
+        ("hazard", hazards),
+        ("pressure delta", pressure_deltas),
+    ):
+        validation.validate_u16_table_count(len(rows), f"descriptor set view '{view_spec.key}' {table_name}")
+
+    resource_calendar_lookback_cycles = max(
+        (max(0, -separation.minimum_issue_separation_cycles) for separation in event_separations),
+        default=0,
+    )
+    resource_calendars, resource_calendar_slot_count = compiler.compile_resource_calendars(
+        resources,
+        schedule_classes,
+        resource_calendar_lookback_cycles,
+    )
+    return CompiledScheduleModel(
+        resources=resources,
+        resource_calendars=tuple(resource_calendars),
+        resource_calendar_slot_count=resource_calendar_slot_count,
+        resource_calendar_lookback_cycles=resource_calendar_lookback_cycles,
+        schedule_classes=schedule_classes,
+        # Shared operand and effect rows carry storage timing-event IDs. Every
+        # view retains that namespace while owning its separation values.
+        timing_events=tuple(compiled.timing_events),
+        event_separations=event_separations,
+        resource_ids=compiled.resource_ids,
+        schedule_class_ids=compiled.schedule_class_ids,
+        timing_event_ids=compiled.timing_event_ids,
+        issue_uses=tuple(issue_uses),
+        hazards=tuple(hazards),
+        pressure_deltas=tuple(pressure_deltas),
+        schedule_rows=tuple(schedule_rows),
+    )
+
+
 def _schedule_alternative_rows_for_view(
     compiled: CompiledDescriptorSet,
     view_spec: DescriptorSet,
     descriptor_ordinals: Sequence[int],
+    uses_storage_ordinals: bool,
 ) -> list[tuple[int, int]]:
     storage_to_view_ordinals = {storage_ordinal: view_ordinal for view_ordinal, storage_ordinal in enumerate(descriptor_ordinals)}
     rows: list[tuple[int, int]] = []
@@ -112,7 +277,12 @@ def _schedule_alternative_rows_for_view(
             source = compiled.descriptors[storage_source]
             alternative = compiled.descriptors[storage_alternative]
             raise ValueError(f"descriptor set view '{view_spec.key}' selects descriptor '{source.key}' without schedule alternative descriptor '{alternative.key}'")
-        rows.append((view_source, view_alternative))
+        rows.append(
+            (
+                storage_source if uses_storage_ordinals else view_source,
+                storage_alternative if uses_storage_ordinals else view_alternative,
+            )
+        )
     return rows
 
 
@@ -154,50 +324,20 @@ def _validate_view_descriptors_match_storage(
 
 
 def _view_instruction_classes(
-    compiled: CompiledDescriptorSet,
     view_spec: DescriptorSet,
     descriptors: Sequence[Descriptor],
-    descriptor_ordinals: Sequence[int],
+    schedule_model: CompiledScheduleModel,
 ) -> tuple[tuple[InstructionClass, ...], ...]:
-    schedule_context: (
-        tuple[
-            dict[str, ScheduleClass],
-            dict[str, ScheduleClass],
-            dict[str, Resource],
-        ]
-        | None
-    ) = None
-    result: list[tuple[InstructionClass, ...]] = []
-    for descriptor, storage_descriptor_ordinal in zip(descriptors, descriptor_ordinals, strict=True):
-        storage_descriptor = compiled.descriptors[storage_descriptor_ordinal]
-        if descriptor.schedule_class == storage_descriptor.schedule_class:
-            result.append(compiled.instruction_classes[storage_descriptor_ordinal])
-            continue
-        if schedule_context is None:
-            # View identity compares authored models, before generated proofs
-            # are projected into the shared runtime schedule-class flags.
-            schedule_context = (
-                {schedule_class.name: schedule_class for schedule_class in compiled.spec.schedule_classes if schedule_class.name in compiled.schedule_class_ids},
-                {schedule_class.name: schedule_class for schedule_class in view_spec.schedule_classes},
-                {resource.name: resource for resource in compiled.resources},
-            )
-        storage_schedule_classes, view_schedule_classes, resources = schedule_context
-        view_schedule_class = view_schedule_classes.get(descriptor.schedule_class)
-        if view_schedule_class is None:
-            raise ValueError(f"descriptor set view '{view_spec.key}' descriptor '{descriptor.key}' references unknown schedule class '{descriptor.schedule_class}'")
-        storage_schedule_class = storage_schedule_classes.get(descriptor.schedule_class)
-        if storage_schedule_class is None:
-            raise ValueError(f"descriptor set view '{view_spec.key}' schedule class '{descriptor.schedule_class}' is absent from storage set '{compiled.spec.key}'")
-        if view_schedule_class != storage_schedule_class:
-            raise ValueError(f"descriptor set view '{view_spec.key}' schedule class '{descriptor.schedule_class}' differs from storage set '{compiled.spec.key}'")
-        result.append(
-            compiler.derive_instruction_classes(
-                descriptor,
-                storage_schedule_class,
-                resources,
-            )
+    schedule_classes = {schedule_class.name: schedule_class for schedule_class in schedule_model.schedule_classes}
+    resources = {resource.name: resource for resource in schedule_model.resources}
+    return tuple(
+        compiler.derive_instruction_classes(
+            descriptor,
+            schedule_classes[descriptor.schedule_class],
+            resources,
         )
-    return tuple(result)
+        for descriptor in descriptors
+    )
 
 
 def _view_descriptor_views_match_storage(
@@ -205,12 +345,19 @@ def _view_descriptor_views_match_storage(
     descriptors: Sequence[Descriptor],
     instruction_classes: Sequence[tuple[InstructionClass, ...]],
     canonical_asm_form_ordinals: Sequence[int | None],
+    descriptor_ordinals: Sequence[int],
 ) -> bool:
     return all(
-        descriptor.schedule_class == compiled.descriptors[i].schedule_class
-        and instruction_classes[i] == compiled.instruction_classes[i]
-        and canonical_asm_form_ordinals[i] == compiled.canonical_asm_form_ordinals[i]
-        for i, descriptor in enumerate(descriptors)
+        descriptor.schedule_class == compiled.descriptors[storage_ordinal].schedule_class
+        and instruction_class == compiled.instruction_classes[storage_ordinal]
+        and canonical_asm_form_ordinal == compiled.canonical_asm_form_ordinals[storage_ordinal]
+        for descriptor, instruction_class, canonical_asm_form_ordinal, storage_ordinal in zip(
+            descriptors,
+            instruction_classes,
+            canonical_asm_form_ordinals,
+            descriptor_ordinals,
+            strict=True,
+        )
     )
 
 
@@ -258,6 +405,7 @@ def _compile_view_asm_forms(
 def _view_register_classes(
     compiled: CompiledDescriptorSet,
     view_spec: DescriptorSet,
+    schedule_model: CompiledScheduleModel,
 ) -> tuple[RegClass | None, ...]:
     classes_by_name = {reg_class.name: reg_class for reg_class in view_spec.reg_classes}
     if len(classes_by_name) != len(view_spec.reg_classes):
@@ -289,11 +437,11 @@ def _view_register_classes(
 
     # Shared operand and schedule tables may contain rows for other views.
     # Only the selected descriptors can reference the classes exposed here.
-    schedules_by_name = {schedule.name: schedule for schedule in compiled.schedule_classes}
+    schedules_by_name = {schedule.name: schedule for schedule in schedule_model.schedule_classes}
     parts_by_name = {part.name: part for part in compiled.register_parts}
     for descriptor in view_spec.descriptors:
         referenced_classes = {alternative.reg_class for operand in descriptor.operands for alternative in operand.reg_alts if alternative.reg_class is not None}
-        referenced_classes.update(parts_by_name[operand.register_part].reg_class for operand in descriptor.operands if operand.register_part is not None)
+        referenced_classes.update(parts_by_name[alternative.register_part].reg_class for operand in descriptor.operands for alternative in operand.reg_alts if alternative.register_part is not None)
         referenced_classes.update(delta.reg_class for delta in schedules_by_name[descriptor.schedule_class].pressure_deltas)
         missing_classes = referenced_classes - classes_by_name.keys()
         if missing_classes:
@@ -328,11 +476,15 @@ def descriptor_set_view_for_spec(
         view_spec,
         descriptor_ordinal_tuple,
     )
-    instruction_classes = _view_instruction_classes(
+    schedule_model = _compile_view_schedule_model(
         compiled,
         view_spec,
         descriptors,
-        descriptor_ordinal_tuple,
+    )
+    instruction_classes = _view_instruction_classes(
+        view_spec,
+        descriptors,
+        schedule_model,
     )
     compiler.validate_schedule_alternative_instruction_classes(
         descriptors,
@@ -343,25 +495,27 @@ def descriptor_set_view_for_spec(
         view_spec,
         descriptor_ordinal_tuple,
     )
-    schedule_alternative_rows = _schedule_alternative_rows_for_view(
+    is_storage_prefix = descriptor_ordinal_tuple == tuple(range(len(descriptor_ordinal_tuple)))
+    storage_asm_forms_match = _view_asm_forms_match_storage(
         compiled,
         view_spec,
         descriptor_ordinal_tuple,
+    ) and not _asm_forms_have_duplicate_mnemonics(compiled.asm_forms)
+    storage_canonical_asm_form_ordinals = [compiled.canonical_asm_form_ordinals[storage_ordinal] for storage_ordinal in descriptor_ordinal_tuple]
+    storage_descriptor_views_match = storage_asm_forms_match and _view_descriptor_views_match_storage(
+        compiled,
+        descriptors,
+        instruction_classes,
+        storage_canonical_asm_form_ordinals,
+        descriptor_ordinal_tuple,
     )
-    uses_storage_descriptor_tables = descriptor_ordinal_tuple == tuple(range(len(descriptor_ordinal_tuple)))
-    uses_storage_asm_form_tables = (
-        uses_storage_descriptor_tables
-        and _view_asm_forms_match_storage(
-            compiled,
-            view_spec,
-            descriptor_ordinal_tuple,
-        )
-        and not _asm_forms_have_duplicate_mnemonics(compiled.asm_forms)
-    )
-    uses_storage_operand_form_tables = uses_storage_descriptor_tables
+    uses_storage_ordinals = is_storage_prefix or storage_descriptor_views_match
+    uses_storage_descriptor_tables = uses_storage_ordinals
+    uses_storage_asm_form_tables = uses_storage_ordinals and storage_asm_forms_match
+    uses_storage_operand_form_tables = uses_storage_ordinals
     if uses_storage_asm_form_tables:
         asm_forms = compiled.asm_forms
-        canonical_asm_form_ordinals = compiled.canonical_asm_form_ordinals[: len(descriptor_ordinal_tuple)]
+        canonical_asm_form_ordinals = storage_canonical_asm_form_ordinals
     else:
         asm_forms = _compile_view_asm_forms(compiled, view_spec)
         _validate_view_asm_forms_unique(view_spec, asm_forms)
@@ -370,11 +524,28 @@ def descriptor_set_view_for_spec(
             asm_forms,
         )
 
-    uses_storage_descriptor_view_tables = uses_storage_descriptor_tables and _view_descriptor_views_match_storage(
+    uses_storage_descriptor_view_tables = uses_storage_ordinals and _view_descriptor_views_match_storage(
         compiled,
         descriptors,
         instruction_classes,
         canonical_asm_form_ordinals,
+        descriptor_ordinal_tuple,
+    )
+
+    descriptor_ordinal_count = max(descriptor_ordinal_tuple) + 1 if uses_storage_ordinals and descriptor_ordinal_tuple else len(descriptor_ordinal_tuple)
+    descriptor_membership_words = (
+        _descriptor_membership_words(
+            descriptor_ordinal_count,
+            descriptor_ordinal_tuple,
+        )
+        if uses_storage_ordinals
+        else ()
+    )
+    schedule_alternative_rows = _schedule_alternative_rows_for_view(
+        compiled,
+        view_spec,
+        descriptor_ordinal_tuple,
+        uses_storage_ordinals,
     )
 
     descriptor_rows = [dict(compiled.descriptor_rows[storage_descriptor_ordinal]) for storage_descriptor_ordinal in descriptor_ordinal_tuple]
@@ -403,13 +574,22 @@ def descriptor_set_view_for_spec(
 
     return DescriptorSetView(
         spec=view_spec,
-        reg_classes=_view_register_classes(compiled, view_spec),
+        reg_classes=_view_register_classes(
+            compiled,
+            view_spec,
+            schedule_model,
+        ),
         descriptors=descriptors,
         instruction_classes=instruction_classes,
-        descriptor_ordinals=descriptor_ordinal_tuple,
+        schedule_model=schedule_model,
+        schedule_class_row_ids=(),
+        storage_descriptor_ordinals=descriptor_ordinal_tuple,
+        descriptor_ordinal_count=descriptor_ordinal_count,
+        descriptor_membership_words=descriptor_membership_words,
         descriptor_refs=_descriptor_refs_for_ordinals(
             compiled.descriptors,
             descriptor_ordinal_tuple,
+            uses_storage_ordinals,
         ),
         schedule_alternative_rows=schedule_alternative_rows,
         descriptor_rows=descriptor_rows,
@@ -418,6 +598,7 @@ def descriptor_set_view_for_spec(
         operand_forms=operand_forms,
         uses_storage_descriptor_tables=uses_storage_descriptor_tables,
         uses_storage_descriptor_view_tables=uses_storage_descriptor_view_tables,
+        uses_storage_descriptor_ref_tables=uses_storage_descriptor_tables,
         uses_storage_asm_form_tables=uses_storage_asm_form_tables,
         uses_storage_operand_form_tables=uses_storage_operand_form_tables,
         uses_storage_schedule_alternative_tables=(schedule_alternative_rows == compiled.schedule_alternative_rows[: len(schedule_alternative_rows)]),

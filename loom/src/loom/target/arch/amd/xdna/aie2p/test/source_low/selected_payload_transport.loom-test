@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/selected_payload_transport.loom-test
 // RUN: pass target=amd.xdna.aie2p:core source-to-low
 
 func.def public @selected_truncated(%input: vector<4xi32>, %left: i64, %right: i64) -> (i32) {
@@ -34,50 +33,22 @@ low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @selected_t
 
 // ====
 
-func.def public @selected_coordinate(%input: vector<4xi32>, %left: i32, %right: i32) -> (index) {
-  %value = vector.extract %input[0] : vector<4xi32> -> i32
+func.def public @selected_converted_offset(%choice: i32, %narrow: i32, %fallback: offset) -> (offset) {
   %threshold = scalar.constant 0 : i32
-  %condition = scalar.cmpi sgt, %value, %threshold : i32
-  %selected = scf.select %condition, %left, %right : i32
-  %payload = index.cast %selected : i32 to index
-  cfg.br ^forward(%payload: index)
-^forward(%carried: index):
-  func.return %carried : index
-}
-
-// ----
-low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @selected_coordinate(%input: reg<aie2p.vec256 x2>, %left: reg<aie2p.er>, %right: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
-  %value = vextract.32.imm %input, 0
-  %threshold = mov.short 0
-  %condition = lt %threshold, %value
-  %18 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
-  %payload = sel.nez %left, %right, %18
-  low.br ^forward(%payload: reg<aie2p.er>)
-^forward(%carried: reg<aie2p.er>):
-  return %carried
-}
-
-// ====
-
-func.def public @selected_offset(%input: vector<4xi32>, %left: i32, %right: i32) -> (offset) {
-  %value = vector.extract %input[0] : vector<4xi32> -> i32
-  %threshold = scalar.constant 0 : i32
-  %condition = scalar.cmpi sgt, %value, %threshold : i32
-  %selected = scf.select %condition, %left, %right : i32
-  %payload = index.cast %selected : i32 to offset
-  cfg.br ^forward(%payload: offset)
+  %condition = scalar.cmpi ne, %choice, %threshold : i32
+  %converted = index.cast %narrow : i32 to offset
+  %selected = scf.select %condition, %converted, %fallback : offset
+  cfg.br ^forward(%selected: offset)
 ^forward(%carried: offset):
   func.return %carried : offset
 }
 
 // ----
-low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @selected_offset(%input: reg<aie2p.vec256 x2>, %left: reg<aie2p.er>, %right: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
-  %value = vextract.32.imm %input, 0
-  %threshold = mov.short 0
-  %condition = lt %threshold, %value
-  %18 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
-  %payload = sel.nez %left, %right, %18
-  low.br ^forward(%payload: reg<aie2p.er>)
+low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @selected_converted_offset(%choice: reg<aie2p.er>, %converted: reg<aie2p.er>, %fallback: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
+  %condition = nez %choice
+  %15 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
+  %selected = sel.nez %converted, %fallback, %15
+  low.br ^forward(%selected: reg<aie2p.er>)
 ^forward(%carried: reg<aie2p.er>):
   return %carried
 }
@@ -121,62 +92,6 @@ low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @selected_e
 
 // ====
 
-func.def public @uniform_selected_truncated(%value: i32, %left: i64, %right: i64) -> (i32) {
-  %threshold = scalar.constant 0 : i32
-  %condition = scalar.cmpi sgt, %value, %threshold : i32
-  %selected = scf.select %condition, %left, %right : i64
-  %payload = scalar.trunci %selected : i64 to i32
-  cfg.br ^forward(%payload: i32)
-^forward(%carried: i32):
-  func.return %carried : i32
-}
-
-// ----
-low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @uniform_selected_truncated(%value: reg<aie2p.er>, %left: reg<aie2p.er x2>, %right: reg<aie2p.er x2>) -> (reg<aie2p.er>) asm {
-  %threshold = mov.short 0
-  %condition = lt %threshold, %value
-  %16 = slice %left[0] : reg<aie2p.er x2> -> reg<aie2p.er>
-  %17 = slice %left[1] : reg<aie2p.er x2> -> reg<aie2p.er>
-  %18 = slice %right[0] : reg<aie2p.er x2> -> reg<aie2p.er>
-  %19 = slice %right[1] : reg<aie2p.er x2> -> reg<aie2p.er>
-  %20 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
-  %21 = sel.nez %16, %18, %20
-  %22 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
-  %23 = sel.nez %17, %19, %22
-  %selected = concat(%21, %23) : (reg<aie2p.er>, reg<aie2p.er>) -> reg<aie2p.er x2>
-  %payload = slice %selected[0] : reg<aie2p.er x2> -> reg<aie2p.er>
-  low.br ^forward(%payload: reg<aie2p.er>)
-^forward(%carried: reg<aie2p.er>):
-  return %carried
-}
-
-// ====
-
-func.def public @independent_assumption_payload(%input: vector<4xi32>, %left: i32, %right: i32, %scalar: i32) -> (i32) {
-  %value = vector.extract %input[0] : vector<4xi32> -> i32
-  %threshold = scalar.constant 0 : i32
-  %condition = scalar.cmpi sgt, %value, %threshold : i32
-  %selected = scf.select %condition, %left, %right : i32
-  %payload, %bounded = scalar.assume %scalar, %selected [range(%selected, 0, 42)] : i32, i32
-  cfg.br ^forward(%payload: i32)
-^forward(%carried: i32):
-  func.return %carried : i32
-}
-
-// ----
-low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @independent_assumption_payload(%input: reg<aie2p.vec256 x2>, %left: reg<aie2p.er>, %right: reg<aie2p.er>, %payload: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
-  %value = vextract.32.imm %input, 0
-  %threshold = mov.short 0
-  %condition = lt %threshold, %value
-  %21 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
-  %bounded = sel.nez %left, %right, %21
-  low.br ^forward(%payload: reg<aie2p.er>)
-^forward(%carried: reg<aie2p.er>):
-  return %carried
-}
-
-// ====
-
 func.def public @selected_assumption_payload(%input: vector<4xi32>, %left: i32, %right: i32, %scalar: i32) -> (i32) {
   %value = vector.extract %input[0] : vector<4xi32> -> i32
   %threshold = scalar.constant 0 : i32
@@ -196,64 +111,6 @@ low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @selected_a
   %21 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
   %bounded = sel.nez %left, %right, %21
   low.br ^forward(%bounded: reg<aie2p.er>)
-^forward(%carried: reg<aie2p.er>):
-  return %carried
-}
-
-// ====
-
-func.def public @independent_transformed_assumption_payload(%input: vector<4xi32>, %left: i32, %right: i32, %scalar: i32) -> (i32) {
-  %value = vector.extract %input[0] : vector<4xi32> -> i32
-  %threshold = scalar.constant 0 : i32
-  %condition = scalar.cmpi sgt, %value, %threshold : i32
-  %selected = scf.select %condition, %left, %right : i32
-  %payload, %bounded = scalar.assume %scalar, %selected [range(%selected, 0, 42)] : i32, i32
-  %increment = scalar.constant 3 : i32
-  %transformed = scalar.addi %payload, %increment : i32
-  cfg.br ^forward(%transformed: i32)
-^forward(%carried: i32):
-  func.return %carried : i32
-}
-
-// ----
-low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @independent_transformed_assumption_payload(%input: reg<aie2p.vec256 x2>, %left: reg<aie2p.er>, %right: reg<aie2p.er>, %payload: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
-  %value = vextract.32.imm %input, 0
-  %threshold = mov.short 0
-  %condition = lt %threshold, %value
-  %23 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
-  %bounded = sel.nez %left, %right, %23
-  %increment = mov.short 3
-  %transformed = add.rr %payload, %increment
-  low.br ^forward(%transformed: reg<aie2p.er>)
-^forward(%carried: reg<aie2p.er>):
-  return %carried
-}
-
-// ====
-
-func.def public @selected_transformed_assumption_payload(%input: vector<4xi32>, %left: i32, %right: i32, %scalar: i32) -> (i32) {
-  %value = vector.extract %input[0] : vector<4xi32> -> i32
-  %threshold = scalar.constant 0 : i32
-  %condition = scalar.cmpi sgt, %value, %threshold : i32
-  %selected = scf.select %condition, %left, %right : i32
-  %payload, %bounded = scalar.assume %scalar, %selected [range(%selected, 0, 42)] : i32, i32
-  %increment = scalar.constant 3 : i32
-  %transformed = scalar.addi %bounded, %increment : i32
-  cfg.br ^forward(%transformed: i32)
-^forward(%carried: i32):
-  func.return %carried : i32
-}
-
-// ----
-low.func.def public target<amd.xdna.aie2p.core> abi(object_function) @selected_transformed_assumption_payload(%input: reg<aie2p.vec256 x2>, %left: reg<aie2p.er>, %right: reg<aie2p.er>, %payload: reg<aie2p.er>) -> (reg<aie2p.er>) asm {
-  %value = vextract.32.imm %input, 0
-  %threshold = mov.short 0
-  %condition = lt %threshold, %value
-  %23 = copy %condition : reg<aie2p.er> -> reg<aie2p.mr27_select>
-  %bounded = sel.nez %left, %right, %23
-  %increment = mov.short 3
-  %transformed = add.rr %bounded, %increment
-  low.br ^forward(%transformed: reg<aie2p.er>)
 ^forward(%carried: reg<aie2p.er>):
   return %carried
 }

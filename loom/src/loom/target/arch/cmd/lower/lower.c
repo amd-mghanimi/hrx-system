@@ -83,7 +83,7 @@ typedef struct loom_cmd_lower_buffer_tuple_t {
   loom_value_id_t byte_length;
 } loom_cmd_lower_buffer_tuple_t;
 
-// Prepared low representations associated with one source SSA value.
+// Materialized low representations associated with one source SSA value.
 typedef struct loom_cmd_lower_source_value_t {
   // Resolved buffer tuple when the source is a buffer or view.
   loom_cmd_lower_buffer_tuple_t buffer;
@@ -92,7 +92,7 @@ typedef struct loom_cmd_lower_source_value_t {
 } loom_cmd_lower_source_value_t;
 
 typedef struct loom_cmd_lower_resources_t {
-  // Prepared representations indexed directly by source value ID.
+  // Materialized representations indexed directly by source value ID.
   loom_cmd_lower_source_value_t* source_values;
   // Number of entries in |source_values|.
   iree_host_size_t source_value_count;
@@ -607,10 +607,9 @@ static iree_status_t loom_cmd_lower_build_indirect_dispatch(
                     : CMD_CORE_DESCRIPTOR_REF_DISPATCH_INDIRECT_STATIC;
   } else {
     IREE_ASSERT_EQ(kind, LOOM_CMD_LOWER_INDIRECT_DISPATCH_KIND_DYNAMIC);
-    IREE_ASSERT(has_barrier,
-                "command-produced indirect counts cross an execution wave");
     descriptor_ordinal =
-        CMD_CORE_DESCRIPTOR_REF_DISPATCH_INDIRECT_DYNAMIC_BARRIER;
+        has_barrier ? CMD_CORE_DESCRIPTOR_REF_DISPATCH_INDIRECT_DYNAMIC_BARRIER
+                    : CMD_CORE_DESCRIPTOR_REF_DISPATCH_INDIRECT_DYNAMIC;
   }
   return loom_cmd_lower_build_descriptor_op(
       state, descriptor_ordinal, operands, operand_count,
@@ -722,7 +721,7 @@ static iree_status_t loom_cmd_lower_create_function(
       state->module, &state->plan->abi_layout, &abi_layout_attr));
   IREE_RETURN_IF_ERROR(loom_low_func_def_build(
       &state->builder, build_flags, visibility, retain,
-      /*cc=*/0, /*purity=*/0, /*inline_policy=*/0, /*allocation=*/0,
+      /*cc=*/0, /*effect_contract=*/0, /*inline_policy=*/0, /*allocation=*/0,
       /*schedule=*/0, descriptor_set_key, loom_symbol_ref_null(),
       LOOM_TARGET_ABI_COMMAND_PROGRAM, loom_named_attr_slice_empty(),
       loom_attr_as_dict(abi_layout_attr), LOOM_STRING_ID_INVALID,

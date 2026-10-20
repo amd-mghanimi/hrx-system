@@ -40,7 +40,7 @@ typedef struct iree_hal_block_command_buffer_t {
   // Recording produced by end(). Consumed by the queue or released on destroy.
   iree_hal_cmd_block_recording_t recording;
 
-  // Direct transient bindings that must be mapped after queue waits resolve.
+  // Direct transient bindings resolved after queue waits publish their backing.
   iree_hal_buffer_binding_t* late_bindings;
 
   // Number of entries in late_bindings.
@@ -370,13 +370,12 @@ static void iree_hal_block_command_buffer_profile_append_dispatch(
 // Binding helpers
 //===----------------------------------------------------------------------===//
 
-// Returns true when |buffer| must be mapped at queue-execute time instead of
-// command-buffer record time. Transient buffers are queue-owned memory with a
-// dealloca operation, so their mappings must be scoped to queue execution even
-// if the backing is already committed while the command buffer records.
+// Queue-owned allocation handles resolve after waits even if storage happens
+// to be committed during recording. Subspans retain the same allocation root.
 static bool iree_hal_block_command_buffer_needs_late_binding(
     iree_hal_buffer_t* buffer) {
-  return iree_hal_task_transient_buffer_isa(buffer);
+  return iree_hal_task_transient_buffer_isa(
+      iree_hal_buffer_allocated_buffer(buffer));
 }
 
 // Finds or appends a late direct binding for a transient buffer. Late slots are
@@ -440,18 +439,11 @@ const iree_hal_buffer_binding_t* iree_hal_block_command_buffer_late_bindings(
   return command_buffer->late_bindings;
 }
 
-// Resolves |count| buffer references into fixup entries. For each ref:
-//   - Direct ready non-transient buffer: maps the buffer persistently and
-//     stores the host pointer inline in the fixup.
-//   - Direct transient buffer: records a late binding slot that the queue maps
-//     after waits resolve.
-//   - Indirect buffer: records the binding table slot and offset for runtime
-//     resolution by the processor.
-//
-// Direct non-transient buffers use PERSISTENT mapping: the buffer is retained
-// by the resource_set for the CB's lifetime, so the pointer is stable.
-// Queue-owned transients are retained but mapped only during queue execution so
-// dealloca can be ordered against the scoped mapping lifetime.
+// Resolves direct ready references to borrowed native execution pointers. The
+// resource set retains ordinary buffers for the recording lifetime. Transient
+// references retain only their handles and resolve after queue waits; the
+// caller orders deallocation after every execution. Indirect references retain
+// their binding-table slot and offset for execution-time address resolution.
 //
 // The fixup data_index fields are pre-filled by the builder and preserved.
 static iree_status_t iree_hal_block_command_buffer_resolve_refs(
@@ -474,15 +466,13 @@ static iree_status_t iree_hal_block_command_buffer_resolve_refs(
         continue;
       }
 
-      // Direct: map the buffer now.
-      iree_hal_buffer_mapping_t mapping = {{0}};
-      IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
-          buffer_refs[i].buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
-          IREE_HAL_MEMORY_ACCESS_ANY, buffer_refs[i].offset,
-          buffer_refs[i].length, &mapping));
-      fixups[i].host_ptr = mapping.contents.data;
-      fixups[i].offset = 0;  // map_range already applied the offset.
-      fixups[i].length = mapping.contents.data_length;
+      iree_byte_span_t span = iree_byte_span_empty();
+      IREE_RETURN_IF_ERROR(iree_hal_buffer_native_host_span(
+          buffer_refs[i].buffer, buffer_refs[i].offset, buffer_refs[i].length,
+          &span));
+      fixups[i].host_ptr = span.data;
+      fixups[i].offset = 0;
+      fixups[i].length = span.data_length;
       fixups[i].slot = 0;
     } else {
       // Indirect: record binding table slot for runtime resolution.
@@ -503,7 +493,6 @@ static void iree_hal_block_command_buffer_destroy(
     iree_hal_command_buffer_t* base_command_buffer);
 
 iree_status_t iree_hal_block_command_buffer_create(
-    iree_hal_allocator_t* device_allocator,
     const iree_hal_queue_family_t* queue_family,
     iree_hal_command_buffer_mode_t mode,
     iree_hal_command_category_t command_categories,
@@ -530,8 +519,8 @@ iree_status_t iree_hal_block_command_buffer_create(
                                 (void**)&command_buffer));
   memset(command_buffer, 0, sizeof(*command_buffer));
   iree_hal_command_buffer_initialize(
-      device_allocator, queue_family, mode, command_categories,
-      binding_capacity, (uint8_t*)command_buffer + validation_state_offset,
+      queue_family, mode, command_categories, binding_capacity,
+      (uint8_t*)command_buffer + validation_state_offset,
       &iree_hal_block_command_buffer_vtable, &command_buffer->base);
   command_buffer->host_allocator = host_allocator;
   command_buffer->block_pool = block_pool;
@@ -541,8 +530,11 @@ iree_status_t iree_hal_block_command_buffer_create(
   command_buffer->late_binding_count = 0;
   command_buffer->late_binding_capacity = 0;
 
-  iree_status_t status =
-      iree_hal_resource_set_allocate(block_pool, &command_buffer->resource_set);
+  iree_status_t status = iree_ok_status();
+  if (!iree_any_bit_set(mode, IREE_HAL_COMMAND_BUFFER_MODE_UNRETAINED)) {
+    status = iree_hal_resource_set_allocate(block_pool,
+                                            &command_buffer->resource_set);
+  }
   if (iree_status_is_ok(status)) {
     *out_command_buffer = &command_buffer->base;
   } else {
@@ -669,35 +661,58 @@ static iree_status_t iree_hal_block_command_buffer_end_debug_group(
 // Barriers and events
 //===----------------------------------------------------------------------===//
 
-static iree_status_t iree_hal_block_command_buffer_execution_barrier(
+static iree_status_t iree_hal_block_command_buffer_barrier(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_execution_stage_t source_stage_mask,
-    iree_hal_execution_stage_t target_stage_mask,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers) {
-  const iree_hal_execution_barrier_flags_t supported_flags =
-      IREE_HAL_EXECUTION_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE |
-      IREE_HAL_EXECUTION_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE;
-  if (IREE_UNLIKELY(flags & ~supported_flags)) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "unsupported task execution barrier flags: 0x%016" PRIx64,
-        flags & ~supported_flags);
-  }
-
+    const iree_hal_barrier_t* barrier) {
   iree_hal_block_command_buffer_t* command_buffer =
       iree_hal_block_command_buffer_cast(base_command_buffer);
-  // Block ISA barriers are global: all prior work in the region must complete
-  // before the next region begins. Fine-grained memory/buffer barriers are
-  // not applicable. Region publication uses release/acquire synchronization in
-  // the coherent host memory domain and already provides system visibility.
+  const iree_hal_atomic_flags_t atomic_flags =
+      iree_hal_task_barrier_resolve_atomic_flags(barrier);
   IREE_RETURN_IF_ERROR(iree_hal_block_command_buffer_profile_reserve_operations(
       command_buffer, command_buffer->profile.operations.count + 1));
   IREE_RETURN_IF_ERROR(
       iree_hal_cmd_block_builder_barrier(&command_buffer->builder));
+  if (atomic_flags != IREE_HAL_ATOMIC_FLAG_NONE) {
+    // Isolate the fence in one region. The block processor's region dependency
+    // aggregates prior worker writes into the fence and publishes its result to
+    // every worker entering the following region.
+    IREE_RETURN_IF_ERROR(
+        iree_hal_cmd_build_fence(&command_buffer->builder, atomic_flags));
+    IREE_RETURN_IF_ERROR(
+        iree_hal_cmd_block_builder_barrier(&command_buffer->builder));
+  }
+  for (iree_host_size_t i = 0; i < barrier->buffer_barrier_count; ++i) {
+    const iree_hal_buffer_barrier_t* range = &barrier->buffer_barriers[i];
+    if (!range->recipe) {
+      continue;
+    }
+    IREE_RETURN_IF_ERROR(iree_hal_resource_set_insert_strided(
+        command_buffer->resource_set, 1, &range->buffer_ref,
+        offsetof(iree_hal_buffer_ref_t, buffer),
+        sizeof(iree_hal_buffer_ref_t)));
+    for (uint32_t j = 0; j < range->recipe->operation_count; ++j) {
+      const iree_hal_memory_transition_recipe_info_t* recipe =
+          &range->recipe->operations[j];
+      if (recipe->executor == IREE_HAL_MEMORY_TRANSITION_EXECUTOR_QUEUE) {
+        continue;
+      }
+      iree_hal_cmd_fixup_t* fixups = NULL;
+      iree_hal_cmd_build_token_t token;
+      IREE_RETURN_IF_ERROR(iree_hal_cmd_build_cache(&command_buffer->builder,
+                                                    recipe, range->buffer_ref,
+                                                    &fixups, &token));
+      if (fixups) {
+        iree_status_t status = iree_hal_block_command_buffer_resolve_refs(
+            command_buffer, 1, &range->buffer_ref, fixups);
+        if (!iree_status_is_ok(status)) {
+          iree_hal_cmd_build_rollback(&command_buffer->builder, token);
+          return status;
+        }
+      }
+      IREE_RETURN_IF_ERROR(
+          iree_hal_cmd_block_builder_barrier(&command_buffer->builder));
+    }
+  }
   iree_hal_block_command_buffer_profile_append_barrier(command_buffer);
   return iree_ok_status();
 }
@@ -1013,7 +1028,7 @@ static const iree_hal_command_buffer_vtable_t
         .end = iree_hal_block_command_buffer_end,
         .begin_debug_group = iree_hal_block_command_buffer_begin_debug_group,
         .end_debug_group = iree_hal_block_command_buffer_end_debug_group,
-        .execution_barrier = iree_hal_block_command_buffer_execution_barrier,
+        .barrier = iree_hal_block_command_buffer_barrier,
         .atomic_wait = iree_hal_block_command_buffer_atomic_wait,
         .atomic_store = iree_hal_block_command_buffer_atomic_store,
         .atomic_rmw = iree_hal_block_command_buffer_atomic_rmw,

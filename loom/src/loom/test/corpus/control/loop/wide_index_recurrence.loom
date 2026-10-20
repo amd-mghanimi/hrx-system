@@ -1,0 +1,121 @@
+// A wide logical index must retain its high word when a cyclic CFG meet loses
+// the seed's exact range. The three subtractions cross the backedge before the
+// final value is compared against another wide index.
+kernel.def @wide_index_cfg_recurrence() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%output: buffer) {
+  func.call @compute_wide_index_cfg_recurrence(%output) : (buffer)
+  kernel.return
+}
+
+func.def device inline @compute_wide_index_cfg_recurrence(%output: buffer) {
+  %initial = index.constant 4294967303 : index
+  %iteration_count = scalar.constant 3 : i32
+  %c0 = scalar.constant 0 : i32
+  %c1 = scalar.constant 1 : i32
+  %step = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 8} : buffer
+  %output_view = buffer.view %aligned_output[%base] : buffer -> view<1xi32>
+  cfg.br ^header(%iteration_count: i32, %initial: index)
+^header(%remaining: i32, %value: index):
+  %more = scalar.cmpi sgt, %remaining, %c0 : i32
+  cfg.cond_br %more, ^body, ^exit
+^body:
+  %next_remaining = scalar.subi %remaining, %c1 : i32
+  %next_value = index.sub %value, %step : index
+  cfg.br ^header(%next_remaining: i32, %next_value: index)
+^exit:
+  %expected = index.constant 4294967300 : index
+  %matches = index.cmp eq, %value, %expected : index
+  cfg.cond_br %matches, ^match, ^mismatch
+^match:
+  view.store %c1, %output_view[0] : i32, view<1xi32>
+  func.return
+^mismatch:
+  view.store %c0, %output_view[0] : i32, view<1xi32>
+  func.return
+}
+
+func.def @wide_index_cfg_recurrence_oracle(%output: buffer) {
+  %base = index.constant 0 : offset
+  %expected = scalar.constant 1 : i32
+  %output_view = buffer.view %output[%base] : buffer -> view<1xi32>
+  view.store %expected, %output_view[0] : i32, view<1xi32>
+  func.return
+}
+
+check.scenario @wide_index_cfg_recurrence_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-1) : tensor<9xi32>
+    %output = check.tensor.view %storage offset(16) : tensor<9xi32> -> tensor<1xi32>
+    check.compare<@wide_index_cfg_recurrence, @wide_index_cfg_recurrence_oracle>(%output) : (tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<9xi32>
+    }
+  }
+  check.return
+}
+
+// The counted domain is above u32, with a dynamic exclusive bound and positive
+// stride. Converting each body coordinate to i64 must retain its high word.
+kernel.def @wide_index_counted_sum() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%trial_input: index, %output: buffer) {
+  %trial = index.assume %trial_input [range(%trial_input, 0, 26)] : index
+  %c1 = index.constant 1 : index
+  %c3 = index.constant 3 : index
+  %span = index.div %trial, %c3 : index
+  %step_residue = index.rem %trial, %c3 : index
+  %step = index.add %step_residue, %c1 : index
+  %begin = index.constant 4294967299 : index
+  %end = index.add %begin, %span : index
+  %initial_sum = scalar.constant 0 : i64
+  %sum = scf.for %position = [%begin to %end step %step](%partial = %initial_sum : i64) -> (i64) {
+    %word = index.cast %position : index to i64
+    %next = scalar.addi %partial, %word : i64
+    scf.yield %next : i64
+  }
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<1xi64>
+  view.store %sum, %output_view[0] : i64, view<1xi64>
+  kernel.return
+}
+
+// Evaluate the arithmetic-series sum in fixed-width integers, independently of
+// counted-loop lowering, index conversion, and its induction facts.
+func.def @wide_index_counted_sum_oracle(%trial_input: index, %output: buffer) {
+  %begin = scalar.constant 4294967299 : i64
+  %c1 = scalar.constant 1 : i64
+  %c2 = scalar.constant 2 : i64
+  %c3 = scalar.constant 3 : i64
+  %trial = index.cast %trial_input : index to i64
+  %span = scalar.divsi %trial, %c3 : i64
+  %step_residue = scalar.remsi %trial, %c3 : i64
+  %step = scalar.addi %step_residue, %c1 : i64
+  %padded_span = scalar.addi %span, %step : i64
+  %numerator = scalar.subi %padded_span, %c1 : i64
+  %count = scalar.divsi %numerator, %step : i64
+  %preceding = scalar.subi %count, %c1 : i64
+  %pair_product = scalar.muli %count, %preceding : i64
+  %pairs = scalar.divsi %pair_product, %c2 : i64
+  %increments = scalar.muli %pairs, %step : i64
+  %origins = scalar.muli %count, %begin : i64
+  %sum = scalar.addi %origins, %increments : i64
+  %base = index.constant 0 : offset
+  %output_view = buffer.view %output[%base] : buffer -> view<1xi64>
+  view.store %sum, %output_view[0] : i64, view<1xi64>
+  func.return
+}
+
+check.scenario @wide_index_counted_sum_values {
+  check.trial[27](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-1) : tensor<5xi64>
+    %output = check.tensor.view %storage offset(16) : tensor<5xi64> -> tensor<1xi64>
+    check.compare<@wide_index_counted_sum, @wide_index_counted_sum_oracle>(%trial, %output) : (index, tensor<1xi64>) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<5xi64>
+    }
+  }
+  check.return
+}

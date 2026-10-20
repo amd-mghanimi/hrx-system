@@ -61,7 +61,7 @@ class DCETest : public ::testing::Test {
                                               IREE_SV("test_fn"), &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    loom_symbol_ref_t callee = {/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    loom_symbol_ref_t callee = {.module_id = 0, .symbol_id = symbol_id};
     loom_op_t* func_op = NULL;
     IREE_ASSERT_OK(loom_test_func_build(&module_builder, 0, 0, 0, callee, NULL,
                                         0, NULL, 0, NULL, 0, NULL, 0,
@@ -348,7 +348,7 @@ TEST_F(DCETest, PartialChainSurvives) {
 }
 
 TEST_F(DCETest, RemovesReadOnlyOpWithUnusedResult) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   // Create a pool-typed block arg so we have a resource value.
@@ -367,7 +367,7 @@ TEST_F(DCETest, RemovesReadOnlyOpWithUnusedResult) {
 }
 
 TEST_F(DCETest, PreservesWriteOp) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -392,7 +392,7 @@ TEST_F(DCETest, PreservesWriteOp) {
 }
 
 TEST_F(DCETest, PreservesMutateOpRemovesUnusedResult) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -446,7 +446,7 @@ TEST_F(DCETest, DiamondUsePattern) {
 
 TEST_F(DCETest, PartialLiveness) {
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
   IREE_ASSERT_OK(loom_builder_define_block_arg(
@@ -496,7 +496,7 @@ TEST_F(DCETest, UnknownEffectsWithResultsSurvives) {
 }
 
 TEST_F(DCETest, NonDeterministicReadWithUnusedResultIsDead) {
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t pool_id = LOOM_VALUE_ID_INVALID;
@@ -564,7 +564,7 @@ TEST_F(DCETest, NestedRegionDeadOpsRemoved) {
 
 TEST_F(DCETest, InnerDeadOpRemovedWhileOuterLives) {
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
 
   loom_value_id_t arg = LOOM_VALUE_ID_INVALID;
   IREE_ASSERT_OK(loom_builder_define_block_arg(
@@ -692,7 +692,7 @@ TEST_F(DCETest, NullFunctionBody) {
 
 TEST_F(DCETest, UnusedAllocationIsRemoved) {
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
 
   // Create an index block arg for the allocation size.
   loom_value_id_t size_id = LOOM_VALUE_ID_INVALID;
@@ -711,7 +711,7 @@ TEST_F(DCETest, UnusedAllocationIsRemoved) {
 
 TEST_F(DCETest, UsedAllocationSurvives) {
   loom_type_t index_type = loom_type_scalar(LOOM_SCALAR_TYPE_INDEX);
-  loom_type_t pool_type = loom_type_pool(loom_dim_pack_static(4096));
+  loom_type_t pool_type = loom_type_pool();
   loom_type_t i32 = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
 
   loom_value_id_t size_id = LOOM_VALUE_ID_INVALID;

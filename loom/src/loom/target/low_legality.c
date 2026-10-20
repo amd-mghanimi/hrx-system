@@ -48,8 +48,8 @@ struct loom_target_low_legality_context_t {
   loom_op_kind_t callable_exit_kind;
   // Result object receiving counters and selected descriptor set.
   loom_target_low_legality_result_t* result;
-  // Scratch arena for the IR walker.
-  iree_arena_allocator_t arena;
+  // True when the current operation produced a terminal contract rejection.
+  bool terminal_rejection;
 };
 
 static const loom_target_bundle_t* loom_target_low_legality_options_bundle(
@@ -340,7 +340,12 @@ const loom_value_fact_table_t* loom_target_low_legality_fact_table(
   return context->options->environment->fact_table;
 }
 
-const loom_local_value_domain_t* loom_target_low_legality_value_domain(
+loom_storage_access_scope_t* loom_target_low_legality_storage_access(
+    const loom_target_low_legality_context_t* context) {
+  return context->options->environment->storage_access;
+}
+
+loom_local_value_domain_t* loom_target_low_legality_value_domain(
     const loom_target_low_legality_context_t* context) {
   return context->options->environment->value_domain;
 }
@@ -538,7 +543,8 @@ static iree_status_t loom_target_low_legality_verify_registered_type(
 
 static iree_status_t loom_target_low_legality_verify_type(
     loom_target_low_legality_context_t* context, const loom_op_t* op,
-    loom_type_t type) {
+    loom_type_t type, loom_value_id_t value_id,
+    loom_target_vector_carrier_supported_callback_t vector_carrier_supported) {
   if (loom_type_is_scalar(type)) {
     return loom_target_low_legality_verify_scalar_type(context, op, type);
   }
@@ -552,11 +558,6 @@ static iree_status_t loom_target_low_legality_verify_type(
   if (registered_type_handled) {
     return iree_ok_status();
   }
-  if (context->options->type_supported.fn != NULL &&
-      context->options->type_supported.fn(
-          context->options->type_supported.user_data, context->module, type)) {
-    return iree_ok_status();
-  }
   if (loom_type_is_vector(type)) {
     if (!loom_type_is_all_static(type)) {
       return loom_target_low_legality_emit_type_constraint(
@@ -568,8 +569,20 @@ static iree_status_t loom_target_low_legality_verify_type(
       return loom_target_low_legality_emit_type_constraint(
           context, op, type, IREE_SV("vector.lane_count_u32"));
     }
+    if (vector_carrier_supported.fn != NULL &&
+        !vector_carrier_supported.fn(
+            vector_carrier_supported.user_data, context->module,
+            context->options->environment->fact_table, value_id, type)) {
+      return loom_target_low_legality_emit_type_constraint(
+          context, op, type, IREE_SV("vector.target_carrier"));
+    }
     return loom_target_low_legality_verify_scalar_type(
         context, op, loom_type_scalar(loom_type_element_type(type)));
+  }
+  if (context->options->type_supported.fn != NULL &&
+      context->options->type_supported.fn(
+          context->options->type_supported.user_data, context->module, type)) {
+    return iree_ok_status();
   }
   return loom_target_low_legality_emit_type_constraint(
       context, op, type, IREE_SV("type.target_low_mapping"));
@@ -577,22 +590,26 @@ static iree_status_t loom_target_low_legality_verify_type(
 
 static iree_status_t loom_target_low_legality_verify_value(
     loom_target_low_legality_context_t* context, const loom_op_t* op,
-    loom_value_id_t value_id) {
+    loom_value_id_t value_id,
+    loom_target_vector_carrier_supported_callback_t vector_carrier_supported) {
   const loom_type_t type = loom_module_value_type(context->module, value_id);
-  return loom_target_low_legality_verify_type(context, op, type);
+  return loom_target_low_legality_verify_type(context, op, type, value_id,
+                                              vector_carrier_supported);
 }
 
 static iree_status_t loom_target_low_legality_verify_op_value_types(
     loom_target_low_legality_context_t* context, const loom_op_t* op) {
   const loom_value_id_t* operands = loom_op_const_operands(op);
   for (uint16_t i = 0; i < op->operand_count; ++i) {
-    IREE_RETURN_IF_ERROR(
-        loom_target_low_legality_verify_value(context, op, operands[i]));
+    IREE_RETURN_IF_ERROR(loom_target_low_legality_verify_value(
+        context, op, operands[i],
+        context->options->source_vector_carrier_supported));
   }
   const loom_value_id_t* results = loom_op_const_results(op);
   for (uint16_t i = 0; i < op->result_count; ++i) {
-    IREE_RETURN_IF_ERROR(
-        loom_target_low_legality_verify_value(context, op, results[i]));
+    IREE_RETURN_IF_ERROR(loom_target_low_legality_verify_value(
+        context, op, results[i],
+        context->options->source_vector_carrier_supported));
   }
   return iree_ok_status();
 }
@@ -662,6 +679,11 @@ static iree_status_t loom_target_low_legality_try_contract_query_op(
       return loom_target_low_legality_reject_contract_query(context, op,
                                                             &result);
     }
+    case LOOM_TARGET_CONTRACT_QUERY_TERMINAL_REJECTION:
+      context->terminal_rejection = true;
+      *out_handled = true;
+      return loom_target_low_legality_reject_contract_query(context, op,
+                                                            &result);
     case LOOM_TARGET_CONTRACT_QUERY_INVALID_IR:
       *out_handled = true;
       return loom_target_low_legality_reject_contract_query(context, op,
@@ -894,9 +916,11 @@ static iree_status_t loom_target_low_legality_walk_op(
   loom_target_low_legality_context_t* context =
       (loom_target_low_legality_context_t*)user_data;
   *out_result = LOOM_WALK_CONTINUE;
+  context->terminal_rejection = false;
   uint32_t previous_error_count = context->result->error_count;
   IREE_RETURN_IF_ERROR(loom_target_low_legality_verify_op(context, op));
-  if (loom_target_low_legality_should_stop(context)) {
+  if (context->terminal_rejection ||
+      loom_target_low_legality_should_stop(context)) {
     *out_result = LOOM_WALK_ABORT;
   } else if (context->result->error_count != previous_error_count &&
              loom_target_low_legality_skip_children_after_rejection(op->kind)) {
@@ -907,18 +931,26 @@ static iree_status_t loom_target_low_legality_walk_op(
 
 static iree_status_t loom_target_low_legality_verify_function_signature(
     loom_target_low_legality_context_t* context) {
+  loom_target_vector_carrier_supported_callback_t vector_carrier_supported =
+      context->options->source_function_vector_carrier_supported;
+  if (vector_carrier_supported.fn == NULL) {
+    vector_carrier_supported =
+        context->options->source_vector_carrier_supported;
+  }
   uint16_t argument_count = 0;
   const loom_value_id_t* argument_ids =
       loom_func_like_arg_ids(context->function, &argument_count);
   for (uint16_t i = 0; i < argument_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_target_low_legality_verify_value(
-        context, context->function.op, argument_ids[i]));
+        context, context->function.op, argument_ids[i],
+        vector_carrier_supported));
   }
   const loom_value_id_t* result_ids =
       loom_op_const_results(context->function.op);
   for (uint16_t i = 0; i < context->function.op->result_count; ++i) {
     IREE_RETURN_IF_ERROR(loom_target_low_legality_verify_value(
-        context, context->function.op, result_ids[i]));
+        context, context->function.op, result_ids[i],
+        vector_carrier_supported));
   }
   return iree_ok_status();
 }
@@ -964,8 +996,6 @@ iree_status_t loom_target_low_verify_function_legality(
                                          LOOM_ERR_TARGET_089, params,
                                          IREE_ARRAYSIZE(params));
   }
-  iree_arena_initialize(module->arena.block_pool, &context.arena);
-
   iree_status_t status = iree_ok_status();
   if (iree_status_is_ok(status)) {
     status = loom_target_low_legality_verify_function_signature(&context);
@@ -975,9 +1005,7 @@ iree_status_t loom_target_low_verify_function_legality(
     status = loom_walk_region(
         module, body, LOOM_WALK_PRE_ORDER,
         (loom_walk_callback_t){loom_target_low_legality_walk_op, &context},
-        &context.arena, &walk_result);
+        &walk_result);
   }
-
-  iree_arena_deinitialize(&context.arena);
   return status;
 }

@@ -8,9 +8,9 @@ The compiler owns the device program; the loader establishes its declared
 storage and binding contract.
 
 The image object in this directory is immutable and device-independent. The
-[experimental executable adapter](../../../../../../../../experimental/xdna/executable.h) connects
+[native storage materializer](../executable_storage.h) connects
 it to caller-owned mappings and libamdf memory handles. The
-[runner](../../../../../../../../experimental/xdna/README.md) demonstrates the complete lifecycle.
+[XDNA HAL](../README.md) owns the complete device execution lifecycle.
 The [Loom producer](../../../../../../../../loom/src/loom/target/arch/amd/xdna/aie2p/emit/xdna_product.h)
 and reader share the fixed-width codecs in
 [xdna_executable.h](../../../../../schemas/xdna_executable.h).
@@ -38,7 +38,7 @@ Strix Halo NPU5 share an array family but have distinct execution profiles.
 The loader does not guess compatibility from a family name or patch an image
 to fit another endpoint.
 
-`iree_hal_amd_xdna_image_create` retains the source byte sequence, decodes the
+`iree_hal_amd_xdna_image_allocate` retains the source byte sequence, decodes the
 load directory, and retains compact metadata. It does not flatten or copy the
 native payload into another host image. Table queries borrow image-owned
 storage. The image has no device allocations, mappings, context, or submission
@@ -57,25 +57,32 @@ A real caller follows this sequence:
    the declared dynamic relocation fields.
 5. Publish mapped writes through the native cache API, resolve invocation zero,
    and submit its command handle and range through libamdf.
-6. Observe terminal completion, perform required output cache invalidation,
-   and advance to the metadata's continuation ordinal while residency is valid.
+6. Observe terminal completion and perform required output cache invalidation.
+   A consumer with a separate, explicit residency guarantee may then advance to
+   the metadata's continuation ordinal. The current XDNA HAL does not do so.
 7. Rebind or release resources only after their previous device users have
    drained. Keep mappings, backing, logical buffers, and context alive through
    their actual completion frontier.
 
-`iree_hal_amd_xdna_executable_load` and `_bind` allocate no memory and retain no
-resources. They check their supplied contracts before writes. A source I/O
+`iree_hal_amd_xdna_executable_storage_load` and `_bind` allocate no memory and
+retain no resources. They check their supplied contracts before writes. A source I/O
 failure during loading may leave backing partially initialized; that backing
 is not ready for submission. Failure does not promise rollback of caller
 storage. Native submission receives memory handles and byte ranges, with no
 per-launch XRT patch list or ELF decoding.
 
-Invocation zero establishes entry state. The current compiler emits a finite
-protocol `0 -> 1 -> 1`: establishment first, then repeated work using resident
-workers. A self-contained range can express `0 -> 0`. A continuation becomes
-valid only after terminal completion while context, backing, and resident state
-remain intact. Reset, replacement by another entry, or loss of backing requires
-establishment again. The caller owns this ordinal and its completion frontier.
+Invocation zero establishes entry state. The current compiler encodes
+`0 -> 1 -> 1`: establishment first, followed by a smaller continuation for an
+execution environment that can separately prove retained tile state. A
+self-contained range can encode `0 -> 0`. The metadata describes this command
+relationship; it does not provide the residency proof.
+
+libamdf context lifetime and fixed backing do not guarantee application tile
+state across independent submissions. The current XDNA HAL therefore uses
+invocation zero for every dispatch. A persistent service instead remains inside
+one outstanding invocation while CPU, GPU, and NPU participants exchange work
+through shared memory. Its terminal completion means that the service has
+stopped its workers and drained transfers, so the placement can be reused.
 
 Native command retirement alone does not prove arbitrary autonomous tile work
 has ended. The compiled program must establish the required output and worker
@@ -94,13 +101,13 @@ and contains no precompiled bootstrap PDI; family bootstrap belongs to libamdf.
 | [image.h](image.h) | Immutable owner and export lookup. |
 | [aie2p/target.h](aie2p/target.h) | Admitted context identity, geometry, and instruction alignment. |
 | [Shared schema](../../../../../schemas/xdna_executable.h) | Wire constants and fixed-width codecs used by producer and consumer. |
-| [Executable adapter](../../../../../../../../experimental/xdna/executable.h) | Loading, relocation, external binding, and native command resolution. |
+| [Native storage materializer](../executable_storage.h) | Loading, relocation, external binding, and native command resolution. |
 
 Admission validates untrusted file structure once. Indexed consumers use the
 established relationships. Native payload is executable code: these checks are
 not a sandbox and do not certify instruction semantics.
 
-## Wire format, metadata version 2
+## Wire format, metadata version 3
 
 All multibyte fields are little endian. Offsets below are byte offsets from the
 start of the relevant row; `u16`, `u32`, and `u64` are unsigned fixed-width
@@ -149,18 +156,18 @@ allocation_use[4] * U
 entry[48] * E
 binding[40] * B
 relocation[48] * R
-invocation[16] * I
+invocation[24] * I
 name_bytes[S]
 ```
 
-The exact length is `64 + 32*A + 4*U + 48*E + 40*B + 48*R + 16*I + S`.
+The exact length is `64 + 32*A + 4*U + 48*E + 40*B + 48*R + 24*I + S`.
 Each record count is at most 65,535; `A` and `E` are nonzero. The whole metadata
 extent is at most 16 MiB. Name bytes have no implicit terminators.
 
 | Offset | Type | Field | Meaning |
 | --- | --- | --- | --- |
 | 0 | u32 | magic | `0x414E4458`, bytes `XDNA`. |
-| 4 | u16 | version | `2`. |
+| 4 | u16 | version | `3`. |
 | 6 | u16 | native_encoding | `1`, native transaction protocol 0.1. |
 | 8 | u32 | target_generation | `3`, AIE2P. |
 | 12 | u32 | device_profile_revision | Exact incompatible profile revision. |
@@ -219,7 +226,7 @@ invocations are addressed by dense ordinals relative to the selected entry.
 
 | Offset | Type | Field | Meaning |
 | --- | --- | --- | --- |
-| 0 | u16 | kind | `BUFFER = 1`. |
+| 0 | u16 | kind | `NONE = 0` or `BUFFER = 1`. |
 | 2 | u16 | address_space | `GLOBAL = 1` or `HOST = 2`. |
 | 4 | u16 | access | Nonempty combination of `READ = 1`, `WRITE = 2`. |
 | 6 | u16 | usage | Combination of `DEVICE_VISIBLE = 1`, `HOST_VISIBLE = 2`, `COHERENT = 4`, `CACHED = 8`. |
@@ -228,10 +235,13 @@ invocations are addressed by dense ordinals relative to the selected entry.
 | 24 | u64 | minimum_byte_offset | Inclusive lower bound on the supplied logical offset. |
 | 32 | u64 | maximum_byte_offset | Inclusive upper bound; `UINT64_MAX` permits any offset satisfying the other bounds. |
 
-The supplied logical range must fit its buffer and satisfy the access,
-visibility, extent, offset, and alignment requirements. Minimum offset cannot
-exceed maximum offset. Binding ordinals are independent of allocation-use
-ordinals: external tensors are not executable backing allocations.
+`NONE` is an exact all-zero row preserving an unused position in the entry's
+dense binding ABI. It has no supplied resource requirement and cannot source a
+dynamic relocation. A `BUFFER` row has nonempty access and the supplied logical
+range must fit its buffer and satisfy the visibility, extent, offset, and
+alignment requirements. Minimum offset cannot exceed maximum offset. Binding
+ordinals are independent of allocation-use ordinals: external tensors are not
+executable backing allocations.
 
 ### Relocation rows
 
@@ -271,6 +281,23 @@ field; it does not search or decode native command streams.
 | 4 | u32 | byte_offset | Command range offset, aligned to the target's instruction requirement. |
 | 8 | u32 | byte_length | Nonzero byte length, a multiple of four. |
 | 12 | u32 | next_invocation | Valid entry-relative continuation ordinal. |
+| 16 | u32 | measurement.begin | Optional command-relative timer insertion boundary. |
+| 20 | u32 | measurement.end | Optional command-relative timer insertion boundary. |
+
+Both measurement offsets are zero when no timer interval is declared. Otherwise
+`16 <= begin <= end <= byte_length`, with four-byte alignment. These are
+instruction boundaries established by the compiler, enclosing work in one
+partition-shim timer epoch. The interval contains no timer reset, and the whole
+command emits no other firmware-result records. This is an executable semantic
+contract, like declared binding access, rather than instruction certification.
+The header and insertion/copy boundaries cannot intersect relocation word pairs.
+
+Ordinary commands contain no timer instructions. Optional profiling materializes
+an exclusive command copy with two fixed-ID `RECORD_TIMER` instructions at the
+declared boundaries. Original storage, relocations, and continuation identity
+remain valid. Measured copies consume 24 additional native command bytes and
+retain their ordinary allocation closure. Timer differences are cycle counters;
+these boundaries do not establish a continuous clock between invocations.
 
 The range fits its allocation and is fully initialized. Allocation alignment
 is at least the target instruction alignment. Ordinal zero and continuation

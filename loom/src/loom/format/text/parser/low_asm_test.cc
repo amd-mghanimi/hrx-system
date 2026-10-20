@@ -73,9 +73,10 @@ class LowAsmParserTest : public ::testing::Test {
   iree_status_t Parse(const char* source, bool enable_low_asm,
                       loom_module_t** out_module) {
     capture_.Reset();
-    loom_text_parse_options_t options = {};
-    options.diagnostic_sink = capture_.sink();
-    options.max_errors = 100;
+    loom_text_parse_options_t options = {
+        .diagnostic_sink = capture_.sink(),
+        .max_errors = 100,
+    };
     if (enable_low_asm) {
       loom_low_descriptor_text_asm_environment_initialize(
           &low_descriptor_registry_, &options.low_asm_environment);
@@ -114,7 +115,7 @@ class LowAsmParserTest : public ::testing::Test {
     return module;
   }
 
-  const std::vector<CapturedDiagnostic>& ParseExpectErrors(const char* source) {
+  const std::deque<CapturedDiagnostic>& ParseExpectErrors(const char* source) {
     loom_module_t* module = nullptr;
     IREE_EXPECT_OK(Parse(source, /*enable_low_asm=*/true, &module));
     EXPECT_EQ(module, nullptr);
@@ -269,23 +270,24 @@ TEST_F(LowAsmParserTest, EmbeddedAssemblyOwnsIrAndPreservesModule) {
       "// C++ wrapper\nR\"(\n"
       "(%value: reg<test.i32>) -> (reg<test.i32>) {\n"
       "  %sum = test.add.i32 %value, %value\n"
+      "  test.state.assign.i32.immediate 1\n"
       "  return %sum\n"
       "}\n)\"; trailing C++";
   loom_string_id_t name;
   IREE_ASSERT_OK(loom_module_intern_string(module, IREE_SV("embedded"), &name));
   loom_symbol_id_t symbol;
   IREE_ASSERT_OK(loom_module_add_symbol(module, name, &symbol));
-  loom_text_parse_options_t options = {};
-  options.diagnostic_sink = capture_.sink();
+  loom_text_parse_options_t options = {.diagnostic_sink = capture_.sink()};
   loom_low_descriptor_text_asm_environment_initialize(
       &low_descriptor_registry_, &options.low_asm_environment);
-  loom_source_range_t range = {};
-  range.filename = IREE_SV("caller.cpp");
-  range.source = iree_make_string_view(source.data(), source.size());
-  range.start = source.find('(') + 1;
-  range.end = source.rfind(")\"");
-  range.start_line = 2;
-  range.start_column = 4;
+  loom_source_range_t range = {
+      .filename = IREE_SV("caller.cpp"),
+      .source = iree_make_string_view(source.data(), source.size()),
+      .start = source.find('(') + 1,
+      .end = source.rfind(")\""),
+      .start_line = 2,
+      .start_column = 4,
+  };
   loom_op_t* function = nullptr;
   IREE_ASSERT_OK(loom_text_parse_low_assembly(
       range, IREE_SV("test.low.core"), symbol, module, &options, &function));
@@ -299,6 +301,9 @@ TEST_F(LowAsmParserTest, EmbeddedAssemblyOwnsIrAndPreservesModule) {
   EXPECT_EQ(loom_block_op(loom_module_block(module), 1), function);
   auto* body = loom_low_func_def_body(function);
   EXPECT_TRUE(body->source_flags & LOOM_REGION_SOURCE_FLAG_EXPLICIT_LOW_ASM);
+  EXPECT_EQ(body->observable_effect_count, 1u);
+  EXPECT_EQ(loom_module_block(module)->parent_region->observable_effect_count,
+            1u);
   auto* entry = loom_region_entry_block(body);
   ASSERT_EQ(entry->arg_count, 1);
   auto* add = loom_block_op(entry, 0);
@@ -309,13 +314,15 @@ TEST_F(LowAsmParserTest, EmbeddedAssemblyOwnsIrAndPreservesModule) {
   auto* sum = loom_module_value(module, loom_op_results(add)[0]);
   EXPECT_EQ(loom_value_def_op(sum), add);
   ASSERT_EQ(sum->use_count, 1u);
-  EXPECT_EQ(loom_use_user_op(loom_value_uses(sum)[0]), loom_block_op(entry, 1));
+  EXPECT_EQ(loom_use_user_op(loom_value_uses(sum)[0]), loom_block_op(entry, 2));
   EXPECT_EQ(StringFromId(module, loom_func_like_repr_contract(
                                      loom_func_like_cast(module, function))),
             "test.low.core");
   IREE_ASSERT_OK(loom_op_erase(module, function));
   EXPECT_EQ(loom_module_block(module)->op_count, 1u);
   EXPECT_EQ(loom_block_op(loom_module_block(module), 0), existing);
+  EXPECT_EQ(loom_module_block(module)->parent_region->observable_effect_count,
+            0u);
   loom_module_free(module);
 }
 
@@ -327,17 +334,17 @@ TEST_F(LowAsmParserTest, EmbeddedAssemblyEofIsInsideOriginalSource) {
   IREE_ASSERT_OK(loom_module_intern_string(module, IREE_SV("embedded"), &name));
   loom_symbol_id_t symbol;
   IREE_ASSERT_OK(loom_module_add_symbol(module, name, &symbol));
-  loom_text_parse_options_t options = {};
-  options.diagnostic_sink = capture_.sink();
+  loom_text_parse_options_t options = {.diagnostic_sink = capture_.sink()};
   loom_low_descriptor_text_asm_environment_initialize(
       &low_descriptor_registry_, &options.low_asm_environment);
-  loom_source_range_t range = {};
-  range.filename = IREE_SV("caller.cpp");
-  range.source = iree_make_string_view(source.data(), source.size());
-  range.start = source.find('(') + 1;
-  range.end = source.rfind(")\"");
-  range.start_line = 2;
-  range.start_column = 4;
+  loom_source_range_t range = {
+      .filename = IREE_SV("caller.cpp"),
+      .source = iree_make_string_view(source.data(), source.size()),
+      .start = source.find('(') + 1,
+      .end = source.rfind(")\""),
+      .start_line = 2,
+      .start_column = 4,
+  };
   loom_op_t* function = nullptr;
   IREE_ASSERT_OK(loom_text_parse_low_assembly(
       range, IREE_SV("test.low.core"), symbol, module, &options, &function));
@@ -815,6 +822,48 @@ TEST_F(LowAsmParserTest, RejectsAmbiguousInferredResultType) {
             "result type annotation is required for one of: "
             "reg<test.i32> | reg<test.i64>");
   (void)diagnostics;
+}
+
+TEST_F(LowAsmParserTest, TypeDiagnosticAllocatesOnlyRetainedArenaStorage) {
+  iree_host_size_t allocator_calls = 0;
+  const iree_allocator_t allocator = {
+      &allocator_calls,
+      [](void* self, iree_allocator_command_t command, const void* params,
+         void** inout_pointer) -> iree_status_t {
+        ++*static_cast<iree_host_size_t*>(self);
+        const iree_allocator_t system = iree_allocator_system();
+        return system.ctl(system.self, command, params, inout_pointer);
+      },
+  };
+  loom_module_t* module = nullptr;
+  IREE_ASSERT_OK(loom_module_allocate(&context_, IREE_SV("type_diagnostic"),
+                                      &block_pool_, nullptr, allocator,
+                                      &module));
+  loom_text_low_asm_environment_t environment = {};
+  loom_low_descriptor_text_asm_environment_initialize(&low_descriptor_registry_,
+                                                      &environment);
+  const loom_text_low_asm_descriptor_set_t* descriptor_set =
+      loom_low_repr_lookup_descriptor_set(&environment.low_repr,
+                                          IREE_SV("test.low.core"));
+  loom_text_low_asm_packet_descriptor_t packet = {};
+  environment.vtable->lookup_packet(environment.state, descriptor_set,
+                                    IREE_SV("test.ambiguous"), &packet);
+
+  allocator_calls = 0;
+  const iree_host_size_t used_before = module->arena.used_allocation_size;
+  loom_type_t type = loom_type_none();
+  iree_string_view_t detail = iree_string_view_empty();
+  IREE_EXPECT_OK(environment.vtable->infer_result_type(
+      environment.state, &packet, nullptr, 0, 0, module, &type, &detail));
+  EXPECT_EQ(allocator_calls, 0u);
+  EXPECT_EQ(module->arena.used_allocation_size - used_before,
+            iree_host_align(detail.size + 1, iree_max_align_t));
+  // Returned detail belongs to the module, not a recycled temporary block.
+  iree_arena_block_pool_trim(&block_pool_);
+  EXPECT_EQ(std::string(detail.data, detail.size),
+            "result type annotation is required for one of: "
+            "reg<test.i32> | reg<test.i64>");
+  loom_module_free(module);
 }
 
 TEST_F(LowAsmParserTest, AcceptsExplicitAmbiguousResultType) {

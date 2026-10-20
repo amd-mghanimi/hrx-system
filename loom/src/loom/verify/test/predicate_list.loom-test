@@ -4,7 +4,7 @@
 // negative spelling is not an alternate representation of the same fact.
 func.def @multiple_requires_positive_divisor(%x: index) -> (index) {
   // ERROR@+1: STRUCTURE/014 "predicates[0].arg[1]" "-8" "positive divisor"
-  %result = test.assume %x [mul(%x, -8)] : index
+  %result = test.assume %x [multiple_of(%x, -8)] : index
   func.return %result : index
 }
 

@@ -8,6 +8,7 @@
 
 #include "loom/codegen/low/diagnostics.h"
 #include "loom/codegen/low/storage_layout.h"
+#include "loom/error/parameter.h"
 #include "loom/ops/type_registry.h"
 #include "loom/target/arch/amdgpu/error_catalog.h"
 #include "loom/target/arch/amdgpu/refs/target_refs.h"
@@ -138,8 +139,9 @@ loom_amdgpu_native_preflight_emit_unsupported_register_metadata(
           allocation->module, allocation->function_op)),
       loom_param_string(loom_low_diagnostic_value_name(allocation->module,
                                                        assignment->value_id)),
-      loom_param_string(loom_low_diagnostic_value_class_name(
-          allocation->target.descriptor_set, assignment->value_class)),
+      loom_param_string(loom_low_diagnostic_reg_class_name(
+          allocation->target.descriptor_set,
+          assignment->descriptor_reg_class_id)),
       loom_param_string(register_class),
       loom_param_string(metadata_contract),
   };
@@ -159,35 +161,30 @@ static iree_status_t loom_amdgpu_native_preflight_collect_register_usage(
     const loom_low_allocation_table_t* allocation,
     const loom_amdgpu_native_preflight_options_t* options,
     loom_amdgpu_native_preflight_t* preflight) {
-  // Allocation retains the complete physical footprint, including temporaries
-  // used to sequence parallel moves that have no corresponding SSA value.
+  // Allocation retains the allocatable register footprint, including parallel
+  // move temporaries without SSA values. ABI-fixed locations are excluded.
   preflight->next_free_sgpr =
       allocation->physical_extents
           .ends_by_reg_class[LOOM_AMDGPU_REG_CLASS_ID_SGPR];
   preflight->next_free_vgpr =
       allocation->physical_extents
           .ends_by_reg_class[LOOM_AMDGPU_REG_CLASS_ID_VGPR];
+  const uint8_t agpr_reg_class_id =
+      loom_amdgpu_agpr_reg_class_id(allocation->target.descriptor_set);
+  if (agpr_reg_class_id != UINT8_MAX) {
+    preflight->next_free_agpr =
+        allocation->physical_extents.ends_by_reg_class[agpr_reg_class_id];
+  }
   for (iree_host_size_t i = 0; i < allocation->assignment_count; ++i) {
     const loom_low_allocation_assignment_t* assignment =
         &allocation->assignments[i];
-    if (assignment->value_class.type_kind != LOOM_TYPE_REGISTER) {
-      continue;
-    }
     if (assignment->location_kind !=
         LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER) {
       continue;
     }
     if (assignment->descriptor_reg_class_id == LOOM_AMDGPU_REG_CLASS_ID_SGPR ||
-        assignment->descriptor_reg_class_id == LOOM_AMDGPU_REG_CLASS_ID_VGPR) {
-      continue;
-    }
-    if (loom_amdgpu_register_class_is_agpr(
-            allocation->target.descriptor_set,
-            assignment->descriptor_reg_class_id)) {
-      IREE_RETURN_IF_ERROR(
-          loom_amdgpu_native_preflight_emit_unsupported_register_metadata(
-              allocation, assignment, IREE_SV("AGPR kernel-descriptor"),
-              preflight, options));
+        assignment->descriptor_reg_class_id == LOOM_AMDGPU_REG_CLASS_ID_VGPR ||
+        assignment->descriptor_reg_class_id == agpr_reg_class_id) {
       continue;
     }
     if (loom_amdgpu_native_preflight_metadata_free_register_class(

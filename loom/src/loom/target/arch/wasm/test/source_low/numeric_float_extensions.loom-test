@@ -1,0 +1,312 @@
+// RUN: emit source-low target=wasm:simd128 output=low
+
+func.def @widen_narrow_float_packets(%e4_buffer: buffer, %e5_buffer: buffer, %f16_buffer: buffer, %bf16_buffer: buffer) -> (vector<4xf32>, vector<4xf32>, vector<4xf32>, vector<4xf32>) {
+  %base = index.constant 0 : offset
+  %e4_view = buffer.view %e4_buffer[%base] : buffer -> view<4xf8E4M3>
+  %e5_view = buffer.view %e5_buffer[%base] : buffer -> view<4xf8E5M2>
+  %f16_view = buffer.view %f16_buffer[%base] : buffer -> view<4xf16>
+  %bf16_view = buffer.view %bf16_buffer[%base] : buffer -> view<4xbf16>
+  %e4 = vector.load %e4_view[0] : view<4xf8E4M3> -> vector<4xf8E4M3>
+  %e5 = vector.load %e5_view[0] : view<4xf8E5M2> -> vector<4xf8E5M2>
+  %f16 = vector.load %f16_view[0] : view<4xf16> -> vector<4xf16>
+  %bf16 = vector.load %bf16_view[0] : view<4xbf16> -> vector<4xbf16>
+  %e4_wide = vector.extf %e4 : vector<4xf8E4M3> to vector<4xf32>
+  %e5_wide = vector.extf %e5 : vector<4xf8E5M2> to vector<4xf32>
+  %f16_wide = vector.extf %f16 : vector<4xf16> to vector<4xf32>
+  %bf16_wide = vector.extf %bf16 : vector<4xbf16> to vector<4xf32>
+  func.return %e4_wide, %e5_wide, %f16_wide, %bf16_wide : vector<4xf32>, vector<4xf32>, vector<4xf32>, vector<4xf32>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @widen_narrow_float_packets(%e4_buffer: reg<wasm.i32>, %e5_buffer: reg<wasm.i32>, %f16_buffer: reg<wasm.i32>, %bf16_buffer: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %49 = i32.load %e4_buffer
+  %e4 = i32x4.splat %49
+  %51 = i32.load %e5_buffer
+  %e5 = i32x4.splat %51
+  %53 = i64.load %f16_buffer
+  %f16 = i64x2.splat %53
+  %55 = i64.load %bf16_buffer
+  %bf16 = i64x2.splat %55
+  %57 = i16x8.extend_low_i8x16_u %e4
+  %58 = i32x4.extend_low_i16x8_u %57
+  %59 = v128.const 549755814016, 549755814016
+  %60 = i32.const 24
+  %61 = v128.and %58, %59
+  %62 = i32x4.shl %61, %60
+  %63 = v128.const 30064771079, 30064771079
+  %64 = v128.and %58, %63
+  %65 = i32.const 3
+  %66 = i32x4.shr_u %58, %65
+  %67 = v128.const 64424509455, 64424509455
+  %68 = v128.and %66, %67
+  %69 = v128.const 515396075640, 515396075640
+  %70 = i32x4.add %68, %69
+  %71 = i32.const 23
+  %72 = i32x4.shl %70, %71
+  %73 = i32.const 20
+  %74 = i32x4.shl %64, %73
+  %75 = v128.or %72, %74
+  %76 = v128.or %62, %75
+  %77 = v128.const 4294967297, 4294967297
+  %78 = v128.const 8589934594, 8589934594
+  %79 = i32x4.lt_u %64, %78
+  %80 = i32.const 2
+  %81 = i32x4.shl %64, %80
+  %82 = v128.bitselect %81, %64, %79
+  %83 = v128.and %79, %78
+  %84 = i32x4.add %77, %83
+  %85 = v128.const 17179869188, 17179869188
+  %86 = i32x4.lt_u %82, %85
+  %87 = i32.const 1
+  %88 = i32x4.shl %82, %87
+  %89 = v128.bitselect %88, %82, %86
+  %90 = v128.and %86, %77
+  %91 = i32x4.add %84, %90
+  %92 = i32x4.shl %89, %87
+  %93 = v128.and %92, %63
+  %94 = i32x4.shl %93, %73
+  %95 = v128.const 519691042937, 519691042937
+  %96 = i32x4.sub %95, %91
+  %97 = i32x4.shl %96, %71
+  %98 = v128.or %97, %94
+  %99 = v128.or %62, %98
+  %100 = v128.const 0, 0
+  %101 = i32x4.eq %64, %100
+  %102 = v128.bitselect %62, %99, %101
+  %103 = i32x4.eq %68, %100
+  %104 = v128.bitselect %102, %76, %103
+  %105 = v128.const 545460846719, 545460846719
+  %106 = v128.and %58, %105
+  %107 = i32x4.eq %106, %105
+  %108 = v128.const 9205357640488583168, 9205357640488583168
+  %e4_wide = v128.bitselect %108, %104, %107
+  %110 = i16x8.extend_low_i8x16_u %e5
+  %111 = i32x4.extend_low_i16x8_u %110
+  %114 = v128.and %111, %59
+  %115 = i32x4.shl %114, %60
+  %116 = v128.const 12884901891, 12884901891
+  %117 = v128.and %111, %116
+  %119 = i32x4.shr_u %111, %80
+  %120 = v128.const 133143986207, 133143986207
+  %121 = v128.and %119, %120
+  %122 = v128.const 481036337264, 481036337264
+  %123 = i32x4.add %121, %122
+  %125 = i32x4.shl %123, %71
+  %126 = i32.const 21
+  %127 = i32x4.shl %117, %126
+  %128 = v128.or %125, %127
+  %129 = v128.or %115, %128
+  %132 = i32x4.lt_u %117, %78
+  %134 = i32x4.shl %117, %87
+  %135 = v128.bitselect %134, %117, %132
+  %136 = v128.and %132, %77
+  %137 = i32x4.add %77, %136
+  %138 = i32x4.shl %135, %87
+  %139 = v128.and %138, %116
+  %140 = i32x4.shl %139, %126
+  %141 = v128.const 485331304561, 485331304561
+  %142 = i32x4.sub %141, %137
+  %143 = i32x4.shl %142, %71
+  %144 = v128.or %143, %140
+  %145 = v128.or %115, %144
+  %147 = i32x4.eq %117, %100
+  %148 = v128.bitselect %115, %145, %147
+  %149 = i32x4.eq %121, %100
+  %150 = v128.bitselect %148, %129, %149
+  %151 = i32x4.eq %121, %120
+  %152 = v128.const 9187343241974906880, 9187343241974906880
+  %153 = v128.or %115, %152
+  %155 = v128.bitselect %153, %108, %147
+  %e5_wide = v128.bitselect %155, %150, %151
+  %157 = i32x4.extend_low_i16x8_u %f16
+  %158 = v128.const 140737488388096, 140737488388096
+  %159 = i32.const 16
+  %160 = v128.and %157, %158
+  %161 = i32x4.shl %160, %159
+  %162 = v128.const 4393751544831, 4393751544831
+  %163 = v128.and %157, %162
+  %164 = i32.const 10
+  %165 = i32x4.shr_u %157, %164
+  %167 = v128.and %165, %120
+  %169 = i32x4.add %167, %122
+  %171 = i32x4.shl %169, %71
+  %172 = i32.const 13
+  %173 = i32x4.shl %163, %172
+  %174 = v128.or %171, %173
+  %175 = v128.or %161, %174
+  %178 = i32x4.lt_u %163, %85
+  %179 = i32.const 8
+  %180 = i32x4.shl %163, %179
+  %181 = v128.bitselect %180, %163, %178
+  %182 = v128.const 34359738376, 34359738376
+  %183 = v128.and %178, %182
+  %184 = i32x4.add %77, %183
+  %185 = v128.const 274877907008, 274877907008
+  %186 = i32x4.lt_u %181, %185
+  %187 = i32.const 4
+  %188 = i32x4.shl %181, %187
+  %189 = v128.bitselect %188, %181, %186
+  %190 = v128.and %186, %85
+  %191 = i32x4.add %184, %190
+  %192 = v128.const 1099511628032, 1099511628032
+  %193 = i32x4.lt_u %189, %192
+  %195 = i32x4.shl %189, %80
+  %196 = v128.bitselect %195, %189, %193
+  %198 = v128.and %193, %78
+  %199 = i32x4.add %191, %198
+  %200 = v128.const 2199023256064, 2199023256064
+  %201 = i32x4.lt_u %196, %200
+  %203 = i32x4.shl %196, %87
+  %204 = v128.bitselect %203, %196, %201
+  %205 = v128.and %201, %77
+  %206 = i32x4.add %199, %205
+  %207 = i32x4.shl %204, %87
+  %208 = v128.and %207, %162
+  %209 = i32x4.shl %208, %172
+  %211 = i32x4.sub %141, %206
+  %212 = i32x4.shl %211, %71
+  %213 = v128.or %212, %209
+  %214 = v128.or %161, %213
+  %216 = i32x4.eq %163, %100
+  %217 = v128.bitselect %161, %214, %216
+  %218 = i32x4.eq %167, %100
+  %219 = v128.bitselect %217, %175, %218
+  %220 = i32x4.eq %167, %120
+  %222 = v128.or %161, %152
+  %224 = v128.or %222, %173
+  %f16_wide = v128.bitselect %224, %219, %220
+  %226 = i32x4.extend_low_i16x8_u %bf16
+  %bf16_wide = i32x4.shl %226, %159
+  return %e4_wide, %e5_wide, %f16_wide, %bf16_wide
+}
+
+// ====
+
+func.def @packetized_float8_widening(%input_buffer: buffer) -> (vector<4xf32>, vector<4xf32>) {
+  %base = index.constant 0 : offset
+  %input_view = buffer.view %input_buffer[%base] : buffer -> view<8xf8E4M3>
+  %input = vector.load %input_view[0] : view<8xf8E4M3> -> vector<8xf8E4M3>
+  %extended = vector.extf %input : vector<8xf8E4M3> to vector<8xf32>
+  %extended0 = vector.slice %extended[0] : vector<8xf32> -> vector<4xf32>
+  %extended1 = vector.slice %extended[4] : vector<8xf32> -> vector<4xf32>
+  func.return %extended0, %extended1 : vector<4xf32>, vector<4xf32>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @packetized_float8_widening(%input_buffer: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.v128>) asm {
+  %22 = i64.load %input_buffer
+  %input = i64x2.splat %22
+  %24 = i16x8.extend_low_i8x16_u %input
+  %25 = i32x4.extend_low_i16x8_u %24
+  %26 = v128.const 549755814016, 549755814016
+  %27 = i32.const 24
+  %28 = v128.and %25, %26
+  %29 = i32x4.shl %28, %27
+  %30 = v128.const 30064771079, 30064771079
+  %31 = v128.and %25, %30
+  %32 = i32.const 3
+  %33 = i32x4.shr_u %25, %32
+  %34 = v128.const 64424509455, 64424509455
+  %35 = v128.and %33, %34
+  %36 = v128.const 515396075640, 515396075640
+  %37 = i32x4.add %35, %36
+  %38 = i32.const 23
+  %39 = i32x4.shl %37, %38
+  %40 = i32.const 20
+  %41 = i32x4.shl %31, %40
+  %42 = v128.or %39, %41
+  %43 = v128.or %29, %42
+  %44 = v128.const 4294967297, 4294967297
+  %45 = v128.const 8589934594, 8589934594
+  %46 = i32x4.lt_u %31, %45
+  %47 = i32.const 2
+  %48 = i32x4.shl %31, %47
+  %49 = v128.bitselect %48, %31, %46
+  %50 = v128.and %46, %45
+  %51 = i32x4.add %44, %50
+  %52 = v128.const 17179869188, 17179869188
+  %53 = i32x4.lt_u %49, %52
+  %54 = i32.const 1
+  %55 = i32x4.shl %49, %54
+  %56 = v128.bitselect %55, %49, %53
+  %57 = v128.and %53, %44
+  %58 = i32x4.add %51, %57
+  %59 = i32x4.shl %56, %54
+  %60 = v128.and %59, %30
+  %61 = i32x4.shl %60, %40
+  %62 = v128.const 519691042937, 519691042937
+  %63 = i32x4.sub %62, %58
+  %64 = i32x4.shl %63, %38
+  %65 = v128.or %64, %61
+  %66 = v128.or %29, %65
+  %67 = v128.const 0, 0
+  %68 = i32x4.eq %31, %67
+  %69 = v128.bitselect %29, %66, %68
+  %70 = i32x4.eq %35, %67
+  %71 = v128.bitselect %69, %43, %70
+  %72 = v128.const 545460846719, 545460846719
+  %73 = v128.and %25, %72
+  %74 = i32x4.eq %73, %72
+  %75 = v128.const 9205357640488583168, 9205357640488583168
+  %76 = v128.bitselect %75, %71, %74
+  %77 = i8x16.shuffle %input, %input, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+  %78 = i16x8.extend_low_i8x16_u %77
+  %79 = i32x4.extend_low_i16x8_u %78
+  %82 = v128.and %79, %26
+  %83 = i32x4.shl %82, %27
+  %85 = v128.and %79, %30
+  %87 = i32x4.shr_u %79, %32
+  %89 = v128.and %87, %34
+  %91 = i32x4.add %89, %36
+  %93 = i32x4.shl %91, %38
+  %95 = i32x4.shl %85, %40
+  %96 = v128.or %93, %95
+  %97 = v128.or %83, %96
+  %100 = i32x4.lt_u %85, %45
+  %102 = i32x4.shl %85, %47
+  %103 = v128.bitselect %102, %85, %100
+  %104 = v128.and %100, %45
+  %105 = i32x4.add %44, %104
+  %107 = i32x4.lt_u %103, %52
+  %109 = i32x4.shl %103, %54
+  %110 = v128.bitselect %109, %103, %107
+  %111 = v128.and %107, %44
+  %112 = i32x4.add %105, %111
+  %113 = i32x4.shl %110, %54
+  %114 = v128.and %113, %30
+  %115 = i32x4.shl %114, %40
+  %117 = i32x4.sub %62, %112
+  %118 = i32x4.shl %117, %38
+  %119 = v128.or %118, %115
+  %120 = v128.or %83, %119
+  %122 = i32x4.eq %85, %67
+  %123 = v128.bitselect %83, %120, %122
+  %124 = i32x4.eq %89, %67
+  %125 = v128.bitselect %123, %97, %124
+  %127 = v128.and %79, %72
+  %128 = i32x4.eq %127, %72
+  %130 = v128.bitselect %75, %125, %128
+  return %76, %130
+}
+
+// ====
+
+// RUN: with-checks compile-report target=wasm:simd128 source-to-low,low-dce
+
+func.def @report_narrow_float_widening(%e4_packet: vector<16xf8E4M3>, %e5_packet: vector<16xf8E5M2>, %f16_packet: vector<8xf16>, %bf16_packet: vector<8xbf16>) -> (vector<4xf32>, vector<4xf32>, vector<4xf32>, vector<4xf32>) {
+  %e4 = vector.slice %e4_packet[0] : vector<16xf8E4M3> -> vector<4xf8E4M3>
+  %e5 = vector.slice %e5_packet[0] : vector<16xf8E5M2> -> vector<4xf8E5M2>
+  %f16 = vector.slice %f16_packet[0] : vector<8xf16> -> vector<4xf16>
+  %bf16 = vector.slice %bf16_packet[0] : vector<8xbf16> -> vector<4xbf16>
+  %e4_wide = vector.extf %e4 : vector<4xf8E4M3> to vector<4xf32>
+  %e5_wide = vector.extf %e5 : vector<4xf8E5M2> to vector<4xf32>
+  %f16_wide = vector.extf %f16 : vector<4xf16> to vector<4xf32>
+  %bf16_wide = vector.extf %bf16 : vector<4xbf16> to vector<4xf32>
+  func.return %e4_wide, %e5_wide, %f16_wide, %bf16_wide : vector<4xf32>, vector<4xf32>, vector<4xf32>, vector<4xf32>
+}
+
+// ----
+CHECK: COMPILE-REPORT: source_low[*] function=report_narrow_float_widening source_op=vector.extf selection=rule plan_key=wasm.float_extension.exact_f8e4m3_to_f32 * emitted_ops=53
+CHECK: COMPILE-REPORT: source_low[*] function=report_narrow_float_widening source_op=vector.extf selection=rule plan_key=wasm.float_extension.exact_f8e5m2_to_f32 * emitted_ops=47
+CHECK: COMPILE-REPORT: source_low[*] function=report_narrow_float_widening source_op=vector.extf selection=rule plan_key=wasm.float_extension.exact_f16_to_f32 * emitted_ops=69
+CHECK: COMPILE-REPORT: source_low[*] function=report_narrow_float_widening source_op=vector.extf selection=rule plan_key=wasm.float_extension.exact_bf16_to_f32 * emitted_ops=3

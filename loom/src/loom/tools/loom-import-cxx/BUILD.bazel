@@ -5,32 +5,23 @@
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
 load("//build_tools/testing:build_defs.bzl", "iree_execution_test_suite")
-load("//loom/build_tools/bazel:build_defs.bzl", "loom_cc_binary", "loom_config_compatible_with")
+load("//loom/binding/c:shared.bzl", "loomc_cc_binary")
+load("//loom/build_tools/bazel:build_defs.bzl", "loom_config_compatible_with")
 
 package(default_visibility = ["//visibility:public"])
 
-loom_cc_binary(
+loomc_cc_binary(
     name = "loom-import-cxx",
     srcs = ["loom-import-cxx.c"],
     deps = [
-        "//loom/src/loom/codegen/low:text_asm",
-        "//loom/src/loom/format/bytecode:writer",
-        "//loom/src/loom/format/text:printer",
-        "//loom/src/loom/import/cxx",
-        "//loom/src/loom/pass:builtin_registry",
-        "//loom/src/loom/pass:tooling",
-        "//loom/src/loom/target:provider",
-        "//loom/src/loom/target/configured:provider_set",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/import/cxx",
+        "//loom/binding/c/target/configured:ir",
         "//loom/src/loom/tooling/cli:help",
-        "//loom/src/loom/tooling/context",
+        "//loom/src/loom/tooling/cli:loomc_result",
         "//loom/src/loom/tooling/io:file",
-        "//loom/src/loom/transforms/cleanup:configured",
-        "//loom/src/loom/transforms/cleanup:pass_environment",
-        "//loom/src/loom/transforms/cleanup:patterns",
-        "//loom/src/loom/verify",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/tooling:flags",
-        "//runtime/src/iree/io:stream",
     ],
 )
 
@@ -40,9 +31,14 @@ iree_execution_test_suite(
         "//loom/src/loom/import/cxx:include/hip/hip_fp16.h",
         "//loom/src/loom/import/cxx:include/hip/hip_runtime.h",
         "//loom/src/loom/import/cxx:include/loomcxx/atomic.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/buffer.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/cache.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/encoding_type.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/index.h",
         "//loom/src/loom/import/cxx:include/loomcxx/kernel.h",
         "//loom/src/loom/import/cxx:include/loomcxx/math.h",
         "//loom/src/loom/import/cxx:include/loomcxx/scalar.h",
+        "//loom/src/loom/import/cxx:include/loomcxx/shape.h",
         "//loom/src/loom/import/cxx:include/loomcxx/view.h",
     ],
     manifests = ["loom-import-cxx.test.json"],
@@ -50,6 +46,18 @@ iree_execution_test_suite(
     target_compatible_with = loom_config_compatible_with(["//loom/config/import:cxx"]),
     tools = {
         "loom-format": "//loom/src/loom/tools/loom-format",
+        "loom-import-cxx": ":loom-import-cxx",
+    },
+)
+
+iree_execution_test_suite(
+    name = "export_roundtrip_test",
+    data = ["testdata/readable_projection.loom"],
+    manifests = ["export_roundtrip.test.json"],
+    tags = ["hostonly"],
+    target_compatible_with = loom_config_compatible_with(["//loom/config/import:cxx"]),
+    tools = {
+        "loom-export-cxx": "//loom/py/loom/tools:loom-export-cxx",
         "loom-import-cxx": ":loom-import-cxx",
     },
 )

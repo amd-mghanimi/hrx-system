@@ -163,6 +163,12 @@ typedef struct iree_hal_vulkan_executable_t {
   // Prepared compute pipelines and export metadata.
   iree_hal_vulkan_pipeline_t* pipelines;
 
+  // Per-export offsets into |parameters|, with one terminal sentinel.
+  iree_host_size_t* parameter_offsets;
+
+  // Compact logical parameter descriptors retained outside hot pipelines.
+  iree_hal_vulkan_spirv_bda_parameter_t* parameters;
+
   // Storage backing all exported name string views.
   char* name_storage;
 } iree_hal_vulkan_executable_t;
@@ -191,7 +197,7 @@ static iree_status_t iree_hal_vulkan_allocate_executable(
     const iree_hal_vulkan_device_syms_t* syms, VkDevice logical_device,
     const iree_hal_queue_family_t* queue_family,
     iree_host_size_t pipeline_count, iree_host_size_t name_storage_size,
-    iree_allocator_t host_allocator,
+    iree_host_size_t parameter_count, iree_allocator_t host_allocator,
     iree_hal_vulkan_executable_t** out_executable) {
   iree_hal_vulkan_executable_t* executable = NULL;
   IREE_RETURN_IF_ERROR(iree_allocator_malloc(
@@ -221,6 +227,17 @@ static iree_status_t iree_hal_vulkan_allocate_executable(
     status = iree_allocator_malloc(host_allocator, name_storage_size,
                                    (void**)&executable->name_storage);
   }
+  if (iree_status_is_ok(status)) {
+    status =
+        iree_allocator_malloc_array(host_allocator, pipeline_count + 1,
+                                    sizeof(executable->parameter_offsets[0]),
+                                    (void**)&executable->parameter_offsets);
+  }
+  if (iree_status_is_ok(status) && parameter_count > 0) {
+    status = iree_allocator_malloc_array(host_allocator, parameter_count,
+                                         sizeof(executable->parameters[0]),
+                                         (void**)&executable->parameters);
+  }
 
   if (iree_status_is_ok(status)) {
     *out_executable = executable;
@@ -230,9 +247,77 @@ static iree_status_t iree_hal_vulkan_allocate_executable(
   return status;
 }
 
+static bool iree_hal_vulkan_requires_subgroup_size_control(
+    uint32_t spirv_version, uint32_t subgroup_size,
+    uint32_t default_subgroup_size) {
+  // Without ALLOW_VARYING_SUBGROUP_SIZE, pre-1.6 modules execute at the device
+  // default width. SPIR-V 1.6 permits varying widths unless explicitly fixed.
+  return subgroup_size != 0 && (spirv_version >= 0x00010600u ||
+                                subgroup_size != default_subgroup_size);
+}
+
+static iree_status_t iree_hal_vulkan_validate_subgroup_size(
+    const iree_hal_vulkan_physical_device_snapshot_t* physical_device,
+    iree_hal_vulkan_features_t enabled_features,
+    const iree_hal_vulkan_spirv_compute_entry_point_t* entry_point,
+    uint32_t spirv_version, uint32_t subgroup_size) {
+  if (!iree_hal_vulkan_requires_subgroup_size_control(
+          spirv_version, subgroup_size,
+          physical_device->subgroup_properties.subgroupSize)) {
+    return iree_ok_status();
+  }
+  const VkPhysicalDeviceSubgroupSizeControlProperties* properties =
+      &physical_device->subgroup_size_control_properties;
+  if (!iree_all_bits_set(
+          enabled_features.general,
+          IREE_HAL_VULKAN_FEATURE_ENABLE_SUBGROUP_SIZE_CONTROL) ||
+      !iree_all_bits_set(properties->requiredSubgroupSizeStages,
+                         VK_SHADER_STAGE_COMPUTE_BIT)) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "SPIR-V entry point '%.*s' requires subgroup size %u, but compute "
+        "subgroup-size control is not enabled (device default %u)",
+        (int)entry_point->name.size, entry_point->name.data, subgroup_size,
+        physical_device->subgroup_properties.subgroupSize);
+  }
+  if (subgroup_size < properties->minSubgroupSize ||
+      subgroup_size > properties->maxSubgroupSize) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "SPIR-V entry point '%.*s' requires subgroup size %u outside device "
+        "range [%u, %u]",
+        (int)entry_point->name.size, entry_point->name.data, subgroup_size,
+        properties->minSubgroupSize, properties->maxSubgroupSize);
+  }
+  if (entry_point->workgroup_size[0] == 0) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "SPIR-V entry point '%.*s' requires a static LocalSize to validate "
+        "subgroup size %u",
+        (int)entry_point->name.size, entry_point->name.data, subgroup_size);
+  }
+  const uint64_t workgroup_xy =
+      (uint64_t)entry_point->workgroup_size[0] * entry_point->workgroup_size[1];
+  const uint64_t maximum_invocations =
+      (uint64_t)subgroup_size * properties->maxComputeWorkgroupSubgroups;
+  if (workgroup_xy > maximum_invocations / entry_point->workgroup_size[2]) {
+    return iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "SPIR-V entry point '%.*s' workgroup [%u, %u, %u] exceeds %u "
+        "subgroups of size %u",
+        (int)entry_point->name.size, entry_point->name.data,
+        entry_point->workgroup_size[0], entry_point->workgroup_size[1],
+        entry_point->workgroup_size[2],
+        properties->maxComputeWorkgroupSubgroups, subgroup_size);
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t iree_hal_vulkan_create_bda_executable(
     const iree_hal_vulkan_device_syms_t* syms, VkDevice logical_device,
-    VkPipelineCache pipeline_cache, const iree_hal_queue_family_t* queue_family,
+    const iree_hal_vulkan_physical_device_snapshot_t* physical_device,
+    iree_hal_vulkan_features_t enabled_features, VkPipelineCache pipeline_cache,
+    const iree_hal_queue_family_t* queue_family,
     const iree_hal_executable_load_params_t* load_params,
     iree_allocator_t host_allocator, iree_hal_executable_t** out_executable) {
   IREE_TRACE_ZONE_BEGIN(z0);
@@ -298,6 +383,7 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
         bda_metadata, host_allocator);
   }
   uint32_t push_constant_range_end = 0;
+  iree_host_size_t parameter_count = 0;
   for (iree_host_size_t i = 0;
        iree_status_is_ok(status) && i < entry_point_count; ++i) {
     const iree_hal_vulkan_spirv_bda_dispatch_metadata_t* metadata =
@@ -308,16 +394,28 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
                                 "iree.vulkan.bda.v1 metadata",
                                 (int)entry_points[i].name.size,
                                 entry_points[i].name.data);
-    }
-    // The physical layout covers every entry; logical dispatch arguments stay
-    // exact in each pipeline's own metadata.
-    push_constant_range_end = iree_max(push_constant_range_end,
-                                       metadata->root_push_constant_offset +
-                                           metadata->root_push_constant_length);
-    if (metadata->constant_byte_length != 0) {
+    } else {
+      // The physical layout covers every entry; logical dispatch arguments
+      // stay exact in each pipeline's own metadata.
       push_constant_range_end = iree_max(
-          push_constant_range_end, metadata->constant_push_constant_offset +
-                                       metadata->constant_byte_length);
+          push_constant_range_end, metadata->root_push_constant_offset +
+                                       metadata->root_push_constant_length);
+      if (metadata->constant_byte_length != 0) {
+        push_constant_range_end = iree_max(
+            push_constant_range_end, metadata->constant_push_constant_offset +
+                                         metadata->constant_byte_length);
+      }
+      if (!iree_host_size_checked_add(
+              parameter_count, metadata->parameter_count, &parameter_count)) {
+        status = iree_make_status(
+            IREE_STATUS_RESOURCE_EXHAUSTED,
+            "Vulkan SPIR-V logical parameter table size overflows");
+      }
+      if (iree_status_is_ok(status)) {
+        status = iree_hal_vulkan_validate_subgroup_size(
+            physical_device, enabled_features, &entry_points[i],
+            analysis.version, metadata->subgroup_size);
+      }
     }
   }
 
@@ -336,7 +434,7 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
   if (iree_status_is_ok(status)) {
     status = iree_hal_vulkan_allocate_executable(
         syms, logical_device, queue_family, entry_point_count,
-        name_storage_size, host_allocator, &executable);
+        name_storage_size, parameter_count, host_allocator, &executable);
   }
 
   VkShaderModule shader_module = VK_NULL_HANDLE;
@@ -381,6 +479,7 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
 
   char* name_storage = executable ? executable->name_storage : NULL;
   iree_host_size_t name_storage_offset = 0;
+  iree_host_size_t parameter_offset = 0;
   for (iree_host_size_t i = 0;
        iree_status_is_ok(status) && i < entry_point_count; ++i) {
     iree_hal_vulkan_pipeline_t* pipeline = &executable->pipelines[i];
@@ -394,6 +493,7 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
 
     pipeline->handle = VK_NULL_HANDLE;
     pipeline->layout = executable->pipeline_layout;
+    pipeline->subgroup_size = bda_metadata[i].subgroup_size;
     status = iree_hal_vulkan_initialize_pipeline_bda_metadata(
         &bda_metadata[i], host_allocator, pipeline);
     if (!iree_status_is_ok(status)) {
@@ -401,9 +501,33 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
     }
     memcpy(pipeline->workgroup_size, entry_points[i].workgroup_size,
            sizeof(pipeline->workgroup_size));
+    executable->parameter_offsets[i] = parameter_offset;
+    if (bda_metadata[i].parameter_count != 0) {
+      memcpy(
+          &executable->parameters[parameter_offset], bda_metadata[i].parameters,
+          bda_metadata[i].parameter_count * sizeof(executable->parameters[0]));
+      parameter_offset += bda_metadata[i].parameter_count;
+    }
 
+    const VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroup_info = {
+        .sType =
+            VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+        .requiredSubgroupSize = pipeline->subgroup_size,
+    };
+    const bool needs_subgroup_control =
+        iree_hal_vulkan_requires_subgroup_size_control(
+            analysis.version, pipeline->subgroup_size,
+            physical_device->subgroup_properties.subgroupSize);
+    const bool requires_full_subgroups =
+        pipeline->subgroup_size != 0 && pipeline->workgroup_size[0] != 0 &&
+        pipeline->workgroup_size[0] % pipeline->subgroup_size == 0;
     VkPipelineShaderStageCreateInfo stage_create_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+        .pNext = needs_subgroup_control ? &subgroup_info : NULL,
+        .flags =
+            requires_full_subgroups
+                ? VK_PIPELINE_SHADER_STAGE_CREATE_REQUIRE_FULL_SUBGROUPS_BIT
+                : 0,
         .stage = VK_SHADER_STAGE_COMPUTE_BIT,
         .module = shader_module,
         .pName = pipeline->name.data,
@@ -429,6 +553,9 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
           iree_status_annotate_f(status, "SPIR-V BDA entry point '%.*s'",
                                  (int)pipeline->name.size, pipeline->name.data);
     }
+  }
+  if (executable) {
+    executable->parameter_offsets[entry_point_count] = parameter_offset;
   }
 
   iree_allocator_free(host_allocator, specialization_map_entries);
@@ -458,7 +585,9 @@ static iree_status_t iree_hal_vulkan_create_bda_executable(
 
 iree_status_t iree_hal_vulkan_executable_create(
     const iree_hal_vulkan_device_syms_t* syms, VkDevice logical_device,
-    VkPipelineCache pipeline_cache, const iree_hal_queue_family_t* queue_family,
+    const iree_hal_vulkan_physical_device_snapshot_t* physical_device,
+    iree_hal_vulkan_features_t enabled_features, VkPipelineCache pipeline_cache,
+    const iree_hal_queue_family_t* queue_family,
     const iree_hal_executable_load_params_t* load_params,
     iree_allocator_t host_allocator, iree_hal_executable_t** out_executable) {
   IREE_ASSERT_ARGUMENT(syms);
@@ -466,8 +595,8 @@ iree_status_t iree_hal_vulkan_executable_create(
   IREE_ASSERT_ARGUMENT(load_params);
   IREE_ASSERT_ARGUMENT(out_executable);
   return iree_hal_vulkan_create_bda_executable(
-      syms, logical_device, pipeline_cache, queue_family, load_params,
-      host_allocator, out_executable);
+      syms, logical_device, physical_device, enabled_features, pipeline_cache,
+      queue_family, load_params, host_allocator, out_executable);
 }
 
 static void iree_hal_vulkan_executable_destroy(
@@ -494,6 +623,8 @@ static void iree_hal_vulkan_executable_destroy(
                                  /*pAllocator=*/NULL);
   }
   iree_allocator_free(host_allocator, executable->name_storage);
+  iree_allocator_free(host_allocator, executable->parameters);
+  iree_allocator_free(host_allocator, executable->parameter_offsets);
   iree_allocator_free(host_allocator, executable->pipelines);
   iree_allocator_free(host_allocator, executable);
 
@@ -538,6 +669,12 @@ static iree_status_t iree_hal_vulkan_executable_export_info(
   out_info->name = pipeline->name;
   out_info->constant_byte_length = pipeline->constant_byte_length;
   out_info->binding_count = pipeline->binding_count;
+  iree_hal_vulkan_executable_t* executable =
+      iree_hal_vulkan_executable_cast(base_executable);
+  const uint32_t ordinal = iree_hal_executable_function_index(export_ordinal);
+  out_info->parameter_count =
+      (uint16_t)(executable->parameter_offsets[ordinal + 1] -
+                 executable->parameter_offsets[ordinal]);
   memcpy(out_info->workgroup_size, pipeline->workgroup_size,
          sizeof(out_info->workgroup_size));
   return iree_ok_status();
@@ -549,8 +686,35 @@ static iree_status_t iree_hal_vulkan_executable_export_parameters(
     iree_hal_executable_function_parameter_t* out_parameters) {
   IREE_ASSERT_ARGUMENT(out_parameters || capacity == 0);
   const iree_hal_vulkan_pipeline_t* pipeline = NULL;
-  return iree_hal_vulkan_executable_lookup_pipeline(base_executable,
-                                                    export_ordinal, &pipeline);
+  IREE_RETURN_IF_ERROR(iree_hal_vulkan_executable_lookup_pipeline(
+      base_executable, export_ordinal, &pipeline));
+  iree_hal_vulkan_executable_t* executable =
+      iree_hal_vulkan_executable_cast(base_executable);
+  const uint32_t ordinal = iree_hal_executable_function_index(export_ordinal);
+  const iree_host_size_t parameter_begin =
+      executable->parameter_offsets[ordinal];
+  const iree_host_size_t parameter_end =
+      executable->parameter_offsets[ordinal + 1];
+  const iree_host_size_t copy_count =
+      iree_min(capacity, parameter_end - parameter_begin);
+  for (iree_host_size_t i = 0; i < copy_count; ++i) {
+    const iree_hal_vulkan_spirv_bda_parameter_t* source =
+        &executable->parameters[parameter_begin + i];
+    iree_hal_executable_function_parameter_t* target = &out_parameters[i];
+    *target = (iree_hal_executable_function_parameter_t){
+        .type = source->type,
+        .size = source->size,
+        .offset = source->offset,
+    };
+    if (source->type == IREE_HAL_EXECUTABLE_FUNCTION_PARAMETER_TYPE_CONSTANT) {
+      target->flags =
+          IREE_HAL_EXECUTABLE_FUNCTION_PARAMETER_FLAG_NATIVE_ABI_OFFSET;
+      target->native_abi_offset =
+          (uint16_t)(pipeline->bda.constant_push_constant_offset +
+                     source->offset);
+    }
+  }
+  return iree_ok_status();
 }
 
 static iree_status_t iree_hal_vulkan_executable_lookup_export_by_name(

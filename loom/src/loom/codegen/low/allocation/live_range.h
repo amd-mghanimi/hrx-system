@@ -13,11 +13,31 @@
 #include "loom/analysis/liveness.h"
 #include "loom/codegen/low/allocation/assignment.h"
 #include "loom/codegen/low/descriptors.h"
+#include "loom/codegen/low/placement.h"
 #include "loom/ir/ir.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Monotone sparse-liveness cursors retained during interval allocation.
+//
+// Each cursor is initialized from its assignment's sparse segment start when
+// that assignment enters the active set. Queries advance cursors past history
+// covered by |point|, so each segment is consumed at most once across the
+// allocation sweep. The final assignment records remain unchanged.
+typedef struct loom_low_allocation_live_range_sweep_t {
+  // Current allocation acquisition point.
+  uint32_t point;
+  // Next sparse segment indexed by assignment index.
+  uint32_t* segment_starts_by_assignment_index;
+} loom_low_allocation_live_range_sweep_t;
+
+enum {
+  // Cursor maintenance becomes cheaper than repeated exact merges above this
+  // sparse-segment count. Short ranges stay on the ordinary query path.
+  LOOM_LOW_ALLOCATION_LIVE_RANGE_CURSOR_MIN_SEGMENT_COUNT = 17u,
+};
 
 // Returns true when |assignment|'s storage lifetime overlaps |interval|'s
 // semantic lifetime.
@@ -39,9 +59,15 @@ uint32_t loom_low_allocation_live_range_interval_storage_end_point(
 uint32_t loom_low_allocation_live_range_interval_initial_unit_end_point(
     const loom_liveness_interval_t* interval);
 
-// Returns the base-location alignment for |interval|'s target register class.
+// Returns the required base alignment from the register class and retained
+// packet constraints. |interval| belongs to |liveness|, which owns the interval
+// indexing used by |operand_constraints_by_interval|. Packing preferences do
+// not restrict legality.
 uint32_t loom_low_allocation_live_range_interval_alignment(
     const loom_low_descriptor_set_t* descriptor_set,
+    const loom_liveness_analysis_t* liveness,
+    const loom_low_placement_operand_constraints_t*
+        operand_constraints_by_interval,
     const loom_liveness_interval_t* interval);
 
 // Returns the one-past-last live program point for one assigned unit. Unit
@@ -79,6 +105,11 @@ bool loom_low_allocation_live_range_values_overlap(
 
 // Returns true when two assignments have overlapping live target-visible
 // storage units under descriptor aliasing and per-unit storage lifetimes.
+// Empty unit lifetimes, including unmaterialized aggregate parts, occupy no
+// storage even when another lifetime encloses their boundary point.
+// Expanded-execution definitions additionally conflict with concrete unit
+// storage spanning their definition point, independently of sparse semantic
+// segments.
 // Assignment sparse segment ranges, when present, index |storage_segments|.
 // A missing range makes only that assignment's reservation continuous.
 bool loom_low_allocation_live_range_assignments_conflict(
@@ -88,6 +119,20 @@ bool loom_low_allocation_live_range_assignments_conflict(
     iree_host_size_t unit_point_count,
     const loom_low_allocation_assignment_t* lhs,
     const loom_low_allocation_assignment_t* rhs);
+
+// Returns true when active |existing| conflicts with |candidate| at or after
+// |sweep_point|. |inout_existing_segment_start| must have been initialized
+// from the existing assignment's sparse range when it entered the active set.
+// Calls advance the cursor monotonically without changing the assignment's
+// final sparse range. The caller routes short ranges to the exact query.
+bool loom_low_allocation_live_range_sweep_assignments_conflict(
+    uint32_t sweep_point, uint32_t* inout_existing_segment_start,
+    const loom_low_descriptor_set_t* descriptor_set,
+    const loom_liveness_segment_t* storage_segments,
+    const uint32_t* unit_start_points, const uint32_t* unit_end_points,
+    iree_host_size_t unit_point_count,
+    const loom_low_allocation_assignment_t* existing,
+    const loom_low_allocation_assignment_t* candidate);
 
 #ifdef __cplusplus
 }  // extern "C"

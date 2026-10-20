@@ -14,6 +14,7 @@
 
 #include "loom/ops/op_defs.h"
 #include "loom/ir/facts.h"
+#include "loom/ir/ir.h"
 #include "loom/ops/atomic.h"
 #include "loom/ops/cache.h"
 #include "loom/ops/combining.h"
@@ -78,8 +79,13 @@ enum {
   LOOM_OP_KERNEL_LAUNCH_YIELD = LOOM_OP_KIND(LOOM_DIALECT_KERNEL, 51),
   LOOM_OP_KERNEL_LAUNCH_SERIAL = LOOM_OP_KIND(LOOM_DIALECT_KERNEL, 52),
   LOOM_OP_KERNEL_LAUNCH_CONCURRENT = LOOM_OP_KIND(LOOM_DIALECT_KERNEL, 53),
-  LOOM_OP_KERNEL_COUNT_ = 54,
+  LOOM_OP_KERNEL_BARRIER_ARRIVE = LOOM_OP_KIND(LOOM_DIALECT_KERNEL, 54),
+  LOOM_OP_KERNEL_BARRIER_WAIT = LOOM_OP_KIND(LOOM_DIALECT_KERNEL, 55),
+  LOOM_OP_KERNEL_COUNT_ = 56,
 };
+
+// Floating-point collective requirements. Without preserve, sums and products use the target's native collective arithmetic, including its intermediate precision and exceptional-value behavior. Extrema always retain the selected combining kind's NaN and signed-zero semantics. Unsupported requirements fail compilation rather than weakening semantics.
+#define LOOM_KERNEL_COLLECTIVEMATHFLAGS_PRESERVE ((uint8_t)1)
 
 // Private symbol retention policy. Absent (0) permits ordinary DCE.
 typedef enum loom_kernel_retain_e {
@@ -148,24 +154,27 @@ typedef enum loom_kernel_workgroup_scan_direction_e {
 // }
 LOOM_DEFINE_ISA(loom_kernel_def_isa, LOOM_OP_KERNEL_DEF)
 LOOM_DEFINE_ATTR_SYMBOL(loom_kernel_def_callee, 0)
-LOOM_DEFINE_ATTR_SYMBOL(loom_kernel_def_target, 1)
-LOOM_DEFINE_ATTR_STRING(loom_kernel_def_export_symbol, 2)
-LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_def_export_linkage, 3, loom_target_linkage_t)
-LOOM_DEFINE_ATTR_PREDICATE_LIST(loom_kernel_def_predicates, 4)
-LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_def_retain, 5, loom_kernel_retain_t)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_def_linkage, 1, loom_symbol_linkage_t)
+LOOM_DEFINE_ATTR_SYMBOL(loom_kernel_def_target, 2)
+LOOM_DEFINE_ATTR_STRING(loom_kernel_def_export_symbol, 3)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_def_export_linkage, 4, loom_target_linkage_t)
+LOOM_DEFINE_ATTR_PREDICATE_LIST(loom_kernel_def_predicates, 5)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_def_retain, 6, loom_kernel_retain_t)
 LOOM_DEFINE_REGION(loom_kernel_def_config, 0)
 LOOM_DEFINE_REGION(loom_kernel_def_body, 1)
 enum loom_kernel_def_build_flag_bits_e {
-  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_RETAIN = 1u << 0,
-  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_TARGET = 1u << 1,
-  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_EXPORT_SYMBOL = 1u << 2,
-  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_EXPORT_LINKAGE = 1u << 3,
-  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_PREDICATES = 1u << 4,
+  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_LINKAGE = 1u << 0,
+  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_RETAIN = 1u << 1,
+  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_TARGET = 1u << 2,
+  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_EXPORT_SYMBOL = 1u << 3,
+  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_EXPORT_LINKAGE = 1u << 4,
+  LOOM_KERNEL_DEF_BUILD_FLAG_HAS_PREDICATES = 1u << 5,
 };
 typedef uint32_t loom_kernel_def_build_flags_t;
 iree_status_t loom_kernel_def_build(
     loom_builder_t* builder,
     loom_kernel_def_build_flags_t build_flags,
+    loom_optional uint8_t linkage,
     loom_optional uint8_t retain,
     loom_optional loom_symbol_ref_t target,
     loom_optional loom_string_id_t export_symbol,
@@ -261,8 +270,8 @@ iree_status_t loom_kernel_barrier_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_KERNEL_ASYNC_COPY: Initiate an asynchronous byte-for-byte transfer between two already originated views. The source and destination view types may use different logical element types or shapes, but they must describe the same static byte footprint. The direction attribute makes the required memory-space flow explicit. The returned token must be committed to exactly one kernel.async.group before the copied bytes are waited or consumed.
-// %copy = kernel.async.copy %src to %dst {cache_scope = cu, cache_temporal = regular, direction = global_to_workgroup} : view<16xi8> to view<16xi8> -> kernel.async.token
+// LOOM_OP_KERNEL_ASYNC_COPY: Initiate an asynchronous byte-for-byte transfer between two already originated views. The source and destination view types may use different logical element types or shapes, but they must describe the same logical payload byte count. Each view's layout determines the addresses visited in logical element order; padding is not copied. Dimensions may remain symbolic in source; specialization and value facts must establish equal concrete payload sizes before target transfer selection. The direction attribute makes the required memory-space flow explicit. The returned token must be committed to exactly one kernel.async.group before the copied bytes are waited or consumed.
+// %copy = kernel.async.copy %src to %dst {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<16xi8> to view<16xi8> -> kernel.async.token
 LOOM_DEFINE_ISA(loom_kernel_async_copy_isa, LOOM_OP_KERNEL_ASYNC_COPY)
 LOOM_DEFINE_OPERAND(loom_kernel_async_copy_source, 0)
 LOOM_DEFINE_OPERAND(loom_kernel_async_copy_dest, 1)
@@ -285,7 +294,7 @@ iree_status_t loom_kernel_async_copy_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_KERNEL_ASYNC_COPY_MASK: Predicated form of kernel.async.copy. When predicate is true, the op initiates the same transfer as kernel.async.copy. When predicate is false, the op performs no memory access and produces an already complete token so grouping and waiting remain structurally uniform.
-// %copy = kernel.async.copy.mask %src to %dst, %in_bounds {cache_scope = cu, cache_temporal = non_temporal, direction = global_to_workgroup} : view<16xi8> to view<16xi8>, i1 -> kernel.async.token
+// %copy = kernel.async.copy.mask %src to %dst, %in_bounds {cache_scope = workgroup, cache_temporal = non_temporal, direction = global_to_workgroup} : view<16xi8> to view<16xi8>, i1 -> kernel.async.token
 LOOM_DEFINE_ISA(loom_kernel_async_copy_mask_isa, LOOM_OP_KERNEL_ASYNC_COPY_MASK)
 LOOM_DEFINE_OPERAND(loom_kernel_async_copy_mask_source, 0)
 LOOM_DEFINE_OPERAND(loom_kernel_async_copy_mask_dest, 1)
@@ -310,7 +319,7 @@ iree_status_t loom_kernel_async_copy_mask_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_KERNEL_ASYNC_GATHER: Initiate a subgroup-collective asynchronous gather from each invocation's source view into a lane-contiguous workgroup destination view. The destination view has one leading subgroup-lane axis and a trailing lane slot with enough static bytes to hold one source payload. If the lane slot is larger than the source footprint, the extra destination bytes are padding bytes with unspecified contents. The destination denotes the subgroup-uniform base tile; the current subgroup lane is applied by the op semantics and must not be pre-applied by forming a lane subview. This directly represents AMDGPU global_load_lds-style staging, including padded narrow loads, without requiring a later pass to rediscover that a set of per-lane copies was really one subgroup LDS DMA operation.
-// %copy = kernel.async.gather %src_lane to %lds_tile {cache_scope = cu, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8> -> kernel.async.token
+// %copy = kernel.async.gather %src_lane to %lds_tile {cache_scope = workgroup, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8> -> kernel.async.token
 LOOM_DEFINE_ISA(loom_kernel_async_gather_isa, LOOM_OP_KERNEL_ASYNC_GATHER)
 LOOM_DEFINE_OPERAND(loom_kernel_async_gather_source, 0)
 LOOM_DEFINE_OPERAND(loom_kernel_async_gather_dest, 1)
@@ -331,7 +340,7 @@ iree_status_t loom_kernel_async_gather_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_KERNEL_ASYNC_GATHER_MASK: Predicated form of kernel.async.gather. False predicates perform no source or destination access for the current invocation but still produce a completed token, preserving a uniform async group shape for tails and guarded tiles.
-// %copy = kernel.async.gather.mask %src_lane to %lds_tile, %in_bounds {cache_scope = cu, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8>, i1 -> kernel.async.token
+// %copy = kernel.async.gather.mask %src_lane to %lds_tile, %in_bounds {cache_scope = workgroup, cache_temporal = regular} : view<4xi8> to view<[%wave]x4xi8>, i1 -> kernel.async.token
 LOOM_DEFINE_ISA(loom_kernel_async_gather_mask_isa, LOOM_OP_KERNEL_ASYNC_GATHER_MASK)
 LOOM_DEFINE_OPERAND(loom_kernel_async_gather_mask_source, 0)
 LOOM_DEFINE_OPERAND(loom_kernel_async_gather_mask_dest, 1)
@@ -401,7 +410,7 @@ iree_status_t loom_kernel_tensor_lds_descriptor_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_KERNEL_ASYNC_TENSOR_LOAD_TO_LDS: Initiate an AMDGPU gfx1250+ tensor-memory load from a global-like source view into a workgroup/LDS destination view using an explicit kernel.tensor.lds.descriptor. The descriptor supplies the exact hardware dgroups, while the source and destination views keep the logical rank, element type, layout, and memory-space facts visible. The endpoints must have the same rank in [1, 5], the same 1/2/4/8 byte element type, and memory spaces global/constant/descriptor to workgroup. The returned token must be committed to exactly one kernel.async.group.
-// %copy = kernel.async.tensor.load.to.lds %global_tile to %lds_tile using %desc {cache_scope = cu, cache_temporal = regular} : view<64x64xf32> to view<64x64xf32>, kernel.tensor.lds.descriptor -> kernel.async.token
+// %copy = kernel.async.tensor.load.to.lds %global_tile to %lds_tile using %desc {cache_scope = workgroup, cache_temporal = regular} : view<64x64xf32> to view<64x64xf32>, kernel.tensor.lds.descriptor -> kernel.async.token
 LOOM_DEFINE_ISA(loom_kernel_async_tensor_load_to_lds_isa, LOOM_OP_KERNEL_ASYNC_TENSOR_LOAD_TO_LDS)
 LOOM_DEFINE_OPERAND(loom_kernel_async_tensor_load_to_lds_source, 0)
 LOOM_DEFINE_OPERAND(loom_kernel_async_tensor_load_to_lds_dest, 1)
@@ -447,7 +456,7 @@ iree_status_t loom_kernel_async_tensor_store_from_lds_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_KERNEL_ASYNC_CLUSTER_GATHER: Initiate a workgroup-cluster asynchronous load from a global-like source view into a workgroup/shared-memory destination view. The required i32 cluster_mask is a semantic participant set: bit N names flat cluster rank N, with x as the minor dimension. Source and destination must have the same static byte footprint, and that footprint must be exactly 1, 4, 8, or 16 bytes. Every named participant must execute the operation in the same dynamic order with corresponding lane-local source and destination addresses. Target lowering maps the participant set, addresses, and cache policy to the selected machine protocol. The returned token must be committed to exactly one kernel.async.group.
-// %copy = kernel.async.cluster.gather %src to %lds using %mask {cache_scope = se, cache_temporal = high_temporal} : view<16xi8> to view<16xi8>, i32 -> kernel.async.token
+// %copy = kernel.async.cluster.gather %src to %lds using %mask {cache_scope = cluster, cache_temporal = high_temporal} : view<16xi8> to view<16xi8>, i32 -> kernel.async.token
 LOOM_DEFINE_ISA(loom_kernel_async_cluster_gather_isa, LOOM_OP_KERNEL_ASYNC_CLUSTER_GATHER)
 LOOM_DEFINE_OPERAND(loom_kernel_async_cluster_gather_source, 0)
 LOOM_DEFINE_OPERAND(loom_kernel_async_cluster_gather_dest, 1)
@@ -470,7 +479,7 @@ iree_status_t loom_kernel_async_cluster_gather_verify(
     iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_KERNEL_ASYNC_CLUSTER_GATHER_MASK: Predicated form of kernel.async.cluster.gather. False predicates perform no source or destination access for the current invocation but still produce a completed token, preserving a uniform async group shape for tails and guarded tiles. The cluster_mask remains the semantic participant set and is distinct from the scalar i1 predicate.
-// %copy = kernel.async.cluster.gather.mask %src to %lds using %mask, %in_bounds {cache_scope = cu, cache_temporal = regular} : view<4xi8> to view<4xi8>, i32, i1 -> kernel.async.token
+// %copy = kernel.async.cluster.gather.mask %src to %lds using %mask, %in_bounds {cache_scope = workgroup, cache_temporal = regular} : view<4xi8> to view<4xi8>, i32, i1 -> kernel.async.token
 LOOM_DEFINE_ISA(loom_kernel_async_cluster_gather_mask_isa, LOOM_OP_KERNEL_ASYNC_CLUSTER_GATHER_MASK)
 LOOM_DEFINE_OPERAND(loom_kernel_async_cluster_gather_mask_source, 0)
 LOOM_DEFINE_OPERAND(loom_kernel_async_cluster_gather_mask_dest, 1)
@@ -573,6 +582,7 @@ iree_status_t loom_kernel_workitem_dispatch_id_build(
     loom_type_t result_type,
     loom_location_id_t location,
     loom_op_t** out_op);
+iree_status_t loom_kernel_workitem_dispatch_id_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
 iree_status_t loom_kernel_workitem_dispatch_id_facts(
     loom_fact_context_t* context,
     const loom_module_t* module, const loom_op_t* op,
@@ -703,12 +713,13 @@ iree_status_t loom_kernel_subgroup_value_result_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_KERNEL_SUBGROUP_REDUCE: Reduce a scalar or rank-1 vector value across the current subgroup.
+// LOOM_OP_KERNEL_SUBGROUP_REDUCE: Reduce a scalar or rank-1 vector value across the current subgroup. Each active contribution participates once per component; association is unspecified. Floating sums and products default to native target arithmetic, which may change signed zeros, flush subnormals, or relax nonfinite handling. The optional preserve requirement instead evaluates each combine with the source format's arithmetic semantics. Neither mode promises serial-reference bits, reproducibility, or a correctly rounded real-number sum. Integer arithmetic and the selected floating-extremum kind keep their exact semantics.
 // %sum = kernel.subgroup.reduce<addf> %v : f32
 LOOM_DEFINE_ISA(loom_kernel_subgroup_reduce_isa, LOOM_OP_KERNEL_SUBGROUP_REDUCE)
 LOOM_DEFINE_OPERAND(loom_kernel_subgroup_reduce_value, 0)
 LOOM_DEFINE_RESULT(loom_kernel_subgroup_reduce_result, 0)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_subgroup_reduce_kind, 0, loom_combining_kind_t)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_kernel_subgroup_reduce_math)
 LOOM_DEFINE_ATTR_I64(loom_kernel_subgroup_reduce_cluster_size, 1)
 LOOM_DEFINE_ATTR_I64(loom_kernel_subgroup_reduce_cluster_stride, 2)
 enum loom_kernel_subgroup_reduce_build_flag_bits_e {
@@ -720,6 +731,7 @@ iree_status_t loom_kernel_subgroup_reduce_build(
     loom_builder_t* builder,
     loom_kernel_subgroup_reduce_build_flags_t build_flags,
     loom_combining_kind_t kind,
+    uint8_t instance_flags,
     loom_value_id_t value,
     loom_optional int64_t cluster_size,
     loom_optional int64_t cluster_stride,
@@ -735,12 +747,13 @@ iree_status_t loom_kernel_subgroup_reduce_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_KERNEL_SUBGROUP_SCAN: Prefix-scan a scalar or rank-1 vector value across the current subgroup.
+// LOOM_OP_KERNEL_SUBGROUP_SCAN: Prefix-scan a scalar or rank-1 vector value across the current subgroup. Each active contribution participates once per component; association is unspecified. Floating sums and products default to native target arithmetic, which may change signed zeros, flush subnormals, or relax nonfinite handling. The optional preserve requirement instead evaluates each combine with the source format's arithmetic semantics. Neither mode promises serial-reference bits, reproducibility, or a correctly rounded real-number sum. Integer arithmetic and the selected floating-extremum kind keep their exact semantics.
 // %prefix = kernel.subgroup.scan<addf> %v {mode = inclusive, direction = forward} : f32
 LOOM_DEFINE_ISA(loom_kernel_subgroup_scan_isa, LOOM_OP_KERNEL_SUBGROUP_SCAN)
 LOOM_DEFINE_OPERAND(loom_kernel_subgroup_scan_value, 0)
 LOOM_DEFINE_RESULT(loom_kernel_subgroup_scan_result, 0)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_subgroup_scan_kind, 0, loom_combining_kind_t)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_kernel_subgroup_scan_math)
 LOOM_DEFINE_ATTR_I64(loom_kernel_subgroup_scan_cluster_size, 1)
 LOOM_DEFINE_ATTR_I64(loom_kernel_subgroup_scan_cluster_stride, 2)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_subgroup_scan_mode, 3, loom_kernel_subgroup_scan_mode_t)
@@ -754,6 +767,7 @@ iree_status_t loom_kernel_subgroup_scan_build(
     loom_builder_t* builder,
     loom_kernel_subgroup_scan_build_flags_t build_flags,
     loom_combining_kind_t kind,
+    uint8_t instance_flags,
     loom_value_id_t value,
     loom_optional int64_t cluster_size,
     loom_optional int64_t cluster_stride,
@@ -884,17 +898,21 @@ iree_status_t loom_kernel_subgroup_match_all_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_KERNEL_WORKGROUP_REDUCE: Reduce a scalar or rank-1 vector value across the current workgroup.
+// LOOM_OP_KERNEL_WORKGROUP_REDUCE: Reduce one or more independent scalar or rank-1 vector payloads at one workgroup convergence point. Each result has the type of the operand in the same position. All payloads share the combining kind and math requirement; no combination occurs between payloads. Each active contribution participates once per component; association is unspecified. Floating sums and products default to native target arithmetic, which may change signed zeros, flush subnormals, or relax nonfinite handling. The optional preserve requirement instead evaluates each combine with the source format's arithmetic semantics. Neither mode promises serial-reference bits, reproducibility, or a correctly rounded real-number sum. Integer arithmetic and the selected floating-extremum kind keep their exact semantics.
 // %sum = kernel.workgroup.reduce<addf> %v : f32
 LOOM_DEFINE_ISA(loom_kernel_workgroup_reduce_isa, LOOM_OP_KERNEL_WORKGROUP_REDUCE)
-LOOM_DEFINE_OPERAND(loom_kernel_workgroup_reduce_value, 0)
-LOOM_DEFINE_RESULT(loom_kernel_workgroup_reduce_result, 0)
+LOOM_DEFINE_VARIADIC_OPERANDS(loom_kernel_workgroup_reduce_values, 0)
+LOOM_DEFINE_VARIADIC_RESULTS(loom_kernel_workgroup_reduce_results, 0)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_workgroup_reduce_kind, 0, loom_combining_kind_t)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_kernel_workgroup_reduce_math)
 iree_status_t loom_kernel_workgroup_reduce_build(
     loom_builder_t* builder,
     loom_combining_kind_t kind,
-    loom_value_id_t value,
-    loom_type_t result_type,
+    uint8_t instance_flags,
+    const loom_value_id_t* values,
+    iree_host_size_t values_count,
+    const loom_type_t* result_types,
+    iree_host_size_t result_count,
     loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_kernel_workgroup_reduce_facts(
@@ -906,17 +924,19 @@ iree_status_t loom_kernel_workgroup_reduce_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_KERNEL_WORKGROUP_SCAN: Prefix-scan a scalar or rank-1 vector value across the current workgroup.
+// LOOM_OP_KERNEL_WORKGROUP_SCAN: Prefix-scan a scalar or rank-1 vector value across the current workgroup. Each active contribution participates once per component; association is unspecified. Floating sums and products default to native target arithmetic, which may change signed zeros, flush subnormals, or relax nonfinite handling. The optional preserve requirement instead evaluates each combine with the source format's arithmetic semantics. Neither mode promises serial-reference bits, reproducibility, or a correctly rounded real-number sum. Integer arithmetic and the selected floating-extremum kind keep their exact semantics.
 // %prefix = kernel.workgroup.scan<addf> %v {mode = inclusive, direction = forward} : f32
 LOOM_DEFINE_ISA(loom_kernel_workgroup_scan_isa, LOOM_OP_KERNEL_WORKGROUP_SCAN)
 LOOM_DEFINE_OPERAND(loom_kernel_workgroup_scan_value, 0)
 LOOM_DEFINE_RESULT(loom_kernel_workgroup_scan_result, 0)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_workgroup_scan_kind, 0, loom_combining_kind_t)
+LOOM_DEFINE_INSTANCE_FLAGS(loom_kernel_workgroup_scan_math)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_workgroup_scan_mode, 1, loom_kernel_workgroup_scan_mode_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_workgroup_scan_direction, 2, loom_kernel_workgroup_scan_direction_t)
 iree_status_t loom_kernel_workgroup_scan_build(
     loom_builder_t* builder,
     loom_combining_kind_t kind,
+    uint8_t instance_flags,
     loom_value_id_t value,
     loom_kernel_workgroup_scan_mode_t mode,
     loom_kernel_workgroup_scan_direction_t direction,
@@ -1124,6 +1144,9 @@ iree_status_t loom_kernel_decl_build(
     iree_host_size_t predicates_count,
     loom_location_id_t location,
     loom_op_t** out_op);
+iree_status_t loom_kernel_decl_verify(
+    const loom_module_t* module, const loom_op_t* op,
+    iree_diagnostic_emitter_t emitter);
 
 // LOOM_OP_KERNEL_ENTRY_DECL: Bodyless declaration of an executable kernel entry. The declaration owns the device ABI but has no workload-to-workgroup configuration contract, execution geometry, or implementation body.
 // kernel.entry.decl @fill(%count: index, %output: buffer)
@@ -1148,7 +1171,7 @@ iree_status_t loom_kernel_entry_decl_build(
     loom_location_id_t location,
     loom_op_t** out_op);
 
-// LOOM_OP_KERNEL_LAUNCH: Launch a kernel with explicit workload and device-ABI operands. Workloads configure the launch and never alter the kernel ABI.
+// LOOM_OP_KERNEL_LAUNCH: Launch a kernel or issue a kernel-scoped pipeline with explicit configuration and device-ABI operands. Workloads configure a kernel launch; for a pipeline they supply the leading specialization arguments.
 // kernel.launch @fill[%count](%count, %output) : [index](index, buffer)
 LOOM_DEFINE_ISA(loom_kernel_launch_isa, LOOM_OP_KERNEL_LAUNCH)
 LOOM_DEFINE_SEGMENTED_OPERANDS(loom_kernel_launch_workloads, 0)
@@ -1167,7 +1190,7 @@ iree_status_t loom_kernel_launch_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_KERNEL_DISPATCH: Dispatch an executable kernel entry with exact workgroup counts and device-ABI operands. Counts are one to three index values or one dense view<3xi32> for indirect dispatch. An optional XYZ workgroup size overrides the executable entry default for targets supporting dispatch-time workgroup sizes.
+// LOOM_OP_KERNEL_DISPATCH: Dispatch a resolved kernel.entry.decl with exact workgroup counts and device-ABI operands. Configured kernel.def and kernel.decl symbols are invoked with kernel.launch instead. Counts are one to three index values or one dense view<3xi32> for indirect dispatch. An optional XYZ workgroup size overrides the executable entry default for targets supporting dispatch-time workgroup sizes.
 // kernel.dispatch @fill[%count](%count, %output) : [index](index, buffer)
 LOOM_DEFINE_ISA(loom_kernel_dispatch_isa, LOOM_OP_KERNEL_DISPATCH)
 LOOM_DEFINE_SEGMENTED_OPERANDS(loom_kernel_dispatch_workgroup_counts, 0)
@@ -1225,6 +1248,38 @@ iree_status_t loom_kernel_launch_concurrent_build(
     loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_kernel_launch_schedule_verify(
+    const loom_module_t* module, const loom_op_t* op,
+    iree_diagnostic_emitter_t emitter);
+
+// LOOM_OP_KERNEL_BARRIER_ARRIVE: Arrive at a split execution barrier and begin its memory-ordering lifetime. Release ordering is applied at arrival; acquire ordering is completed by the unique kernel.barrier.wait consuming the returned phase. Every participant in the execution scope must execute matching dynamic arrive and wait instances. The interval may contain ordinary per-invocation work and pure calls. Other convergent operations, barriers, and impure calls must remain outside the interval.
+// %phase = kernel.barrier.arrive<workgroup> scope(workgroup) ordering(acq_rel) -> kernel.barrier.phase
+LOOM_DEFINE_ISA(loom_kernel_barrier_arrive_isa, LOOM_OP_KERNEL_BARRIER_ARRIVE)
+LOOM_DEFINE_RESULT(loom_kernel_barrier_arrive_phase, 0)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_barrier_arrive_memory_space, 0, loom_value_fact_memory_space_t)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_barrier_arrive_ordering, 1, loom_atomic_ordering_t)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_kernel_barrier_arrive_scope, 2, loom_atomic_scope_t)
+iree_status_t loom_kernel_barrier_arrive_build(
+    loom_builder_t* builder,
+    loom_value_fact_memory_space_t memory_space,
+    loom_atomic_scope_t scope,
+    loom_atomic_ordering_t ordering,
+    loom_type_t result_type,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_kernel_barrier_arrive_verify(
+    const loom_module_t* module, const loom_op_t* op,
+    iree_diagnostic_emitter_t emitter);
+
+// LOOM_OP_KERNEL_BARRIER_WAIT: Wait for every participant in a split-barrier phase to arrive and complete the acquire portion of that phase's memory ordering. The operand must be the unique use of a kernel.barrier.arrive result.
+// kernel.barrier.wait %phase : kernel.barrier.phase
+LOOM_DEFINE_ISA(loom_kernel_barrier_wait_isa, LOOM_OP_KERNEL_BARRIER_WAIT)
+LOOM_DEFINE_OPERAND(loom_kernel_barrier_wait_phase, 0)
+iree_status_t loom_kernel_barrier_wait_build(
+    loom_builder_t* builder,
+    loom_value_id_t phase,
+    loom_location_id_t location,
+    loom_op_t** out_op);
+iree_status_t loom_kernel_barrier_wait_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 

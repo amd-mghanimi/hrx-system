@@ -25,6 +25,8 @@ from loom.target.contracts.descriptors import (
 )
 from loom.target.contracts.immediates import (
     AttrProject,
+    OperandSegmentProject,
+    ReadOnlyDataLiteral,
     SourceMemoryProject,
     SourceMemoryProjectKind,
     SourceOpProject,
@@ -35,6 +37,7 @@ from loom.target.contracts.kinds import SourceValueKind
 from loom.target.contracts.patterns import TypePattern
 from loom.target.contracts.source import ValueRef
 from loom.target.contracts.source_memory import (
+    SourceMemoryAddressLayout,
     SourceMemoryAddressMaterializer,
     SourceMemoryByteOffsetMaterializer,
     SourceMemoryConstraint,
@@ -58,10 +61,19 @@ class DescriptorEmitForm(Enum):
     AUTO = "auto"
     OP = "op"
     CONST = "const"
+    COND_BR = "cond_br"
     FIRST_LANE = "first_lane"
     PER_LANE = "per_lane"
     PER_LANE_SEQUENCE = "per_lane_sequence"
     ACCUMULATE_LANES = "accumulate_lanes"
+
+
+@unique
+class DescriptorOperandMaterialization(Enum):
+    """Operand-group materialization applied before descriptor emission."""
+
+    DIRECT = "direct"
+    TARGET = "target"
 
 
 @unique
@@ -179,6 +191,46 @@ class EmitRegisterCopy:
 
 
 @dataclass(frozen=True, slots=True)
+class EmitRegisterMove:
+    """Transfers one temporary register value to a fresh identity."""
+
+    source: ValueRef
+    result: ValueRef
+    result_type: ResultTypeBinding | None = None
+
+    def validate(
+        self,
+        source_op: Op,
+        descriptor_set: DescriptorSet,
+        defined_temporaries: set[str],
+        *,
+        source_ops: Mapping[str, Op] | None = None,
+    ) -> tuple[str, ...]:
+        del descriptor_set
+        if self.source.kind is not SourceValueKind.TEMPORARY:
+            raise ValueError(
+                f"{source_op.name}: register move source must bind a temporary"
+            )
+        _validate_structural_source(
+            source_op,
+            self.source,
+            "register move source",
+            defined_temporaries,
+            source_ops,
+        )
+        produced_temporaries = _validate_structural_result(
+            source_op,
+            self.result,
+            self.result_type,
+            "register move result",
+            defined_temporaries,
+            source_ops=source_ops,
+        )
+        defined_temporaries.remove(self.source.field)
+        return produced_temporaries
+
+
+@dataclass(frozen=True, slots=True)
 class EmitRegisterConcat:
     """Concatenates register-unit sources into one aggregate value."""
 
@@ -227,7 +279,11 @@ class EmitRegisterConcat:
 
 
 type ContractEmit = (
-    EmitDescriptorOp | EmitRegisterCopy | EmitRegisterSlice | EmitRegisterConcat
+    EmitDescriptorOp
+    | EmitRegisterCopy
+    | EmitRegisterMove
+    | EmitRegisterSlice
+    | EmitRegisterConcat
 )
 
 
@@ -243,6 +299,8 @@ class EmitDescriptorOp:
         Mapping[
             str,
             AttrProject
+            | OperandSegmentProject
+            | ReadOnlyDataLiteral
             | SourceOpProject
             | ValueProject
             | ValueTypeProject
@@ -252,6 +310,9 @@ class EmitDescriptorOp:
         | Sequence[AttrProject]
     ) = ()
     form: DescriptorEmitForm = DescriptorEmitForm.AUTO
+    operand_materialization: DescriptorOperandMaterialization = (
+        DescriptorOperandMaterialization.DIRECT
+    )
     swap_first_two_operands: bool = False
     copy_operands: Sequence[str] = ()
     accumulator: str | None = None
@@ -316,11 +377,58 @@ class EmitDescriptorOp:
                 f"{source_op.name}: descriptor '{self.descriptor.key}' uses "
                 "low.const but the contract requests a low.op emission form"
             )
+        if (
+            self.form == DescriptorEmitForm.COND_BR
+            and self.descriptor.op_kind is not DescriptorOpKind.COND_BR
+        ):
+            raise ValueError(
+                f"{source_op.name}: descriptor '{self.descriptor.key}' does not "
+                "use low.op.cond_br"
+            )
+        if self.descriptor.op_kind is DescriptorOpKind.COND_BR and self.form not in (
+            DescriptorEmitForm.AUTO,
+            DescriptorEmitForm.COND_BR,
+        ):
+            raise ValueError(
+                f"{source_op.name}: descriptor '{self.descriptor.key}' uses "
+                "low.op.cond_br but the contract requests another emission form"
+            )
+        if (
+            self.operand_materialization is not DescriptorOperandMaterialization.DIRECT
+            and self.descriptor.op_kind is not DescriptorOpKind.OP
+        ):
+            raise ValueError(
+                f"{source_op.name}: descriptor operand materialization requires "
+                "a low.op descriptor"
+            )
         operand_bindings = dict(self.operands) if self.operands is not None else {}
         result_bindings = dict(self.results) if self.results is not None else {}
         result_type_bindings = (
             dict(self.result_types) if self.result_types is not None else {}
         )
+        if self.descriptor.op_kind is DescriptorOpKind.COND_BR:
+            if len(source_op.successors) != 2:
+                raise ValueError(
+                    f"{source_op.name}: low.op.cond_br emission requires exactly "
+                    "two source successors"
+                )
+            if result_bindings or result_type_bindings:
+                raise ValueError(
+                    f"{source_op.name}: low.op.cond_br emission cannot bind results"
+                )
+            if self.swap_first_two_operands or self.copy_operands:
+                raise ValueError(
+                    f"{source_op.name}: low.op.cond_br emission cannot rewrite operands"
+                )
+            if (
+                self.source_memory is not None
+                or self.source_memory_byte_offset_materializer is not None
+                or self.source_memory_address_materializer is not None
+            ):
+                raise ValueError(
+                    f"{source_op.name}: low.op.cond_br emission cannot consume "
+                    "source memory"
+                )
         for descriptor_field, value_ref in operand_bindings.items():
             operand = _require_descriptor_operand(
                 self.descriptor, descriptor_field, "descriptor operand binding"
@@ -388,8 +496,10 @@ class EmitDescriptorOp:
                 if binding.kind in (
                     SourceValueKind.SOURCE_MEMORY_DYNAMIC_TERM,
                     SourceValueKind.SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET,
+                    SourceValueKind.SOURCE_MEMORY_BYTE_OFFSET,
                     SourceValueKind.SOURCE_MEMORY_ADDRESS,
                     SourceValueKind.SOURCE_MEMORY_ROOT,
+                    SourceValueKind.SOURCE_MEMORY_ELEMENT_STRIDE,
                 ):
                     raise ValueError(
                         f"{source_op.name}: descriptor result type "
@@ -508,6 +618,8 @@ class EmitDescriptorOp:
                 materializer.add,
                 materializer.multiply,
                 materializer.shift_left,
+                materializer.multiply_add,
+                materializer.static_bias,
                 *(
                     conversion.descriptor
                     for conversion in materializer.integer_conversions
@@ -568,7 +680,10 @@ class EmitDescriptorOp:
                     f"selects {self.source_memory.dynamic_term_count}"
                 )
         for descriptor_field, value_ref in operand_bindings.items():
-            if value_ref.kind != SourceValueKind.SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET:
+            if value_ref.kind not in (
+                SourceValueKind.SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET,
+                SourceValueKind.SOURCE_MEMORY_BYTE_OFFSET,
+            ):
                 continue
             if self.source_memory is None:
                 raise ValueError(
@@ -594,7 +709,10 @@ class EmitDescriptorOp:
                     "offset materializer"
                 )
         for descriptor_field, value_ref in operand_bindings.items():
-            if value_ref.kind != SourceValueKind.SOURCE_MEMORY_ADDRESS:
+            if value_ref.kind not in (
+                SourceValueKind.SOURCE_MEMORY_ADDRESS,
+                SourceValueKind.SOURCE_MEMORY_ELEMENT_STRIDE,
+            ):
                 continue
             if self.source_memory is None:
                 raise ValueError(
@@ -606,6 +724,23 @@ class EmitDescriptorOp:
                     f"{source_op.name}: descriptor '{self.descriptor.key}' "
                     f"operand '{descriptor_field}' needs a source-memory address "
                     "materializer"
+                )
+
+        for value_ref in operand_bindings.values():
+            if value_ref.kind != SourceValueKind.SOURCE_MEMORY_ELEMENT_STRIDE:
+                continue
+            expected_layout = (
+                SourceMemoryAddressLayout.ROW_MAJOR
+                if value_ref.element == 0
+                else SourceMemoryAddressLayout.COLUMN_MAJOR
+            )
+            if (
+                self.source_memory is None
+                or self.source_memory.address_layout != expected_layout
+            ):
+                raise ValueError(
+                    f"{source_op.name}: stride axis must be the leading axis "
+                    "of the source-memory layout"
                 )
 
     def _validate_immediates(
@@ -629,7 +764,18 @@ class EmitDescriptorOp:
                         immediate_name,
                         source_ops=source_ops,
                     )
-                elif isinstance(binding, AttrProject | SourceOpProject):
+                elif isinstance(binding, AttrProject):
+                    binding.validate(
+                        source_op,
+                        descriptor_set,
+                        self.descriptor,
+                        immediate_name,
+                        source_ops=source_ops,
+                    )
+                elif isinstance(
+                    binding,
+                    (OperandSegmentProject, ReadOnlyDataLiteral, SourceOpProject),
+                ):
                     binding.validate(source_op, self.descriptor, immediate_name)
                 elif isinstance(binding, SourceMemoryProject):
                     if self.source_memory is None:
@@ -685,7 +831,13 @@ class EmitDescriptorOp:
         else:
             bound_names = set[str]()
             for projection in self.immediates:
-                projection.validate(source_op, self.descriptor, None)
+                projection.validate(
+                    source_op,
+                    descriptor_set,
+                    self.descriptor,
+                    None,
+                    source_ops=source_ops,
+                )
                 bound_names.update(projection.target_names)
         for immediate in self.descriptor.immediates:
             if _immediate_has_default(immediate):
@@ -757,15 +909,13 @@ def _validate_structural_result(
         if result_type.kind in (
             SourceValueKind.SOURCE_MEMORY_DYNAMIC_TERM,
             SourceValueKind.SOURCE_MEMORY_DYNAMIC_BYTE_OFFSET,
+            SourceValueKind.SOURCE_MEMORY_BYTE_OFFSET,
             SourceValueKind.SOURCE_MEMORY_ADDRESS,
             SourceValueKind.SOURCE_MEMORY_ROOT,
+            SourceValueKind.SOURCE_MEMORY_ELEMENT_STRIDE,
         ):
             raise ValueError(
                 f"{source_op.name}: {subject} type cannot bind source memory"
-            )
-        if result_type.kind == SourceValueKind.TEMPORARY:
-            raise ValueError(
-                f"{source_op.name}: {subject} type cannot bind a temporary"
             )
         _validate_value_ref(
             source_op,
@@ -994,6 +1144,25 @@ def _validate_byte_offset_materializer(
                 input_carriers=(carrier, carrier),
                 result_carrier=carrier,
             )
+    if materializer.multiply_add is not None:
+        _validate_materializer_descriptor(
+            source_op,
+            materializer.multiply_add,
+            subject="source-memory byte-offset multiply-add",
+            op_kind=DescriptorOpKind.OP,
+            input_carriers=(carrier, carrier, carrier),
+            result_carrier=carrier,
+        )
+    if materializer.static_bias is not None:
+        _validate_materializer_descriptor(
+            source_op,
+            materializer.static_bias,
+            subject="source-memory byte-offset static bias",
+            op_kind=DescriptorOpKind.OP,
+            input_carriers=(),
+            result_carrier=carrier,
+            bound_immediate=materializer.constant_immediate,
+        )
     _validate_integer_conversions(
         source_op, descriptor_set, materializer.integer_conversions, carrier
     )

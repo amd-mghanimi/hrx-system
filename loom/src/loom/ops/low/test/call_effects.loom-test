@@ -1,0 +1,166 @@
+// RUN: pass canonicalize,dce
+
+// A noinline boundary retains its call ABI but does not hide a visible body's
+// effects. Dead address/value calculations can disappear before Low inlining.
+test.target<low_core> @target
+
+low.func.def noinline target<test.low.core>(@target) @identity(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  return %value
+}
+
+func.def @source_identity(%value: i32) -> (i32) {
+  %unused = low.invoke noinline @identity(%value) : (i32) -> (i32)
+  %result = low.invoke noinline @identity(%value) : (i32) -> (i32)
+  func.return %result : i32
+}
+
+low.func.def target<test.low.core>(@target) @native_identity(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %unused = low.func.call noinline @identity(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  %result = low.func.call noinline @identity(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  return %result
+}
+
+// ----
+test.target<low_core> @target
+
+low.func.def noinline target<test.low.core>(@target) @identity(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  return %value
+}
+
+func.def @source_identity(%value: i32) -> (i32) {
+  %result = low.invoke pure noinline @identity(%value) : (i32) -> (i32)
+  func.return %result : i32
+}
+
+low.func.def target<test.low.core>(@target) @native_identity(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %result = low.func.call pure noinline @identity(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  return %result
+}
+
+// ====
+
+// Explicit declaration contracts also establish purity without a definition.
+test.target<low_core> @target
+
+low.func.decl pure target<test.low.core>(@target) @external_value(%value: reg<test.i32>) -> (reg<test.i32>)
+
+func.def @source_external_value(%value: i32) -> (i32) {
+  %unused = low.invoke @external_value(%value) : (i32) -> (i32)
+  %result = low.invoke @external_value(%value) : (i32) -> (i32)
+  func.return %result : i32
+}
+
+low.func.def target<test.low.core>(@target) @native_external_value(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %unused = low.func.call @external_value(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  %result = low.func.call @external_value(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  return %result
+}
+
+// ----
+test.target<low_core> @target
+
+low.func.decl pure target<test.low.core>(@target) @external_value(%value: reg<test.i32>) -> (reg<test.i32>)
+
+func.def @source_external_value(%value: i32) -> (i32) {
+  %result = low.invoke pure @external_value(%value) : (i32) -> (i32)
+  func.return %result : i32
+}
+
+low.func.def target<test.low.core>(@target) @native_external_value(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %result = low.func.call pure @external_value(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  return %result
+}
+
+// ====
+
+// Read-only contracts propagate through both source and Low call forms. DCE
+// can erase an unused deterministic read while retaining the contract on live
+// calls for memory-aware motion and CSE.
+test.target<low_core> @target
+
+low.func.decl readonly target<test.low.core>(@target) @external_read(%address: reg<test.ptr>) -> (reg<test.i32 x4>)
+
+func.def @source_external_read(%address: i64) -> (vector<4xi32>) {
+  %unused = low.invoke @external_read(%address) : (i64) -> (vector<4xi32>)
+  %result = low.invoke @external_read(%address) : (i64) -> (vector<4xi32>)
+  func.return %result : vector<4xi32>
+}
+
+low.func.def target<test.low.core>(@target) @native_external_read(%address: reg<test.ptr>) -> (reg<test.i32 x4>) asm {
+  %unused = low.func.call @external_read(%address) : (reg<test.ptr>) -> (reg<test.i32 x4>)
+  %result = low.func.call @external_read(%address) : (reg<test.ptr>) -> (reg<test.i32 x4>)
+  return %result
+}
+
+// ----
+test.target<low_core> @target
+
+low.func.decl readonly target<test.low.core>(@target) @external_read(%address: reg<test.ptr>) -> (reg<test.i32 x4>)
+
+func.def @source_external_read(%address: i64) -> (vector<4xi32>) {
+  %result = low.invoke readonly @external_read(%address) : (i64) -> (vector<4xi32>)
+  func.return %result : vector<4xi32>
+}
+
+low.func.def target<test.low.core>(@target) @native_external_read(%address: reg<test.ptr>) -> (reg<test.i32 x4>) asm {
+  %result = low.func.call readonly @external_read(%address) : (reg<test.ptr>) -> (reg<test.i32 x4>)
+  return %result
+}
+
+// ====
+
+// Unused results never discharge an unknown external call's effects.
+test.target<low_core> @target
+
+low.func.decl target<test.low.core>(@target) @external_effect(%value: reg<test.i32>) -> (reg<test.i32>)
+
+func.def @source_external_effect(%value: i32) {
+  %unused = low.invoke @external_effect(%value) : (i32) -> (i32)
+  func.return
+}
+
+low.func.def target<test.low.core>(@target) @native_external_effect(%value: reg<test.i32>) asm {
+  %unused = low.func.call @external_effect(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  return
+}
+
+// ====
+
+// Reads, writes, convergence and independent observations each keep calls live.
+test.target<low_core> @target
+
+low.func.def target<test.low.core>(@target) @read_memory(%address: reg<test.ptr>) -> (reg<test.i32 x4>) asm {
+  %value = test.load.v4i32 %address
+  return %value
+}
+
+low.func.def target<test.low.core>(@target) @write_memory(%address: reg<test.ptr>, %value: reg<test.i32 x4>) asm {
+  test.store.v4i32 %address, %value
+  return
+}
+
+low.func.def target<test.low.core>(@target) @converge(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %result = test.convergent.i32 %value
+  return %result
+}
+
+low.func.def target<test.low.core>(@target) @observe(%value: reg<test.i32>) -> (reg<test.i32>) asm {
+  %result = test.projectable_effect.i32 %value
+  return %result
+}
+
+func.def @source_effects(%address: i64, %value: i32, %values: vector<4xi32>) {
+  %read = low.invoke @read_memory(%address) : (i64) -> (vector<4xi32>)
+  low.invoke @write_memory(%address, %values) : (i64, vector<4xi32>)
+  %converged = low.invoke @converge(%value) : (i32) -> (i32)
+  %observed = low.invoke @observe(%value) : (i32) -> (i32)
+  func.return
+}
+
+low.func.def target<test.low.core>(@target) @native_effects(%address: reg<test.ptr>, %value: reg<test.i32>, %values: reg<test.i32 x4>) asm {
+  %read = low.func.call @read_memory(%address) : (reg<test.ptr>) -> (reg<test.i32 x4>)
+  low.func.call @write_memory(%address, %values) : (reg<test.ptr>, reg<test.i32 x4>)
+  %converged = low.func.call @converge(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  %observed = low.func.call @observe(%value) : (reg<test.i32>) -> (reg<test.i32>)
+  return
+}

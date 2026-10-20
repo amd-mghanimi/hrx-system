@@ -1,0 +1,167 @@
+// RUN: emit aie2p-xdna
+
+// The worker owns the complete acquire/consume/release loop. Configuration
+// only places its image and initializes the physical resources it addresses.
+aie2p.target<configuration> @configuration_target {device_profile = "amd.xdna.strix_halo.17f0_11"}
+
+aie2p.target<core> @core_target
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration_target) abi(array_program) @stream() asm {
+  %columns = constant 2 : reg<aie2p.config.scalar : i64>
+  %bounded_columns = low.assume %columns [eq(%columns, 2)] : reg<aie2p.config.scalar : i64>
+  entry %bounded_columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration_target) @initialize() asm {
+  %zero = constant 0 : reg<aie2p.config.scalar : i64>
+  %one = constant 1 : reg<aie2p.config.scalar : i64>
+  %row = constant 2 : reg<aie2p.config.scalar : i64>
+  %control = constant 2293760 : reg<aie2p.config.scalar : i64>
+  write32 %control, %zero
+  program.load %zero, %row, @worker
+  program.load %one, %row, @worker
+  write.mask32 %control, %one, %one
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration_target) @invoke() asm {
+  %zero = constant 0 : reg<aie2p.config.scalar : i64>
+  %one = constant 1 : reg<aie2p.config.scalar : i64>
+  %alignment = constant 64 : reg<aie2p.config.scalar : i64>
+  %header_length = constant 256 : reg<aie2p.config.scalar : i64>
+  %payload_length = constant 4096 : reg<aie2p.config.scalar : i64>
+  %binding_length = constant 4352 : reg<aie2p.config.scalar : i64>
+  %words = constant 1024 : reg<aie2p.config.scalar : i64>
+  %binding = binding %zero, %one, %binding_length, %alignment
+  %payload = range %binding, %header_length, %payload_length
+  %header = range %binding, %zero, %header_length
+  %header_address = constant 2588608 : reg<aie2p.config.scalar : i64>
+  write.address %header_address, %header
+  %descriptor_address = constant 118784 : reg<aie2p.config.scalar : i64>
+  shim.descriptor %descriptor_address, %payload, %words, %zero, %zero, %zero, %zero, %zero, %one
+  %queue = constant 119316 : reg<aie2p.config.scalar : i64>
+  write.block32(%queue)[%zero, %one]
+  dma.wait %zero, %zero, %one, %zero, %one, %one
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.core>(@core_target) abi(object_function) @worker() asm {
+  %one = mova.i32 1
+  %header = mov.local-address 458752
+  %count = lda %header, 0
+  low.br ^next(%count: reg<aie2p.er>)
+^next(%remaining: reg<aie2p.er>):
+  low.cond_br %remaining, ^consume, ^done : reg<aie2p.er>
+^consume:
+  acq %one, 0
+  %record = lda %header, 4
+  st %record, %header, 8
+  rel %one, 1
+  %decremented = sub %remaining, %one
+  low.br ^next(%decremented: reg<aie2p.er>)
+^done:
+  return
+}
+
+// ----
+partition: 2 columns, 6 rows
+entries: 1
+entry 0: 1 bindings, 4 dynamic relocations
+  binding 0: access=1 bytes=4352 alignment=64 offset=[0,18446744073709551615]
+  relocation 0: binding=0 addend=0 maximum=281474976710400 alignment=4
+  relocation 1: binding=0 addend=256 maximum=281474976706560 alignment=4
+  relocation 2: binding=0 addend=0 maximum=281474976710400 alignment=4
+  relocation 3: binding=0 addend=256 maximum=281474976706560 alignment=4
+  invocation 0: bytes=444 next=1
+  invocation 1: bytes=128 next=1
+
+// ====
+// RUN: emit aie2p-xdna
+
+aie2p.target<configuration> @configuration_target {device_profile = "amd.xdna.strix_halo.17f0_11"}
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration_target) abi(array_program) @service() asm {
+  %one = constant 1 : reg<aie2p.config.scalar : i64>
+  entry %one, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration_target) @initialize() asm {
+  %address = constant 2224128 : reg<aie2p.config.scalar : i64>
+  %value = constant 1 : reg<aie2p.config.scalar : i64>
+  write32 %address, %value
+  wait.mask32 %address, %value, %value
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration_target) @invoke() asm {
+  %address = constant 2224132 : reg<aie2p.config.scalar : i64>
+  %value = constant 1 : reg<aie2p.config.scalar : i64>
+  wait.mask32 %address, %value, %value
+  write32 %address, %value
+  return
+}
+
+// ----
+partition: 1 columns, 6 rows
+entries: 1
+entry 0: 0 bindings, 0 dynamic relocations
+  invocation 0: bytes=128 next=1
+  invocation 1: bytes=72 next=1
+
+// ====
+// RUN: emit aie2p-xdna
+
+// Unused arguments preserve public ordinals without access or relocations.
+aie2p.target<configuration> @configuration {device_profile = "amd.xdna.strix.17f0_10"}
+
+low.func.def public retain target<amd.xdna.aie2p.configuration>(@configuration) abi(array_program) @with_unused_arguments() asm {
+  %columns = constant 1 : reg<aie2p.config.scalar : i64>
+  entry %columns, @initialize, @invoke
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @initialize() asm {
+  return
+}
+
+low.func.def target<amd.xdna.aie2p.configuration>(@configuration) @invoke() asm {
+  %first_unused = constant 0 : reg<aie2p.config.scalar : i64>
+  %input_ordinal = constant 1 : reg<aie2p.config.scalar : i64>
+  %middle_unused = constant 2 : reg<aie2p.config.scalar : i64>
+  %output_ordinal = constant 3 : reg<aie2p.config.scalar : i64>
+  %last_unused = constant 4 : reg<aie2p.config.scalar : i64>
+  %read_access = constant 1 : reg<aie2p.config.scalar : i64>
+  %write_access = constant 2 : reg<aie2p.config.scalar : i64>
+  %extent = constant 64 : reg<aie2p.config.scalar : i64>
+  %origin = constant 0 : reg<aie2p.config.scalar : i64>
+  %input_address = constant 2588608 : reg<aie2p.config.scalar : i64>
+  %output_address = constant 2588616 : reg<aie2p.config.scalar : i64>
+  binding.unused %first_unused
+  %input = binding %input_ordinal, %read_access, %extent, %extent
+  binding.unused %middle_unused
+  %output = binding %output_ordinal, %write_access, %extent, %extent
+  binding.unused %last_unused
+  %input_range = range %input, %origin, %extent
+  %output_range = range %output, %origin, %extent
+  write.address %input_address, %input_range
+  write.address %output_address, %output_range
+  return
+}
+
+// ----
+partition: 1 columns, 6 rows
+entries: 1
+entry 0: 5 bindings, 4 dynamic relocations
+  binding 0: access=0 bytes=0 alignment=0 offset=[0,0]
+  binding 1: access=1 bytes=64 alignment=64 offset=[0,18446744073709551615]
+  binding 2: access=0 bytes=0 alignment=0 offset=[0,0]
+  binding 3: access=2 bytes=64 alignment=64 offset=[0,18446744073709551615]
+  binding 4: access=0 bytes=0 alignment=0 offset=[0,0]
+  relocation 0: binding=1 addend=0 maximum=281474976710592 alignment=4
+  relocation 1: binding=3 addend=0 maximum=281474976710592 alignment=4
+  relocation 2: binding=1 addend=0 maximum=281474976710592 alignment=4
+  relocation 3: binding=3 addend=0 maximum=281474976710592 alignment=4
+  invocation 0: bytes=64 next=1
+  invocation 1: bytes=64 next=1

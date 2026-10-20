@@ -8,7 +8,7 @@
 
 #include <string.h>
 
-#include "iree/base/threading/mutex.h"
+#include "iree/hal/buffer_allocation.h"
 #include "iree/hal/replay/recorder_record.h"
 
 #define IREE_HAL_REPLAY_VTABLE_DISPATCH(resource, type_prefix, method_name) \
@@ -36,33 +36,44 @@ struct iree_hal_replay_recorder_buffer_t {
   // Recorder allocator ID for virtual reservations, or NONE for ordinary
   // buffers.
   iree_hal_replay_object_id_t virtual_memory_allocator_id;
-  // Mutex guarding active write mappings.
-  iree_slim_mutex_t mutex;
-  // Active write mappings whose flush/unmap bytes may need capture.
-  struct iree_hal_replay_recorder_buffer_mapping_t* mapping_list;
+  // One scoped host mapping owned by this proxy, or zero for an ordinary view.
+  struct {
+    // Session-local identity independent from the original buffer's lifetime.
+    iree_hal_replay_object_id_t id;
+    // Borrowed caller mapping valid until its consuming unmap.
+    iree_hal_buffer_mapping_t* value;
+    // Offset in the original captured buffer at the mapped range's start.
+    iree_device_size_t recorded_origin;
+    // Offset in the native mapped buffer at the same byte.
+    iree_device_size_t native_origin;
+  } mapping;
 };
 
-typedef struct iree_hal_replay_recorder_buffer_mapping_t {
-  // Caller-owned mapping object used to identify the mapping on unmap.
-  iree_hal_buffer_mapping_t* mapping;
-  // Allowed access bits captured from the mapping.
-  iree_hal_memory_access_t allowed_access;
-  // Next active mapping for the same replay buffer.
-  struct iree_hal_replay_recorder_buffer_mapping_t* next;
-} iree_hal_replay_recorder_buffer_mapping_t;
-
 static const iree_hal_buffer_vtable_t iree_hal_replay_recorder_buffer_vtable;
+static const iree_hal_buffer_vtable_t
+    iree_hal_replay_recorder_allocated_buffer_vtable;
 
 static bool iree_hal_replay_recorder_buffer_isa(
     iree_hal_buffer_t* base_buffer) {
   return iree_hal_resource_is(base_buffer,
-                              &iree_hal_replay_recorder_buffer_vtable);
+                              &iree_hal_replay_recorder_buffer_vtable) ||
+         iree_hal_resource_is(
+             base_buffer, &iree_hal_replay_recorder_allocated_buffer_vtable);
 }
 
 static iree_hal_replay_recorder_buffer_t* iree_hal_replay_recorder_buffer_cast(
     iree_hal_buffer_t* base_buffer) {
-  IREE_HAL_ASSERT_TYPE(base_buffer, &iree_hal_replay_recorder_buffer_vtable);
+  IREE_ASSERT(iree_hal_replay_recorder_buffer_isa(base_buffer));
   return (iree_hal_replay_recorder_buffer_t*)base_buffer;
+}
+
+static iree_device_size_t iree_hal_replay_recorder_buffer_recorded_offset(
+    const iree_hal_replay_recorder_buffer_t* buffer,
+    iree_device_size_t native_offset) {
+  return buffer->mapping.id
+             ? buffer->mapping.recorded_origin + native_offset -
+                   buffer->mapping.native_origin
+             : native_offset - iree_hal_buffer_byte_offset(&buffer->base);
 }
 
 void iree_hal_replay_recorder_buffer_make_object_payload(
@@ -123,6 +134,12 @@ void iree_hal_replay_recorder_buffer_ref_make_payload(
     out_payload->buffer_id =
         iree_hal_replay_recorder_buffer_id_or_none(buffer_ref.buffer);
     out_payload->offset += iree_hal_buffer_byte_offset(buffer_ref.buffer);
+    iree_hal_buffer_t* root =
+        iree_hal_buffer_allocated_buffer(buffer_ref.buffer);
+    if (iree_hal_replay_recorder_buffer_isa(root)) {
+      out_payload->offset = iree_hal_replay_recorder_buffer_recorded_offset(
+          iree_hal_replay_recorder_buffer_cast(root), out_payload->offset);
+    }
   } else {
     out_payload->buffer_slot = buffer_ref.buffer_slot;
   }
@@ -195,7 +212,12 @@ iree_hal_buffer_t* iree_hal_replay_recorder_buffer_initialize_proxy(
       iree_hal_buffer_memory_type(base_buffer),
       iree_hal_buffer_allowed_access(base_buffer),
       iree_hal_buffer_allowed_usage(base_buffer),
-      &iree_hal_replay_recorder_buffer_vtable, &buffer->base);
+      iree_hal_buffer_allocation_vtable(base_buffer)
+          ? &iree_hal_replay_recorder_allocated_buffer_vtable
+          : &iree_hal_replay_recorder_buffer_vtable,
+      &buffer->base);
+  buffer->base.memory = base_buffer->memory;
+  buffer->base.host_binding_index = base_buffer->host_binding_index;
   buffer->host_allocator = host_allocator;
   buffer->recorder = recorder;
   iree_hal_replay_recorder_retain(buffer->recorder);
@@ -204,7 +226,6 @@ iree_hal_buffer_t* iree_hal_replay_recorder_buffer_initialize_proxy(
   buffer->device_id = device_id;
   buffer->buffer_id = buffer_id;
   buffer->virtual_memory_allocator_id = virtual_memory_allocator_id;
-  iree_slim_mutex_initialize(&buffer->mutex);
 
   return &buffer->base;
 }
@@ -247,6 +268,22 @@ iree_hal_buffer_t* iree_hal_replay_recorder_buffer_base_or_self(
              : buffer;
 }
 
+// Resolves the native root beneath any internal replay identity adapters.
+// Offsets remain absolute within the allocation and are handled by callers.
+static iree_hal_buffer_t*
+iree_hal_replay_recorder_buffer_unwrap_allocated_buffer(
+    iree_hal_buffer_t* buffer) {
+  iree_hal_buffer_t* allocated_buffer =
+      iree_hal_buffer_allocated_buffer(buffer);
+  while (iree_hal_replay_recorder_buffer_isa(allocated_buffer)) {
+    iree_hal_replay_recorder_buffer_t* replay_buffer =
+        iree_hal_replay_recorder_buffer_cast(allocated_buffer);
+    allocated_buffer =
+        iree_hal_buffer_allocated_buffer(replay_buffer->base_buffer);
+  }
+  return allocated_buffer;
+}
+
 void iree_hal_replay_recorder_buffer_consume_virtual_memory(
     iree_hal_buffer_t* buffer) {
   iree_hal_replay_recorder_buffer_t* replay_buffer =
@@ -266,9 +303,9 @@ iree_status_t iree_hal_replay_recorder_buffer_unwrap_for_call(
   *out_temporary_buffer = NULL;
 
   if (iree_hal_replay_recorder_buffer_isa(buffer)) {
-    *out_base_buffer =
-        iree_hal_replay_recorder_buffer_cast(buffer)->base_buffer;
-    return iree_ok_status();
+    return iree_hal_replay_recorder_buffer_unwrap_for_call(
+        iree_hal_replay_recorder_buffer_cast(buffer)->base_buffer,
+        host_allocator, out_base_buffer, out_temporary_buffer);
   }
 
   iree_hal_buffer_t* allocated_buffer =
@@ -281,7 +318,8 @@ iree_status_t iree_hal_replay_recorder_buffer_unwrap_for_call(
   iree_hal_replay_recorder_buffer_t* replay_allocated_buffer =
       iree_hal_replay_recorder_buffer_cast(allocated_buffer);
   iree_hal_buffer_t* base_allocated_buffer =
-      iree_hal_buffer_allocated_buffer(replay_allocated_buffer->base_buffer);
+      iree_hal_replay_recorder_buffer_unwrap_allocated_buffer(
+          replay_allocated_buffer->base_buffer);
   IREE_RETURN_IF_ERROR(iree_hal_buffer_subspan(
       base_allocated_buffer, iree_hal_buffer_byte_offset(buffer),
       iree_hal_buffer_byte_length(buffer), host_allocator,
@@ -303,7 +341,7 @@ iree_status_t iree_hal_replay_recorder_buffer_ref_unwrap_for_call(
   if (iree_hal_replay_recorder_buffer_isa(inout_ref->buffer)) {
     inout_ref->buffer =
         iree_hal_replay_recorder_buffer_cast(inout_ref->buffer)->base_buffer;
-    return iree_ok_status();
+    return iree_hal_replay_recorder_buffer_ref_unwrap_for_call(inout_ref);
   }
 
   iree_hal_buffer_t* allocated_buffer =
@@ -321,8 +359,8 @@ iree_status_t iree_hal_replay_recorder_buffer_ref_unwrap_for_call(
   }
   iree_hal_replay_recorder_buffer_t* replay_allocated_buffer =
       iree_hal_replay_recorder_buffer_cast(allocated_buffer);
-  inout_ref->buffer =
-      iree_hal_buffer_allocated_buffer(replay_allocated_buffer->base_buffer);
+  inout_ref->buffer = iree_hal_replay_recorder_buffer_unwrap_allocated_buffer(
+      replay_allocated_buffer->base_buffer);
   inout_ref->offset = base_offset;
   return iree_ok_status();
 }
@@ -339,8 +377,8 @@ static iree_status_t iree_hal_replay_recorder_buffer_begin_operation(
     iree_hal_replay_pending_record_t* out_pending_record) {
   return iree_hal_replay_recorder_begin_operation(
       buffer->recorder, buffer->device_id, buffer->buffer_id,
-      IREE_HAL_REPLAY_OBJECT_ID_NONE, IREE_HAL_REPLAY_OBJECT_TYPE_BUFFER,
-      operation_code, payload_type, out_pending_record);
+      buffer->mapping.id, IREE_HAL_REPLAY_OBJECT_TYPE_BUFFER, operation_code,
+      payload_type, out_pending_record);
 }
 
 static bool iree_hal_replay_recorder_buffer_mapping_has_write_access(
@@ -349,130 +387,26 @@ static bool iree_hal_replay_recorder_buffer_mapping_has_write_access(
                            IREE_HAL_MEMORY_ACCESS_WRITE);
 }
 
-static iree_status_t iree_hal_replay_recorder_buffer_make_range_data_payload(
+static void iree_hal_replay_recorder_buffer_make_range_data_payload(
+    const iree_hal_replay_recorder_buffer_t* buffer,
     const iree_hal_buffer_mapping_t* mapping,
     iree_device_size_t local_byte_offset, iree_device_size_t local_byte_length,
     iree_hal_replay_buffer_range_data_payload_t* out_payload,
     iree_const_byte_span_t* out_data) {
-  IREE_ASSERT_ARGUMENT(mapping);
-  IREE_ASSERT_ARGUMENT(out_payload);
-  IREE_ASSERT_ARGUMENT(out_data);
+  // The public mapping API has already bounded this range within the map.
   memset(out_payload, 0, sizeof(*out_payload));
-  *out_data = iree_make_const_byte_span(NULL, 0);
-
-  if (IREE_UNLIKELY(!mapping->contents.data)) {
-    if (local_byte_length == 0) {
-      return iree_ok_status();
-    }
-    return iree_make_status(
-        IREE_STATUS_FAILED_PRECONDITION,
-        "cannot capture replay mapped buffer data without mapped contents");
-  }
-  if (IREE_UNLIKELY(local_byte_offset < mapping->impl.byte_offset)) {
-    return iree_make_status(IREE_STATUS_DATA_LOSS,
-                            "replay mapped buffer range begins before mapping");
-  }
-  iree_device_size_t mapped_data_offset =
-      local_byte_offset - mapping->impl.byte_offset;
-  if (IREE_UNLIKELY(mapped_data_offset > mapping->contents.data_length ||
-                    local_byte_length >
-                        mapping->contents.data_length - mapped_data_offset)) {
-    return iree_make_status(IREE_STATUS_DATA_LOSS,
-                            "replay mapped buffer range extends past mapping");
-  }
-  if (IREE_UNLIKELY(local_byte_length > IREE_HOST_SIZE_MAX)) {
-    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
-                            "replay mapped buffer range exceeds host size");
-  }
-
-  out_payload->byte_offset = local_byte_offset;
+  const iree_host_size_t mapped_data_offset =
+      (iree_host_size_t)(local_byte_offset - mapping->impl.byte_offset);
+  out_payload->byte_offset = iree_hal_replay_recorder_buffer_recorded_offset(
+      buffer, local_byte_offset);
   out_payload->byte_length = local_byte_length;
   out_payload->data_length = local_byte_length;
   out_payload->memory_access = mapping->impl.allowed_access;
+  out_payload->map_flags = mapping->impl.flags;
   *out_data = iree_make_const_byte_span(
-      mapping->contents.data + (iree_host_size_t)mapped_data_offset,
+      mapping->contents.data ? mapping->contents.data + mapped_data_offset
+                             : NULL,
       (iree_host_size_t)local_byte_length);
-  return iree_ok_status();
-}
-
-static void iree_hal_replay_recorder_buffer_unregister_mapping(
-    iree_hal_replay_recorder_buffer_t* buffer,
-    iree_hal_buffer_mapping_t* mapping) {
-  iree_hal_replay_recorder_buffer_mapping_t* removed_entry = NULL;
-  iree_slim_mutex_lock(&buffer->mutex);
-  iree_hal_replay_recorder_buffer_mapping_t** entry_ptr = &buffer->mapping_list;
-  while (*entry_ptr) {
-    iree_hal_replay_recorder_buffer_mapping_t* entry = *entry_ptr;
-    if (entry->mapping == mapping) {
-      removed_entry = entry;
-      *entry_ptr = entry->next;
-      break;
-    }
-    entry_ptr = &entry->next;
-  }
-  iree_slim_mutex_unlock(&buffer->mutex);
-  iree_allocator_free(buffer->host_allocator, removed_entry);
-}
-
-static void iree_hal_replay_recorder_buffer_clear_mappings(
-    iree_hal_replay_recorder_buffer_t* buffer) {
-  iree_slim_mutex_lock(&buffer->mutex);
-  iree_hal_replay_recorder_buffer_mapping_t* mapping_list =
-      buffer->mapping_list;
-  buffer->mapping_list = NULL;
-  iree_slim_mutex_unlock(&buffer->mutex);
-  while (mapping_list) {
-    iree_hal_replay_recorder_buffer_mapping_t* entry = mapping_list;
-    mapping_list = entry->next;
-    iree_allocator_free(buffer->host_allocator, entry);
-  }
-}
-
-static iree_status_t iree_hal_replay_recorder_buffer_capture_mapping_range(
-    iree_hal_replay_recorder_buffer_t* buffer,
-    iree_device_size_t local_byte_offset, iree_device_size_t local_byte_length,
-    iree_hal_replay_buffer_range_data_payload_t* out_payload,
-    iree_const_byte_span_t* out_data) {
-  IREE_ASSERT_ARGUMENT(out_payload);
-  IREE_ASSERT_ARGUMENT(out_data);
-  memset(out_payload, 0, sizeof(*out_payload));
-  *out_data = iree_make_const_byte_span(NULL, 0);
-  if (local_byte_length == 0) {
-    return iree_ok_status();
-  }
-
-  iree_slim_mutex_lock(&buffer->mutex);
-  bool found_mapping = false;
-  iree_status_t status = iree_ok_status();
-  for (iree_hal_replay_recorder_buffer_mapping_t* entry = buffer->mapping_list;
-       entry; entry = entry->next) {
-    if (!iree_all_bits_set(entry->allowed_access,
-                           IREE_HAL_MEMORY_ACCESS_WRITE)) {
-      continue;
-    }
-    if (local_byte_offset < entry->mapping->impl.byte_offset) {
-      continue;
-    }
-    const iree_device_size_t mapping_data_offset =
-        local_byte_offset - entry->mapping->impl.byte_offset;
-    if (mapping_data_offset > entry->mapping->contents.data_length ||
-        local_byte_length >
-            entry->mapping->contents.data_length - mapping_data_offset) {
-      continue;
-    }
-    status = iree_hal_replay_recorder_buffer_make_range_data_payload(
-        entry->mapping, local_byte_offset, local_byte_length, out_payload,
-        out_data);
-    found_mapping = true;
-    break;
-  }
-  iree_slim_mutex_unlock(&buffer->mutex);
-  if (!found_mapping) {
-    return iree_make_status(
-        IREE_STATUS_FAILED_PRECONDITION,
-        "cannot capture replay buffer flush without an active write mapping");
-  }
-  return status;
 }
 
 static void iree_hal_replay_recorder_buffer_destroy(
@@ -482,8 +416,6 @@ static void iree_hal_replay_recorder_buffer_destroy(
   iree_allocator_t host_allocator = buffer->host_allocator;
   IREE_TRACE_ZONE_BEGIN(z0);
 
-  iree_hal_replay_recorder_buffer_clear_mappings(buffer);
-  iree_slim_mutex_deinitialize(&buffer->mutex);
   iree_hal_buffer_release(buffer->base_buffer);
   iree_hal_replay_recorder_release(buffer->recorder);
   iree_allocator_free(host_allocator, buffer);
@@ -494,11 +426,17 @@ static void iree_hal_replay_recorder_buffer_destroy(
 static iree_status_t iree_hal_replay_recorder_buffer_export_range(
     iree_hal_buffer_t* base_buffer, iree_device_size_t local_byte_offset,
     iree_device_size_t local_byte_length,
-    iree_hal_external_buffer_type_t requested_type,
-    iree_hal_external_buffer_flags_t requested_flags,
-    iree_hal_external_buffer_t* out_external_buffer) {
+    iree_hal_external_storage_class_t requested_class,
+    iree_hal_external_storage_t* out_storage,
+    iree_hal_buffer_range_t* out_logical_range) {
   iree_hal_replay_recorder_buffer_t* buffer =
       iree_hal_replay_recorder_buffer_cast(base_buffer);
+  if (buffer->buffer_id == IREE_HAL_REPLAY_OBJECT_ID_NONE) {
+    return IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer, iree_hal_buffer,
+                                           export_range)(
+        buffer->base_buffer, local_byte_offset, local_byte_length,
+        requested_class, out_storage, out_logical_range);
+  }
   iree_hal_replay_pending_record_t pending_record;
   IREE_RETURN_IF_ERROR(iree_hal_replay_recorder_buffer_begin_operation(
       buffer, IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_EXPORT,
@@ -509,58 +447,83 @@ static iree_status_t iree_hal_replay_recorder_buffer_export_range(
       IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer, iree_hal_buffer,
                                       export_range)(
           buffer->base_buffer, local_byte_offset, local_byte_length,
-          requested_type, requested_flags, out_external_buffer));
+          requested_class, out_storage, out_logical_range));
 }
 
 static iree_status_t iree_hal_replay_recorder_buffer_map_range(
     iree_hal_buffer_t* base_buffer, iree_hal_mapping_mode_t mapping_mode,
-    iree_hal_memory_access_t memory_access,
+    iree_hal_memory_access_t memory_access, iree_hal_buffer_map_flags_t flags,
     iree_device_size_t local_byte_offset, iree_device_size_t local_byte_length,
     iree_hal_buffer_mapping_t* mapping) {
   iree_hal_replay_recorder_buffer_t* buffer =
       iree_hal_replay_recorder_buffer_cast(base_buffer);
+  if (buffer->buffer_id == IREE_HAL_REPLAY_OBJECT_ID_NONE) {
+    return IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer, iree_hal_buffer,
+                                           map_range)(
+        buffer->base_buffer, mapping_mode, memory_access, flags,
+        local_byte_offset, local_byte_length, mapping);
+  }
   iree_hal_replay_buffer_range_payload_t payload = {
-      .byte_offset = local_byte_offset,
+      .byte_offset = iree_hal_replay_recorder_buffer_recorded_offset(
+          buffer, local_byte_offset),
       .byte_length = local_byte_length,
       .mapping_mode = mapping_mode,
       .memory_access = memory_access,
+      .map_flags = flags,
   };
   iree_const_byte_span_t iovec =
       iree_make_const_byte_span((const uint8_t*)&payload, sizeof(payload));
+  iree_hal_replay_object_id_t mapping_id = IREE_HAL_REPLAY_OBJECT_ID_NONE;
+  if (!mapping->impl.is_persistent) {
+    IREE_RETURN_IF_ERROR(iree_hal_replay_recorder_reserve_object_id(
+        buffer->recorder, &mapping_id));
+  }
   iree_hal_replay_pending_record_t pending_record;
-  IREE_RETURN_IF_ERROR(iree_hal_replay_recorder_buffer_begin_operation(
-      buffer, IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_MAP_RANGE,
+  IREE_RETURN_IF_ERROR(iree_hal_replay_recorder_begin_operation(
+      buffer->recorder, buffer->device_id, buffer->buffer_id, mapping_id,
+      IREE_HAL_REPLAY_OBJECT_TYPE_BUFFER,
+      IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_MAP_RANGE,
       IREE_HAL_REPLAY_PAYLOAD_TYPE_BUFFER_RANGE, &pending_record));
-  const bool has_write_access =
-      iree_all_bits_set(memory_access, IREE_HAL_MEMORY_ACCESS_WRITE);
-  iree_hal_replay_recorder_buffer_mapping_t* mapping_entry = NULL;
   iree_status_t status = iree_ok_status();
-  if (has_write_access &&
-      iree_all_bits_set(mapping_mode, IREE_HAL_MAPPING_MODE_PERSISTENT)) {
+  if (mapping->impl.is_persistent &&
+      iree_all_bits_set(memory_access, IREE_HAL_MEMORY_ACCESS_WRITE)) {
     status = iree_make_status(
         IREE_STATUS_UNIMPLEMENTED,
         "HAL replay capture does not support persistent write mappings");
   }
-  if (iree_status_is_ok(status) && has_write_access) {
-    status = iree_allocator_malloc(
-        buffer->host_allocator, sizeof(*mapping_entry), (void**)&mapping_entry);
+  iree_hal_replay_recorder_buffer_t* mapped_proxy = NULL;
+  if (iree_status_is_ok(status) && !mapping->impl.is_persistent) {
+    status = iree_hal_replay_recorder_buffer_allocate_proxy(
+        buffer->host_allocator, &mapped_proxy);
   }
+  iree_hal_buffer_t* original_mapping_buffer = mapping->buffer;
   if (iree_status_is_ok(status)) {
     status = IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer,
                                              iree_hal_buffer, map_range)(
-        buffer->base_buffer, mapping_mode, memory_access, local_byte_offset,
-        local_byte_length, mapping);
+        buffer->base_buffer, mapping_mode, memory_access, flags,
+        local_byte_offset, local_byte_length, mapping);
   }
-  if (iree_status_is_ok(status) && mapping_entry) {
-    mapping_entry->mapping = mapping;
-    mapping_entry->allowed_access = mapping->impl.allowed_access;
-    iree_slim_mutex_lock(&buffer->mutex);
-    mapping_entry->next = buffer->mapping_list;
-    buffer->mapping_list = mapping_entry;
-    mapping_entry = NULL;
-    iree_slim_mutex_unlock(&buffer->mutex);
+  if (iree_status_is_ok(status) && mapped_proxy) {
+    // A scoped map owns its actual native storage independently from the
+    // original view. Its proxy also gives flush/unmap an exact capture identity
+    // when several maps overlap or the original view has been decommitted.
+    iree_hal_buffer_t* retained_buffer = mapping->buffer;
+    iree_hal_buffer_t* native_mapped_buffer =
+        retained_buffer == original_mapping_buffer ? buffer->base_buffer
+                                                   : retained_buffer;
+    mapping->buffer = iree_hal_replay_recorder_buffer_initialize_proxy(
+        buffer->recorder, buffer->device_id, buffer->buffer_id,
+        IREE_HAL_REPLAY_OBJECT_ID_NONE, NULL, native_mapped_buffer,
+        buffer->host_allocator, mapped_proxy);
+    mapped_proxy->mapping.id = mapping_id;
+    mapped_proxy->mapping.value = mapping;
+    mapped_proxy->mapping.recorded_origin = payload.byte_offset;
+    mapped_proxy->mapping.native_origin = mapping->impl.byte_offset;
+    iree_hal_buffer_release(retained_buffer);
+    mapped_proxy = NULL;
   }
-  iree_allocator_free(buffer->host_allocator, mapping_entry);
+  iree_hal_replay_recorder_buffer_free_proxy(buffer->host_allocator,
+                                             mapped_proxy);
   return iree_hal_replay_recorder_end_operation_with_payload(&pending_record,
                                                              status, 1, &iovec);
 }
@@ -570,22 +533,29 @@ static iree_status_t iree_hal_replay_recorder_buffer_unmap_range(
     iree_device_size_t local_byte_length, iree_hal_buffer_mapping_t* mapping) {
   iree_hal_replay_recorder_buffer_t* buffer =
       iree_hal_replay_recorder_buffer_cast(base_buffer);
+  if (buffer->buffer_id == IREE_HAL_REPLAY_OBJECT_ID_NONE) {
+    return IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer, iree_hal_buffer,
+                                           unmap_range)(
+        buffer->base_buffer, local_byte_offset, local_byte_length, mapping);
+  }
   const bool capture_data =
       iree_hal_replay_recorder_buffer_mapping_has_write_access(mapping);
   iree_hal_replay_buffer_range_payload_t payload = {
-      .byte_offset = local_byte_offset,
+      .byte_offset = iree_hal_replay_recorder_buffer_recorded_offset(
+          buffer, local_byte_offset),
       .byte_length = local_byte_length,
       .memory_access = mapping->impl.allowed_access,
+      .map_flags = mapping->impl.flags,
   };
   iree_hal_replay_buffer_range_data_payload_t data_payload;
   iree_const_byte_span_t data_span = iree_make_const_byte_span(NULL, 0);
   uint8_t* data_snapshot = NULL;
   iree_status_t status = iree_ok_status();
   if (capture_data) {
-    status = iree_hal_replay_recorder_buffer_make_range_data_payload(
-        mapping, local_byte_offset, local_byte_length, &data_payload,
+    iree_hal_replay_recorder_buffer_make_range_data_payload(
+        buffer, mapping, local_byte_offset, local_byte_length, &data_payload,
         &data_span);
-    if (iree_status_is_ok(status) && data_span.data_length > 0) {
+    if (data_span.data_length > 0) {
       status =
           iree_allocator_malloc(buffer->host_allocator, data_span.data_length,
                                 (void**)&data_snapshot);
@@ -603,24 +573,27 @@ static iree_status_t iree_hal_replay_recorder_buffer_unmap_range(
           capture_data ? sizeof(data_payload) : sizeof(payload)),
       data_span,
   };
-  iree_hal_replay_pending_record_t pending_record;
+  iree_hal_replay_pending_record_t pending_record = {0};
   if (iree_status_is_ok(status)) {
-    status = iree_hal_replay_recorder_buffer_begin_operation(
-        buffer, IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_UNMAP_RANGE,
+    iree_hal_replay_recorder_try_begin_operation(
+        buffer->recorder, buffer->device_id, buffer->buffer_id,
+        buffer->mapping.id, IREE_HAL_REPLAY_OBJECT_TYPE_BUFFER,
+        IREE_HAL_REPLAY_OPERATION_CODE_BUFFER_UNMAP_RANGE,
         capture_data ? IREE_HAL_REPLAY_PAYLOAD_TYPE_BUFFER_RANGE_DATA
                      : IREE_HAL_REPLAY_PAYLOAD_TYPE_BUFFER_RANGE,
         &pending_record);
+  } else {
+    iree_hal_replay_recorder_fail(buffer->recorder, iree_status_code(status));
+    // The capture failure is now owned by the recorder and reported at close.
+    iree_status_free(status);
   }
-  if (iree_status_is_ok(status)) {
-    status = IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer,
-                                             iree_hal_buffer, unmap_range)(
-        buffer->base_buffer, local_byte_offset, local_byte_length, mapping);
-    status = iree_hal_replay_recorder_end_operation_with_payload(
-        &pending_record, status, capture_data ? 2 : 1, iovecs);
-  }
-  if (capture_data) {
-    iree_hal_replay_recorder_buffer_unregister_mapping(buffer, mapping);
-  }
+  // Public unmap consumes the mapping on every path. Capture cannot prevent
+  // native teardown or replace its status with an observation failure.
+  status = IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer, iree_hal_buffer,
+                                           unmap_range)(
+      buffer->base_buffer, local_byte_offset, local_byte_length, mapping);
+  status = iree_hal_replay_recorder_end_passthrough_operation_with_payload(
+      &pending_record, status, capture_data ? 2 : 1, iovecs);
   iree_allocator_free(buffer->host_allocator, data_snapshot);
   return status;
 }
@@ -630,8 +603,14 @@ static iree_status_t iree_hal_replay_recorder_buffer_invalidate_range(
     iree_device_size_t local_byte_length) {
   iree_hal_replay_recorder_buffer_t* buffer =
       iree_hal_replay_recorder_buffer_cast(base_buffer);
+  if (buffer->buffer_id == IREE_HAL_REPLAY_OBJECT_ID_NONE) {
+    return IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer, iree_hal_buffer,
+                                           invalidate_range)(
+        buffer->base_buffer, local_byte_offset, local_byte_length);
+  }
   iree_hal_replay_buffer_range_payload_t payload = {
-      .byte_offset = local_byte_offset,
+      .byte_offset = iree_hal_replay_recorder_buffer_recorded_offset(
+          buffer, local_byte_offset),
       .byte_length = local_byte_length,
   };
   iree_const_byte_span_t iovec =
@@ -652,16 +631,24 @@ static iree_status_t iree_hal_replay_recorder_buffer_flush_range(
     iree_device_size_t local_byte_length) {
   iree_hal_replay_recorder_buffer_t* buffer =
       iree_hal_replay_recorder_buffer_cast(base_buffer);
+  if (buffer->buffer_id == IREE_HAL_REPLAY_OBJECT_ID_NONE) {
+    return IREE_HAL_REPLAY_VTABLE_DISPATCH(buffer->base_buffer, iree_hal_buffer,
+                                           flush_range)(
+        buffer->base_buffer, local_byte_offset, local_byte_length);
+  }
   iree_hal_replay_buffer_range_payload_t payload = {
-      .byte_offset = local_byte_offset,
+      .byte_offset = iree_hal_replay_recorder_buffer_recorded_offset(
+          buffer, local_byte_offset),
       .byte_length = local_byte_length,
   };
   iree_hal_replay_buffer_range_data_payload_t data_payload;
   iree_const_byte_span_t data_span = iree_make_const_byte_span(NULL, 0);
   uint8_t* data_snapshot = NULL;
-  iree_status_t status = iree_hal_replay_recorder_buffer_capture_mapping_range(
-      buffer, local_byte_offset, local_byte_length, &data_payload, &data_span);
-  if (iree_status_is_ok(status) && data_span.data_length > 0) {
+  iree_hal_replay_recorder_buffer_make_range_data_payload(
+      buffer, buffer->mapping.value, local_byte_offset, local_byte_length,
+      &data_payload, &data_span);
+  iree_status_t status = iree_ok_status();
+  if (data_span.data_length > 0) {
     status = iree_allocator_malloc(
         buffer->host_allocator, data_span.data_length, (void**)&data_snapshot);
     if (iree_status_is_ok(status)) {
@@ -699,12 +686,109 @@ static iree_status_t iree_hal_replay_recorder_buffer_flush_range(
   return status;
 }
 
+static iree_hal_buffer_memory_view_t
+iree_hal_replay_recorder_buffer_query_memory(
+    const iree_hal_buffer_t* base_buffer) {
+  const iree_hal_replay_recorder_buffer_t* buffer =
+      (const iree_hal_replay_recorder_buffer_t*)base_buffer;
+  return iree_hal_buffer_memory_view(buffer->base_buffer);
+}
+
+static iree_hal_virtual_buffer_view_t
+iree_hal_replay_recorder_buffer_query_virtual(
+    const iree_hal_buffer_t* base_buffer) {
+  const iree_hal_replay_recorder_buffer_t* buffer =
+      (const iree_hal_replay_recorder_buffer_t*)base_buffer;
+  return iree_hal_buffer_virtual_view(buffer->base_buffer);
+}
+
+static iree_status_t iree_hal_replay_recorder_buffer_detach_mappings(
+    iree_hal_buffer_t* base_buffer, uint32_t scope_id) {
+  iree_hal_replay_recorder_buffer_t* buffer =
+      (iree_hal_replay_recorder_buffer_t*)base_buffer;
+  iree_hal_replay_pending_record_t pending_record = {0};
+  iree_hal_replay_recorder_try_begin_operation(
+      buffer->recorder, buffer->device_id, buffer->buffer_id,
+      IREE_HAL_REPLAY_OBJECT_ID_NONE, IREE_HAL_REPLAY_OBJECT_TYPE_BUFFER,
+      IREE_HAL_REPLAY_OPERATION_CODE_VIRTUAL_BUFFER_DETACH,
+      IREE_HAL_REPLAY_PAYLOAD_TYPE_VIRTUAL_BUFFER_DETACH, &pending_record);
+  const iree_hal_memory_scope_t scope = {
+      .domain = base_buffer->memory.contract->domain, .id = scope_id};
+  iree_status_t status =
+      iree_hal_virtual_buffer_detach(buffer->base_buffer, scope);
+  const iree_hal_replay_virtual_buffer_detach_payload_t payload = {
+      .scope_id = scope_id,
+  };
+  const iree_const_byte_span_t iovec =
+      iree_make_const_byte_span(&payload, sizeof(payload));
+  return iree_hal_replay_recorder_end_passthrough_operation_with_payload(
+      &pending_record, status, 1, &iovec);
+}
+
+static iree_hal_buffer_allocation_profile_t
+iree_hal_replay_recorder_buffer_allocation_profile(iree_hal_buffer_t* buffer) {
+  return iree_hal_buffer_allocation_profile(
+      iree_hal_replay_recorder_buffer_cast(buffer)->base_buffer);
+}
+
+static iree_status_t iree_hal_replay_recorder_buffer_begin_dealloca(
+    iree_hal_buffer_t* buffer, iree_hal_pool_t** out_pool) {
+  return iree_hal_buffer_allocation_begin_dealloca(
+      iree_hal_replay_recorder_buffer_cast(buffer)->base_buffer, out_pool);
+}
+
+static void iree_hal_replay_recorder_buffer_abort_dealloca(
+    iree_hal_buffer_t* buffer) {
+  iree_hal_buffer_allocation_abort_dealloca(
+      iree_hal_replay_recorder_buffer_cast(buffer)->base_buffer);
+}
+
+static void iree_hal_replay_recorder_buffer_take_dealloca_reservation(
+    iree_hal_buffer_t* buffer, iree_hal_pool_t** out_pool,
+    iree_hal_pool_reservation_t* out_reservation) {
+  iree_hal_buffer_allocation_take_dealloca_reservation(
+      iree_hal_replay_recorder_buffer_cast(buffer)->base_buffer, out_pool,
+      out_reservation);
+}
+
+static void iree_hal_replay_recorder_buffer_decommit(
+    iree_hal_buffer_t* buffer) {
+  iree_hal_buffer_allocation_decommit(
+      iree_hal_replay_recorder_buffer_cast(buffer)->base_buffer);
+}
+
+static const iree_hal_buffer_allocation_vtable_t
+    iree_hal_replay_recorder_buffer_allocation_vtable = {
+        .profile = iree_hal_replay_recorder_buffer_allocation_profile,
+        .begin_dealloca = iree_hal_replay_recorder_buffer_begin_dealloca,
+        .abort_dealloca = iree_hal_replay_recorder_buffer_abort_dealloca,
+        .take_dealloca_reservation =
+            iree_hal_replay_recorder_buffer_take_dealloca_reservation,
+        .decommit = iree_hal_replay_recorder_buffer_decommit,
+};
+
 static const iree_hal_buffer_vtable_t iree_hal_replay_recorder_buffer_vtable = {
-    .recycle = iree_hal_buffer_recycle,
     .destroy = iree_hal_replay_recorder_buffer_destroy,
     .export_range = iree_hal_replay_recorder_buffer_export_range,
     .map_range = iree_hal_replay_recorder_buffer_map_range,
     .unmap_range = iree_hal_replay_recorder_buffer_unmap_range,
     .invalidate_range = iree_hal_replay_recorder_buffer_invalidate_range,
     .flush_range = iree_hal_replay_recorder_buffer_flush_range,
+    .query_memory = iree_hal_replay_recorder_buffer_query_memory,
+    .query_virtual = iree_hal_replay_recorder_buffer_query_virtual,
+    .detach_mappings = iree_hal_replay_recorder_buffer_detach_mappings,
+};
+
+static const iree_hal_buffer_vtable_t
+    iree_hal_replay_recorder_allocated_buffer_vtable = {
+        .destroy = iree_hal_replay_recorder_buffer_destroy,
+        .export_range = iree_hal_replay_recorder_buffer_export_range,
+        .map_range = iree_hal_replay_recorder_buffer_map_range,
+        .unmap_range = iree_hal_replay_recorder_buffer_unmap_range,
+        .invalidate_range = iree_hal_replay_recorder_buffer_invalidate_range,
+        .flush_range = iree_hal_replay_recorder_buffer_flush_range,
+        .query_memory = iree_hal_replay_recorder_buffer_query_memory,
+        .query_virtual = iree_hal_replay_recorder_buffer_query_virtual,
+        .detach_mappings = iree_hal_replay_recorder_buffer_detach_mappings,
+        .allocation = &iree_hal_replay_recorder_buffer_allocation_vtable,
 };

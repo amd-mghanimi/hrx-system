@@ -12,6 +12,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 
 from loom.target.arch.amdgpu.lds_bank_service import (
+    AMDGPU_LDS_BANK_SERVICE_MODELS_CDNA3,
+    AMDGPU_LDS_BANK_SERVICE_MODELS_GFX942,
+    AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1100,
+    AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1151,
     AMDGPU_LDS_BANK_SERVICE_MODELS_WAVE32_B128_QUAD_PHASES,
 )
 from loom.target.arch.amdgpu.target_catalog import (
@@ -21,12 +25,15 @@ from loom.target.arch.amdgpu.target_catalog import (
     AMDGPU_TARGET_OVERLAY_INFOS,
 )
 from loom.target.arch.amdgpu.target_info import (
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_OCP_FP8_NONCANONICAL_NAN,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_ARITHMETIC,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_COMPARE,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_SCALAR_FLOAT_CONVERSION,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_DUAL_MOV_SRC2_CACHE,
     AMDGPU_DESCRIPTOR_SET_INFO_FLAG_VOPD_NUMERIC_MINMAX_MNEMONICS,
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES,
+    AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION,
     AMDGPU_DESCRIPTOR_SET_INFOS,
     AMDGPU_GENERIC_MATRIX_FEATURE_EXCLUSIONS,
     AMDGPU_INSTRUCTION_CONSTRAINT_DS_PAIRED_ADDRESS_ALIGNMENT,
@@ -42,6 +49,9 @@ from loom.target.arch.amdgpu.target_info import (
     AMDGPU_MEMORY_ORDERING_MODEL_GFX12,
     AMDGPU_PROCESSOR_INFOS,
     AMDGPU_PROCESSOR_SCHEDULING_DELAY_ALU,
+    AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN,
+    AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR,
+    AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES,
     AMDGPU_TARGET_ID_FEATURE_SUPPORT_NONE,
     AMDGPU_TARGET_ID_FEATURE_SUPPORT_SRAMECC,
     AMDGPU_TARGET_ID_FEATURE_SUPPORT_XNACK,
@@ -109,6 +119,29 @@ def test_noncanonical_native_fp8_nan_is_scoped_to_gfx12_descriptor_sets() -> Non
         if info.flags & AMDGPU_DESCRIPTOR_SET_INFO_FLAG_NATIVE_OCP_FP8_NONCANONICAL_NAN
     }
     assert flagged_generator_targets == {"rdna4", "gfx12_generic"}
+
+
+def test_system_scope_store_waits_are_scoped_to_gfx120x() -> None:
+    flagged_generator_targets = {
+        info.generator_target
+        for info in AMDGPU_DESCRIPTOR_SET_INFOS
+        if info.flags & AMDGPU_DESCRIPTOR_SET_INFO_FLAG_WAITS_BEFORE_SYSTEM_SCOPE_STORES
+    }
+    assert flagged_generator_targets == {"rdna4", "gfx12_generic"}
+
+
+def test_xcnt_source_retention_is_scoped_to_gfx125x() -> None:
+    flagged_generator_targets = {
+        info.generator_target
+        for info in AMDGPU_DESCRIPTOR_SET_INFOS
+        if info.flags & AMDGPU_DESCRIPTOR_SET_INFO_FLAG_XCNT_SOURCE_RETENTION
+    }
+    assert flagged_generator_targets == {
+        "rdna4_gfx1250_a0",
+        "rdna4_gfx1251",
+        "rdna4_gfx125x",
+        "gfx12_5_generic",
+    }
 
 
 def test_native_scalar_float_arithmetic_is_scoped_to_rdna35_and_newer() -> None:
@@ -207,6 +240,25 @@ def test_rdna4m_processors_publish_gfx12_matrix_contracts() -> None:
     )
 
 
+def test_mask_write_hazard_covers_gfx11_processors() -> None:
+    for info in AMDGPU_PROCESSOR_INFOS:
+        assert bool(
+            info.features.scheduling
+            & AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR
+        ) == info.processor.startswith("gfx11"), info.processor
+
+
+def test_vmem_replay_clauses_cover_cdna_and_exclude_always_on_gfx125x() -> None:
+    # LLVM checks SMEM before the NoDataDepHazard early return, and VMEM
+    # afterward. Always-on XNACK on gfx125x therefore does not imply VMEM
+    # software clauses. Stepping overlays inherit their processor's policy.
+    assert {
+        info.processor
+        for info in AMDGPU_PROCESSOR_INFOS
+        if info.features.scheduling & AMDGPU_PROCESSOR_SCHEDULING_VMEM_REPLAY_CLAUSES
+    } == {"gfx90a", "gfx940", "gfx941", "gfx942", "gfx950", "gfx9-4-generic"}
+
+
 def test_rdna4m_processors_publish_delay_alu_scheduling() -> None:
     processors = {
         info.processor: info
@@ -267,6 +319,37 @@ def test_descriptor_set_storage_target_lookup_classifies_storage_targets() -> No
             ).generator_target
             == view_info.storage_generator_target
         )
+
+
+def test_tensor_issue_drain_covers_exact_and_generic_gfx125x() -> None:
+    assert {
+        info.processor
+        for info in AMDGPU_PROCESSOR_INFOS
+        if info.features.scheduling & AMDGPU_PROCESSOR_SCHEDULING_TENSOR_ISSUE_DRAIN
+    } == {"gfx1250", "gfx1251", "gfx12-5-generic"}
+    # Stepping overlays inherit their processor's scheduling contract.
+    assert amdgpu_target_info_by_name("gfx1250-a0").processor == "gfx1250"
+
+
+def test_wave64_valu_mask_write_hazard_covers_gfx11_processors() -> None:
+    assert {
+        info.processor
+        for info in AMDGPU_PROCESSOR_INFOS
+        if info.features.scheduling & AMDGPU_PROCESSOR_SCHEDULING_VALU_MASK_WRITE_DEPCTR
+    } == {
+        "gfx1100",
+        "gfx1101",
+        "gfx1102",
+        "gfx1103",
+        "gfx1150",
+        "gfx1151",
+        "gfx1152",
+        "gfx1153",
+        "gfx1170",
+        "gfx1171",
+        "gfx1172",
+        "gfx11-generic",
+    }
 
 
 def test_generic_descriptor_sets_have_independent_contracts() -> None:
@@ -395,6 +478,22 @@ def test_generic_contracts_are_portable_member_intersections() -> None:
     )
 
 
+def test_generic_contracts_reject_nonportable_descriptor_flags() -> None:
+    descriptor_sets = tuple(
+        replace(
+            info,
+            flags=(
+                info.flags | AMDGPU_DESCRIPTOR_SET_INFO_FLAG_ATOMIC_F32_ADD_DENORMALS
+            ),
+        )
+        if info.generator_target == "gfx9_4_generic"
+        else info
+        for info in AMDGPU_DESCRIPTOR_SET_INFOS
+    )
+    with _raises_value_error("flags do not match the member intersection"):
+        validate_amdgpu_generic_contracts(AMDGPU_PROCESSOR_INFOS, descriptor_sets)
+
+
 def test_generic_contracts_reject_different_ordering_with_same_cache_encoding() -> None:
     descriptor_sets = tuple(
         replace(
@@ -491,6 +590,35 @@ def test_lds_bank_service_models_are_structural_target_data() -> None:
         == AMDGPU_LDS_BANK_SERVICE_MODELS_WAVE32_B128_QUAD_PHASES
     )
     assert gfx1250_a0.semantics.lds_bank_service_models is None
+    for name in ("gfx940", "gfx941"):
+        assert (
+            processors[name].features.lds_bank_service_models
+            == AMDGPU_LDS_BANK_SERVICE_MODELS_CDNA3
+        )
+    assert (
+        processors["gfx942"].features.lds_bank_service_models
+        == AMDGPU_LDS_BANK_SERVICE_MODELS_GFX942
+    )
+    assert (
+        processors["gfx1100"].features.lds_bank_service_models
+        == AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1100
+    )
+    assert (
+        processors["gfx1151"].features.lds_bank_service_models
+        == AMDGPU_LDS_BANK_SERVICE_MODELS_GFX1151
+    )
+    # Native qualification does not transfer to other processors in a family.
+    for name in (
+        "gfx1101",
+        "gfx1102",
+        "gfx1103",
+        "gfx1150",
+        "gfx1200",
+        "gfx1201",
+        "gfx11-generic",
+        "gfx9-4-generic",
+    ):
+        assert processors[name].features.lds_bank_service_models == ()
     assert processors["gfx1251"].features.lds_bank_service_models == ()
     assert processors["gfx12-5-generic"].features.lds_bank_service_models == ()
 

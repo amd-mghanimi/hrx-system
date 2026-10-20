@@ -8,9 +8,12 @@
 
 #include <stdint.h>
 
+#include "loom/ir/module.h"
 #include "loom/ops/buffer/ops.h"
+#include "loom/ops/global/ops.h"
 #include "loom/target/arch/amdgpu/lower/constants.h"
-#include "loom/target/arch/amdgpu/lower/topology.h"
+#include "loom/target/arch/amdgpu/lower/data_symbol.h"
+#include "loom/target/arch/amdgpu/lower/source_alloca_layout.h"
 #include "loom/target/arch/amdgpu/lower/types.h"
 #include "loom/util/fact_table.h"
 
@@ -18,6 +21,9 @@ static bool loom_amdgpu_select_buffer_alloca_plan_from_facts(
     const loom_value_fact_table_t* fact_table, const loom_op_t* source_op,
     loom_amdgpu_buffer_alloca_plan_t* out_plan) {
   *out_plan = (loom_amdgpu_buffer_alloca_plan_t){0};
+  if (loom_buffer_alloca_pool(source_op) != LOOM_VALUE_ID_INVALID) {
+    return false;
+  }
   const loom_value_fact_memory_space_t memory_space =
       loom_buffer_alloca_memory_space(source_op);
   switch (memory_space) {
@@ -61,14 +67,40 @@ iree_status_t loom_amdgpu_select_buffer_plan(loom_low_lower_context_t* context,
                                              loom_low_lower_plan_t* out_plan) {
   *out_plan = loom_low_lower_plan_empty();
   switch (source_op->kind) {
+    case LOOM_OP_GLOBAL_LOAD: {
+      const loom_module_t* module = loom_low_lower_context_module(context);
+      const loom_symbol_ref_t symbol = loom_global_load_global(source_op);
+      if (loom_symbol_implements(&module->symbols.entries[symbol.symbol_id],
+                                 LOOM_SYMBOL_INTERFACE_RODATA)) {
+        loom_type_t address_type = loom_type_none();
+        IREE_RETURN_IF_ERROR(
+            loom_amdgpu_make_sgpr_range_type(context, 2, &address_type));
+        IREE_RETURN_IF_ERROR(loom_low_lower_plan_value_type(
+            context, loom_global_load_result(source_op).values[0],
+            address_type));
+        *out_plan = loom_low_lower_plan_make(source_op->kind, NULL);
+      }
+      return iree_ok_status();
+    }
     case LOOM_OP_BUFFER_ALLOCA: {
       loom_amdgpu_buffer_alloca_plan_t local_plan = {0};
       if (!loom_amdgpu_select_buffer_alloca_plan(context, source_op,
                                                  &local_plan)) {
         return iree_ok_status();
       }
+      bool lifetime_supported = false;
+      IREE_RETURN_IF_ERROR(loom_low_lower_function_storage_check_lifetime(
+          context, source_op, &lifetime_supported));
+      if (!lifetime_supported) {
+        *out_plan = loom_low_lower_plan_make(source_op->kind, NULL);
+        return iree_ok_status();
+      }
       IREE_RETURN_IF_ERROR(loom_amdgpu_source_alloca_layout_record_lower_alloca(
           context, source_op, (uint64_t)local_plan.byte_length));
+      loom_type_t address_type = loom_type_none();
+      IREE_RETURN_IF_ERROR(loom_amdgpu_make_vgpr_type(context, &address_type));
+      IREE_RETURN_IF_ERROR(loom_low_lower_plan_value_type(
+          context, loom_buffer_alloca_result(source_op), address_type));
       loom_amdgpu_buffer_alloca_plan_t* plan_data = NULL;
       IREE_RETURN_IF_ERROR(loom_low_lower_allocate_plan_data(
           context, sizeof(*plan_data), (void**)&plan_data));
@@ -104,20 +136,19 @@ static iree_status_t loom_amdgpu_lower_buffer_alloca(
     loom_low_lower_context_t* context, const loom_op_t* source_op,
     const loom_amdgpu_buffer_alloca_plan_t* plan) {
   loom_builder_t* builder = loom_low_lower_context_builder(context);
-  const loom_amdgpu_source_alloca_layout_t* layout = NULL;
-  IREE_RETURN_IF_ERROR(
-      loom_amdgpu_source_alloca_layout_for_lower_context(context, &layout));
   loom_value_id_t storage_root = LOOM_VALUE_ID_INVALID;
+  int64_t storage_byte_offset = 0;
   loom_amdgpu_source_alloca_layout_lookup_low_storage(
-      layout, loom_buffer_alloca_memory_space(source_op),
-      loom_buffer_alloca_result(source_op), &storage_root);
+      context, loom_buffer_alloca_memory_space(source_op),
+      loom_buffer_alloca_result(source_op), &storage_root,
+      &storage_byte_offset);
 
-  loom_type_t vgpr_type = loom_type_none();
-  IREE_RETURN_IF_ERROR(loom_amdgpu_make_vgpr_type(context, &vgpr_type));
+  const loom_type_t address_type = loom_low_lower_value_binding_type(
+      context, loom_buffer_alloca_result(source_op));
   loom_op_t* address_op = NULL;
   IREE_RETURN_IF_ERROR(loom_low_storage_address_build(
-      builder, storage_root, /*offset=*/0, vgpr_type, source_op->location,
-      &address_op));
+      builder, storage_root, storage_byte_offset, address_type,
+      source_op->location, &address_op));
   return loom_low_lower_bind_value(context,
                                    loom_buffer_alloca_result(source_op),
                                    loom_low_storage_address_result(address_op));
@@ -127,6 +158,18 @@ iree_status_t loom_amdgpu_lower_buffer_op(loom_low_lower_context_t* context,
                                           const loom_op_t* source_op,
                                           loom_low_lower_plan_t plan) {
   switch (source_op->kind) {
+    case LOOM_OP_GLOBAL_LOAD: {
+      loom_value_id_t address = LOOM_VALUE_ID_INVALID;
+      IREE_RETURN_IF_ERROR(loom_amdgpu_build_data_symbol_address(
+          loom_low_lower_context_builder(context),
+          loom_low_lower_context_descriptor_set(context),
+          (loom_amdgpu_data_symbol_address_t){
+              .symbol = loom_global_load_global(source_op),
+          },
+          source_op->location, &address));
+      return loom_low_lower_bind_value(
+          context, loom_global_load_result(source_op).values[0], address);
+    }
     case LOOM_OP_BUFFER_ALLOCA:
       return loom_amdgpu_lower_buffer_alloca(
           context, source_op,

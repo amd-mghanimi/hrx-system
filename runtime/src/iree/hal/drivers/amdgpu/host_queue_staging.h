@@ -42,11 +42,6 @@ typedef struct iree_hal_amdgpu_staging_pool_options_t {
   iree_host_size_t slot_size;
   // Number of staging slots. Must be non-zero and a power of two.
   uint32_t slot_count;
-  // Forces the staging allocation to use the fine-grained host pool instead of
-  // the preferred coarse-grained host pool.
-  uint32_t force_fine_host_memory : 1;
-  // Reserved for future staging allocation policy bits.
-  uint32_t reserved : 31;
 } iree_hal_amdgpu_staging_pool_options_t;
 
 // Fixed-size host/device-visible staging pool shared by one physical device.
@@ -115,7 +110,9 @@ iree_status_t iree_hal_amdgpu_staging_transfer_create_download(
 
 // Starts a captured host transfer. The optional |completion_resource| keeps
 // |completion_action.user_data| live until the action executes. The completion
-// action runs outside notification-ring drain with a NULL reclaim entry.
+// action runs outside notification-ring drain with a NULL reclaim entry after
+// captured buffers and files have been released. The caller may retain the
+// completed transfer without retaining its storage.
 iree_status_t iree_hal_amdgpu_staging_transfer_start(
     iree_hal_amdgpu_staging_transfer_t* transfer,
     iree_hal_amdgpu_reclaim_action_t completion_action,
@@ -132,7 +129,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_staged_read(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_file_t* source_file, uint64_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers);
 
 // Submits a chunked fd-backed queue_write through the staging pool.
 iree_status_t iree_hal_amdgpu_host_queue_submit_staged_write(
@@ -141,7 +138,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_staged_write(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t* target_file, uint64_t target_offset,
-    iree_device_size_t length);
+    iree_device_size_t length, const iree_hal_queue_barriers_t* barriers);
 
 #ifdef __cplusplus
 }  // extern "C"

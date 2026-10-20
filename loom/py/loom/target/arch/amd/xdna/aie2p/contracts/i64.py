@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from enum import Enum
 
 from loom.dialect.scalar import arithmetic as scalar_arithmetic
 from loom.dialect.scalar import bitwise as scalar_bitwise
@@ -17,6 +18,7 @@ from loom.dialect.scalar import conversion as scalar_conversion
 from loom.dialect.scf import defs as scf
 from loom.dialect.vector import defs as vector
 from loom.dsl import Op
+from loom.target.arch.amd.xdna.aie2p.contracts.packet_program import PairPacketProgram
 from loom.target.arch.amd.xdna.aie2p.contracts.scalar_program import ScalarProgram
 from loom.target.arch.amd.xdna.aie2p.core_descriptors import (
     AIE2P_CORE_DESCRIPTOR_SET,
@@ -46,6 +48,26 @@ _F64 = Scalar("f64")
 _INDEX = Scalar("index")
 _I64_VECTOR = Vector("i64", minimum_static_elements=1, maximum_static_elements=8)
 _F64_VECTOR = Vector("f64", minimum_static_elements=1, maximum_static_elements=8)
+_I64_PREDICATE_VECTOR = Vector(
+    "i1", minimum_static_elements=1, maximum_static_elements=8
+)
+
+
+class _PairVectorConstantCarrier(Enum):
+    NATIVE = "native"
+    WIDE = "wide"
+    ACCUMULATOR = "accumulator"
+
+
+# Each stage dilates the active predicate bits into the low bit of progressively
+# wider groups. The final common step copies each bit into the adjacent 32-bit
+# payload-word position consumed by VSEL.32.
+_PAIR_VECTOR_SELECT_RANGES = (
+    (1, 1, ()),
+    (2, 2, ((1, 0x5),)),
+    (3, 4, ((2, 0x33), (1, 0x55))),
+    (5, 8, ((4, 0x0F0F), (2, 0x3333), (1, 0x5555))),
+)
 
 AIE2P_PAIR_VECTOR_TYPES = (_I64_VECTOR, _F64_VECTOR)
 AIE2P_PAIR_SCALAR_TYPES = (_I64, _F64)
@@ -107,6 +129,68 @@ def _pair_bitwise_rule(source_op: Op, operation: str) -> DescriptorRule:
     )
 
 
+def _pair_vector_binary_rule(source_op: Op, descriptor_key: str) -> DescriptorRule:
+    descriptor = _descriptor(descriptor_key)
+    return DescriptorRule(
+        source_op=source_op,
+        descriptor=descriptor,
+        guards=_typed_guards(("lhs", "rhs", "result"), _I64_VECTOR),
+        emit=(
+            EmitDescriptorOp(
+                descriptor=descriptor,
+                operands={
+                    "s1": ValueRef.operand("lhs"),
+                    "s2": ValueRef.operand("rhs"),
+                },
+                results={"d": ValueRef.result("result")},
+                form=DescriptorEmitForm.OP,
+            ),
+        ),
+    )
+
+
+def _pair_vector_xor_rule() -> DescriptorRule:
+    bitwise_or = _descriptor("amd.xdna.aie2p.or.bits512")
+    bitwise_and = _descriptor("amd.xdna.aie2p.and.bits512")
+    subtract = _descriptor("amd.xdna.aie2p.sub.i32x16")
+    return DescriptorRule(
+        source_op=vector.vector_xori,
+        descriptor=subtract,
+        guards=_typed_guards(("lhs", "rhs", "result"), _I64_VECTOR),
+        emit=(
+            EmitDescriptorOp(
+                descriptor=bitwise_or,
+                operands={
+                    "s1": ValueRef.operand("lhs"),
+                    "s2": ValueRef.operand("rhs"),
+                },
+                results={"d": ValueRef.temporary("union")},
+                result_types={"d": ValueRef.operand("lhs")},
+                form=DescriptorEmitForm.OP,
+            ),
+            EmitDescriptorOp(
+                descriptor=bitwise_and,
+                operands={
+                    "s1": ValueRef.operand("lhs"),
+                    "s2": ValueRef.operand("rhs"),
+                },
+                results={"d": ValueRef.temporary("intersection")},
+                result_types={"d": ValueRef.operand("lhs")},
+                form=DescriptorEmitForm.OP,
+            ),
+            EmitDescriptorOp(
+                descriptor=subtract,
+                operands={
+                    "s1": ValueRef.temporary("union"),
+                    "s2": ValueRef.temporary("intersection"),
+                },
+                results={"d": ValueRef.result("result")},
+                form=DescriptorEmitForm.OP,
+            ),
+        ),
+    )
+
+
 def _pair_add_sub_rule(
     source_op: Op,
     low_operation: str,
@@ -150,6 +234,38 @@ def _pair_add_sub_rule(
     )
 
 
+def _pair_constant_emits(
+    low_bits: ValueProject,
+    high_bits: ValueProject,
+    result: ValueRef,
+    result_type: TypePattern | None,
+) -> tuple[EmitDescriptorOp, EmitDescriptorOp, EmitRegisterConcat]:
+    descriptor = _descriptor("amd.xdna.aie2p.constant.i32")
+    low = ValueRef.temporary("constant_low")
+    high = ValueRef.temporary("constant_high")
+    return (
+        EmitDescriptorOp(
+            descriptor=descriptor,
+            results={"dst": low},
+            result_types={"dst": DescriptorResultType()},
+            immediates={"i": low_bits},
+            form=DescriptorEmitForm.CONST,
+        ),
+        EmitDescriptorOp(
+            descriptor=descriptor,
+            results={"dst": high},
+            result_types={"dst": DescriptorResultType()},
+            immediates={"i": high_bits},
+            form=DescriptorEmitForm.CONST,
+        ),
+        EmitRegisterConcat(
+            sources=(low, high),
+            result=result,
+            result_type=result_type,
+        ),
+    )
+
+
 def _pair_constant_rule(
     result_type: TypePattern,
     attr_kind: str,
@@ -158,8 +274,6 @@ def _pair_constant_rule(
     exact_guard: Guard,
 ) -> DescriptorRule:
     descriptor = _descriptor("amd.xdna.aie2p.constant.i32")
-    low = ValueRef.temporary("constant_low")
-    high = ValueRef.temporary("constant_high")
     return DescriptorRule(
         source_op=scalar_conversion.scalar_constant,
         descriptor=descriptor,
@@ -168,24 +282,123 @@ def _pair_constant_rule(
             Guard.value_type("result", result_type),
             exact_guard,
         ),
-        emit=(
-            EmitDescriptorOp(
-                descriptor=descriptor,
-                results={"dst": low},
-                result_types={"dst": DescriptorResultType()},
-                immediates={"i": low_bits},
-                form=DescriptorEmitForm.CONST,
-            ),
-            EmitDescriptorOp(
-                descriptor=descriptor,
-                results={"dst": high},
-                result_types={"dst": DescriptorResultType()},
-                immediates={"i": high_bits},
-                form=DescriptorEmitForm.CONST,
-            ),
-            _concat_pair(low, high),
+        emit=_pair_constant_emits(
+            low_bits,
+            high_bits,
+            ValueRef.result("result"),
+            None,
         ),
     )
+
+
+def _pair_vector_constant_rule(
+    scalar_type: TypePattern,
+    result_type: TypePattern,
+    attr_kind: str,
+    low_bits: ValueProject,
+    high_bits: ValueProject,
+    exact_guard: Guard,
+    carrier: _PairVectorConstantCarrier,
+) -> DescriptorRule:
+    descriptor = _descriptor("amd.xdna.aie2p.splat.i64x8")
+    packet = (
+        ValueRef.result("result")
+        if carrier is _PairVectorConstantCarrier.NATIVE
+        else ValueRef.temporary("packet")
+    )
+    scalar = ValueRef.temporary("scalar")
+    emits = list(_pair_constant_emits(low_bits, high_bits, scalar, scalar_type))
+    emits.append(
+        EmitDescriptorOp(
+            descriptor=descriptor,
+            operands={"src": scalar},
+            results={"dst": packet},
+            result_types={"dst": DescriptorResultType()},
+            form=DescriptorEmitForm.OP,
+        )
+    )
+    if carrier is _PairVectorConstantCarrier.WIDE:
+        emits.append(
+            EmitRegisterConcat(
+                sources=(packet, packet),
+                result=ValueRef.result("result"),
+            )
+        )
+    elif carrier is _PairVectorConstantCarrier.ACCUMULATOR:
+        accumulator_unit = ValueRef.temporary("accumulator_unit")
+        emits.extend(
+            (
+                EmitDescriptorOp(
+                    descriptor=_descriptor(
+                        "amd.xdna.aie2p.move.vector512.to.accumulator512"
+                    ),
+                    operands={"src": packet},
+                    results={"dst": accumulator_unit},
+                    result_types={"dst": DescriptorResultType()},
+                    form=DescriptorEmitForm.OP,
+                ),
+                EmitRegisterConcat(
+                    sources=(accumulator_unit,) * 4,
+                    result=ValueRef.result("result"),
+                ),
+            )
+        )
+    return DescriptorRule(
+        source_op=vector.vector_constant,
+        descriptor=descriptor,
+        guards=(
+            Guard.attr_kind("value", attr_kind),
+            Guard.value_type("result", result_type),
+            exact_guard,
+        ),
+        emit=tuple(emits),
+    )
+
+
+def _pair_vector_constant_rules() -> tuple[DescriptorRule, ...]:
+    integer_words = ValueProject.exact_i64_i32_word
+    float_words = ValueProject.float_as_f64_i32_word
+    integer_exact = Guard.value_exact_i64
+    float_exact = Guard.value_exact_float
+    rules = []
+    for scalar_type, native_type, element_type, project, exact_guard in (
+        (_I64, _I64_VECTOR, "i64", integer_words, integer_exact),
+        (_F64, _F64_VECTOR, "f64", float_words, float_exact),
+    ):
+        for result_type, carrier in (
+            (native_type, _PairVectorConstantCarrier.NATIVE),
+            (
+                Vector(
+                    element_type,
+                    minimum_static_elements=9,
+                    maximum_static_elements=16,
+                ),
+                _PairVectorConstantCarrier.WIDE,
+            ),
+        ):
+            rules.append(
+                _pair_vector_constant_rule(
+                    scalar_type,
+                    result_type,
+                    element_type,
+                    project("result", word_index=0),
+                    project("result", word_index=1),
+                    exact_guard("result"),
+                    carrier,
+                )
+            )
+    rules.append(
+        _pair_vector_constant_rule(
+            _I64,
+            Vector("i64", lanes=32),
+            "i64",
+            integer_words("result", word_index=0),
+            integer_words("result", word_index=1),
+            integer_exact("result"),
+            _PairVectorConstantCarrier.ACCUMULATOR,
+        )
+    )
+    return tuple(rules)
 
 
 def _pair_multiply_rule() -> DescriptorRule:
@@ -448,6 +661,192 @@ def _pair_compare_rule(predicate: str) -> DescriptorRule:
     )
 
 
+def _pair_vector_deinterleave_emits() -> tuple[
+    tuple[EmitDescriptorOp, ...],
+    tuple[ValueRef, ValueRef],
+    tuple[ValueRef, ValueRef],
+]:
+    program = PairPacketProgram()
+    lhs_words = program.split_i64_words(ValueRef.operand("lhs"), "lhs")
+    rhs_words = program.split_i64_words(ValueRef.operand("rhs"), "rhs")
+    return tuple(program.emits), lhs_words, rhs_words
+
+
+def _pair_vector_word_equality(
+    prefix: str,
+    lhs: ValueRef,
+    rhs: ValueRef,
+) -> tuple[tuple[EmitDescriptorOp, EmitDescriptorOp], ValueRef]:
+    subtract = _descriptor("amd.xdna.aie2p.sub.i32x16")
+    compare = _descriptor("amd.xdna.aie2p.cmp.eqz.i32x16.el.low32")
+    difference = ValueRef.temporary(f"{prefix}_word_difference")
+    result = ValueRef.temporary(f"{prefix}_word_equal")
+    return (
+        (
+            EmitDescriptorOp(
+                descriptor=subtract,
+                operands={"s1": lhs, "s2": rhs},
+                results={"d": difference},
+                result_types={"d": DescriptorResultType()},
+                form=DescriptorEmitForm.OP,
+            ),
+            EmitDescriptorOp(
+                descriptor=compare,
+                operands={"s2": difference},
+                results={"cmp": result},
+                result_types={"cmp": DescriptorResultType()},
+                form=DescriptorEmitForm.OP,
+            ),
+        ),
+        result,
+    )
+
+
+def _pair_vector_word_compare(
+    prefix: str,
+    lhs: ValueRef,
+    rhs: ValueRef,
+    *,
+    relation: str,
+    signed: bool,
+) -> tuple[EmitDescriptorOp, ValueRef]:
+    signedness = "signed" if signed else "unsigned"
+    compare = _descriptor(f"amd.xdna.aie2p.cmp.{relation}.{signedness}.i32x16.el.low32")
+    result = ValueRef.temporary(f"{prefix}_word_{relation}")
+    return (
+        EmitDescriptorOp(
+            descriptor=compare,
+            operands={"s1": lhs, "s2": rhs},
+            results={"cmp": result},
+            result_types={"cmp": DescriptorResultType()},
+            form=DescriptorEmitForm.OP,
+        ),
+        result,
+    )
+
+
+def _pair_vector_predicate_binary(
+    operation: str,
+    prefix: str,
+    lhs: ValueRef,
+    rhs: ValueRef,
+) -> tuple[EmitDescriptorOp, ValueRef]:
+    descriptor = _descriptor(f"amd.xdna.aie2p.predicate.{operation}.low32")
+    result = ValueRef.temporary(prefix)
+    return (
+        EmitDescriptorOp(
+            descriptor=descriptor,
+            operands={"s0": lhs, "s1": rhs},
+            results={"d0": result},
+            result_types={"d0": DescriptorResultType()},
+            form=DescriptorEmitForm.OP,
+        ),
+        result,
+    )
+
+
+def _pair_vector_compare_rule(predicate: str) -> DescriptorRule:
+    deinterleave_emits, lhs_words, rhs_words = _pair_vector_deinterleave_emits()
+    emits: list[EmitDescriptorOp] = list(deinterleave_emits)
+
+    if predicate == "eq":
+        low_equal_emits, low_equal = _pair_vector_word_equality(
+            "low", lhs_words[0], rhs_words[0]
+        )
+        high_equal_emits, high_equal = _pair_vector_word_equality(
+            "high", lhs_words[1], rhs_words[1]
+        )
+        emits.extend((*low_equal_emits, *high_equal_emits))
+        combine, result_bits = _pair_vector_predicate_binary(
+            "and", "pair_equal", low_equal, high_equal
+        )
+        emits.append(combine)
+    elif predicate == "ne":
+        differences: list[ValueRef] = []
+        for word, lhs_word, rhs_word in zip(
+            ("low", "high"), lhs_words, rhs_words, strict=True
+        ):
+            for direction, compare_lhs, compare_rhs in (
+                ("forward", lhs_word, rhs_word),
+                ("reverse", rhs_word, lhs_word),
+            ):
+                compare, difference = _pair_vector_word_compare(
+                    f"{word}_{direction}",
+                    compare_lhs,
+                    compare_rhs,
+                    relation="lt",
+                    signed=False,
+                )
+                emits.append(compare)
+                differences.append(difference)
+        result_bits = differences[0]
+        for index, difference in enumerate(differences[1:], start=1):
+            combine, result_bits = _pair_vector_predicate_binary(
+                "or", f"different_{index}", result_bits, difference
+            )
+            emits.append(combine)
+    else:
+        signed = predicate.startswith("s")
+        swap_operands = predicate in ("sgt", "sge", "ugt", "uge")
+        inclusive = predicate in ("sle", "sge", "ule", "uge")
+        ordered_lhs, ordered_rhs = (
+            (rhs_words, lhs_words) if swap_operands else (lhs_words, rhs_words)
+        )
+        # Compare the word pairs lexicographically. The high word carries the
+        # i64 sign; the low word is always unsigned. Inclusive predicates use
+        # low_rhs >= low_lhs only when the high words are equal.
+        high_equal_emits, high_equal = _pair_vector_word_equality(
+            "high", ordered_lhs[1], ordered_rhs[1]
+        )
+        emits.extend(high_equal_emits)
+        high_compare, high_less = _pair_vector_word_compare(
+            "high",
+            ordered_lhs[1],
+            ordered_rhs[1],
+            relation="lt",
+            signed=signed,
+        )
+        emits.append(high_compare)
+        low_compare, low_ordered = _pair_vector_word_compare(
+            "low",
+            ordered_rhs[0] if inclusive else ordered_lhs[0],
+            ordered_lhs[0] if inclusive else ordered_rhs[0],
+            relation="ge" if inclusive else "lt",
+            signed=False,
+        )
+        emits.append(low_compare)
+        combine, tied_low_ordered = _pair_vector_predicate_binary(
+            "and", "tied_low_ordered", high_equal, low_ordered
+        )
+        emits.append(combine)
+        combine, result_bits = _pair_vector_predicate_binary(
+            "or", "pair_ordered", high_less, tied_low_ordered
+        )
+        emits.append(combine)
+
+    complete = _descriptor("amd.xdna.aie2p.predicate.complete.zero.high32")
+    emits.append(
+        EmitDescriptorOp(
+            descriptor=complete,
+            operands={"storage": result_bits},
+            results={"dst": ValueRef.result("result")},
+            immediates={"i": 0},
+            form=DescriptorEmitForm.OP,
+        )
+    )
+    return DescriptorRule(
+        source_op=vector.vector_cmpi,
+        descriptor=complete,
+        guards=(
+            Guard.enum_attr_equals("predicate", predicate),
+            Guard.value_type("lhs", _I64_VECTOR),
+            Guard.value_type("rhs", _I64_VECTOR),
+            Guard.value_type("result", _I64_PREDICATE_VECTOR),
+        ),
+        emit=tuple(emits),
+    )
+
+
 def _pair_select_rule(type_pattern: TypePattern) -> DescriptorRule:
     true_emits, true_low, true_high = _split_pair(
         ValueRef.operand("true_value"), "true"
@@ -480,6 +879,97 @@ def _pair_select_rule(type_pattern: TypePattern) -> DescriptorRule:
             *false_emits,
             *program.emits,
             _concat_pair(result_low, result_high),
+        ),
+    )
+
+
+def _pair_vector_select_rule(
+    element_type: str,
+    minimum_lanes: int,
+    maximum_lanes: int,
+    spread_stages: Sequence[tuple[int, int]],
+) -> DescriptorRule:
+    value_type = Vector(
+        element_type,
+        minimum_static_elements=minimum_lanes,
+        maximum_static_elements=maximum_lanes,
+    )
+    condition_type = Vector(
+        "i1",
+        minimum_static_elements=minimum_lanes,
+        maximum_static_elements=maximum_lanes,
+    )
+    program = ScalarProgram()
+    constants: dict[int, ValueRef] = {}
+
+    def constant(value: int) -> ValueRef:
+        if value not in constants:
+            constants[value] = program.constant(f"selector_constant_{value:x}", value)
+        return constants[value]
+
+    # Predicates pack one bit per logical 64-bit lane, while VSEL.32 consumes
+    # one bit per physical 32-bit payload word. Mask undefined predicate bits,
+    # dilate each active bit into an even position, then copy it to the adjacent
+    # odd position. This selects both words of every i64/f64 lane together.
+    selector = program.binary(
+        "selector_active",
+        "predicate.mask.low32",
+        ValueRef.operand("condition"),
+        constant((1 << maximum_lanes) - 1),
+    )
+    for stage_index, (shift, mask) in enumerate(spread_stages):
+        shifted = program.binary(
+            f"selector_spread_{stage_index}_shifted",
+            "lshl.i32",
+            selector,
+            constant(shift),
+        )
+        combined = program.binary(
+            f"selector_spread_{stage_index}_combined",
+            "or.i32",
+            selector,
+            shifted,
+        )
+        selector = program.binary(
+            f"selector_spread_{stage_index}",
+            "and.i32",
+            combined,
+            constant(mask),
+        )
+    shifted = program.binary(
+        "selector_odd",
+        "lshl.i32",
+        selector,
+        constant(1),
+    )
+    hardware_selector = program.binary(
+        "hardware_selector",
+        "or.i32",
+        selector,
+        shifted,
+    )
+    select = _descriptor("amd.xdna.aie2p.select.i32x16")
+    return DescriptorRule(
+        source_op=vector.vector_select,
+        descriptor=select,
+        guards=(
+            Guard.value_type("condition", condition_type),
+            *_typed_guards(("true_value", "false_value", "result"), value_type),
+        ),
+        emit=(
+            *program.emits,
+            EmitDescriptorOp(
+                descriptor=select,
+                operands={
+                    # VSEL chooses s1 for zero and s2 for one.
+                    "s1": ValueRef.operand("false_value"),
+                    "s2": ValueRef.operand("true_value"),
+                    "sel": hardware_selector,
+                },
+                results={"d": ValueRef.result("result")},
+                form=DescriptorEmitForm.OP,
+                copy_operands=("sel",),
+            ),
         ),
     )
 
@@ -667,6 +1157,10 @@ AIE2P_I64_RULES = (
         ValueProject.float_as_f64_i32_word("result", word_index=1),
         Guard.value_exact_float("result"),
     ),
+    *_pair_vector_constant_rules(),
+    _pair_vector_binary_rule(vector.vector_andi, "amd.xdna.aie2p.and.bits512"),
+    _pair_vector_binary_rule(vector.vector_ori, "amd.xdna.aie2p.or.bits512"),
+    _pair_vector_xor_rule(),
     _pair_bitwise_rule(scalar_bitwise.scalar_andi, "and.i32"),
     _pair_bitwise_rule(scalar_bitwise.scalar_ori, "or.i32"),
     _pair_bitwise_rule(scalar_bitwise.scalar_xori, "xor.i32"),
@@ -706,8 +1200,33 @@ AIE2P_I64_RULES = (
             "uge",
         )
     ),
+    *(
+        _pair_vector_compare_rule(predicate)
+        for predicate in (
+            "eq",
+            "ne",
+            "slt",
+            "sle",
+            "sgt",
+            "sge",
+            "ult",
+            "ule",
+            "ugt",
+            "uge",
+        )
+    ),
     _pair_select_rule(_I64),
     _pair_select_rule(_F64),
+    *(
+        _pair_vector_select_rule(
+            element_type,
+            minimum_lanes,
+            maximum_lanes,
+            spread_stages,
+        )
+        for element_type in ("i64", "f64")
+        for minimum_lanes, maximum_lanes, spread_stages in (_PAIR_VECTOR_SELECT_RANGES)
+    ),
     *(
         rule
         for vector_type, scalar_type in (

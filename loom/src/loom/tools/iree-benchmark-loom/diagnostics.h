@@ -13,6 +13,7 @@
 #include "loom/error/diagnostic.h"
 #include "loom/tools/iree-benchmark-loom/model.h"
 #include "loom/util/stream.h"
+#include "loomc/result.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,6 +40,11 @@ iree_status_t iree_benchmark_loom_write_diagnostic_array_json(
 // Diagnostic sink callback that appends one structured JSON diagnostic.
 iree_status_t iree_benchmark_loom_diagnostic_capture_sink(
     void* user_data, const loom_diagnostic_t* diagnostic);
+
+// Appends every structured diagnostic in one public compiler result.
+iree_status_t iree_benchmark_loom_diagnostic_capture_loomc_result(
+    iree_benchmark_loom_diagnostic_capture_t* capture,
+    const loomc_result_t* result);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -55,7 +55,11 @@ AIE2P_TABLE_RULES = tuple(
     for elements, lane_count, descriptor_key in (
         (("i8", "f8E4M3", "f8E5M2"), 64, "amd.xdna.aie2p.broadcast.i8x64.from-vector"),
         (("i16", "f16", "bf16"), 32, "amd.xdna.aie2p.broadcast.i16x32.from-vector"),
-        (("i32", "f32"), 16, "amd.xdna.aie2p.broadcast.i32x16.from-vector"),
+        (
+            ("i32", "f32", "index", "offset"),
+            16,
+            "amd.xdna.aie2p.broadcast.i32x16.from-vector",
+        ),
         (("i64", "f64"), 8, "amd.xdna.aie2p.broadcast.i64x8.from-vector"),
     )
 )

@@ -15,30 +15,31 @@ loom_low_allocation_assignment_t Assignment(
     loom_value_id_t value_id, uint16_t descriptor_reg_class_id,
     uint32_t start_point, uint32_t end_point, uint32_t location_base,
     uint32_t location_count, uint32_t unit_count, uint32_t unit_point_start) {
-  loom_low_allocation_assignment_t assignment = {};
-  assignment.value_id = value_id;
-  assignment.descriptor_reg_class_id = descriptor_reg_class_id;
-  assignment.start_point = start_point;
-  assignment.end_point = end_point;
-  assignment.location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER;
-  assignment.location_base = location_base;
-  assignment.location_count = location_count;
-  assignment.unit_count = unit_count;
-  assignment.unit_point_start = unit_point_start;
+  loom_low_allocation_assignment_t assignment = {
+      .value_id = value_id,
+      .descriptor_reg_class_id = descriptor_reg_class_id,
+      .start_point = start_point,
+      .end_point = end_point,
+      .unit_count = unit_count,
+      .location_kind = LOOM_LOW_ALLOCATION_LOCATION_PHYSICAL_REGISTER,
+      .location_base = location_base,
+      .location_count = location_count,
+      .unit_point_start = unit_point_start,
+  };
   return assignment;
 }
 
 loom_low_reg_class_t RegClass(uint16_t alias_set_id) {
-  loom_low_reg_class_t reg_class = {};
-  reg_class.alias_set_id = alias_set_id;
+  loom_low_reg_class_t reg_class = {.alias_set_id = alias_set_id};
   return reg_class;
 }
 
 loom_liveness_analysis_t Liveness(const loom_liveness_block_info_t* blocks,
                                   iree_host_size_t block_count) {
-  loom_liveness_analysis_t liveness = {};
-  liveness.blocks = blocks;
-  liveness.block_count = block_count;
+  loom_liveness_analysis_t liveness = {
+      .blocks = blocks,
+      .block_count = block_count,
+  };
   return liveness;
 }
 
@@ -101,17 +102,17 @@ TEST(LowAllocationLiveRangeTest, ClassifiesAllocatableIntervals) {
 }
 
 TEST(LowAllocationLiveRangeTest, ComputesIntervalStorageEndPoints) {
-  loom_liveness_interval_t live_interval = {};
-  live_interval.start_point = 3;
-  live_interval.end_point = 7;
+  loom_liveness_interval_t live_interval = {.start_point = 3, .end_point = 7};
 
-  loom_liveness_interval_t dead_result_interval = {};
-  dead_result_interval.start_point = 3;
-  dead_result_interval.end_point = 3;
+  loom_liveness_interval_t dead_result_interval = {
+      .start_point = 3,
+      .end_point = 3,
+  };
 
-  loom_liveness_interval_t saturated_interval = {};
-  saturated_interval.start_point = UINT32_MAX;
-  saturated_interval.end_point = UINT32_MAX;
+  loom_liveness_interval_t saturated_interval = {
+      .start_point = UINT32_MAX,
+      .end_point = UINT32_MAX,
+  };
 
   EXPECT_EQ(
       loom_low_allocation_live_range_interval_storage_end_point(&live_interval),
@@ -130,25 +131,68 @@ TEST(LowAllocationLiveRangeTest, ComputesIntervalStorageEndPoints) {
             UINT32_MAX);
 }
 
-TEST(LowAllocationLiveRangeTest, ComputesIntervalAlignment) {
+TEST(LowAllocationLiveRangeTest, SeparatesRequiredAndPreferredAlignment) {
   loom_low_reg_class_t reg_classes[2] = {};
   reg_classes[1].flags = LOOM_LOW_REG_CLASS_FLAG_EVEN_ALIGNED_TUPLES;
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.reg_classes = reg_classes;
-  descriptor_set.reg_class_count = IREE_ARRAYSIZE(reg_classes);
+  loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = reg_classes,
+      .reg_class_count = IREE_ARRAYSIZE(reg_classes),
+  };
   const uint32_t unit_counts[] = {1, 2, 3, 4, 5, 6, 7, 8, 12};
   const uint32_t unaligned[] = {1, 2, 1, 4, 1, 1, 1, 8, 1};
   const uint32_t aligned[] = {1, 2, 2, 4, 2, 2, 2, 8, 2};
+  loom_low_placement_table_t placement = {};
   for (size_t i = 0; i < IREE_ARRAYSIZE(unit_counts); ++i) {
-    loom_liveness_interval_t interval = {};
-    interval.unit_count = unit_counts[i];
-    EXPECT_EQ(loom_low_allocation_live_range_interval_alignment(&descriptor_set,
-                                                                &interval),
+    loom_liveness_interval_t interval = {.unit_count = unit_counts[i]};
+    loom_liveness_analysis_t liveness = {
+        .intervals = &interval,
+        .interval_count = 1,
+    };
+    EXPECT_EQ(loom_low_allocation_live_range_interval_alignment(
+                  &descriptor_set, &liveness,
+                  placement.operand_constraints_by_interval, &interval),
+              1u);
+    EXPECT_EQ(loom_low_reg_class_preferred_unit_alignment(&reg_classes[0],
+                                                          interval.unit_count),
               unaligned[i]);
     interval.value_class.register_class_id = 1;
-    EXPECT_EQ(loom_low_allocation_live_range_interval_alignment(&descriptor_set,
-                                                                &interval),
+    EXPECT_EQ(loom_low_allocation_live_range_interval_alignment(
+                  &descriptor_set, &liveness,
+                  placement.operand_constraints_by_interval, &interval),
+              interval.unit_count > 1 ? 2u : 1u);
+    EXPECT_EQ(loom_low_reg_class_preferred_unit_alignment(&reg_classes[1],
+                                                          interval.unit_count),
               aligned[i]);
+  }
+}
+
+TEST(LowAllocationLiveRangeTest, CombinesRetainedOperandAndClassAlignment) {
+  loom_low_reg_class_t reg_class = {
+      .flags = LOOM_LOW_REG_CLASS_FLAG_EVEN_ALIGNED_TUPLES,
+  };
+  loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = &reg_class,
+      .reg_class_count = 1,
+  };
+  loom_liveness_interval_t intervals[3] = {};
+  for (auto& interval : intervals) {
+    interval.unit_count = 4;
+  }
+  loom_liveness_analysis_t liveness = {
+      .intervals = intervals,
+      .interval_count = IREE_ARRAYSIZE(intervals),
+  };
+  const loom_low_placement_operand_constraints_t operands[] = {
+      {0, 0, false}, {0, 1, false}, {0, 3, false}};
+  loom_low_placement_table_t placement = {
+      .operand_constraints_by_interval = operands,
+  };
+  const uint32_t expected[] = {2, 2, 8};
+  for (size_t i = 0; i < IREE_ARRAYSIZE(intervals); ++i) {
+    EXPECT_EQ(loom_low_allocation_live_range_interval_alignment(
+                  &descriptor_set, &liveness,
+                  placement.operand_constraints_by_interval, &intervals[i]),
+              expected[i]);
   }
 }
 
@@ -156,13 +200,13 @@ TEST(LowAllocationLiveRangeTest, ChecksBlockObservableOverlap) {
   const loom_value_id_t live_in_values[] = {1};
   const loom_liveness_block_info_t blocks[] = {
       {
-          /*.block=*/nullptr,
-          /*.start_point=*/0,
-          /*.end_point=*/10,
-          /*.live_in_values=*/live_in_values,
-          /*.live_in_count=*/IREE_ARRAYSIZE(live_in_values),
-          /*.live_out_values=*/nullptr,
-          /*.live_out_count=*/0,
+          .block = nullptr,
+          .start_point = 0,
+          .end_point = 10,
+          .live_in_values = live_in_values,
+          .live_in_count = IREE_ARRAYSIZE(live_in_values),
+          .live_out_values = nullptr,
+          .live_out_count = 0,
       },
   };
   loom_liveness_analysis_t liveness = Liveness(blocks, IREE_ARRAYSIZE(blocks));
@@ -182,9 +226,10 @@ TEST(LowAllocationLiveRangeTest, ChecksAssignmentConflicts) {
       RegClass(/*alias_set_id=*/1),
       RegClass(/*alias_set_id=*/1),
   };
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.reg_classes = reg_classes;
-  descriptor_set.reg_class_count = IREE_ARRAYSIZE(reg_classes);
+  loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = reg_classes,
+      .reg_class_count = IREE_ARRAYSIZE(reg_classes),
+  };
 
   uint32_t unit_end_points[] = {10, 10, 10, 10};
   const loom_low_allocation_assignment_t lhs = Assignment(
@@ -214,9 +259,10 @@ TEST(LowAllocationLiveRangeTest, RefinesAssignmentConflictsByUnitStart) {
   const loom_low_reg_class_t reg_classes[] = {
       RegClass(/*alias_set_id=*/1),
   };
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.reg_classes = reg_classes;
-  descriptor_set.reg_class_count = IREE_ARRAYSIZE(reg_classes);
+  loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = reg_classes,
+      .reg_class_count = IREE_ARRAYSIZE(reg_classes),
+  };
 
   uint32_t unit_end_points[] = {10, 10, 5, 6};
   uint32_t unit_start_points[] = {0, 5, 2, 2};
@@ -250,9 +296,10 @@ TEST(LowAllocationLiveRangeTest, AssignmentConflictsRejectDisjointLifetime) {
       RegClass(/*alias_set_id=*/1),
       RegClass(/*alias_set_id=*/1),
   };
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.reg_classes = reg_classes;
-  descriptor_set.reg_class_count = IREE_ARRAYSIZE(reg_classes);
+  loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = reg_classes,
+      .reg_class_count = IREE_ARRAYSIZE(reg_classes),
+  };
 
   const loom_low_allocation_assignment_t lhs = Assignment(
       /*value_id=*/1, /*descriptor_reg_class_id=*/0, /*start_point=*/0,
@@ -274,8 +321,12 @@ TEST(LowAllocationLiveRangeTest, PreservesSparseGapsAgainstContiguousStorage) {
   const uint16_t candidate_ordinals[] = {0};
   const uint16_t allocation_ordinals[] = {0};
   const loom_low_physical_register_t physical_registers[] = {
-      {/*.name_string_ref=*/0, /*.atomic_unit_start=*/0,
-       /*.atomic_unit_count=*/1, /*.reserved=*/0},
+      {
+          .name_string_ref = 0,
+          .atomic_unit_start = 0,
+          .atomic_unit_count = 1,
+          .reserved = 0,
+      },
   };
   const loom_liveness_segment_t segments[] = {{0, 4}, {20, 30}};
   for (const uint32_t flags :
@@ -285,21 +336,20 @@ TEST(LowAllocationLiveRangeTest, PreservesSparseGapsAgainstContiguousStorage) {
     reg_class.flags = flags;
     reg_class.allocatable_count = 1;
     reg_class.candidate_lookup.register_count = 1;
-    loom_low_descriptor_set_t descriptor_set = {};
-    descriptor_set.reg_classes = &reg_class;
-    descriptor_set.reg_class_count = 1;
-    descriptor_set.physical_registers = physical_registers;
-    descriptor_set.physical_register_count = IREE_ARRAYSIZE(physical_registers);
-    descriptor_set.physical_register_atomic_units = atomic_units;
-    descriptor_set.physical_register_atomic_unit_count =
-        IREE_ARRAYSIZE(atomic_units);
-    descriptor_set.physical_register_candidate_ids = candidate_ids;
-    descriptor_set.physical_register_candidate_count =
-        IREE_ARRAYSIZE(candidate_ids);
-    descriptor_set.physical_register_candidate_ordinals = candidate_ordinals;
-    descriptor_set.physical_register_candidate_ordinal_count =
-        IREE_ARRAYSIZE(candidate_ordinals);
-    descriptor_set.physical_register_allocation_ordinals = allocation_ordinals;
+    loom_low_descriptor_set_t descriptor_set = {
+        .reg_classes = &reg_class,
+        .reg_class_count = 1,
+        .physical_registers = physical_registers,
+        .physical_register_count = IREE_ARRAYSIZE(physical_registers),
+        .physical_register_candidate_ids = candidate_ids,
+        .physical_register_allocation_ordinals = allocation_ordinals,
+        .physical_register_candidate_count = IREE_ARRAYSIZE(candidate_ids),
+        .physical_register_candidate_ordinals = candidate_ordinals,
+        .physical_register_candidate_ordinal_count =
+            IREE_ARRAYSIZE(candidate_ordinals),
+        .physical_register_atomic_units = atomic_units,
+        .physical_register_atomic_unit_count = IREE_ARRAYSIZE(atomic_units),
+    };
 
     loom_low_allocation_assignment_t sparse = Assignment(
         /*value_id=*/1, /*descriptor_reg_class_id=*/0, /*start_point=*/0,
@@ -335,24 +385,160 @@ TEST(LowAllocationLiveRangeTest, PreservesSparseGapsAgainstContiguousStorage) {
   }
 }
 
+TEST(LowAllocationLiveRangeTest,
+     ExpandedExecutionDefinitionsProtectRetainedSparseStorage) {
+  const uint16_t atomic_units[] = {0};
+  const uint16_t candidate_ids[] = {0};
+  const uint16_t candidate_ordinals[] = {0};
+  const uint16_t allocation_ordinals[] = {0};
+  const loom_low_physical_register_t physical_registers[] = {
+      {
+          .name_string_ref = 0,
+          .atomic_unit_start = 0,
+          .atomic_unit_count = 1,
+          .reserved = 0,
+      },
+  };
+  const loom_liveness_segment_t segments[] = {{0, 4}, {20, 30}};
+  for (const uint32_t class_flags :
+       {0u, uint32_t(LOOM_LOW_REG_CLASS_FLAG_EXPLICIT_PHYSICAL_REGISTERS)}) {
+    SCOPED_TRACE(class_flags);
+    loom_low_reg_class_t reg_class = RegClass(/*alias_set_id=*/1);
+    reg_class.flags = class_flags;
+    reg_class.allocatable_count = 1;
+    reg_class.candidate_lookup.register_count = 1;
+    const loom_low_descriptor_set_t descriptor_set = {
+        .reg_classes = &reg_class,
+        .reg_class_count = 1,
+        .physical_registers = physical_registers,
+        .physical_register_count = IREE_ARRAYSIZE(physical_registers),
+        .physical_register_candidate_ids = candidate_ids,
+        .physical_register_allocation_ordinals = allocation_ordinals,
+        .physical_register_candidate_count = IREE_ARRAYSIZE(candidate_ids),
+        .physical_register_candidate_ordinals = candidate_ordinals,
+        .physical_register_candidate_ordinal_count =
+            IREE_ARRAYSIZE(candidate_ordinals),
+        .physical_register_atomic_units = atomic_units,
+        .physical_register_atomic_unit_count = IREE_ARRAYSIZE(atomic_units),
+    };
+    loom_low_allocation_assignment_t retained = Assignment(
+        /*value_id=*/1, /*descriptor_reg_class_id=*/0, /*start_point=*/0,
+        /*end_point=*/30, /*location_base=*/0, /*location_count=*/1,
+        /*unit_count=*/1, /*unit_point_start=*/0);
+    retained.liveness_segments = {0, IREE_ARRAYSIZE(segments)};
+    loom_low_allocation_assignment_t expanded_definition = Assignment(
+        /*value_id=*/2, /*descriptor_reg_class_id=*/0, /*start_point=*/10,
+        /*end_point=*/11, /*location_base=*/0, /*location_count=*/1,
+        /*unit_count=*/1, /*unit_point_start=*/1);
+    const uint32_t unit_start_points[] = {0, 10};
+    const uint32_t unit_end_points[] = {30, 11};
+
+    EXPECT_FALSE(loom_low_allocation_live_range_assignments_conflict(
+        &descriptor_set, segments, unit_start_points, unit_end_points,
+        IREE_ARRAYSIZE(unit_end_points), &retained, &expanded_definition));
+
+    expanded_definition.flags =
+        LOOM_LOW_ALLOCATION_ASSIGNMENT_FLAG_EXPANDED_EXECUTION_DEFINITION;
+    EXPECT_TRUE(loom_low_allocation_live_range_assignments_conflict(
+        &descriptor_set, segments, unit_start_points, unit_end_points,
+        IREE_ARRAYSIZE(unit_end_points), &retained, &expanded_definition));
+    EXPECT_TRUE(loom_low_allocation_live_range_assignments_conflict(
+        &descriptor_set, segments, unit_start_points, unit_end_points,
+        IREE_ARRAYSIZE(unit_end_points), &expanded_definition, &retained));
+
+    uint32_t sweep_segment = retained.liveness_segments.start;
+    EXPECT_TRUE(loom_low_allocation_live_range_sweep_assignments_conflict(
+        /*sweep_point=*/10, &sweep_segment, &descriptor_set, segments,
+        unit_start_points, unit_end_points, IREE_ARRAYSIZE(unit_end_points),
+        &retained, &expanded_definition));
+  }
+}
+
+TEST(LowAllocationLiveRangeTest,
+     ExpandedExecutionDefinitionsRetainPointLocalReuse) {
+  const loom_low_reg_class_t reg_class = RegClass(/*alias_set_id=*/1);
+  const loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = &reg_class,
+      .reg_class_count = 1,
+  };
+  loom_low_allocation_assignment_t expanded_definition = Assignment(
+      /*value_id=*/1, /*descriptor_reg_class_id=*/0, /*start_point=*/10,
+      /*end_point=*/11, /*location_base=*/1, /*location_count=*/1,
+      /*unit_count=*/1, /*unit_point_start=*/0);
+  expanded_definition.flags =
+      LOOM_LOW_ALLOCATION_ASSIGNMENT_FLAG_EXPANDED_EXECUTION_DEFINITION;
+  const loom_low_allocation_assignment_t ends_at_definition = Assignment(
+      /*value_id=*/2, /*descriptor_reg_class_id=*/0, /*start_point=*/0,
+      /*end_point=*/10, /*location_base=*/1, /*location_count=*/1,
+      /*unit_count=*/1, /*unit_point_start=*/1);
+  const loom_low_allocation_assignment_t starts_after_definition = Assignment(
+      /*value_id=*/3, /*descriptor_reg_class_id=*/0, /*start_point=*/11,
+      /*end_point=*/20, /*location_base=*/1, /*location_count=*/1,
+      /*unit_count=*/1, /*unit_point_start=*/2);
+  const uint32_t unit_start_points[] = {10, 0, 11};
+  const uint32_t unit_end_points[] = {11, 10, 20};
+
+  EXPECT_FALSE(loom_low_allocation_live_range_assignments_conflict(
+      &descriptor_set, /*storage_segments=*/nullptr, unit_start_points,
+      unit_end_points, IREE_ARRAYSIZE(unit_end_points), &expanded_definition,
+      &ends_at_definition));
+  EXPECT_FALSE(loom_low_allocation_live_range_assignments_conflict(
+      &descriptor_set, /*storage_segments=*/nullptr, unit_start_points,
+      unit_end_points, IREE_ARRAYSIZE(unit_end_points), &expanded_definition,
+      &starts_after_definition));
+}
+
+TEST(LowAllocationLiveRangeTest,
+     ExpandedExecutionDefinitionsRespectPerUnitStorage) {
+  const loom_low_reg_class_t reg_class = RegClass(/*alias_set_id=*/1);
+  const loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = &reg_class,
+      .reg_class_count = 1,
+  };
+  loom_low_allocation_assignment_t expanded_definition = Assignment(
+      /*value_id=*/1, /*descriptor_reg_class_id=*/0, /*start_point=*/10,
+      /*end_point=*/11, /*location_base=*/2, /*location_count=*/1,
+      /*unit_count=*/1, /*unit_point_start=*/0);
+  expanded_definition.flags =
+      LOOM_LOW_ALLOCATION_ASSIGNMENT_FLAG_EXPANDED_EXECUTION_DEFINITION;
+  loom_low_allocation_assignment_t retained = Assignment(
+      /*value_id=*/2, /*descriptor_reg_class_id=*/0, /*start_point=*/0,
+      /*end_point=*/20, /*location_base=*/1, /*location_count=*/2,
+      /*unit_count=*/2, /*unit_point_start=*/1);
+  retained.flags = LOOM_LOW_ALLOCATION_ASSIGNMENT_FLAG_REFINED_UNIT_STARTS;
+  const uint32_t unit_start_points[] = {10, 0, 0};
+  uint32_t unit_end_points[] = {11, 20, 10};
+
+  EXPECT_FALSE(loom_low_allocation_live_range_assignments_conflict(
+      &descriptor_set, /*storage_segments=*/nullptr, unit_start_points,
+      unit_end_points, IREE_ARRAYSIZE(unit_end_points), &expanded_definition,
+      &retained));
+  unit_end_points[2] = 20;
+  EXPECT_TRUE(loom_low_allocation_live_range_assignments_conflict(
+      &descriptor_set, /*storage_segments=*/nullptr, unit_start_points,
+      unit_end_points, IREE_ARRAYSIZE(unit_end_points), &expanded_definition,
+      &retained));
+}
+
 TEST(LowAllocationLiveRangeTest, AssignmentConflictsUsePhysicalStorageOverlap) {
   const loom_low_reg_class_t reg_classes[] = {
       RegClass(/*alias_set_id=*/1),
       RegClass(/*alias_set_id=*/1),
   };
-  loom_low_descriptor_set_t descriptor_set = {};
-  descriptor_set.reg_classes = reg_classes;
-  descriptor_set.reg_class_count = IREE_ARRAYSIZE(reg_classes);
+  loom_low_descriptor_set_t descriptor_set = {
+      .reg_classes = reg_classes,
+      .reg_class_count = IREE_ARRAYSIZE(reg_classes),
+  };
 
   const loom_liveness_block_info_t blocks[] = {
       {
-          /*.block=*/nullptr,
-          /*.start_point=*/40,
-          /*.end_point=*/80,
-          /*.live_in_values=*/nullptr,
-          /*.live_in_count=*/0,
-          /*.live_out_values=*/nullptr,
-          /*.live_out_count=*/0,
+          .block = nullptr,
+          .start_point = 40,
+          .end_point = 80,
+          .live_in_values = nullptr,
+          .live_in_count = 0,
+          .live_out_values = nullptr,
+          .live_out_count = 0,
       },
   };
   const loom_liveness_analysis_t liveness =

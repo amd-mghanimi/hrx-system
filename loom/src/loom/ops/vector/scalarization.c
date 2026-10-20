@@ -6,6 +6,7 @@
 
 #include "loom/ops/vector/scalarization.h"
 
+#include "loom/ops/index/ops.h"
 #include "loom/ops/scalar/ops.h"
 #include "loom/ops/vector/ops.h"
 

@@ -1,0 +1,641 @@
+# Copyright 2026 The IREE Authors
+#
+# Licensed under the Apache License v2.0 with LLVM Exceptions.
+# See https://llvm.org/LICENSE.txt for license information.
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+
+load("//loom/build_tools/bazel:build_defs.bzl", "iree_select", "loom_cc_binary", "loom_cc_library", "loom_cc_test", "loom_config_compatible_with")
+load("//loom/build_tools/bazel:python.bzl", "loom_py_test")
+load("//loom/src/loom/serve/fixture/decision:sources.bzl", DECISION_SOURCES = "SOURCES")
+load("//loom/src/loom/serve/fixture/embedding:sources.bzl", EMBEDDING_SOURCES = "SOURCES", EMBEDDING_VARIANT_SOURCES = "VARIANT_SOURCES")
+load("//loom/src/loom/serve/fixture/image:sources.bzl", IMAGE_SOURCES = "SOURCES")
+load("//loom/src/loom/serve/fixture/projector:sources.bzl", PROJECTOR_SOURCES = "SOURCES")
+load("//loom/src/loom/serve/fixture/recognition:sources.bzl", RECOGNITION_SOURCES = "SOURCES")
+load("//loom/src/loom/serve/fixture/speech:sources.bzl", SPEECH_SOURCES = "SOURCES", SPEECH_VARIANT_SOURCES = "VARIANT_SOURCES")
+load("//loom/src/loom/serve/fixture/text:sources.bzl", TEXT_SOURCES = "SOURCES")
+load("//loom/src/loom/serve/service/finite:testdata/component/sources.bzl", COMPONENT_SOURCES = "SOURCES")
+
+package(default_visibility = ["//visibility:private"])
+
+loom_cc_library(
+    name = "test_compiler",
+    testonly = True,
+    srcs = ["test_compiler.c"],
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+    ]),
+    deps = [
+        "//loom/binding/c/target/cpu:iree_hal",
+        "//loom/binding/c/target/x86",
+        "//loom/src/loom/serve/testing:compiler",
+    ],
+    alwayslink = True,
+)
+
+loom_cc_library(
+    name = "test_device",
+    testonly = True,
+    srcs = ["test_device.c"],
+    target_compatible_with = loom_config_compatible_with([
+        "//runtime/config/hal:driver_task",
+    ]),
+    deps = [
+        "//loom/src/loom/serve/testing:device",
+    ],
+    alwayslink = True,
+)
+
+loom_cc_binary(
+    name = "loom-serve-test-tool",
+    testonly = True,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//runtime/config/hal:driver_task",
+    ]),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/testing:server_test_tool",
+    ],
+)
+
+# JITs an external source package and executes its command program through the
+# task HAL using the exact CPU serving composition.
+loom_py_test(
+    name = "serve_command_test",
+    size = "small",
+    srcs = ["//loom/src/loom/tools/loom-serve:server_test.py"],
+    args = [
+        "$(rootpath :loom-serve-test-tool)",
+        "$(rootpath //loom/src/loom/serve/fixture/embedding:prepare.loom)",
+        "$(rootpath //loom/src/loom/tools/loom-format)",
+    ],
+    data = EMBEDDING_SOURCES + [
+        ":loom-serve-test-tool",
+        "//loom/src/loom/tools/loom-format",
+    ],
+    main = "server_test.py",
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//runtime/config/hal:driver_task",
+        "//runtime/config/hal:executable_loader_embedded_elf",
+    ]) + ["@platforms//cpu:x86_64"] + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//loom/src/loom/serve/testing:http"],
+)
+
+loom_py_test(
+    name = "pressure_test",
+    size = "small",
+    srcs = ["//loom/src/loom/serve/server:pressure_test.py"],
+    args = [
+        "--server=$(rootpath :loom-serve-test-tool)",
+        "--source=$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+        "--device=task",
+    ],
+    data = TEXT_SOURCES + [":loom-serve-test-tool"],
+    main = "pressure_test.py",
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//runtime/config/hal:driver_task",
+        "//runtime/config/hal:executable_loader_embedded_elf",
+    ]) + ["@platforms//cpu:x86_64"] + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//loom/src/loom/serve/testing:http"],
+)
+
+loom_cc_test(
+    name = "execution_queues_test",
+    target_compatible_with = loom_config_compatible_with([
+        "//runtime/config/hal:driver_task",
+    ]),
+    deps = [
+        ":test_device",
+        "//loom/src/loom/serve/runtime/execution:queues_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "finite_component_test",
+    data = COMPONENT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_COMPONENT_SOURCE": "$(rootpath //loom/src/loom/serve/service/finite:testdata/component/prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/finite:component_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_py_test(
+    name = "text_client_test",
+    size = "small",
+    srcs = ["//loom/src/loom/serve/service/text:client_test.py"],
+    args = [
+        "$(rootpath :loom-serve-test-tool)",
+        "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    ],
+    data = TEXT_SOURCES + [
+        ":loom-serve-test-tool",
+    ],
+    main = "client_test.py",
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//loom/src/loom/serve/testing:http"],
+)
+
+loom_py_test(
+    name = "recognition_client_test",
+    size = "small",
+    srcs = ["//loom/src/loom/serve/service/recognition:client_test.py"],
+    args = [
+        "$(rootpath :loom-serve-test-tool)",
+        "$(rootpath //loom/src/loom/serve/fixture/recognition:prepare.loom)",
+        "$(rootpath //loom/src/loom/serve/media:testdata/audio/sample.flac)",
+    ] + iree_select({
+        "//loom/config/serve:wav": ["--wav"],
+        "//conditions:default": [],
+    }) + iree_select({
+        "//loom/config/serve:mp3": ["--mp3"],
+        "//conditions:default": [],
+    }) + iree_select({
+        "//loom/config/serve:flac": ["--flac"],
+        "//conditions:default": [],
+    }),
+    data = RECOGNITION_SOURCES + [
+        ":loom-serve-test-tool",
+        "//loom/src/loom/serve/media:testdata/audio/sample.flac",
+        "//loom/src/loom/serve/media:testdata/audio/sample.mp3",
+    ],
+    main = "client_test.py",
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = ["//loom/src/loom/serve/testing:http"],
+)
+
+loom_cc_test(
+    name = "source_recognition_http_test",
+    args = ["--model_source=$(rootpath //loom/src/loom/serve/fixture/recognition:prepare.loom)"],
+    data = RECOGNITION_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/recognition:source_http_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_image_service_test",
+    data = IMAGE_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/image:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/image:source_service_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_recognition_model_test",
+    args = [
+        "--model_source=$(rootpath //loom/src/loom/serve/fixture/recognition:prepare.loom)",
+    ],
+    data = RECOGNITION_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/recognition:source_model_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_recognition_stream_test",
+    args = [
+        "--model_source=$(rootpath //loom/src/loom/serve/fixture/recognition:prepare.loom)",
+    ],
+    data = RECOGNITION_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/recognition:source_stream_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_recognition_stream_parallel_test",
+    args = [
+        "--test_workers=4",
+        "--model_source=$(rootpath //loom/src/loom/serve/fixture/recognition:prepare.loom)",
+    ],
+    data = RECOGNITION_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/recognition:source_stream_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "registry_speech_test",
+    args = [
+        "--model=$(rootpath //loom/src/loom/serve/fixture/speech:model.json)",
+    ],
+    data = SPEECH_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/server:registry_speech_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "registry_recognition_test",
+    args = [
+        "--model=$(rootpath //loom/src/loom/serve/fixture/recognition:model.json)",
+    ],
+    data = RECOGNITION_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/server:registry_recognition_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_speech_service_test",
+    args = [
+        "--model_source=$(rootpath //loom/src/loom/serve/fixture/speech:prepare.loom)",
+    ],
+    data = SPEECH_SOURCES + SPEECH_VARIANT_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/speech:source_service_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_speech_service_parallel_test",
+    args = [
+        "--test_workers=2",
+        "--model_source=$(rootpath //loom/src/loom/serve/fixture/speech:prepare.loom)",
+    ],
+    data = SPEECH_SOURCES + SPEECH_VARIANT_SOURCES,
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/speech:source_service_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_decision_service_test",
+    data = DECISION_SOURCES + EMBEDDING_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_EMBEDDING_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/embedding:prepare.loom)",
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/decision:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/finite/decision:source_service_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_embedding_service_test",
+    data = EMBEDDING_SOURCES + EMBEDDING_VARIANT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/embedding:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/finite/embedding:checkpoint_preparation_tests",
+        "//loom/src/loom/serve/service/finite/embedding:direct_dispatch_tests",
+        "//loom/src/loom/serve/service/finite/embedding:source_execution_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_embedding_management_test",
+    data = EMBEDDING_SOURCES + EMBEDDING_VARIANT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/embedding:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/finite/embedding:source_management_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_embedding_device_group_test",
+    data = EMBEDDING_SOURCES + EMBEDDING_VARIANT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/embedding:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/finite/embedding:device_group_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_text_service_test",
+    data = TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:source_reference_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_text_media_test",
+    data = EMBEDDING_SOURCES + PROJECTOR_SOURCES + TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MEDIA_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/embedding:model.json)",
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+        "LOOM_SERVE_TEST_PROJECTOR_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/projector:model.json)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:source_media_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "native_text_service_test",
+    data = TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:native_service_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_text_admission_test",
+    data = TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:admission_service_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_text_checkpoint_test",
+    data = TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:checkpoint_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_text_prefix_test",
+    data = TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:prefix_service_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_text_cache_test",
+    data = TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:source_cache_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "source_text_reconfiguration_test",
+    data = TEXT_SOURCES,
+    env = {
+        "LOOM_SERVE_TEST_MODEL_SOURCE": "$(rootpath //loom/src/loom/serve/fixture/text:prepare.loom)",
+    },
+    target_compatible_with = loom_config_compatible_with([
+        "//loom/config/target/arch:x86",
+        "//loom/config/execute:task_hal",
+    ]) + select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        ":test_compiler",
+        ":test_device",
+        "//loom/src/loom/serve/service/text:source_reconfiguration_tests",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)

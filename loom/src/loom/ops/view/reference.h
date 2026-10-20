@@ -29,12 +29,33 @@ extern "C" {
 // drops changing ranges independently of stable origin and footprint facts.
 extern const loom_value_fact_domain_t loom_view_fact_domain;
 
+// Summarizes an arbitrary record selected along a storage view's leading axis.
+// The remaining axes describe one record. Selection preserves the allocation
+// identity and memory space while its base ranges across every storage slot.
+// These are spatial facts only: they establish neither record identity nor
+// payload readiness, and imply no ordering between accesses to the storage.
+iree_status_t loom_view_reference_make_record(loom_fact_context_t* context,
+                                              const loom_module_t* module,
+                                              loom_value_id_t storage_value_id,
+                                              loom_value_facts_t storage_facts,
+                                              loom_type_t storage_type,
+                                              loom_value_facts_t* out);
+
 // Constructs view-reference facts for `buffer.view`.
 iree_status_t loom_view_reference_make_buffer_view(
     loom_fact_context_t* context, const loom_module_t* module,
     loom_value_id_t buffer_value_id, loom_value_facts_t buffer_facts,
     loom_value_facts_t byte_offset_facts, loom_type_t result_type,
     loom_value_facts_t* out);
+
+// Constructs a typed view whose placement within its source buffer is opaque.
+// Offsets are relative to the view's own root identity. Storage provenance and
+// alias scope survive, but source-buffer alignment does not constrain the new
+// origin, and no buffer SSA value directly materializes that origin.
+iree_status_t loom_view_reference_make_unplaced_view(
+    loom_fact_context_t* context, const loom_module_t* module,
+    loom_value_id_t result_value_id, loom_value_facts_t buffer_facts,
+    loom_type_t result_type, loom_value_facts_t* out);
 
 // Constructs view-reference facts for `view.subview`.
 iree_status_t loom_view_reference_make_subview(
@@ -43,8 +64,9 @@ iree_status_t loom_view_reference_make_subview(
     loom_attribute_t static_offsets, loom_value_slice_t dynamic_offsets,
     loom_type_t source_type, loom_type_t result_type, loom_value_facts_t* out);
 
-// Constructs view-reference facts for `view.refine`.
-iree_status_t loom_view_reference_make_refine(
+// Reinterprets view-reference facts with another view type while preserving
+// storage identity and the byte origin. Used by view.refine and view.bitcast.
+iree_status_t loom_view_reference_make_reinterpret(
     loom_fact_context_t* context, const loom_module_t* module,
     loom_value_id_t source_value_id, loom_value_facts_t source_facts,
     loom_type_t source_type, loom_type_t result_type, loom_value_facts_t* out);

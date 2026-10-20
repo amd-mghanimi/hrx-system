@@ -1,0 +1,138 @@
+// RUN: emit source-low target=wasm:simd128 output=low
+
+// Narrow carriers consume the bounded scalar count without splatting it.
+func.def @byte_shifts(%values: vector<16xi8>, %count: i8) -> (vector<16xi8>, vector<16xi8>, vector<16xi8>) {
+  %mask = scalar.constant 7 : i8
+  %bounded_count = scalar.andi %count, %mask : i8
+  %counts = vector.splat %bounded_count : vector<16xi8>
+  %left = vector.shli %values, %counts : vector<16xi8>
+  %signed = vector.shrsi %values, %counts : vector<16xi8>
+  %unsigned = vector.shrui %values, %counts : vector<16xi8>
+  func.return %left, %signed, %unsigned : vector<16xi8>, vector<16xi8>, vector<16xi8>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @byte_shifts(%values: reg<wasm.v128>, %count: reg<wasm.i32>) -> (reg<wasm.v128>, reg<wasm.v128>, reg<wasm.v128>) asm {
+  %21 = i32.const 255
+  %22 = i32.and %count, %21
+  %23 = i32.const 7
+  %bounded_count = i32.and %22, %23
+  %left = i8x16.shl %values, %bounded_count
+  %signed = i8x16.shr_s %values, %bounded_count
+  %unsigned = i8x16.shr_u %values, %bounded_count
+  return %left, %signed, %unsigned
+}
+
+// ====
+
+// A constant vector count materializes one I32 scalar, not a vector constant.
+func.def @nibble_extraction(%values: vector<8xi16>) -> (vector<8xi16>) {
+  %counts = vector.constant 4 : vector<8xi16>
+  %result = vector.shrui %values, %counts : vector<8xi16>
+  func.return %result : vector<8xi16>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @nibble_extraction(%values: reg<wasm.v128>) -> (reg<wasm.v128>) asm {
+  %6 = i32.const 4
+  %result = i16x8.shr_u %values, %6
+  return %result
+}
+
+// ====
+
+// Equal element types alone do not establish a shared count.
+func.def @varying_counts(%values: vector<2xi64>, %counts: vector<2xi64>) -> (vector<2xi64>) {
+  %mask = vector.constant 63 : vector<2xi64>
+  %bounded_counts = vector.andi %counts, %mask : vector<2xi64>
+  %result = vector.shrui %values, %bounded_counts : vector<2xi64>
+  func.return %result : vector<2xi64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @varying_counts(%values: reg<wasm.v128>, %counts: reg<wasm.v128>) -> (reg<wasm.v128>) asm {
+  %mask = v128.const 63, 63
+  %bounded_counts = v128.and %counts, %mask
+  %11 = v128.const 1, 1
+  %12 = i32.const 1
+  %13 = v128.const 2, 2
+  %14 = i32.const 2
+  %15 = v128.const 4, 4
+  %16 = i32.const 4
+  %17 = v128.const 8, 8
+  %18 = i32.const 8
+  %19 = v128.const 16, 16
+  %20 = i32.const 16
+  %21 = v128.const 32, 32
+  %22 = i32.const 32
+  %23 = v128.and %bounded_counts, %11
+  %24 = i64x2.eq %23, %11
+  %25 = i64x2.shr_u %values, %12
+  %26 = v128.bitselect %25, %values, %24
+  %27 = v128.and %bounded_counts, %13
+  %28 = i64x2.eq %27, %13
+  %29 = i64x2.shr_u %26, %14
+  %30 = v128.bitselect %29, %26, %28
+  %31 = v128.and %bounded_counts, %15
+  %32 = i64x2.eq %31, %15
+  %33 = i64x2.shr_u %30, %16
+  %34 = v128.bitselect %33, %30, %32
+  %35 = v128.and %bounded_counts, %17
+  %36 = i64x2.eq %35, %17
+  %37 = i64x2.shr_u %34, %18
+  %38 = v128.bitselect %37, %34, %36
+  %39 = v128.and %bounded_counts, %19
+  %40 = i64x2.eq %39, %19
+  %41 = i64x2.shr_u %38, %20
+  %42 = v128.bitselect %41, %38, %40
+  %43 = v128.and %bounded_counts, %21
+  %44 = i64x2.eq %43, %21
+  %45 = i64x2.shr_u %42, %22
+  %result = v128.bitselect %45, %42, %44
+  return %result
+}
+
+// ====
+
+// Wasm's SIMD instruction takes I32 even when the source lanes are I64.
+func.def @wide_count(%values: vector<2xi64>, %count: i64) -> (vector<2xi64>) {
+  %mask = scalar.constant 63 : i64
+  %bounded_count = scalar.andi %count, %mask : i64
+  %counts = vector.splat %bounded_count : vector<2xi64>
+  %result = vector.shrsi %values, %counts : vector<2xi64>
+  func.return %result : vector<2xi64>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @wide_count(%values: reg<wasm.v128>, %count: reg<wasm.i64>) -> (reg<wasm.v128>) asm {
+  %mask = i64.const 63
+  %bounded_count = i64.and %count, %mask
+  %12 = i32.wrap_i64 %bounded_count
+  %result = i64x2.shr_s %values, %12
+  return %result
+}
+
+// ====
+
+// Selection must use the old scalar read, not the overwritten count.
+func.def @saved_count(%values: vector<4xi32>, %source_storage: buffer, %replacement: i32) -> (vector<4xi32>) {
+  %base = index.constant 0 : offset
+  %source = buffer.view %source_storage[%base] : buffer -> view<1xi32>
+  %count = view.load %source[0] : view<1xi32> -> i32
+  %mask = scalar.constant 31 : i32
+  %bounded_count = scalar.andi %count, %mask : i32
+  %counts = vector.splat %bounded_count : vector<4xi32>
+  view.store %replacement, %source[0] : i32, view<1xi32>
+  %result = vector.shli %values, %counts : vector<4xi32>
+  func.return %result : vector<4xi32>
+}
+
+// ----
+low.func.def target<wasm.core.simd128> abi(wasm_function) @saved_count(%values: reg<wasm.v128>, %source_storage: reg<wasm.i32>, %replacement: reg<wasm.i32>) -> (reg<wasm.v128>) asm {
+  %count = i32.load %source_storage
+  %mask = i32.const 31
+  %bounded_count = i32.and %count, %mask
+  i32.store %source_storage, %replacement
+  %result = i32x4.shl %values, %bounded_count
+  return %result
+}

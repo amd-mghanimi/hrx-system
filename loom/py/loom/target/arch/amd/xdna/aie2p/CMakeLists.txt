@@ -66,6 +66,7 @@ iree_py_library(
     descriptors
   SRCS
     "array_descriptors.py"
+    "configuration_descriptors.py"
     "core_address_descriptors.py"
     "core_comparison_descriptors.py"
     "core_descriptor_constraints.py"
@@ -185,10 +186,12 @@ iree_py_test(
   SRCS
     "core_descriptors_test.py"
     "core_memory_descriptors_test.py"
+    "core_schedule_descriptors_test.py"
     "../../../../../tools/pytest_style_runner.py"
   ARGS
     "loom.target.arch.amd.xdna.aie2p.core_descriptors_test"
     "loom.target.arch.amd.xdna.aie2p.core_memory_descriptors_test"
+    "loom.target.arch.amd.xdna.aie2p.core_schedule_descriptors_test"
   DEPS
     loom::py::loom::target::arch::amd::xdna::aie2p::descriptors
     loom::py::loom::target::arch::amd::xdna::aie2p::machine_data

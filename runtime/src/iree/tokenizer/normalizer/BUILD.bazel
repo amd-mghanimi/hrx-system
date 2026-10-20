@@ -290,6 +290,7 @@ iree_runtime_cc_library(
     hdrs = ["sequence.h"],
     deps = [
         "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:unicode",
         "//runtime/src/iree/tokenizer:normalizer",
     ],
 )
@@ -308,6 +309,32 @@ iree_runtime_cc_test(
         "//runtime/src/iree/base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_library(
+    name = "span",
+    srcs = ["span.c"],
+    hdrs = ["span.h"],
+    deps = [
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/tokenizer:normalizer",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "span_test",
+    srcs = ["span_test.cc"],
+    deps = [
+        ":normalizer_test_util",
+        ":prepend",
+        ":replace",
+        ":sequence",
+        ":span",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//runtime/src/iree/tokenizer:normalizer",
     ],
 )
 

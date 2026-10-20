@@ -4,15 +4,14 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// iree-run-loom binary with build-selected execution providers.
+// iree-run-loom binary with build-selected compiler integrations.
 
 #include <stddef.h>
-#include <stdio.h>
 
-#include "loom/tooling/execution/execution_provider.h"
 #include "loom/tooling/input/configured.h"
+#include "loom/tooling/input/loomc_configured.h"
 #include "loom/tools/iree-run-loom/main.h"
-#include "loom/transforms/cleanup/configured.h"
+#include "loomc/target/configured.h"
 
 #ifndef IREE_RUN_LOOM_HAVE_AMDGPU
 #define IREE_RUN_LOOM_HAVE_AMDGPU 0
@@ -21,65 +20,37 @@
 #define IREE_RUN_LOOM_HAVE_SPIRV 0
 #endif  // IREE_RUN_LOOM_HAVE_SPIRV
 
-#define IREE_RUN_LOOM_HAVE_ANY_PROVIDER \
-  (IREE_RUN_LOOM_HAVE_AMDGPU || IREE_RUN_LOOM_HAVE_SPIRV)
-
 #if IREE_RUN_LOOM_HAVE_AMDGPU
-#include "loom/tooling/target/amdgpu/execution_provider.h"
+#include "loomc/target/amdgpu/iree_hal.h"
 #endif  // IREE_RUN_LOOM_HAVE_AMDGPU
 #if IREE_RUN_LOOM_HAVE_SPIRV
-#include "loom/tooling/target/spirv/execution_provider.h"
+#include "loomc/target/spirv/iree_hal.h"
 #endif  // IREE_RUN_LOOM_HAVE_SPIRV
 
-#if IREE_RUN_LOOM_HAVE_ANY_PROVIDER
-static const loom_run_execution_provider_t* const kIreeRunLoomProviders[] = {
-#if IREE_RUN_LOOM_HAVE_AMDGPU
-    &loom_amdgpu_execution_provider,
-#endif  // IREE_RUN_LOOM_HAVE_AMDGPU
-#if IREE_RUN_LOOM_HAVE_SPIRV
-    &loom_spirv_vulkan_execution_provider,
-#endif  // IREE_RUN_LOOM_HAVE_SPIRV
-};
-#endif  // IREE_RUN_LOOM_HAVE_ANY_PROVIDER
-
-static const loom_run_execution_provider_set_t kIreeRunLoomProviderSet = {
-#if IREE_RUN_LOOM_HAVE_ANY_PROVIDER
-    .providers = kIreeRunLoomProviders,
-    .provider_count = IREE_ARRAYSIZE(kIreeRunLoomProviders),
-#else
-    .providers = NULL,
-    .provider_count = 0,
-#endif  // IREE_RUN_LOOM_HAVE_ANY_PROVIDER
-};
+#if IREE_RUN_LOOM_HAVE_AMDGPU || IREE_RUN_LOOM_HAVE_SPIRV
+static const loomc_iree_hal_target_provider_t* kIreeRunLoomTargetProviders[2];
+#endif  // IREE_RUN_LOOM_HAVE_AMDGPU || IREE_RUN_LOOM_HAVE_SPIRV
 
 int main(int argc, char** argv) {
-  loom_run_execution_environment_t environment;
-  iree_status_t status = loom_run_execution_environment_initialize(
-      &kIreeRunLoomProviderSet, &environment);
-  if (!iree_status_is_ok(status)) {
-    iree_status_fprint(stderr, status);
-    iree_status_free(status);
-    return 1;
-  }
+  iree_host_size_t target_provider_count = 0;
+#if IREE_RUN_LOOM_HAVE_AMDGPU
+  kIreeRunLoomTargetProviders[target_provider_count++] =
+      loomc_amdgpu_iree_hal_target_provider();
+#endif  // IREE_RUN_LOOM_HAVE_AMDGPU
+#if IREE_RUN_LOOM_HAVE_SPIRV
+  kIreeRunLoomTargetProviders[target_provider_count++] =
+      loomc_spirv_iree_hal_target_provider();
+#endif  // IREE_RUN_LOOM_HAVE_SPIRV
 
   const iree_run_loom_configuration_t configuration = {
       .input_providers = loom_configured_input_providers(),
       .tool_name = "iree-run-loom",
-      .register_context =
-          loom_run_execution_environment_register_context_callback(
-              &environment),
-      .initialize_low_descriptor_registry =
-          loom_run_execution_environment_low_descriptor_registry_callback(
-              &environment),
-      .target_environment =
-          loom_run_execution_environment_target_environment(&environment),
-      .cleanup_pattern_provider_set =
-          loom_cleanup_configured_pattern_provider_set(),
-      .execution_backend_registry =
-          *loom_run_execution_environment_execution_backend_registry(
-              &environment),
+      .create_target_environment = loomc_target_environment_create_configured,
+      .import = loom_configured_input_loomc_importer(),
+#if IREE_RUN_LOOM_HAVE_AMDGPU || IREE_RUN_LOOM_HAVE_SPIRV
+      .hal_target_providers = kIreeRunLoomTargetProviders,
+#endif  // IREE_RUN_LOOM_HAVE_AMDGPU || IREE_RUN_LOOM_HAVE_SPIRV
+      .hal_target_provider_count = target_provider_count,
   };
-  int exit_code = iree_run_loom_main(argc, argv, &configuration);
-  loom_run_execution_environment_deinitialize(&environment);
-  return exit_code;
+  return iree_run_loom_main(argc, argv, &configuration);
 }

@@ -43,12 +43,14 @@ PFN_vkVoidFunction VKAPI_CALL ResolveDeviceSymbol(VkDevice device,
 
 TEST(LibVulkanTest, LoadsCoreDeviceWithoutOptionalExtensions) {
   DeviceResolver resolver;
-  iree_hal_vulkan_instance_syms_t instance_syms = {};
-  instance_syms.vkGetDeviceProcAddr = ResolveDeviceSymbol;
+  iree_hal_vulkan_instance_syms_t instance_syms = {
+      .vkGetDeviceProcAddr = ResolveDeviceSymbol,
+  };
   iree_hal_vulkan_device_syms_t device_syms = {};
   IREE_ASSERT_OK(iree_hal_vulkan_libvulkan_load_device_syms(
       &instance_syms, reinterpret_cast<VkDevice>(&resolver), &device_syms));
   EXPECT_NE(device_syms.vkGetBufferDeviceAddress, nullptr);
+  EXPECT_NE(device_syms.vkGetDeviceBufferMemoryRequirements, nullptr);
   EXPECT_NE(device_syms.vkQueueSubmit2, nullptr);
   EXPECT_EQ(device_syms.vkGetMemoryHostPointerPropertiesEXT, nullptr);
   EXPECT_EQ(device_syms.vkCmdPushDescriptorSetKHR, nullptr);
@@ -57,8 +59,9 @@ TEST(LibVulkanTest, LoadsCoreDeviceWithoutOptionalExtensions) {
 TEST(LibVulkanTest, LoadsEnabledHostMemoryExtension) {
   DeviceResolver resolver;
   resolver.extension_symbol = "vkGetMemoryHostPointerPropertiesEXT";
-  iree_hal_vulkan_instance_syms_t instance_syms = {};
-  instance_syms.vkGetDeviceProcAddr = ResolveDeviceSymbol;
+  iree_hal_vulkan_instance_syms_t instance_syms = {
+      .vkGetDeviceProcAddr = ResolveDeviceSymbol,
+  };
   iree_hal_vulkan_device_syms_t device_syms = {};
   IREE_ASSERT_OK(iree_hal_vulkan_libvulkan_load_device_syms(
       &instance_syms, reinterpret_cast<VkDevice>(&resolver), &device_syms));
@@ -71,8 +74,9 @@ TEST(LibVulkanTest, RejectsMissingRequiredCoreSymbol) {
   DeviceResolver resolver;
   resolver.extension_symbol = "vkGetMemoryHostPointerPropertiesEXT";
   resolver.missing_symbol = "vkGetBufferDeviceAddress";
-  iree_hal_vulkan_instance_syms_t instance_syms = {};
-  instance_syms.vkGetDeviceProcAddr = ResolveDeviceSymbol;
+  iree_hal_vulkan_instance_syms_t instance_syms = {
+      .vkGetDeviceProcAddr = ResolveDeviceSymbol,
+  };
   iree_hal_vulkan_device_syms_t device_syms = {};
   IREE_EXPECT_STATUS_IS(
       IREE_STATUS_NOT_FOUND,

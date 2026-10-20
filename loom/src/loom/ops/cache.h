@@ -22,15 +22,16 @@
 extern "C" {
 #endif
 
-// Cache hierarchy scope at which an advisory policy applies.
+// Logical execution scope at which an advisory cache policy applies. Targets
+// map these portable domains to their physical cache hierarchy.
 typedef enum loom_cache_scope_e {
-  // Cache/coherency scope is the compute unit.
-  LOOM_CACHE_SCOPE_CU = 0,
-  // Cache/coherency scope is the shader engine.
-  LOOM_CACHE_SCOPE_SE = 1,
-  // Cache/coherency scope is the current device.
+  // Cache-policy scope is the current workgroup.
+  LOOM_CACHE_SCOPE_WORKGROUP = 0,
+  // Cache-policy scope is the current workgroup cluster.
+  LOOM_CACHE_SCOPE_CLUSTER = 1,
+  // Cache-policy scope is the current device.
   LOOM_CACHE_SCOPE_DEVICE = 2,
-  // Cache/coherency scope is the full system.
+  // Cache-policy scope is the full system.
   LOOM_CACHE_SCOPE_SYSTEM = 3,
   LOOM_CACHE_SCOPE_COUNT_,
 } loom_cache_scope_t;

@@ -118,6 +118,70 @@ class BdaDispatchValidationTest : public CtsTestBase<> {
   iree_hal_executable_t* requirement_executable_ = nullptr;
 };
 
+TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsGrantsFromAnotherGroup) {
+  DeviceCreateContext context;
+  IREE_ASSERT_OK(context.Initialize(iree_allocator_system()));
+  Ref<iree_hal_device_t> other_device;
+  IREE_ASSERT_OK(iree_hal_driver_create_default_device(
+      driver_, context.params(), iree_allocator_system(), other_device.out()));
+  Ref<iree_hal_device_group_t> other_group;
+  IREE_ASSERT_OK(iree_hal_device_group_create_from_device(
+      other_device, context.frontier_tracker(), iree_allocator_system(),
+      other_group.out()));
+  iree_hal_pool_family_access_t access = {
+      .family = iree_hal_device_queue_family(
+          other_device, iree_hal_queue_family(dispatch_queue_)->ordinal),
+      .usage = IREE_HAL_BUFFER_USAGE_STORAGE |
+               IREE_HAL_BUFFER_USAGE_DISPATCH_INDIRECT_PARAMETERS,
+  };
+  const iree_hal_pool_scope_t scope = {1, &access, {}};
+  iree_hal_slab_pool_options_t options;
+  iree_hal_slab_pool_options_initialize(&options);
+  Ref<iree_hal_pool_t> source;
+  IREE_ASSERT_OK(iree_hal_slab_pool_create(
+      other_group, scope, &options, iree_allocator_system(), source.out()));
+  iree_hal_pool_capabilities_t capabilities;
+  iree_hal_pool_query_capabilities(source, &capabilities);
+  const iree_device_size_t min_alignment =
+      iree_min((iree_device_size_t)256, capabilities.max_allocation_alignment);
+  Ref<iree_hal_buffer_t> foreign_buffer;
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      source, iree_hal_make_pool_reservation_request(32, min_alignment),
+      iree_infinite_timeout(), foreign_buffer.out()));
+  Ref<iree_hal_pool_t> local_source;
+  IREE_ASSERT_OK(
+      CreateDevicePool(IREE_HAL_BUFFER_USAGE_STORAGE |
+                           IREE_HAL_BUFFER_USAGE_DISPATCH_INDIRECT_PARAMETERS,
+                       local_source.out()));
+  Ref<iree_hal_buffer_t> local_buffer;
+  IREE_ASSERT_OK(iree_hal_pool_allocate_buffer(
+      local_source, iree_hal_make_pool_reservation_request(32, 1),
+      iree_infinite_timeout(), local_buffer.out()));
+  for (auto flags : {IREE_HAL_DISPATCH_FLAG_NONE,
+                     IREE_HAL_DISPATCH_FLAG_STATIC_INDIRECT_PARAMETERS,
+                     IREE_HAL_DISPATCH_FLAG_DYNAMIC_INDIRECT_PARAMETERS}) {
+    SCOPED_TRACE(flags);
+    const bool indirect = iree_hal_dispatch_uses_indirect_parameters(flags);
+    auto* binding_buffer = indirect ? local_buffer.get() : foreign_buffer.get();
+    const iree_hal_buffer_ref_t refs[] = {
+        iree_hal_make_buffer_ref(binding_buffer, 0, 16),
+        iree_hal_make_buffer_ref(binding_buffer, 16, 16),
+    };
+    auto config = iree_hal_make_static_dispatch_config(1, 1, 1);
+    if (indirect) {
+      config.workgroup_count_ref =
+          iree_hal_make_buffer_ref(foreign_buffer, 0, sizeof(uint32_t[3]));
+    }
+    IREE_EXPECT_STATUS_IS(
+        IREE_STATUS_PERMISSION_DENIED,
+        iree_hal_queue_dispatch(
+            dispatch_queue_, iree_hal_semaphore_list_empty(),
+            iree_hal_semaphore_list_empty(), executable_,
+            iree_hal_executable_function_from_index(0), config, constants(),
+            {IREE_ARRAYSIZE(refs), refs}, /*barriers=*/NULL, flags));
+  }
+}
+
 TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsBindingCountMismatch) {
   iree_hal_buffer_t* input_buffer = nullptr;
   iree_hal_buffer_t* output_buffer = nullptr;
@@ -128,8 +192,8 @@ TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsBindingCountMismatch) {
                                iree_hal_buffer_byte_length(input_buffer)),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
   EXPECT_THAT(Status(iree_hal_queue_dispatch(
@@ -137,7 +201,7 @@ TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsBindingCountMismatch) {
                   iree_hal_semaphore_list_empty(), executable_,
                   iree_hal_executable_function_from_index(0),
                   iree_hal_make_static_dispatch_config(1, 1, 1), constants(),
-                  bindings, IREE_HAL_DISPATCH_FLAG_NONE)),
+                  bindings, /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE)),
               StatusIs(StatusCode::kInvalidArgument));
 
   iree_hal_buffer_release(output_buffer);
@@ -161,8 +225,8 @@ TEST_P(BdaDispatchValidationTest,
                                iree_hal_buffer_byte_length(input_buffer)),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
   EXPECT_THAT(Status(iree_hal_command_buffer_dispatch(
@@ -188,8 +252,8 @@ TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsEmptyBindingRange) {
       iree_hal_make_buffer_ref(output_buffer, /*offset=*/0, /*length=*/0),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
   EXPECT_THAT(Status(iree_hal_queue_dispatch(
@@ -197,7 +261,7 @@ TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsEmptyBindingRange) {
                   iree_hal_semaphore_list_empty(), executable_,
                   iree_hal_executable_function_from_index(0),
                   iree_hal_make_static_dispatch_config(1, 1, 1), constants(),
-                  bindings, IREE_HAL_DISPATCH_FLAG_NONE)),
+                  bindings, /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_NONE)),
               StatusIs(StatusCode::kInvalidArgument));
 
   iree_hal_buffer_release(output_buffer);
@@ -222,8 +286,8 @@ TEST_P(BdaDispatchValidationTest,
       iree_hal_make_buffer_ref(output_buffer, /*offset=*/0, /*length=*/0),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
   IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
       command_buffer, executable_, iree_hal_executable_function_from_index(0),
@@ -259,18 +323,18 @@ TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsMinimumBindingLength) {
                                iree_hal_buffer_byte_length(output_buffer)),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
-  EXPECT_THAT(
-      Status(iree_hal_queue_dispatch(
-          dispatch_queue_, iree_hal_semaphore_list_empty(),
-          iree_hal_semaphore_list_empty(), requirement_executable_,
-          iree_hal_executable_function_from_index(0),
-          iree_hal_make_static_dispatch_config(1, 1, 1),
-          iree_const_byte_span_empty(), bindings, IREE_HAL_DISPATCH_FLAG_NONE)),
-      StatusIs(StatusCode::kOutOfRange));
+  EXPECT_THAT(Status(iree_hal_queue_dispatch(
+                  dispatch_queue_, iree_hal_semaphore_list_empty(),
+                  iree_hal_semaphore_list_empty(), requirement_executable_,
+                  iree_hal_executable_function_from_index(0),
+                  iree_hal_make_static_dispatch_config(1, 1, 1),
+                  iree_const_byte_span_empty(), bindings, /*barriers=*/NULL,
+                  IREE_HAL_DISPATCH_FLAG_NONE)),
+              StatusIs(StatusCode::kOutOfRange));
 
   iree_hal_buffer_release(output_buffer);
   iree_hal_buffer_release(input_buffer);
@@ -297,8 +361,8 @@ TEST_P(BdaDispatchValidationTest,
                                iree_hal_buffer_byte_length(output_buffer)),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
   IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
       command_buffer, requirement_executable_,
@@ -337,18 +401,18 @@ TEST_P(BdaDispatchValidationTest, QueueDispatchRejectsMinimumBindingAlignment) {
           iree_hal_buffer_byte_length(output_buffer) - output_offset),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
 
-  EXPECT_THAT(
-      Status(iree_hal_queue_dispatch(
-          dispatch_queue_, iree_hal_semaphore_list_empty(),
-          iree_hal_semaphore_list_empty(), requirement_executable_,
-          iree_hal_executable_function_from_index(0),
-          iree_hal_make_static_dispatch_config(1, 1, 1),
-          iree_const_byte_span_empty(), bindings, IREE_HAL_DISPATCH_FLAG_NONE)),
-      StatusIs(StatusCode::kInvalidArgument));
+  EXPECT_THAT(Status(iree_hal_queue_dispatch(
+                  dispatch_queue_, iree_hal_semaphore_list_empty(),
+                  iree_hal_semaphore_list_empty(), requirement_executable_,
+                  iree_hal_executable_function_from_index(0),
+                  iree_hal_make_static_dispatch_config(1, 1, 1),
+                  iree_const_byte_span_empty(), bindings, /*barriers=*/NULL,
+                  IREE_HAL_DISPATCH_FLAG_NONE)),
+              StatusIs(StatusCode::kInvalidArgument));
 
   iree_hal_buffer_release(output_buffer);
   iree_hal_buffer_release(input_buffer);
@@ -378,8 +442,8 @@ TEST_P(BdaDispatchValidationTest,
           iree_hal_buffer_byte_length(output_buffer) - output_offset),
   };
   const iree_hal_buffer_ref_list_t bindings = {
-      /*.count=*/IREE_ARRAYSIZE(binding_refs),
-      /*.values=*/binding_refs,
+      .count = IREE_ARRAYSIZE(binding_refs),
+      .values = binding_refs,
   };
   IREE_ASSERT_OK(iree_hal_command_buffer_dispatch(
       command_buffer, requirement_executable_,

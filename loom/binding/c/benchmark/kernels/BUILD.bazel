@@ -13,6 +13,7 @@ package(
 
 exports_files([
     "attention/prefill_f16_wmma_amdgpu.loom",
+    "ffn/gate_up_quadratic_bf16_xdna.loom",
     "synthetic/paired_matrix_helpers.loom",
     "synthetic/paired_scoped_matrix_helpers.loom",
     "synthetic/packed_table_lookup_u4.loom",

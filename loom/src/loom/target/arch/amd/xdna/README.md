@@ -3,15 +3,17 @@
 Loom compiles tile programs and their array transport into a native `.xdna`
 executable. The product contains AIE2P instructions, initialized data, array
 configuration, explicit storage and binding requirements, and native invocation
-ranges. It executes through [libamdf](../../../../../../../libamdf/docs/xdna/execution.md);
-compilation does not invoke the AIE SDK, LLVM, Python, or an external linker.
+ranges. The [XDNA HAL](../../../../../../../runtime/src/iree/hal/drivers/amd/xdna/README.md)
+loads and executes it through
+[libamdf](../../../../../../../libamdf/docs/xdna.md); compilation does not invoke
+the AIE SDK, LLVM, Python, or an external linker.
 
 This directory owns device facts and AIE2P target mechanics. The shared Loom
 compiler owns IR analysis, canonicalization, scheduling, register allocation,
 and pass lifecycles. The target supplies descriptors, legal realizations,
-physical constraints, and native encoding. The experimental pipeline dialect
-provides an authoring path for streamed workers; its representation is
-provisional and subject to redesign.
+physical constraints, and native encoding. Pipeline strands author complete
+resident worker programs. Typed channels carry record ownership, and explicit
+worker coordinates and memory pools select placement before native emission.
 
 ## Start here
 
@@ -20,7 +22,7 @@ provisional and subject to redesign.
 | Write a streamed program or author AIE2P Low | [Source lowering examples](aie2p/test/source_low/) and [Low descriptor fixtures](aie2p/test/descriptors/) |
 | Embed the compiler | [Public XDNA C binding](../../../../../../binding/c/include/loomc/target/amd/xdna.h) |
 | Understand the executable contract | [Native image format and lifecycle](../../../../../../../runtime/src/iree/hal/drivers/amd/xdna/image/README.md) |
-| Load and execute a compiled image | [Experimental native runner](../../../../../../../experimental/xdna/README.md) |
+| Load and execute a compiled image | [XDNA HAL and normal Loom test workflow](../../../../../../../runtime/src/iree/hal/drivers/amd/xdna/README.md) |
 | Compare compiler work across targets | [Shared benchmark workloads](../../../../../../binding/c/benchmark/kernels/README.md) |
 
 ## Target identity
@@ -35,25 +37,29 @@ firmware protocol identity, partition constraints, and native memory alignment.
 | --- | --- | --- |
 | Strix NPU4 | `amd.xdna.strix.17f0_10` | `17f0:10` |
 | Strix Halo NPU5 | `amd.xdna.strix_halo.17f0_11` | `17f0:11` |
+| Krackan NPU6 | `amd.xdna.krackan.17f0_20` | `17f0:20` |
 
-Both profiles use the NPU2 array family and AIE2P cores. This does not make their
-executable images interchangeable: admission compares the exact profile,
-revision, firmware ABI, and context geometry. Tile memory, DMA engines, locks,
-stream switches, register fields, and instruction limits come from owned
-profile and family tables rather than assumptions about one attached device.
+All profiles use the NPU2 array family and AIE2P cores. Strix and Krackan share
+an executable profile identity; Strix Halo uses a separate identity. Admission
+compares the executable profile, revision, firmware ABI, and context geometry.
+Tile memory, DMA engines, locks, stream switches, register fields, and instruction
+limits come from owned profile and family tables rather than assumptions about
+one attached device.
 
 ## Compilation path
 
 ```text
-High functions + experimental pipeline composition
+Pipeline strands + typed channels + explicit storage
                  |
-      shared analyses and target legalization
+      shared construction and worker preparation
                  |
-     AIE2P core Low + AIE2P array Low
+      target channel/storage realization
+                 |
+    complete AIE2P core Low + configuration Low
           |                    |
-   schedule / allocate    logical topology
+   schedule / allocate    selected physical resources
           |                    |
-   packetize / encode     physical resource plan
+   packetize / encode          |
           |                    |
    detached native leaf ------+
    + retained requirements    |
@@ -66,12 +72,52 @@ High functions + experimental pipeline composition
                          .xdna ELF
 ```
 
-The [pipeline lowering](aie2p/pipeline/lower.h) consumes composition relations
-and materializes workers, channels, and entry bindings. A logical group names
-participants; physical placement and transport are decisions of the array
-plan. Consumers use the indexed relations retained by their producers.
+The [pipeline realization](aie2p/pipeline/native.h) consumes shared construction,
+worker and channel plans. Worker preparation preserves caller storage facts
+through inlining and ordinary SCF transforms. Channel realization supplies local
+views, ownership waits and publications, and strided DMA operations before memory
+legalization. Invocation bindings retain their source argument ordinals and
+required access spans. Consumers use indexed relations retained by their
+producers.
 
-The [array plan](aie2p/array/plan.h) owns worker placement, endpoint storage,
+The initial native path requires specialized singleton worker domains, explicit
+tile storage, and bounded single-producer/single-consumer channels. Complete
+worker images must fit the selected tile instruction budget. Unsupported
+placement, transfer or code-size requirements are diagnosed before emission.
+Invocation completion joins worker completion before releasing the owned
+resources. Instruction-image replacement requires a further target realization;
+channel storage and ownership are independent of instruction residency.
+
+An independently establishing native pipeline owns route selection on every
+stream switch traversed by its complete composed plan. Admission retains the
+desired master, slave, and packet-filter banks; initialization writes those
+complete banks, including disabled entries, before starting workers. This
+replaces routes left by a prior program without clearing unrelated tiles or
+reserved register ranges. The caller still drains prior work before replacement;
+configuration is not cancellation or a drain mechanism. Externally prefixed
+routes are not an undeclared input to this native materialization. Authored
+physical configurations and logical-array programs retain their explicit
+composition boundaries.
+
+Hardware FIFO credits describe a completed prefix, not an arbitrary count of
+finished records. If a strand reserves A then B and publishes B first, that
+publication exposes no credit; publishing A exposes both. Read retirement uses
+the same rule so returning B cannot let a producer overwrite a still-owned A.
+Shared worker analysis retains these per-action credit counts through branches
+and loop-carried accesses. An already acquired read can cross a loop argument
+and use `channel.wait` to borrow its payload again without another admission.
+
+Reclamation delay cannot introduce a new wait cycle. A schedule that releases B
+and needs another channel admission before releasing A requires independently
+reusable storage, rather than this aggregate-prefix ring. Likewise, control
+joins requiring runtime completion state need a record-aware realization.
+The native selector diagnoses those requirements before emitting the program;
+they are not invalid generic channel semantics. The
+[completion fixtures](aie2p/test/native_completion.loom-test) exercise reordered
+publication, reclamation, loop rotation and branch-local completion.
+
+For directly authored physical array programs, the
+[array plan](aie2p/array/plan.h) owns worker placement, endpoint storage,
 ring slots, locks, DMA channels and buffer descriptors, stream routes, and
 completion resources. It selects external DMA, adjacent shared-memory windows,
 or routed DMA according to the communication pattern and physical constraints.
@@ -118,7 +164,7 @@ recompile a leaf to discover its requirements.
 | [aie2p/legalization.c](aie2p/legalization.c), [math_policy.h](aie2p/math_policy.h), [low_verify.h](aie2p/low_verify.h) | Supported High realizations, floating-point policy, and authored Low contracts. |
 | [aie2p/contracts/](aie2p/contracts/), [lower/](aie2p/lower/) | Declarative legalization contracts and their C lowering mechanics. |
 | [aie2p/descriptors/](aie2p/descriptors/), [machine/](aie2p/machine/), [encoding/](aie2p/encoding/) | Instruction forms, physical registers, operand constraints, native bit encodings, and packet formats. |
-| [aie2p/pipeline/](aie2p/pipeline/) | Experimental composition analysis and lowering to array/core Low. |
+| [aie2p/pipeline/](aie2p/pipeline/) | Realization of complete strands, explicit memory and owned channels into core/configuration Low. |
 | [aie2p/array/](aie2p/array/) | Topology, resource planning, routes, resident worker protocols, and native commands. |
 | [aie2p/emit/](aie2p/emit/) | Leaf compilation, packet planning, detached objects, tile linking, reports, and final `.xdna` production. |
 | [aie2p/test/](aie2p/test/) | Authored compiler regressions and descriptor/encoding coverage. |
@@ -138,11 +184,13 @@ requirement describes storage; each exported entry selects the allocations it
 uses. Loading applies static address fixups, and binding applies external
 buffer addresses to explicitly declared fields.
 
-Invocation zero establishes resident state. The current finite protocol then
-uses a continuation range for repeated work (`0 -> 1 -> 1`) while the context,
-backing, and residency remain intact. The format also represents a self-contained
-range (`0 -> 0`). Program shards and role changes within an invocation are
-compiled device behavior, not a mandatory host dispatch per tile function.
+Invocation zero establishes the program's state. The image format can represent
+a continuation (`0 -> 1 -> 1`) for a caller with an established native
+state-retention contract. The finite XDNA HAL path uses the complete establishing
+range for every independent submission (`0 -> 0`), because retaining a
+time-sliced context does not preserve application tile state. Program shards
+and role changes within an invocation are compiled device behavior, not a
+mandatory host dispatch per tile function.
 
 The format has no fixed ARRAY/CONTROL split, XRT argument-patching contract, or
 precompiled PDI dependency. libamdf owns device/context establishment and family
@@ -168,8 +216,12 @@ unsupported cases instead of silently changing floating-point behavior.
 
 Compiler transformations and diagnostics are exercised through `.loom-test`
 fixtures. C tests cover API and representation contracts. The
-[native consumer CTS](../../../../../../../experimental/xdna/cts) verifies real loading,
-binding, repeated execution, numerical outputs, and resource lifetimes through
-libamdf on matching hardware. The [BF16 FFN benchmark](../../../../../../binding/c/benchmark/kernels/ffn/gate_up_quadratic_bf16_xdna.loom)
+[native HAL CTS](../../../../../../../runtime/src/iree/hal/drivers/amd/xdna/cts/)
+verifies loading, binding, repeated execution, numerical outputs, and resource
+lifetimes through libamdf on matching hardware. The
+[normal Loom HAL scenario](../../../../tooling/target/amd/xdna/test/hal_execution.loom)
+adds device-driven target selection, compilation, staging, dispatch, readback,
+and comparison with an independent VM oracle. The
+[BF16 FFN benchmark](../../../../../../binding/c/benchmark/kernels/ffn/gate_up_quadratic_bf16_xdna.loom)
 provides a small High-to-image workload comparable to the AMDGPU implementation;
 its benchmark measures compilation, not device throughput.

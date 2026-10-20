@@ -193,6 +193,43 @@ TEST_F(BuilderStorageTest, SeparateResultTypesFollowDeclaredFields) {
       loom_type_equal(loom_module_value_type(module_, second), second_type));
 }
 
+TEST_F(BuilderStorageTest, ProjectedBlockArgumentGroupsShareOneEntrySignature) {
+  const loom_type_t actual_types[] = {
+      loom_type_scalar(LOOM_SCALAR_TYPE_F32),
+      loom_type_scalar(LOOM_SCALAR_TYPE_I32),
+  };
+  const loom_type_t expected_types[] = {
+      loom_type_scalar(LOOM_SCALAR_TYPE_INDEX),
+  };
+  loom_op_t* op = nullptr;
+  IREE_ASSERT_OK(loom_test_block_arg_groups_build(
+      &builder_, actual_types, IREE_ARRAYSIZE(actual_types), expected_types,
+      IREE_ARRAYSIZE(expected_types), LOOM_LOCATION_UNKNOWN, &op));
+
+  EXPECT_EQ(loom_test_block_arg_groups_actual_count(op), 2);
+  const loom_block_t* entry =
+      loom_region_const_entry_block(loom_test_block_arg_groups_body(op));
+  ASSERT_EQ(entry->arg_count, 3u);
+  EXPECT_TRUE(loom_type_equal(
+      loom_module_value_type(module_, loom_block_arg_id(entry, 0)),
+      actual_types[0]));
+  EXPECT_TRUE(loom_type_equal(
+      loom_module_value_type(module_, loom_block_arg_id(entry, 1)),
+      actual_types[1]));
+  EXPECT_TRUE(loom_type_equal(
+      loom_module_value_type(module_, loom_block_arg_id(entry, 2)),
+      expected_types[0]));
+
+  const uint32_t op_count = loom_module_block(module_)->op_count;
+  loom_op_t* overflow = nullptr;
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_RESOURCE_EXHAUSTED,
+                        loom_test_block_arg_groups_build(
+                            &builder_, actual_types, UINT16_MAX, expected_types,
+                            1, LOOM_LOCATION_UNKNOWN, &overflow));
+  EXPECT_EQ(overflow, nullptr);
+  EXPECT_EQ(loom_module_block(module_)->op_count, op_count);
+}
+
 TEST_F(BuilderStorageTest, IntegerArraysOutliveCallerStorage) {
   for (iree_host_size_t count : {0u, 2u}) {
     int64_t keys[] = {-7, 42};
@@ -258,7 +295,7 @@ TEST_F(BuilderStorageTest, BytesOutliveCallerStorage) {
     uint8_t bytes[] = {0x00, 0x7F, 0xFF};
     loom_op_t* op = nullptr;
     IREE_ASSERT_OK(loom_global_rodata_def_build(
-        &builder_, 0, {0, symbol}, 0,
+        &builder_, 0, {0, symbol}, 0, loom_symbol_ref_array_empty(),
         iree_make_const_byte_span(count ? bytes : nullptr, count),
         LOOM_LOCATION_UNKNOWN, &op));
 
@@ -307,6 +344,45 @@ TEST_F(BuilderStorageTest, EnumArraysPreserveOrderAndOptionalPresence) {
       }
     }
   }
+}
+
+TEST_F(BuilderStorageTest, StringArraysPreserveCallerOrderAndStorage) {
+  loom_string_id_t required[] = {LOOM_STRING_ID_INVALID, LOOM_STRING_ID_INVALID,
+                                 LOOM_STRING_ID_INVALID};
+  loom_string_id_t optional = LOOM_STRING_ID_INVALID;
+  IREE_ASSERT_OK(loom_builder_intern_string(&builder_, IREE_SV("gfx12-generic"),
+                                            &required[0]));
+  IREE_ASSERT_OK(
+      loom_builder_intern_string(&builder_, IREE_SV("gfx1250"), &required[1]));
+  required[2] = required[0];
+  IREE_ASSERT_OK(loom_builder_intern_string(&builder_, IREE_SV("gfx11-generic"),
+                                            &optional));
+
+  loom_op_t* op = nullptr;
+  IREE_ASSERT_OK(loom_test_string_array_attrs_build(
+      &builder_, LOOM_TEST_STRING_ARRAY_ATTRS_BUILD_FLAG_HAS_OPTIONAL_VALUES,
+      loom_make_string_id_array(required, IREE_ARRAYSIZE(required)),
+      loom_make_string_id_array(&optional, 1), loom_named_attr_slice_empty(),
+      LOOM_LOCATION_UNKNOWN, &op));
+
+  memset(required, 0, sizeof(required));
+  optional = LOOM_STRING_ID_INVALID;
+  const loom_string_id_array_t stored =
+      loom_test_string_array_attrs_required_values(op);
+  ASSERT_EQ(stored.count, 3u);
+  EXPECT_TRUE(iree_string_view_equal(
+      loom_string_table_get(&module_->strings, stored.values[0]),
+      IREE_SV("gfx12-generic")));
+  EXPECT_TRUE(iree_string_view_equal(
+      loom_string_table_get(&module_->strings, stored.values[1]),
+      IREE_SV("gfx1250")));
+  EXPECT_EQ(stored.values[0], stored.values[2]);
+  const loom_string_id_array_t stored_optional =
+      loom_test_string_array_attrs_optional_values(op);
+  ASSERT_EQ(stored_optional.count, 1u);
+  EXPECT_TRUE(iree_string_view_equal(
+      loom_string_table_get(&module_->strings, stored_optional.values[0]),
+      IREE_SV("gfx11-generic")));
 }
 
 TEST_F(BuilderStorageTest, SignedEnumSetsCopyBothPolarities) {

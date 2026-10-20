@@ -72,8 +72,10 @@ IREE_FLAG(
     " --task_topology_cpu_ids=0,1,2 [+ --task_topology_cpu_ids=3,4,5]:\n"
     "   Creates one executor per set of logical CPU IDs.\n"
     " 'physical_cores':\n"
-    "   Creates one executor per NUMA node in --task_topology_nodes= and one\n"
-    "   group per physical core in each NUMA node up to the value specified\n"
+    "   Creates one executor per placement node in --task_topology_nodes= and "
+    "one\n"
+    "   group per physical core in each placement node up to the value "
+    "specified\n"
     "   by --task_topology_max_group_count=.");
 
 IREE_FLAG(
@@ -94,9 +96,10 @@ IREE_FLAG_LIST(
 
 IREE_FLAG(
     string, task_topology_nodes, "current",
-    "Comma-separated list of NUMA nodes that topologies will be defined for.\n"
+    "Comma-separated worker placement nodes (CPU clusters/packages on Linux,\n"
+    "NUMA nodes on Windows) that topologies will be defined for.\n"
     "Each node specified will be configured based on the other topology\n"
-    "flags. 'all' can be used to indicate all available NUMA nodes and\n"
+    "flags. 'all' can be used to indicate all available placement nodes and\n"
     "'current' will inherit the node of the calling thread.");
 
 IREE_FLAG(
@@ -112,7 +115,7 @@ IREE_FLAG(string, task_topology_performance_level, "any",
 IREE_FLAG(
     string, task_topology_distribution, "scatter",
     "Strategy for distributing cores across cache domains (CCXs) within the\n"
-    "selected NUMA node(s) (use --task_topology_nodes to control NUMA "
+    "selected placement node(s) (use --task_topology_nodes to select "
     "locality):\n"
     "  `compact` - Fill cache domains sequentially (better for compute).\n"
     "  `scatter` - Round-robin across domains (better for memory bandwidth).");
@@ -125,7 +128,7 @@ IREE_FLAG(
     "  `throughput` - Maximize batch throughput (scatter + any-perf).\n"
     "  `efficiency` - Minimize power consumption (compact + low-perf).");
 
-// Builds a bitmask of NUMA nodes that topologies should be created for.
+// Builds a bitmask of placement nodes that topologies should be created for.
 //
 // NOTE: because of the mask being 64-bits we have a 64-node limit.
 // We could change this mask to be variable-sized (ala cpu_set) if we wanted to
@@ -137,7 +140,7 @@ static iree_status_t iree_task_topologies_select_nodes_from_flags(
   IREE_ASSERT_ARGUMENT(out_node_mask);
   *out_node_mask = 0ull;
 
-  // Query the total number of NUMA nodes in the system. On implementations
+  // Query the total number of placement nodes in the system. On implementations
   // where this information isn't available this will return 1.
   const iree_host_size_t available_node_count =
       iree_max(1u, iree_min(64u, iree_task_topology_query_node_count()));
@@ -162,13 +165,13 @@ static iree_status_t iree_task_topologies_select_nodes_from_flags(
       uint32_t node_id = 0;
       if (!iree_string_view_atoi_uint32(node_value, &node_id)) {
         return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "invalid NUMA node ID specified: '%.*s'",
+                                "invalid placement node ID specified: '%.*s'",
                                 (int)node_value.size, node_value.data);
       } else if (node_id >= available_node_count) {
-        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                                "NUMA node ID out of valid range [0,%" PRIhsz
-                                "): %u",
-                                available_node_count, node_id);
+        return iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "placement node ID out of valid range [0,%" PRIhsz "): %u",
+            available_node_count, node_id);
       }
       node_mask |= 1ull << node_id;
     }
@@ -254,7 +257,7 @@ iree_status_t iree_task_topology_initialize_from_flags(
         FLAG_task_topology_group_count, out_topology);
     return iree_ok_status();
   } else if (strcmp(FLAG_task_topology_mode, "physical_cores") == 0) {
-    // Physical cores sourced from a specific NUMA node.
+    // Physical cores sourced from a specific placement domain.
     iree_task_topology_performance_level_t performance_level =
         IREE_TASK_TOPOLOGY_PERFORMANCE_LEVEL_ANY;
     iree_task_topology_distribution_t distribution =
@@ -442,19 +445,13 @@ iree_status_t iree_task_executors_create_from_flags(
     return iree_ok_status();
   }
 
-  // NOTE: the flags could use some ergonomics improvement or renaming to
-  // indicate how they differ. Trying to specify a generic group count _and_
-  // multiple NUMA nodes won't produce expected results (IMO) so we error out
-  // on that here instead of letting users think they are running with
-  // NUMA-aware scheduling. We could lighten this restriction in the future if
-  // there are use cases for arbitrarily-scheduled worker groups that have just
-  // their allocations pinned to NUMA nodes.
+  // A fixed unpinned worker count cannot express per-domain placement.
   if (FLAG_task_topology_group_count != 0 && topology_count > 1) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "multiple nodes specified with --task_topology_group_count=; you "
         "probably meant --task_topology_max_group_count= in order to get "
-        "proper NUMA-aware scheduling");
+        "per-domain worker placement");
   }
 
   // Create one executor per topology.

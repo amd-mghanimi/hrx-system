@@ -88,8 +88,10 @@ iree_status_t loom_amdgpu_materialize_hal_kernel_abi_run(
 
   loom_amdgpu_hal_kernel_abi_verify_result_t verify_result = {0};
   IREE_RETURN_IF_ERROR(loom_amdgpu_hal_kernel_abi_verify_low(
-      module, function.op, target.descriptor_set, /*max_errors=*/20,
-      pass->diagnostic_emitter, &verify_result, pass->arena));
+      module, function.op, target.descriptor_set,
+      loom_amdgpu_target_processor_properties_from_resolved_target(&target),
+      /*max_errors=*/20, pass->diagnostic_emitter, &verify_result,
+      pass->arena));
   loom_amdgpu_hal_kernel_abi_statistics_t* statistics =
       loom_amdgpu_hal_kernel_abi_statistics(pass);
   statistics->errors += verify_result.error_count;
@@ -99,8 +101,8 @@ iree_status_t loom_amdgpu_materialize_hal_kernel_abi_run(
 
   loom_amdgpu_hal_binding_materialization_result_t materialization = {0};
   IREE_RETURN_IF_ERROR(loom_amdgpu_hal_binding_materialize(
-      module, function.op, target.descriptor_set, &materialization,
-      pass->arena));
+      module, function.op, target.descriptor_set,
+      verify_result.kernarg_segment_ptr, &materialization, pass->arena));
   ++statistics->functions;
   statistics->bindings += materialization.materialized_binding_count;
   statistics->direct_args += materialization.materialized_direct_arg_count;

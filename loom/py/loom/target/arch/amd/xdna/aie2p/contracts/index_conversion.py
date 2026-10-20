@@ -9,6 +9,19 @@
 from __future__ import annotations
 
 from loom.dialect.index import defs as index
+from loom.dialect.vector import defs as vector
+from loom.target.arch.amd.xdna.aie2p.contracts.core import (
+    predicate_boolean_bytes_emits,
+)
+from loom.target.arch.amd.xdna.aie2p.contracts.packet_conversion import (
+    INTEGER_TRUNCATION_RULE_SHAPES,
+    INTEGER_WIDEN_RULE_SHAPES,
+    IntegerTruncationRuleShape,
+    IntegerWidenRuleShape,
+    integer_truncation_emits,
+    integer_truncation_rule,
+    integer_widen_rule,
+)
 from loom.target.arch.amd.xdna.aie2p.core_descriptors import (
     AIE2P_CORE_DESCRIPTOR_SET,
 )
@@ -24,6 +37,7 @@ from loom.target.contracts import (
     TypePattern,
     ValueAliasRule,
     ValueRef,
+    Vector,
     descriptor_by_key,
 )
 from loom.target.low_descriptors import Descriptor
@@ -258,6 +272,333 @@ AIE2P_INDEX_CONVERSION_RULES: tuple[DescriptorRule | ValueAliasRule, ...] = (
     _alias_rule(
         _OFFSET,
         _INDEX,
+        extra_guards=(Guard.value_i64_range("input", 0, _I32_MAX),),
+    ),
+)
+
+
+def _vector_type(
+    element: str,
+    minimum_lane_count: int,
+    maximum_lane_count: int,
+) -> TypePattern:
+    return Vector(
+        element,
+        minimum_lanes=minimum_lane_count,
+        maximum_lanes=maximum_lane_count,
+    )
+
+
+def _whole_address_vector_type(element: str) -> TypePattern:
+    return Vector(
+        element,
+        minimum_static_elements=1,
+        maximum_static_elements=64,
+    )
+
+
+def _vector_report_key(strategy: str) -> str:
+    return f"native_index_cast_{strategy}"
+
+
+def _vector_alias_rule(
+    input_element: str,
+    result_element: str,
+    *,
+    extra_guards: tuple[Guard, ...] = (),
+) -> ValueAliasRule:
+    return ValueAliasRule(
+        source_op=vector.vector_index_cast,
+        source=ValueRef.operand("input"),
+        result=ValueRef.result("result"),
+        guards=(
+            Guard.value_type("input", _whole_address_vector_type(input_element)),
+            Guard.value_type("result", _whole_address_vector_type(result_element)),
+            *extra_guards,
+        ),
+    )
+
+
+def _vector_widen_rules(
+    input_element: str,
+    result_element: str,
+    signedness: str,
+    physical_input_element: str,
+    physical_result_element: str,
+    report_strategy: str,
+) -> tuple[DescriptorRule, ...]:
+    return tuple(
+        integer_widen_rule(
+            vector.vector_index_cast,
+            signedness,
+            rule_shape,
+            input_type=_vector_type(
+                input_element,
+                rule_shape.minimum_lane_count,
+                rule_shape.maximum_lane_count,
+            ),
+            result_type=_vector_type(
+                result_element,
+                rule_shape.minimum_lane_count,
+                rule_shape.maximum_lane_count,
+            ),
+            report_key=_vector_report_key(report_strategy),
+        )
+        for rule_shape in INTEGER_WIDEN_RULE_SHAPES
+        if (
+            rule_shape.instruction.input_element == physical_input_element
+            and rule_shape.instruction.result_element == physical_result_element
+        )
+    )
+
+
+def _predicate_to_address_rule(
+    result_element: str,
+    signedness: str,
+    rule_shape: IntegerWidenRuleShape,
+) -> DescriptorRule:
+    boolean_bytes = ValueRef.temporary("boolean_bytes")
+    materialize_emits, _ = predicate_boolean_bytes_emits(
+        ValueRef.operand("input"),
+        boolean_bytes,
+        temporary_prefix="index_cast",
+    )
+    return integer_widen_rule(
+        vector.vector_index_cast,
+        signedness,
+        rule_shape,
+        input_type=_vector_type(
+            "i1",
+            rule_shape.minimum_lane_count,
+            rule_shape.maximum_lane_count,
+        ),
+        result_type=_vector_type(
+            result_element,
+            rule_shape.minimum_lane_count,
+            rule_shape.maximum_lane_count,
+        ),
+        source=boolean_bytes,
+        prefix_emits=materialize_emits,
+        report_key=_vector_report_key("predicate_to_address"),
+    )
+
+
+def _vector_truncation_rules(
+    input_element: str,
+    result_element: str,
+    physical_input_element: str,
+    physical_result_element: str,
+    *,
+    extra_guards: tuple[Guard, ...] = (),
+    report_strategy: str,
+) -> tuple[DescriptorRule, ...]:
+    return tuple(
+        integer_truncation_rule(
+            rule_shape,
+            source_op=vector.vector_index_cast,
+            input_type=_vector_type(
+                input_element,
+                rule_shape.minimum_lane_count,
+                rule_shape.maximum_lane_count,
+            ),
+            result_type=_vector_type(
+                result_element,
+                rule_shape.minimum_lane_count,
+                rule_shape.maximum_lane_count,
+            ),
+            extra_guards=extra_guards,
+            report_key=_vector_report_key(report_strategy),
+        )
+        for rule_shape in INTEGER_TRUNCATION_RULE_SHAPES
+        if (
+            rule_shape.instruction.input_element == physical_input_element
+            and rule_shape.instruction.result_element == physical_result_element
+        )
+    )
+
+
+def _address_to_predicate_rule(
+    input_element: str,
+    rule_shape: IntegerTruncationRuleShape,
+) -> DescriptorRule:
+    low_bytes = ValueRef.temporary("low_bytes")
+    one = ValueRef.temporary("one")
+    ones = ValueRef.temporary("ones")
+    zeros = ValueRef.temporary("zeros")
+    low_bits = ValueRef.temporary("low_bits")
+    constant = _descriptor("amd.xdna.aie2p.constant.i32.short")
+    splat = _descriptor("amd.xdna.aie2p.splat.i8x64")
+    subtract = _descriptor("amd.xdna.aie2p.sub.i8x64")
+    bitwise_and = _descriptor("amd.xdna.aie2p.and.bits512")
+    compare = _descriptor("amd.xdna.aie2p.cmp.lt.unsigned.i8x64")
+    return DescriptorRule(
+        source_op=vector.vector_index_cast,
+        descriptor=compare,
+        guards=(
+            Guard.value_type(
+                "input",
+                _vector_type(
+                    input_element,
+                    rule_shape.minimum_lane_count,
+                    rule_shape.maximum_lane_count,
+                ),
+            ),
+            Guard.value_type(
+                "result",
+                _vector_type(
+                    "i1",
+                    rule_shape.minimum_lane_count,
+                    rule_shape.maximum_lane_count,
+                ),
+            ),
+        ),
+        emit=(
+            *integer_truncation_emits(
+                rule_shape,
+                ValueRef.operand("input"),
+                low_bytes,
+                result_type=DescriptorResultType(),
+            ),
+            EmitDescriptorOp(
+                descriptor=constant,
+                results={"dst": one},
+                result_types={"dst": DescriptorResultType()},
+                immediates={"i": 1},
+                form=DescriptorEmitForm.CONST,
+            ),
+            EmitDescriptorOp(
+                descriptor=splat,
+                operands={"src": one},
+                results={"dst": ones},
+                result_types={"dst": DescriptorResultType()},
+                form=DescriptorEmitForm.OP,
+            ),
+            EmitDescriptorOp(
+                descriptor=subtract,
+                operands={"s1": ones, "s2": ones},
+                results={"d": zeros},
+                result_types={"d": DescriptorResultType()},
+                form=DescriptorEmitForm.OP,
+            ),
+            EmitDescriptorOp(
+                descriptor=bitwise_and,
+                operands={"s1": low_bytes, "s2": ones},
+                results={"d": low_bits},
+                result_types={"d": DescriptorResultType()},
+                form=DescriptorEmitForm.OP,
+            ),
+            EmitDescriptorOp(
+                descriptor=compare,
+                operands={"s1": zeros, "s2": low_bits},
+                results={"cmp": ValueRef.result("result")},
+                form=DescriptorEmitForm.OP,
+            ),
+        ),
+        report_key=_vector_report_key("address_to_predicate"),
+    )
+
+
+_I8_TO_I32_WIDEN_SHAPES = tuple(
+    rule_shape
+    for rule_shape in INTEGER_WIDEN_RULE_SHAPES
+    if rule_shape.instruction.input_element == "i8"
+    and rule_shape.instruction.result_element == "i32"
+)
+
+_I32_TO_I8_TRUNCATION_SHAPES = tuple(
+    rule_shape
+    for rule_shape in INTEGER_TRUNCATION_RULE_SHAPES
+    if rule_shape.instruction.input_element == "i32"
+    and rule_shape.instruction.result_element == "i8"
+)
+
+
+AIE2P_VECTOR_INDEX_CONVERSION_RULES: tuple[DescriptorRule | ValueAliasRule, ...] = (
+    *(
+        _predicate_to_address_rule(result_element, signedness, rule_shape)
+        for result_element, signedness in (
+            ("index", "signed"),
+            ("offset", "unsigned"),
+        )
+        for rule_shape in _I8_TO_I32_WIDEN_SHAPES
+    ),
+    *(
+        rule
+        for input_element in ("i8", "i16")
+        for result_element, signedness in (
+            ("index", "signed"),
+            ("offset", "unsigned"),
+        )
+        for rule in _vector_widen_rules(
+            input_element,
+            result_element,
+            signedness,
+            input_element,
+            "i32",
+            "narrow_to_address",
+        )
+    ),
+    _vector_alias_rule("i32", "index"),
+    _vector_alias_rule("i32", "offset"),
+    *(
+        rule
+        for result_element, range_guard in (
+            ("index", Guard.value_signed_bit_count("input", 32)),
+            ("offset", Guard.value_unsigned_bit_count("input", 32)),
+        )
+        for rule in _vector_truncation_rules(
+            "i64",
+            result_element,
+            "i64",
+            "i32",
+            extra_guards=(range_guard,),
+            report_strategy="i64_to_address",
+        )
+    ),
+    *(
+        _address_to_predicate_rule(input_element, rule_shape)
+        for input_element in ("index", "offset")
+        for rule_shape in _I32_TO_I8_TRUNCATION_SHAPES
+    ),
+    *(
+        rule
+        for input_element in ("index", "offset")
+        for result_element in ("i8", "i16")
+        for rule in _vector_truncation_rules(
+            input_element,
+            result_element,
+            "i32",
+            result_element,
+            report_strategy="address_to_narrow",
+        )
+    ),
+    _vector_alias_rule("index", "i32"),
+    _vector_alias_rule("offset", "i32"),
+    *(
+        rule
+        for input_element, signedness in (
+            ("index", "signed"),
+            ("offset", "unsigned"),
+        )
+        for rule in _vector_widen_rules(
+            input_element,
+            "i64",
+            signedness,
+            "i32",
+            "i64",
+            "address_to_i64",
+        )
+    ),
+    _vector_alias_rule("index", "index"),
+    _vector_alias_rule("offset", "offset"),
+    _vector_alias_rule(
+        "index",
+        "offset",
+        extra_guards=(Guard.value_i64_range("input", 0, _I32_MAX),),
+    ),
+    _vector_alias_rule(
+        "offset",
+        "index",
         extra_guards=(Guard.value_i64_range("input", 0, _I32_MAX),),
     ),
 )

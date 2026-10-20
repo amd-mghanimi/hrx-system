@@ -225,6 +225,10 @@ void loom_context_initialize(iree_allocator_t allocator,
 // from this context must have been freed first.
 void loom_context_deinitialize(loom_context_t* context);
 
+// Returns true when |dialect_id| has been registered with |context|.
+bool loom_context_is_dialect_registered(const loom_context_t* context,
+                                        uint8_t dialect_id);
+
 // Registers a dialect's vtable array with the context. The |vtables|
 // pointer must remain valid for the lifetime of the context (typically
 // a static array generated from the DSL). Returns INVALID_ARGUMENT if

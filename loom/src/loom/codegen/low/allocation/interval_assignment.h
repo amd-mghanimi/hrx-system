@@ -22,14 +22,15 @@
 #include "loom/codegen/low/placement.h"
 #include "loom/codegen/low/target_binding.h"
 #include "loom/ir/ir.h"
+#include "loom/target/residency.h"
 #include "loom/util/cfg_graph.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-struct loom_target_residency_model_t;
 struct loom_low_schedule_table_t;
+struct loom_low_allocation_concat_affinity_t;
 
 // Concrete-location ordering used for one whole-function assignment attempt.
 typedef enum loom_low_allocation_search_strategy_e {
@@ -38,6 +39,10 @@ typedef enum loom_low_allocation_search_strategy_e {
   // Separates overlapping scalar and wide intervals across the feasible
   // liveness-pressure frontier to repair first-fit fragmentation.
   LOOM_LOW_ALLOCATION_SEARCH_STRATEGY_FRAGMENTATION_REPAIR = 1,
+  // Reuses an exact retained location for every current value. The attempt
+  // stops without a planning error when any location is unavailable under the
+  // current liveness and target constraints.
+  LOOM_LOW_ALLOCATION_SEARCH_STRATEGY_RETAINED_LOCATIONS = 2,
 } loom_low_allocation_search_strategy_t;
 
 typedef struct loom_low_allocation_interval_assignment_context_t {
@@ -57,8 +62,18 @@ typedef struct loom_low_allocation_interval_assignment_context_t {
   const struct loom_low_schedule_table_t* schedule;
   // Function-local placement relations over |liveness|.
   const loom_low_placement_table_t* placement;
+  // Bound instruction preferences owned by the enclosing allocation pass.
+  const loom_low_placement_preference_index_t* preferences;
+  // Unique concat-chain spans retained after optional alias refinement.
+  const struct loom_low_allocation_concat_affinity_t* concat_affinity;
   // Mutable target storage budgets, fixed values, and reserved ranges.
   loom_low_allocation_target_constraints_t* target_constraints;
+  // Borrowed incoming locations indexed by formal-argument ordinal.
+  const loom_low_allocation_abi_location_t* entry_locations;
+  // Number of entries in |entry_locations|.
+  iree_host_size_t entry_location_count;
+  // Proven boundary representations, independent of physical register search.
+  const loom_low_storage_transport_t* storage_transport;
   // Per-allocation-unit liveness facts for |liveness|.
   const loom_low_allocation_unit_liveness_t* unit_liveness;
   // Mutable assignment-backed storage leases and release actions.
@@ -67,11 +82,22 @@ typedef struct loom_low_allocation_interval_assignment_context_t {
   iree_arena_allocator_t* arena;
   // Shared read-only control-flow graph for |body|.
   const loom_cfg_graph_t* function_cfg_graph;
-  // Optional target residency model used for physical extent decisions.
-  const struct loom_target_residency_model_t* residency_model;
+  // Function-local residency view used for physical extent decisions.
+  loom_target_residency_view_t residency;
   // Borrowed bitmap indexed by module value ID. Set values require register
   // storage throughout allocation.
   iree_bitmap_t required_register_values;
+  // Borrowed bitmap indexed by module value ID. Set values have definitions
+  // that write physical storage outside their semantic execution domain.
+  iree_bitmap_t expanded_execution_values;
+  // Optional exact locations indexed by the current liveness value ordinal.
+  // Required by RETAINED_LOCATIONS and ignored by other strategies.
+  const loom_low_allocation_assignment_t* const*
+      retained_assignments_by_value_ordinal;
+  // Optional borrowed exclusive spill-traffic limit for this assignment
+  // attempt. Reaching the limit ends the attempt with a partial result that
+  // the comparison caller must discard. Null leaves the attempt unbounded.
+  const uint64_t* spill_traffic_exclusive_limit;
   // Concrete-location ordering for this whole-function assignment attempt.
   loom_low_allocation_search_strategy_t search_strategy;
 } loom_low_allocation_interval_assignment_context_t;
@@ -85,11 +111,17 @@ typedef struct loom_low_allocation_interval_assignment_result_t {
   uint32_t* assignment_indices_by_value_ordinal;
   // Lookup table over assignments and liveness-local value ordinals.
   loom_low_allocation_assignment_map_t assignment_map;
+  // Per-unit end points selected by this assignment attempt. This normally
+  // borrows the input analysis and owns a private copy only when spill
+  // materialization retires a structural source observation.
+  const uint32_t* unit_end_points;
   // Spill materialization plan records in spill-decision order. Null when no
   // assignment spills; otherwise sized to |spill_count|.
   loom_low_allocation_spill_plan_t* spill_plans;
   // Number of initialized spill materialization plan records.
   iree_host_size_t spill_plan_count;
+  // Distinct retained-read blockers owned by this assignment attempt.
+  loom_low_allocation_retained_fixed_values_t retained_fixed_values;
   // Predicted store and reload bytes across the spill materialization plans.
   uint64_t spill_traffic_bytes;
   // Allocation remark records in spill-decision order. Null when no assignment
@@ -99,6 +131,13 @@ typedef struct loom_low_allocation_interval_assignment_result_t {
   iree_host_size_t remark_count;
   // Number of assignments whose location kind is SPILL_SLOT.
   iree_host_size_t spill_count;
+  // True when assignment stopped after reaching the comparison-only spill
+  // traffic limit. All assignment state is partial and must be discarded.
+  bool reached_spill_traffic_limit;
+  // True when an exact retained location could not be replayed. This is a
+  // legitimate comparison rejection; all partial assignment state is
+  // discarded by the caller.
+  bool retained_location_replay_failed;
   // Interval ordering found a multi-unit interval in a contiguous register
   // class. Without one, fragmentation repair repeats the same placement.
   bool has_packable_aggregates;
@@ -106,9 +145,12 @@ typedef struct loom_low_allocation_interval_assignment_result_t {
 
 // Assigns concrete locations for allocatable intervals in |context| and writes
 // arena-owned assignment, spill-plan, remark, and lookup table state. Working
-// indexes and decision storage are released before returning.
+// indexes borrow |scratch_arena|'s tail and are released before returning.
+// |scratch_arena| must be distinct from |context->arena|; its earlier contents
+// remain valid throughout assignment and after returning.
 iree_status_t loom_low_allocation_interval_assignment_build(
     const loom_low_allocation_interval_assignment_context_t* context,
+    iree_arena_allocator_t* scratch_arena,
     loom_low_allocation_interval_assignment_result_t* out_result);
 
 #ifdef __cplusplus

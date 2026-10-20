@@ -104,6 +104,22 @@ iree_cc_test(
     iree::testing::gtest_main
 )
 
+if(IREE_ALLOCATOR_SYSTEM STREQUAL "mimalloc")
+  iree_cc_test(
+    NAME
+      allocator_mimalloc_test
+    SRCS
+      "allocator_mimalloc_test.cc"
+    CXX_FEATURES
+      exceptions
+    DEPS
+      ::base
+      iree::testing::gtest
+      iree::testing::gtest_main
+      iree::third_party::mimalloc
+  )
+endif()
+
 iree_cc_test(
   NAME
     alignment_test
@@ -111,6 +127,20 @@ iree_cc_test(
     "alignment_test.cc"
   DEPS
     ::core_headers
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    attributes_test
+  SRCS
+    "attributes_c_test.c"
+    "attributes_test.cc"
+  DEPS
+    ::base
+    ::core_headers
+    iree::base::internal
     iree::testing::gtest
     iree::testing::gtest_main
 )
@@ -221,6 +251,17 @@ iree_cc_test(
     string_view_test
   SRCS
     "string_view_test.cc"
+  DEPS
+    ::base
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    time_test
+  SRCS
+    "time_test.cc"
   DEPS
     ::base
     iree::testing::gtest

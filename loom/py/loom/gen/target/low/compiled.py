@@ -12,6 +12,7 @@ from collections.abc import Hashable, Sequence
 from dataclasses import dataclass, field
 
 from loom.gen.support.string_pool import CStringPool
+from loom.gen.target.low.validation import validate_u16_table_count
 from loom.target.low_descriptors import (
     AsmOperandSegmentDelimiter,
     AsmResultValueType,
@@ -37,6 +38,8 @@ from loom.target.low_descriptors import (
     RegClass,
     RegClassAltFlag,
     RegisterPackingResource,
+    RegisterPackingResourceFlag,
+    RegisterPackingResourceMemberFlag,
     RegisterPart,
     Resource,
     ScheduleClass,
@@ -57,16 +60,28 @@ class CompiledPhysicalRegisterView:
 
 @dataclass(frozen=True, slots=True)
 class CompiledRegisterPackingResource:
+    # Authored resource identity and member contributions.
     source: RegisterPackingResource
+    # Static capacity derived from the capacity register class.
+    capacity: int
+    # Immutable facts derived from all member register classes.
+    flags: tuple[RegisterPackingResourceFlag, ...]
+    # First row in the packed register-class contribution table.
     member_start: int
+    # Number of register-class contribution rows.
     member_count: int
 
 
 @dataclass(frozen=True, slots=True)
 class CompiledRegisterPackingResourceMember:
+    # Descriptor register class contributing pressure.
     reg_class_id: int
+    # Live register units rounded into one contribution group.
     register_unit_count: int
+    # Packing-resource units consumed by one contribution group.
     resource_unit_count: int
+    # Immutable properties derived during descriptor generation.
+    flags: tuple[RegisterPackingResourceMemberFlag, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +92,35 @@ class CompiledResourceCalendar:
     slot_mask: int
     # Required stage-zero units common to every schedule class in this group.
     minimum_issue_units: int
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledScheduleModel:
+    """Canonical scheduling tables selected by one descriptor-set view."""
+
+    resources: tuple[Resource, ...]
+    resource_calendars: tuple[CompiledResourceCalendar, ...]
+    resource_calendar_slot_count: int
+    resource_calendar_lookback_cycles: int
+    schedule_classes: tuple[ScheduleClass, ...]
+    timing_events: tuple[TimingEvent, ...]
+    event_separations: tuple[EventSeparation, ...]
+    resource_ids: dict[str, int]
+    schedule_class_ids: dict[str, int]
+    timing_event_ids: dict[str, int]
+    issue_uses: tuple[IssueUse, ...]
+    hazards: tuple[Hazard, ...]
+    pressure_deltas: tuple[PressureDelta, ...]
+    schedule_rows: tuple[dict[str, int], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledScheduleClassTable:
+    """Family-wide schedule-class rows indexed by physical row IDs."""
+
+    schedule_classes: tuple[ScheduleClass, ...]
+    schedule_rows: tuple[dict[str, int], ...]
+    canonical_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +178,8 @@ class CompiledDescriptorSet:
     descriptors: list[Descriptor]
     instruction_classes: list[tuple[InstructionClass, ...]]
     reg_classes: list[RegClass]
+    # Shared pressure sets derived from linear aliases and explicit domains.
+    reg_class_pressure_set_ids: list[int]
     physical_registers: list[PhysicalRegister]
     physical_register_candidate_ids: list[int]
     # Class-local semantic ordinals in aggregate-preserving search order.
@@ -159,7 +205,11 @@ class CompiledDescriptorSet:
     resource_calendars: list[CompiledResourceCalendar]
     # Total occupancy slots across distinct resource calendars.
     resource_calendar_slot_count: int
+    # Earlier issue distance retained before the native issue high-water mark.
+    resource_calendar_lookback_cycles: int
     schedule_classes: list[ScheduleClass]
+    # Canonical schedule rows followed by distinct rows contributed by views.
+    schedule_class_table: CompiledScheduleClassTable
     timing_events: list[TimingEvent]
     event_separations: list[EventSeparation]
     enum_domains: list[EnumDomain]
@@ -170,9 +220,12 @@ class CompiledDescriptorSet:
     timing_event_ids: dict[str, int]
     enum_domain_ids: dict[str, int]
     string_pool: CStringPool
-    reg_class_alts: list[tuple[int | None, tuple[RegClassAltFlag, ...]]]
+    reg_class_alts: list[tuple[int | None, int | None, tuple[RegClassAltFlag, ...], int, int]]
+    # Descriptor-local sequences of indices into the shared operand row tables.
+    operand_indices: list[int]
     operands: list[Operand]
     operand_source_value_indices: list[int | None]
+    operand_rematerialization_source_operand_indices: list[int | None]
     operand_alt_starts: list[int]
     operand_rematerializable: list[bool]
     immediates: list[Immediate]
@@ -194,13 +247,33 @@ class CompiledDescriptorSet:
     operand_form_matches: list[CompiledOperandFormMatch]
     operand_form_operand_indices: list[int]
     descriptor_rows: list[dict[str, int]]
-    descriptor_refs: list[tuple[str, int]]
+    # Descriptor ordinals sorted by stable descriptor identity.
+    descriptor_refs: list[int]
     schedule_alternative_rows: list[tuple[int, int]]
     canonical_asm_form_ordinals: list[int | None]
     asm_forms: list[CompiledAsmForm]
     asm_table_storage: CompiledAsmTableStorage
     schedule_rows: list[dict[str, int]]
     enum_domain_rows: list[dict[str, int]]
+
+    @property
+    def schedule_model(self) -> CompiledScheduleModel:
+        return CompiledScheduleModel(
+            resources=tuple(self.resources),
+            resource_calendars=tuple(self.resource_calendars),
+            resource_calendar_slot_count=self.resource_calendar_slot_count,
+            resource_calendar_lookback_cycles=self.resource_calendar_lookback_cycles,
+            schedule_classes=tuple(self.schedule_classes),
+            timing_events=tuple(self.timing_events),
+            event_separations=tuple(self.event_separations),
+            resource_ids=self.resource_ids,
+            schedule_class_ids=self.schedule_class_ids,
+            timing_event_ids=self.timing_event_ids,
+            issue_uses=tuple(self.issue_uses),
+            hazards=tuple(self.hazards),
+            pressure_deltas=tuple(self.pressure_deltas),
+            schedule_rows=tuple(self.schedule_rows),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,24 +283,38 @@ class DescriptorSetView:
     reg_classes: tuple[RegClass | None, ...]
     descriptors: tuple[Descriptor, ...]
     instruction_classes: tuple[tuple[InstructionClass, ...], ...]
-    descriptor_ordinals: tuple[int, ...]
-    descriptor_refs: list[tuple[str, int]]
+    schedule_model: CompiledScheduleModel
+    # Runtime row IDs indexed by canonical schedule-class ID. Empty is identity.
+    schedule_class_row_ids: tuple[int, ...]
+    storage_descriptor_ordinals: tuple[int, ...]
+    descriptor_ordinal_count: int
+    descriptor_membership_words: tuple[int, ...]
+    # View-addressable ordinals sorted by stable descriptor identity.
+    descriptor_refs: list[int]
     schedule_alternative_rows: list[tuple[int, int]]
     descriptor_rows: list[dict[str, int]]
     canonical_asm_form_ordinals: list[int | None]
     asm_forms: list[CompiledAsmForm]
     operand_forms: list[CompiledOperandForm]
-    # Structural descriptor rows are a prefix of the storage table.
+    # Structural descriptor rows use shared storage ordinals.
     uses_storage_descriptor_tables: bool
-    # View-owned descriptor rows are a prefix of the storage table.
+    # View-owned descriptor rows use shared storage ordinals.
     uses_storage_descriptor_view_tables: bool
+    # Stable-ID lookup references use shared storage ordinals.
+    uses_storage_descriptor_ref_tables: bool
     uses_storage_asm_form_tables: bool
     uses_storage_operand_form_tables: bool
     uses_storage_schedule_alternative_tables: bool
 
     @property
     def descriptor_count(self) -> int:
-        return len(self.descriptor_ordinals)
+        return len(self.storage_descriptor_ordinals)
+
+    @property
+    def runtime_descriptor_ordinals(self) -> tuple[int, ...]:
+        if self.uses_storage_descriptor_tables:
+            return self.storage_descriptor_ordinals
+        return tuple(range(self.descriptor_count))
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +341,29 @@ class CompiledAsmOperandSegment:
     has_variadic_operand: bool
 
 
+@dataclass(frozen=True, slots=True)
+class CompiledAsmOperandType:
+    """Inherits an exact register type, including its semantic payload."""
+
+    # Canonical packet input supplying the complete result type.
+    operand_index: int
+    # True when this result also consumes the input's IR ownership by default.
+    tied: bool
+
+
+type CompiledAsmResultType = AsmResultValueType | CompiledAsmOperandType | None
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledAsmTiedResult:
+    """Default IR ownership tie without a type change."""
+
+    # Canonical packet result receiving ownership.
+    result_index: int
+    # Canonical packet input whose ownership is consumed.
+    operand_index: int
+
+
 @dataclass(slots=True)
 class CompiledAsmForm:
     descriptor_ordinal: int
@@ -261,18 +371,54 @@ class CompiledAsmForm:
     mnemonic: str
     native_assembly_mnemonic_label: str | None
     native_assembly_mnemonic: str | None
-    result_indices: tuple[int, ...]
-    operand_indices: tuple[int, ...]
     operand_segments: tuple[CompiledAsmOperandSegment, ...]
-    result_value_types: tuple[AsmResultValueType | None, ...]
+    # Result-indexed exact typing and default ownership, or an empty span.
+    result_types: tuple[CompiledAsmResultType, ...]
+    # Default IR ownership in descriptor constraint order.
+    tied_results: tuple[CompiledAsmTiedResult, ...]
+    # Complete immediate order: explicit assembly fields, then descriptor suffix.
     immediates: tuple[CompiledAsmImmediate, ...]
+    # Number of authored fields at the start of the complete immediate order.
+    explicit_immediate_count: int
+    # An explicit alias or default selects named syntax for the entire form.
+    has_named_immediates: bool
+    # At least one field in the named dictionary has no descriptor default.
+    requires_named_immediates: bool
+    # Native immediate projections own spelling instead of generic suffixes.
+    native_owns_immediate_syntax: bool
     native_assembly_values: tuple[CompiledNativeAsmValue, ...]
-    result_index_start: int = 0
-    result_value_type_start: int | None = None
-    operand_index_start: int = 0
-    operand_segment_start: int = 0
-    immediate_start: int = 0
-    native_assembly_value_start: int = 0
+    # Index assigned when this form's formatting spans enter shared storage.
+    layout_index: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledAsmLayout:
+    """Exact emitted formatting spans, independent of assembly identity."""
+
+    # First result type recipe, or None when all results use carrier inference.
+    result_type_start: int | None
+    # First default IR ownership tie.
+    tied_result_start: int
+    # First delimited input operand segment.
+    operand_segment_start: int
+    # First row of the complete immediate order, including implicit fields.
+    immediate_start: int
+    # First native assembly value row.
+    native_assembly_value_start: int
+    # Number of default IR ownership ties.
+    tied_result_count: int
+    # Number of delimited input operand segments.
+    operand_segment_count: int
+    # Number of explicit spelling rows before the implicit descriptor suffix.
+    explicit_immediate_count: int
+    # Number of native assembly value rows.
+    native_assembly_value_count: int
+    # Explicit aliases or defaults require named syntax for the entire form.
+    has_named_immediates: bool
+    # The named dictionary cannot be omitted after any positional prefix.
+    requires_named_immediates: bool
+    # Native immediate projections suppress generic immediate suffixes.
+    native_owns_immediate_syntax: bool
 
 
 def append_interned_sequence[RowT: Hashable](
@@ -298,18 +444,22 @@ def append_interned_sequence[RowT: Hashable](
 class CompiledAsmTableStorage:
     """Interned assembly-form table rows shared across storage and views."""
 
-    # Result and operand indices addressed by assembly-form spans.
-    operand_indices: list[int] = field(default_factory=list)
+    # Exact formatting layouts addressed by each form's layout index.
+    layouts: list[CompiledAsmLayout] = field(default_factory=list)
+    # Default ownership rows copied directly into canonical IR operations.
+    tied_results: list[CompiledAsmTiedResult] = field(default_factory=list)
     # Delimited operand groups addressed by assembly-form spans.
     operand_segments: list[CompiledAsmOperandSegment] = field(default_factory=list)
-    # Exact semantic result types addressed by assembly-form spans.
-    result_value_types: list[AsmResultValueType | None] = field(default_factory=list)
+    # Result type recipes addressed by assembly-form spans.
+    result_types: list[CompiledAsmResultType] = field(default_factory=list)
     # Immediate projections addressed by assembly-form spans.
     immediates: list[CompiledAsmImmediate] = field(default_factory=list)
     # Native assembly values addressed by assembly-form spans.
     native_values: list[CompiledNativeAsmValue] = field(default_factory=list)
-    # Starts of exact operand-index sequences already in storage.
-    _operand_index_starts: dict[tuple[int, ...], int] = field(
+    # Indices of formatting layouts already in storage.
+    _layout_indices: dict[CompiledAsmLayout, int] = field(default_factory=dict, init=False, repr=False)
+    # Starts of exact default ownership sequences already in storage.
+    _tied_result_starts: dict[tuple[CompiledAsmTiedResult, ...], int] = field(
         default_factory=dict,
         init=False,
         repr=False,
@@ -317,7 +467,7 @@ class CompiledAsmTableStorage:
     # Starts of exact operand-segment sequences already in storage.
     _operand_segment_starts: dict[tuple[CompiledAsmOperandSegment, ...], int] = field(default_factory=dict, init=False, repr=False)
     # Starts of exact result-type sequences already in storage.
-    _result_value_type_starts: dict[tuple[AsmResultValueType | None, ...], int] = field(default_factory=dict, init=False, repr=False)
+    _result_type_starts: dict[tuple[CompiledAsmResultType, ...], int] = field(default_factory=dict, init=False, repr=False)
     # Starts of exact immediate sequences already in storage.
     _immediate_starts: dict[tuple[CompiledAsmImmediate, ...], int] = field(
         default_factory=dict,
@@ -335,37 +485,65 @@ class CompiledAsmTableStorage:
         """Interns each form's exact table spans into this storage."""
 
         for asm_form in asm_forms:
-            asm_form.result_index_start, _ = append_interned_sequence(
-                asm_form.result_indices,
-                self.operand_indices,
-                self._operand_index_starts,
-            )
-            if asm_form.result_value_types:
-                asm_form.result_value_type_start, _ = append_interned_sequence(
-                    asm_form.result_value_types,
-                    self.result_value_types,
-                    self._result_value_type_starts,
+            result_type_start = None
+            if asm_form.result_types:
+                result_type_start, _ = append_interned_sequence(
+                    asm_form.result_types,
+                    self.result_types,
+                    self._result_type_starts,
                 )
-            asm_form.operand_index_start, _ = append_interned_sequence(
-                asm_form.operand_indices,
-                self.operand_indices,
-                self._operand_index_starts,
+            tied_result_start, _ = append_interned_sequence(
+                asm_form.tied_results,
+                self.tied_results,
+                self._tied_result_starts,
             )
-            asm_form.operand_segment_start, _ = append_interned_sequence(
+            operand_segment_start, _ = append_interned_sequence(
                 asm_form.operand_segments,
                 self.operand_segments,
                 self._operand_segment_starts,
             )
-            asm_form.immediate_start, _ = append_interned_sequence(
+            immediate_start, _ = append_interned_sequence(
                 asm_form.immediates,
                 self.immediates,
                 self._immediate_starts,
             )
-            asm_form.native_assembly_value_start, _ = append_interned_sequence(
+            native_assembly_value_start, _ = append_interned_sequence(
                 asm_form.native_assembly_values,
                 self.native_values,
                 self._native_value_starts,
             )
+            layout = CompiledAsmLayout(
+                result_type_start=result_type_start,
+                tied_result_start=tied_result_start,
+                operand_segment_start=operand_segment_start,
+                immediate_start=immediate_start,
+                native_assembly_value_start=native_assembly_value_start,
+                tied_result_count=len(asm_form.tied_results),
+                operand_segment_count=len(asm_form.operand_segments),
+                explicit_immediate_count=asm_form.explicit_immediate_count,
+                native_assembly_value_count=len(asm_form.native_assembly_values),
+                has_named_immediates=asm_form.has_named_immediates,
+                requires_named_immediates=asm_form.requires_named_immediates,
+                native_owns_immediate_syntax=asm_form.native_owns_immediate_syntax,
+            )
+            layout_index = self._layout_indices.get(layout)
+            if layout_index is None:
+                layout_index = len(self.layouts)
+                self._layout_indices[layout] = layout_index
+                self.layouts.append(layout)
+            asm_form.layout_index = layout_index
+
+        # Views can append new spans after the storage descriptors are compiled.
+        # Validate their shared compact address space at its owning boundary.
+        for table_name, rows in (
+            ("layout", self.layouts),
+            ("tied result", self.tied_results),
+            ("operand segment", self.operand_segments),
+            ("result type", self.result_types),
+            ("immediate", self.immediates),
+            ("native value", self.native_values),
+        ):
+            validate_u16_table_count(len(rows), f"asm {table_name}")
 
 
 @dataclass(frozen=True, slots=True)

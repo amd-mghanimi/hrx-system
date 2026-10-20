@@ -23,7 +23,8 @@ typedef enum loom_value_relation_iterator_phase_e {
   LOOM_VALUE_RELATION_PHASE_LOOP_BYPASS = LOOM_VALUE_RELATION_LOOP_BYPASS - 1,
   LOOM_VALUE_RELATION_PHASE_LOOP_TERMINATOR = 8,
   LOOM_VALUE_RELATION_PHASE_REGION_TERMINATOR = 9,
-  LOOM_VALUE_RELATION_PHASE_END = 10,
+  LOOM_VALUE_RELATION_PHASE_REFERENCE_SOURCE = 10,
+  LOOM_VALUE_RELATION_PHASE_END = 11,
 } loom_value_relation_iterator_phase_t;
 static_assert(LOOM_VALUE_RELATION_PHASE_END <= 16,
               "value relation phases must fit the iterator bitset");
@@ -102,6 +103,30 @@ static bool loom_value_relation_next_value_alias(
   return loom_value_relation_emit(
       loom_op_const_operands(op)[0], loom_op_const_results(op)[0], 0,
       LOOM_VALUE_RELATION_VALUE_ALIAS, out_relation);
+}
+
+static bool loom_value_relation_next_reference_source(
+    loom_value_relation_iterator_t* iterator,
+    loom_value_relation_t* out_relation) {
+  const loom_op_t* op = iterator->op;
+  const loom_op_vtable_t* vtable = iterator->vtable;
+  while (iterator->outer_index < op->result_count) {
+    const uint16_t result_index = iterator->outer_index++;
+    const uint16_t field_index =
+        iree_min(result_index, vtable->fixed_result_count);
+    const uint8_t source = vtable->result_descriptors[field_index]
+                               .reference_source_operand_index_plus_one;
+    if (!source) {
+      continue;
+    }
+    const loom_value_slice_t span =
+        loom_op_operand_field_span(vtable, op, source - 1);
+    return loom_value_relation_emit(
+        span.values[0], loom_op_const_results(op)[result_index],
+        (uint16_t)(span.values - loom_op_const_operands(op)),
+        LOOM_VALUE_RELATION_REFERENCE_SOURCE, out_relation);
+  }
+  return false;
 }
 
 static bool loom_value_relation_next_select_payload(
@@ -203,8 +228,6 @@ static bool loom_value_relation_next_loop_entry(
   if (iterator->outer_index >= iter_args.count) {
     return false;
   }
-  IREE_ASSERT_EQ(iter_args.count, op->result_count,
-                 "verified loop state must match result arity");
   loom_region_t* entry_region = loom_loop_like_condition_region(loop);
   uint16_t block_arg_offset = 0;
   if (entry_region == NULL) {
@@ -282,17 +305,16 @@ static bool loom_value_relation_next_loop_terminator(
   IREE_ASSERT(is_body || is_condition,
               "selected loop terminator phase must belong to the loop");
 
-  const uint16_t state_count = parent_op->result_count;
-  IREE_ASSERT_EQ(loom_loop_like_iter_args(loop).count, state_count,
-                 "verified loop state must match result arity");
+  const uint16_t header_count = loom_loop_like_iter_args(loop).count;
+  const uint16_t result_count = parent_op->result_count;
   const loom_block_t* body_block = loom_region_const_entry_block(body);
   const uint16_t body_arg_offset =
       loop.vtable->iv_block_arg_index == LOOM_BLOCK_ARG_INDEX_NONE
           ? 0
           : (uint16_t)(loop.vtable->iv_block_arg_index + 1);
   IREE_ASSERT_EQ(body_block->arg_count,
-                 (uint16_t)(state_count + body_arg_offset),
-                 "verified loop body arguments must match carried state");
+                 (uint16_t)(result_count + body_arg_offset),
+                 "verified loop body arguments must match result state");
 
   uint16_t source_operand_index = iterator->outer_index;
   uint8_t destination_count = 0;
@@ -303,9 +325,9 @@ static bool loom_value_relation_next_loop_terminator(
                    "condition loops must not have an induction variable");
     IREE_ASSERT(condition != NULL && condition->block_count == 1,
                 "verified loop condition region must have one block");
-    IREE_ASSERT_EQ(op->operand_count, (uint16_t)(state_count + 1),
-                   "verified loop condition must forward every state value");
-    if (iterator->outer_index >= state_count) {
+    IREE_ASSERT_EQ(op->operand_count, (uint16_t)(result_count + 1),
+                   "verified loop condition must forward every result value");
+    if (iterator->outer_index >= result_count) {
       return false;
     }
     source_operand_index = (uint16_t)(iterator->outer_index + 1);
@@ -313,21 +335,23 @@ static bool loom_value_relation_next_loop_terminator(
     destinations[1] = loom_op_const_results(parent_op)[iterator->outer_index];
     destination_count = 2;
   } else if (condition != NULL) {
-    IREE_ASSERT_EQ(op->operand_count, state_count,
-                   "verified loop body yield must match carried state");
-    if (iterator->outer_index >= state_count) {
+    IREE_ASSERT_EQ(op->operand_count, header_count,
+                   "verified loop body yield must match header state");
+    if (iterator->outer_index >= header_count) {
       return false;
     }
     const loom_block_t* condition_block =
         loom_region_const_entry_block(condition);
-    IREE_ASSERT_EQ(condition_block->arg_count, state_count,
-                   "verified loop condition arguments must match state");
+    IREE_ASSERT_EQ(condition_block->arg_count, header_count,
+                   "verified loop condition arguments must match header state");
     destinations[0] = loom_block_arg_id(condition_block, iterator->outer_index);
     destination_count = 1;
   } else {
-    IREE_ASSERT_EQ(op->operand_count, state_count,
+    IREE_ASSERT_EQ(header_count, result_count,
+                   "verified counted-loop state must match result arity");
+    IREE_ASSERT_EQ(op->operand_count, result_count,
                    "verified counted-loop yield must match carried state");
-    if (iterator->outer_index >= state_count) {
+    if (iterator->outer_index >= result_count) {
       return false;
     }
     destinations[0] = loom_block_arg_id(
@@ -387,6 +411,17 @@ void loom_value_relation_iterator_initialize(
         LOOM_VALUE_RELATION_PHASE_REGION_TERMINATOR);
   }
   uint16_t phase_bits = 0;
+  if (iree_any_bit_set(
+          relation_mask,
+          LOOM_VALUE_RELATION_MASK(LOOM_VALUE_RELATION_REFERENCE_SOURCE))) {
+    requested_phase_bits |= LOOM_VALUE_RELATION_PHASE_BIT(
+        LOOM_VALUE_RELATION_PHASE_REFERENCE_SOURCE);
+  }
+  if (vtable && iree_any_bit_set(vtable->vtable_flags,
+                                 LOOM_OP_VTABLE_HAS_REFERENCE_SOURCE)) {
+    phase_bits |= LOOM_VALUE_RELATION_PHASE_BIT(
+        LOOM_VALUE_RELATION_PHASE_REFERENCE_SOURCE);
+  }
   if (op->tied_result_count != 0) {
     phase_bits |=
         LOOM_VALUE_RELATION_PHASE_BIT(LOOM_VALUE_RELATION_PHASE_TIED_RESULT);
@@ -507,6 +542,10 @@ bool loom_value_relation_iterator_next(loom_value_relation_iterator_t* iterator,
       case LOOM_VALUE_RELATION_PHASE_REGION_TERMINATOR:
         found =
             loom_value_relation_next_region_terminator(iterator, out_relation);
+        break;
+      case LOOM_VALUE_RELATION_PHASE_REFERENCE_SOURCE:
+        found =
+            loom_value_relation_next_reference_source(iterator, out_relation);
         break;
       case LOOM_VALUE_RELATION_PHASE_END:
         break;

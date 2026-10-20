@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/numeric_offset_wide.loom-test
 // RUN: emit source-low target=x86:avx2 output=low
 
 func.def @offset_scale_unbounded(%element: index) -> (offset) {
@@ -74,7 +73,7 @@ func.def @offset_scale_lane(%elements: vector<4xi32>, %stride: offset) -> (offse
 }
 
 // ----
-low.func.def target<x86.avx2.core> abi(object_function) @offset_scale_lane(%elements: reg<x86.xmm>, %stride: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<4xi32>, offset) -> (offset)}) @offset_scale_lane(%elements: reg<x86.xmm>, %stride: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
   %raw = vpextrd.xmm %elements, 0
   %element = movzx.gpr64.gpr32 %raw
   %12 = copy %element : reg<x86.gpr64> -> reg<x86.gpr64>
@@ -132,9 +131,8 @@ func.def @offset_scale_join(%element_input: index, %choice: i32) -> (offset) {
 low.func.def target<x86.avx2.core> abi(object_function) @offset_scale_join(%element: reg<x86.gpr64>, %choice: reg<x86.gpr32>) -> (reg<x86.gpr64>) asm {
   %stride = mov.imm64 4
   %bytes = lea.scale %element {disp32 = 0, scale = 4}
-  %condition = cmp.ne.imm.gpr32 %choice, 0
-  %16 = copy %stride : reg<x86.gpr64> -> reg<x86.gpr64>
-  %result = select.gpr64 %condition, %bytes, %16
+  %15 = copy %stride : reg<x86.gpr64> -> reg<x86.gpr64>
+  %result = cmp.select.imm.gpr32.gpr64 %choice, %bytes, %15, 0, "ne"
   return %result
 }
 
@@ -160,14 +158,13 @@ low.func.def target<x86.avx2.core> abi(object_function) @offset_scale_loop(%elem
   %begin = mov.imm64 0
   low.br ^_bb1(%begin: reg<x86.gpr64>, %bytes: reg<x86.gpr64>)
 ^_bb1(%iteration: reg<x86.gpr64>, %current: reg<x86.gpr64>):
-  %28 = cmp.slt.gpr64 %iteration, %count
-  low.cond_br %28, ^_bb2, ^_bb3 : reg<x86.gpr32>
+  low.op.cond_br<x86.scalar.cmp.branch.gpr64>(%iteration, %count) {predicate = 12}, ^_bb2, ^_bb3 : (reg<x86.gpr64>, reg<x86.gpr64>)
 ^_bb2:
   %next = lea %current, %stride
-  %30 = lea.disp %iteration {disp32 = 1}
-  low.br ^_bb1(%30: reg<x86.gpr64>, %next: reg<x86.gpr64>)
+  %29 = lea.disp %iteration {disp32 = 1}
+  low.br ^_bb1(%29: reg<x86.gpr64>, %next: reg<x86.gpr64>)
 ^_bb3:
-  %31 = copy %current : reg<x86.gpr64> -> reg<x86.gpr64>
-  %previous = sub.gpr64 %31, %stride
+  %30 = copy %current : reg<x86.gpr64> -> reg<x86.gpr64>
+  %previous = sub.gpr64 %30, %stride
   return %previous
 }

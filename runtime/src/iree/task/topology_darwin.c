@@ -85,15 +85,31 @@ iree_task_topology_node_id_t iree_task_topology_query_current_node(void) {
   return (iree_task_topology_node_id_t)0;
 }
 
+iree_numa_node_id_t iree_task_topology_query_numa_node(
+    const iree_task_topology_t* topology) {
+  if (topology->group_count == 0) {
+    return IREE_NUMA_NODE_ANY;
+  }
+  int32_t packages = 1;
+#if !defined(IREE_PLATFORM_IOS)
+  if (!iree_task_sysctlbyname_int32("hw.packages", &packages)) {
+    return IREE_NUMA_NODE_ANY;
+  }
+#endif  // !IREE_PLATFORM_IOS
+  // CPU tags cannot bind to a package, so only a sole memory domain is known.
+  return packages == 1 ? 0 : IREE_NUMA_NODE_ANY;
+}
+
 //===----------------------------------------------------------------------===//
 // Topology initialization helpers
 //===----------------------------------------------------------------------===//
 
 iree_status_t iree_task_topology_fixup_constructive_sharing_masks(
     iree_task_topology_t* topology) {
-  return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
-                          "assignment to individual CPUs is not available on "
-                          "Apple platforms due to a lack of APIs");
+  // Darwin exposes no CPU-to-cache mapping for caller-provided affinities.
+  // Preserve the conservative sharing masks initialized with each group.
+  // Worker startup separately applies affinity tags and node constraints.
+  return iree_ok_status();
 }
 
 iree_status_t iree_task_topology_initialize_from_logical_cpu_set(
@@ -171,7 +187,6 @@ iree_status_t iree_task_topology_initialize_from_physical_cores(
   IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, (int64_t)node_id);
 
   iree_task_topology_initialize(out_topology);
-  out_topology->node_id = node_id;
 
   // Total number of physical cores in the system of all types.
   int32_t total_physicalcpu_max = 0;

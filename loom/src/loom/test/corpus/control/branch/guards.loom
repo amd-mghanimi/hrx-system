@@ -1,0 +1,553 @@
+// Empty true arms preserve the guards around loads and nested loop effects.
+func.def device inline @accumulate_nonnegative(%output: view<1xi32>, %value: i32) {
+  %c0 = scalar.constant 0 : i32
+  %skip = scalar.cmpi slt, %value, %c0 : i32
+  scf.if %skip {
+  } else {
+    %previous = view.load %output[0] : view<1xi32> -> i32
+    %next = scalar.addi %previous, %value : i32
+    view.store %next, %output[0] : i32, view<1xi32>
+  }
+  func.return
+}
+
+kernel.def @conditional_guards() {
+  %unit = index.constant 1 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %length: i32, %stop: i32, %iterations: index) {
+  %lane = kernel.workitem.id<x> : index
+  func.call @compute_conditional_guards(%input, %output, %length, %stop, %iterations, %lane) : (buffer, buffer, i32, i32, index, index)
+  kernel.return
+}
+
+func.def device inline @compute_conditional_guards(%input: buffer, %output: buffer, %length: i32, %stop: i32, %iterations: index, %lane: index) {
+  %c0 = scalar.constant 0 : i32
+  %stopped = scalar.cmpi ne, %stop, %c0 : i32
+  scf.if %stopped {
+  } else {
+    %lane_integer = index.cast %lane : index to i32
+    %out_of_bounds = scalar.cmpi uge, %lane_integer, %length : i32
+    scf.if %out_of_bounds {
+    } else {
+      %stride = index.constant 4 : offset
+      %address = index.scale %lane, %stride : index, offset -> offset
+      %input_view = buffer.view %input[%address] : buffer -> view<1xi32>
+      %value = view.load %input_view[0] : view<1xi32> -> i32
+      %output_view = buffer.view %output[%address] : buffer -> view<1xi32>
+      %begin = index.constant 0 : index
+      %step = index.constant 1 : index
+      scf.for %iteration = [%begin to %iterations step %step] {
+        func.call @accumulate_nonnegative(%output_view, %value) : (view<1xi32>, i32)
+      }
+    }
+  }
+  func.return
+}
+
+// A uniform stop suppresses loads even when length exceeds the input buffer.
+// An empty active range performs no loads and leaves the output untouched.
+// Cross-wave tails and negative inputs leave their output unchanged. Active
+// nonnegative inputs contribute three additions to the initial value of -123.
+// The reference is -123 plus three additions of each nonnegative input.
+func.def @conditional_guards_oracle(%input: buffer, %output: buffer, %length: i32, %stop: i32, %iterations: index) {
+  %begin = index.constant 0 : index
+  %end = index.constant 64 : index
+  %step = index.constant 1 : index
+  scf.for %lane = [%begin to %end step %step] {
+    func.call @compute_conditional_guards(%input, %output, %length, %stop, %iterations, %lane) : (buffer, buffer, i32, i32, index, index)
+  }
+  func.return
+}
+
+check.scenario @conditional_guard_values {
+  // A uniform stop suppresses loads even when length exceeds the input buffer.
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-18) step(1) : tensor<1xi32>
+    %storage = check.generate.fill value(-123) : tensor<96xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<96xi32> -> tensor<64xi32>
+    %length = check.literal value(64) : i32
+    %stop = check.literal value(1) : i32
+    %iterations = check.literal value(3) : index
+    check.compare<@conditional_guards, @conditional_guards_oracle>(%input, %output, %length, %stop, %iterations) : (tensor<1xi32>, tensor<64xi32>, i32, i32, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<96xi32>
+    }
+  }
+  // An empty active range performs no loads and leaves storage untouched.
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-18) step(1) : tensor<1xi32>
+    %storage = check.generate.fill value(-123) : tensor<96xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<96xi32> -> tensor<64xi32>
+    %length = check.literal value(0) : i32
+    %stop = check.literal value(0) : i32
+    %iterations = check.literal value(3) : index
+    check.compare<@conditional_guards, @conditional_guards_oracle>(%input, %output, %length, %stop, %iterations) : (tensor<1xi32>, tensor<64xi32>, i32, i32, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<1xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<96xi32>
+    }
+  }
+  // Cross-wave tails and negative inputs exercise every nested guard.
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-18) step(1) : tensor<37xi32>
+    %storage = check.generate.fill value(-123) : tensor<96xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<96xi32> -> tensor<64xi32>
+    %length = check.literal value(37) : i32
+    %stop = check.literal value(0) : i32
+    %iterations = check.literal value(3) : index
+    check.compare<@conditional_guards, @conditional_guards_oracle>(%input, %output, %length, %stop, %iterations) : (tensor<37xi32>, tensor<64xi32>, i32, i32, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<37xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<96xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-18) step(1) : tensor<64xi32>
+    %storage = check.generate.fill value(-123) : tensor<96xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<96xi32> -> tensor<64xi32>
+    %length = check.literal value(64) : i32
+    %stop = check.literal value(0) : i32
+    %iterations = check.literal value(3) : index
+    check.compare<@conditional_guards, @conditional_guards_oracle>(%input, %output, %length, %stop, %iterations) : (tensor<64xi32>, tensor<64xi32>, i32, i32, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<64xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<96xi32>
+    }
+  }
+  check.return
+}
+
+// The row guard excludes the final half-workgroup. Reconstructing a flat
+// vector address must retain that bound on the original linear coordinate.
+kernel.def @quotient_guarded_vector_transfer() {
+  %unit = index.constant 1 : index
+  %threads = index.constant 64 : index
+  %blocks = index.constant 37 : index
+  kernel.launch.config workgroups(%blocks, %unit, %unit) workgroup_size(%threads, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %threads = index.constant 64 : index
+  %rows = index.constant 73 : index
+  %groups = index.constant 32 : index
+  %width = index.constant 16 : index
+  %block = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %linear = index.madd %block, %threads, %lane : index
+  %row = index.div %linear, %groups : index
+  %group = index.rem %linear, %groups : index
+  %column = index.mul %group, %width : index
+  %inside = index.cmp ult, %row, %rows : index
+  %inputs = buffer.view %input[%base] : buffer -> view<73x512xf32>
+  %outputs = buffer.view %output[%base] : buffer -> view<73x512xf32>
+  scf.if %inside {
+    %value = vector.load %inputs[%row, %column] : view<73x512xf32> -> vector<16xf32>
+    vector.store %value, %outputs[%row, %column] : vector<16xf32>, view<73x512xf32>
+  }
+  kernel.return
+}
+
+// Copy exactly the valid elements without the kernel's quotient, remainder,
+// vector addressing, workgroup topology, or conditional execution.
+func.def @quotient_guarded_vector_transfer_oracle(%input: buffer, %output: buffer) {
+  %base = index.constant 0 : offset
+  %begin = index.constant 0 : index
+  %end = index.constant 37376 : index
+  %step = index.constant 1 : index
+  %inputs = buffer.view %input[%base] : buffer -> view<37376xf32>
+  %outputs = buffer.view %output[%base] : buffer -> view<37376xf32>
+  scf.for %element = [%begin to %end step %step] {
+    %value = view.load %inputs[%element] : view<37376xf32> -> f32
+    view.store %value, %outputs[%element] : f32, view<37376xf32>
+  }
+  func.return
+}
+
+check.scenario @quotient_guarded_vector_transfer_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input_storage = check.generate.random.uniform seed(%seed) range(-4.0 to 4.0) : tensor<37408xf32>
+    %input = check.tensor.view %input_storage offset(64) : tensor<37408xf32> -> tensor<37376xf32>
+    %output_storage = check.generate.fill value(-11.0) : tensor<37408xf32>
+    %output = check.tensor.view %output_storage offset(64) : tensor<37408xf32> -> tensor<37376xf32>
+    check.compare<@quotient_guarded_vector_transfer, @quotient_guarded_vector_transfer_oracle>(%input, %output) : (tensor<37376xf32>, tensor<37376xf32>) -> () {
+      check.expect.bitwise actual(%input_storage) expected(%input_storage) : tensor<37408xf32>
+      check.expect.bitwise actual(%output_storage) expected(%output_storage) : tensor<37408xf32>
+    }
+  }
+  check.return
+}
+
+// A divergent guarded vector conversion joins before publishing through
+// workgroup memory. The neighboring work item observes every packet lane.
+kernel.def @guarded_packets() {
+  %unit = index.constant 1 : index
+  %threads = index.constant 64 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%threads, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %active: index, %fallback: f32) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.id<x> : index
+  %rows = index.constant 37 : index
+  %begin = index.constant 0 : index
+  %nonnegative_active = index.max %active, %begin : index
+  %bounded_active = index.min %nonnegative_active, %rows : index
+  %inputs = buffer.view %input[%base] : buffer -> view<37x8xf32>
+  %outputs = buffer.view %output[%base] : buffer -> view<64x8xf16>
+  %inside = index.cmp ult, %lane, %bounded_active : index
+  %values = scf.if %inside -> (vector<8xf16>) {
+    %loaded = vector.load %inputs[%lane, 0] : view<37x8xf32> -> vector<8xf32>
+    %converted = vector.fptrunc %loaded : vector<8xf32> to vector<8xf16>
+    scf.yield %converted : vector<8xf16>
+  } else {
+    %scalar = scalar.fptrunc %fallback : f32 to f16
+    %fill = vector.splat %scalar : vector<8xf16>
+    scf.yield %fill : vector<8xf16>
+  }
+  %scratch_bytes = index.constant 1024 : offset
+  %scratch = buffer.alloca<workgroup> align(16) %scratch_bytes : buffer
+  %scratch_view = buffer.view %scratch[%base] : buffer -> view<64x8xf16>
+  vector.store %values, %scratch_view[%lane, 0] : vector<8xf16>, view<64x8xf16>
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %step = index.constant 1 : index
+  %neighbor = index.xori %lane, %step : index
+  %observed = vector.load %scratch_view[%neighbor, 0] : view<64x8xf16> -> vector<8xf16>
+  vector.store %observed, %outputs[%lane, 0] : vector<8xf16>, view<64x8xf16>
+  kernel.return
+}
+
+func.def @guarded_packets_oracle(%input: buffer, %output: buffer, %active: index, %fallback: f32) {
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<296xf32>
+  %outputs = buffer.view %output[%base] : buffer -> view<512xf16>
+  %begin = index.constant 0 : index
+  %end = index.constant 512 : index
+  %step = index.constant 1 : index
+  %width = index.constant 8 : index
+  %rows = index.constant 37 : index
+  %nonnegative_active = index.max %active, %begin : index
+  %bounded_active = index.min %nonnegative_active, %rows : index
+  %limit = index.mul %bounded_active, %width : index
+  scf.for %position = [%begin to %end step %step] {
+    %source = index.xori %position, %width : index
+    %inside = index.cmp ult, %source, %limit : index
+    %value = scf.if %inside -> (f32) {
+      %loaded = view.load %inputs[%source] : view<296xf32> -> f32
+      scf.yield %loaded : f32
+    } else {
+      scf.yield %fallback : f32
+    }
+    %converted = scalar.fptrunc %value : f32 to f16
+    view.store %converted, %outputs[%position] : f16, view<512xf16>
+  }
+  func.return
+}
+
+check.scenario @guarded_packet_values {
+  check.trial[4](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32.0 to 32.0) : tensor<37x8xf32>
+    %storage = check.generate.fill value(-123.0) : tensor<528xf16>
+    %output = check.tensor.view %storage offset(16) : tensor<528xf16> -> tensor<64x8xf16>
+    %active = check.literal value(37) : index
+    %fallback = check.literal value(-3.5) : f32
+    check.compare<@guarded_packets, @guarded_packets_oracle>(%input, %output, %active, %fallback) : (tensor<37x8xf32>, tensor<64x8xf16>, index, f32) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<37x8xf32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<528xf16>
+    }
+  }
+  check.return
+}
+
+// A uniform branch transports an opaque cooperative fragment alongside an
+// ordinary vector. On 32-lane subgroups their authored types coincide. Only
+// one lane publishes the dense vector; the subgroup copies the matrix tile.
+kernel.def @mixed_carriers() {
+  %unit = index.constant 1 : index
+  %width = target.subgroup.size : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %condition: i1) {
+  %base = index.constant 0 : offset
+  %tile = index.constant 16 : index
+  %tile_elements = index.constant 256 : index
+  %subgroup_size = target.subgroup.size : index
+  %fragment_lanes = index.div %tile_elements, %subgroup_size : index
+  %aligned_input = buffer.assume.alignment %input {minimum_alignment = 16} : buffer
+  %aligned_output = buffer.assume.alignment %output {minimum_alignment = 16} : buffer
+  %input_matrix = buffer.view %aligned_input[%base] : buffer -> view<16x16xf32>
+  %input_dense = buffer.view %input[%base] : buffer -> view<8xf32>
+  %output_matrix = buffer.view %aligned_output[%base] : buffer -> view<16x16xf32>
+  %dense_offset = index.constant 1024 : offset
+  %output_dense = buffer.view %output[%dense_offset] : buffer -> view<8xf32>
+  %matrix, %dense = scf.if %condition -> (vector<[%fragment_lanes]xf32>, vector<8xf32>) {
+    %fragment = vector.fragment.load<init> %input_matrix[0, 0] shape [%tile, %tile] : view<16x16xf32> -> vector<[%fragment_lanes]xf32>
+    %lanes = vector.load %input_dense[0] : view<8xf32> -> vector<8xf32>
+    scf.yield %fragment, %lanes : vector<[%fragment_lanes]xf32>, vector<8xf32>
+  } else {
+    %fragment = vector.fragment.load<init> %input_matrix[0, 0] shape [%tile, %tile] : view<16x16xf32> -> vector<[%fragment_lanes]xf32>
+    %fallback = vector.constant 3.0 : vector<8xf32>
+    scf.yield %fragment, %fallback : vector<[%fragment_lanes]xf32>, vector<8xf32>
+  }
+  vector.fragment.store<result> %matrix, %output_matrix[0, 0] shape [%tile, %tile] : vector<[%fragment_lanes]xf32>, view<16x16xf32>
+  %lane = kernel.workitem.id<x> : index
+  %c0 = index.constant 0 : index
+  %leader = index.cmp eq, %lane, %c0 : index
+  scf.if %leader {
+    vector.store %dense, %output_dense[0] : vector<8xf32>, view<8xf32>
+  }
+  kernel.return
+}
+
+func.def @mixed_carriers_oracle(%input: buffer, %output: buffer, %condition: i1) {
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<256xf32>
+  %outputs = buffer.view %output[%base] : buffer -> view<264xf32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %matrix_length = index.constant 256 : index
+  %dense_length = index.constant 8 : index
+  %fallback = scalar.constant 3.0 : f32
+  scf.for %position = [%begin to %matrix_length step %step] {
+    %value = view.load %inputs[%position] : view<256xf32> -> f32
+    view.store %value, %outputs[%position] : f32, view<264xf32>
+  }
+  scf.for %position = [%begin to %dense_length step %step] {
+    %loaded = view.load %inputs[%position] : view<256xf32> -> f32
+    %value = scf.select %condition, %loaded, %fallback : f32
+    %destination = index.add %matrix_length, %position : index
+    view.store %value, %outputs[%destination] : f32, view<264xf32>
+  }
+  func.return
+}
+
+check.scenario @mixed_carrier_values {
+  check.trial[2](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32.0 to 32.0) : tensor<256xf32>
+    %storage = check.generate.fill value(-123.0) : tensor<272xf32>
+    %output = check.tensor.view %storage offset(16) : tensor<272xf32> -> tensor<264xf32>
+    %condition = check.literal value(true) : i1
+    check.compare<@mixed_carriers, @mixed_carriers_oracle>(%input, %output, %condition) : (tensor<256xf32>, tensor<264xf32>, i1) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<256xf32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<272xf32>
+    }
+  }
+  check.trial[2](%trial: index, %entropy: check.entropy) {
+    %seed = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %input = check.generate.random.uniform seed(%seed) range(-32.0 to 32.0) : tensor<256xf32>
+    %storage = check.generate.fill value(-123.0) : tensor<272xf32>
+    %output = check.tensor.view %storage offset(16) : tensor<272xf32> -> tensor<264xf32>
+    %condition = check.literal value(false) : i1
+    check.compare<@mixed_carriers, @mixed_carriers_oracle>(%input, %output, %condition) : (tensor<256xf32>, tensor<264xf32>, i1) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<256xf32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<272xf32>
+    }
+  }
+  check.return
+}
+
+// Consecutive correlated guards append to an ordered trace inside nested loops.
+// Every lane has its own inner trip count, including zero, while the outer
+// count is a runtime argument. Both guards and carried state vary each trip.
+kernel.def @overlapping_loop_guards() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 4 : index
+  %width = index.constant 64 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%width, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer, %epochs: index) {
+  %base = index.constant 0 : offset
+  %lane = kernel.workitem.dispatch.id<x> : index
+  %inputs = buffer.view %input[%base] : buffer -> view<256xi32>
+  %outputs = buffer.view %output[%base] : buffer -> view<256xi32>
+  %bits = view.load %inputs[%lane] : view<256xi32> -> i32
+  %count_mask = scalar.constant 7 : i32
+  %count_bits = scalar.andi %bits, %count_mask : i32
+  %iterations = index.cast %count_bits : i32 to index
+  %mask = scalar.constant 127 : i32
+  %boundary = scalar.constant 124 : i32
+  %multiplier = scalar.constant 33 : i32
+  %first = scalar.constant 1 : i32
+  %second = scalar.constant 2 : i32
+  %third = scalar.constant 3 : i32
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  scf.for %epoch = [%begin to %epochs step %step] {
+    %epoch_value = index.cast %epoch : index to i32
+    %epoch_bits = scalar.addi %bits, %epoch_value : i32
+    scf.for %iteration = [%begin to %iterations step %step] {
+      %delta = index.cast %iteration : index to i32
+      %shifted = scalar.addi %epoch_bits, %delta : i32
+      %magnitude = scalar.andi %shifted, %mask : i32
+      %below = scalar.cmpi ult, %magnitude, %boundary : i32
+      %not_above = scalar.cmpi ule, %magnitude, %boundary : i32
+      %not_equal = scalar.cmpi ne, %magnitude, %boundary : i32
+      scf.if %below {
+        %previous = view.load %outputs[%lane] : view<256xi32> -> i32
+        %scaled = scalar.muli %previous, %multiplier : i32
+        %next = scalar.addi %scaled, %first : i32
+        view.store %next, %outputs[%lane] : i32, view<256xi32>
+      }
+      scf.if %not_above {
+        %previous = view.load %outputs[%lane] : view<256xi32> -> i32
+        %scaled = scalar.muli %previous, %multiplier : i32
+        %next = scalar.addi %scaled, %second : i32
+        view.store %next, %outputs[%lane] : i32, view<256xi32>
+      }
+      scf.if %not_equal {
+        %previous = view.load %outputs[%lane] : view<256xi32> -> i32
+        %scaled = scalar.muli %previous, %multiplier : i32
+        %next = scalar.addi %scaled, %third : i32
+        view.store %next, %outputs[%lane] : i32, view<256xi32>
+      }
+    }
+  }
+  kernel.return
+}
+
+// Classify each magnitude once and apply its complete affine transition.
+// Below the boundary all three observations give h*33^3 + 1*33^2 + 2*33 + 3;
+// equality appends only 2, and values above the boundary append only 3.
+func.def @overlapping_loop_guards_oracle(%input: buffer, %output: buffer, %epochs: index) {
+  %base = index.constant 0 : offset
+  %inputs = buffer.view %input[%base] : buffer -> view<256xi32>
+  %outputs = buffer.view %output[%base] : buffer -> view<256xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 256 : index
+  %step = index.constant 1 : index
+  %count_mask = scalar.constant 7 : i32
+  %mask = scalar.constant 127 : i32
+  %boundary = scalar.constant 124 : i32
+  %single_multiplier = scalar.constant 33 : i32
+  %triple_multiplier = scalar.constant 35937 : i32
+  %triple_increment = scalar.constant 1158 : i32
+  %second = scalar.constant 2 : i32
+  %third = scalar.constant 3 : i32
+  scf.for %lane = [%begin to %end step %step] {
+    %bits = view.load %inputs[%lane] : view<256xi32> -> i32
+    %seed = view.load %outputs[%lane] : view<256xi32> -> i32
+    %count_bits = scalar.andi %bits, %count_mask : i32
+    %iterations = index.cast %count_bits : i32 to index
+    %result = scf.for %epoch = [%begin to %epochs step %step](%outer = %seed : i32) -> (i32) {
+      %epoch_value = index.cast %epoch : index to i32
+      %epoch_bits = scalar.addi %bits, %epoch_value : i32
+      %inner_result = scf.for %iteration = [%begin to %iterations step %step](%hash = %outer : i32) -> (i32) {
+        %delta = index.cast %iteration : index to i32
+        %shifted = scalar.addi %epoch_bits, %delta : i32
+        %magnitude = scalar.andi %shifted, %mask : i32
+        %below = scalar.cmpi ult, %magnitude, %boundary : i32
+        %equal = scalar.cmpi eq, %magnitude, %boundary : i32
+        %multiplier = scf.select %below, %triple_multiplier, %single_multiplier : i32
+        %single_increment = scf.select %equal, %second, %third : i32
+        %increment = scf.select %below, %triple_increment, %single_increment : i32
+        %scaled = scalar.muli %hash, %multiplier : i32
+        %next = scalar.addi %scaled, %increment : i32
+        scf.yield %next : i32
+      }
+      scf.yield %inner_result : i32
+    }
+    view.store %result, %outputs[%lane] : i32, view<256xi32>
+  }
+  func.return
+}
+
+check.scenario @overlapping_loop_guard_values {
+  check.trial[3](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.iota offset(-128) step(1) : tensor<256xi32>
+    %storage = check.generate.fill value(-123) : tensor<288xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<288xi32> -> tensor<256xi32>
+    check.compare<@overlapping_loop_guards, @overlapping_loop_guards_oracle>(%input, %output, %trial) : (tensor<256xi32>, tensor<256xi32>, index) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<256xi32>
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<288xi32>
+    }
+  }
+  check.return
+}
+
+// A nested uniform guard and its later shared body must reconverge both
+// participating lanes and upstream bypasses before the shared loop.
+kernel.def @nested_guard_bypass() {
+  %unit = index.constant 1 : index
+  %groups = index.constant 2 : index
+  %threads = index.constant 64 : index
+  kernel.launch.config workgroups(%groups, %unit, %unit) workgroup_size(%threads, %unit, %unit) : index
+} launch(%output: buffer, %iterations: index) {
+  %group = kernel.workgroup.id<x> : index
+  %lane = kernel.workitem.id<x> : index
+  %position = kernel.workitem.dispatch.id<x> : index
+  %base = index.constant 0 : offset
+  %outputs = buffer.view %output[%base] : buffer -> view<128xi32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %multiplier = scalar.constant 10 : i32
+  %first = scalar.constant 1 : i32
+  %second = scalar.constant 2 : i32
+  %third = scalar.constant 3 : i32
+  %leader = index.cmp eq, %lane, %begin : index
+  scf.if %leader {
+    %previous = view.load %outputs[%position] : view<128xi32> -> i32
+    %scaled = scalar.muli %previous, %multiplier : i32
+    %next = scalar.addi %scaled, %first : i32
+    view.store %next, %outputs[%position] : i32, view<128xi32>
+    %first_group = index.cmp eq, %group, %begin : index
+    scf.if %first_group {
+      %previous = view.load %outputs[%position] : view<128xi32> -> i32
+      %scaled = scalar.muli %previous, %multiplier : i32
+      %next = scalar.addi %scaled, %second : i32
+      view.store %next, %outputs[%position] : i32, view<128xi32>
+    }
+  }
+  %capture_group = index.cmp eq, %group, %begin : index
+  scf.if %capture_group {
+    scf.for %iteration = [%begin to %iterations step %step] {
+      %previous = view.load %outputs[%position] : view<128xi32> -> i32
+      %scaled = scalar.muli %previous, %multiplier : i32
+      %next = scalar.addi %scaled, %third : i32
+      view.store %next, %outputs[%position] : i32, view<128xi32>
+    }
+  }
+  kernel.return
+}
+
+// Evaluate the observation trace with scalar selects and a loop-carried hash.
+// Leaders append 1, selected leaders append 2, and selected groups append 3
+// once per iteration. The oracle performs one final store per lane.
+func.def @nested_guard_bypass_oracle(%output: buffer, %iterations: index) {
+  %base = index.constant 0 : offset
+  %outputs = buffer.view %output[%base] : buffer -> view<128xi32>
+  %begin = index.constant 0 : index
+  %end = index.constant 128 : index
+  %width = index.constant 64 : index
+  %step = index.constant 1 : index
+  %multiplier = scalar.constant 10 : i32
+  %first = scalar.constant 1 : i32
+  %second = scalar.constant 2 : i32
+  %third = scalar.constant 3 : i32
+  scf.for %position = [%begin to %end step %step] {
+    %lane = index.rem %position, %width : index
+    %leader = index.cmp eq, %lane, %begin : index
+    %selected = index.cmp ult, %position, %width : index
+    %selected_leader = scalar.andi %leader, %selected : i1
+    %seed = view.load %outputs[%position] : view<128xi32> -> i32
+    %first_scaled = scalar.muli %seed, %multiplier : i32
+    %first_next = scalar.addi %first_scaled, %first : i32
+    %first_hash = scf.select %leader, %first_next, %seed : i32
+    %second_scaled = scalar.muli %first_hash, %multiplier : i32
+    %second_next = scalar.addi %second_scaled, %second : i32
+    %second_hash = scf.select %selected_leader, %second_next, %first_hash : i32
+    %result = scf.for %iteration = [%begin to %iterations step %step](%hash = %second_hash : i32) -> (i32) {
+      %scaled = scalar.muli %hash, %multiplier : i32
+      %next = scalar.addi %scaled, %third : i32
+      %selected_hash = scf.select %selected, %next, %hash : i32
+      scf.yield %selected_hash : i32
+    }
+    view.store %result, %outputs[%position] : i32, view<128xi32>
+  }
+  func.return
+}
+
+check.scenario @nested_guard_bypass_values {
+  check.trial[3](%trial: index, %entropy: check.entropy) {
+    %storage = check.generate.fill value(-123) : tensor<160xi32>
+    %output = check.tensor.view %storage offset(64) : tensor<160xi32> -> tensor<128xi32>
+    check.compare<@nested_guard_bypass, @nested_guard_bypass_oracle>(%output, %trial) : (tensor<128xi32>, index) -> () {
+      check.expect.bitwise actual(%storage) expected(%storage) : tensor<160xi32>
+    }
+  }
+  check.return
+}

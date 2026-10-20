@@ -11,6 +11,7 @@
 #include "loom/codegen/low/builder.h"
 #include "loom/codegen/low/diagnostics.h"
 #include "loom/codegen/low/function.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ops/low/ops.h"
@@ -21,7 +22,8 @@
 #include "loom/target/emit/native/amdgpu/storage_layout.h"
 #include "loom/target/registers.h"
 
-#define LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BITS 32u
+// SGPR, VGPR and AGPR allocation units are all 32-bit words.
+#define LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES 4u
 
 static const loom_low_storage_space_set_t kLoomAmdgpuSpillStorageSpaces =
     LOOM_LOW_STORAGE_SPACE_SET_SCRATCH | LOOM_LOW_STORAGE_SPACE_SET_PRIVATE;
@@ -41,16 +43,10 @@ typedef struct loom_amdgpu_spill_access_t {
 } loom_amdgpu_spill_access_t;
 
 typedef enum loom_amdgpu_spill_register_kind_e {
+  LOOM_AMDGPU_SPILL_REGISTER_KIND_UNSUPPORTED = 0,
   LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR = 1,
-  LOOM_AMDGPU_SPILL_REGISTER_KIND_VGPR = 2,
+  LOOM_AMDGPU_SPILL_REGISTER_KIND_PER_LANE = 2,
 } loom_amdgpu_spill_register_kind_t;
-
-typedef struct loom_amdgpu_spill_register_t {
-  // Register file being spilled or reloaded.
-  loom_amdgpu_spill_register_kind_t kind;
-  // Bytes in one allocation unit.
-  uint32_t unit_bytes;
-} loom_amdgpu_spill_register_t;
 
 typedef struct loom_amdgpu_spill_lowering_context_t {
   // Module being rewritten.
@@ -63,12 +59,10 @@ typedef struct loom_amdgpu_spill_lowering_context_t {
   loom_amdgpu_storage_layout_t storage_layout;
   // Descriptor-set-local ID for the AMDGPU SGPR register class.
   uint16_t sgpr_class_id;
-  // Bytes in one SGPR allocation unit.
-  uint32_t sgpr_unit_bytes;
   // Descriptor-set-local ID for the AMDGPU VGPR register class.
   uint16_t vgpr_class_id;
-  // Bytes in one VGPR allocation unit.
-  uint32_t vgpr_unit_bytes;
+  // Descriptor-set-local accumulator class ID, or UINT8_MAX when absent.
+  uint8_t agpr_class_id;
   // Attribute name used by scratch packet descriptors.
   loom_string_id_t offset_attr_id;
   // Optional structured diagnostic emitter for user-authored spill traffic.
@@ -83,6 +77,18 @@ typedef struct loom_amdgpu_spill_lowering_context_t {
   iree_host_size_t required_register_value_count;
   // Capacity of |required_register_value_ids|.
   iree_host_size_t required_register_value_capacity;
+  // Register values created as private setup for one reload consumer.
+  loom_value_id_t* per_user_placement_value_ids;
+  // Number of entries in |per_user_placement_value_ids|.
+  iree_host_size_t per_user_placement_value_count;
+  // Capacity of |per_user_placement_value_ids|.
+  iree_host_size_t per_user_placement_value_capacity;
+  // VGPR values defined while spill lowering has widened EXEC.
+  loom_value_id_t* expanded_execution_value_ids;
+  // Number of entries in |expanded_execution_value_ids|.
+  iree_host_size_t expanded_execution_value_count;
+  // Capacity of |expanded_execution_value_ids|.
+  iree_host_size_t expanded_execution_value_capacity;
 } loom_amdgpu_spill_lowering_context_t;
 
 static iree_status_t loom_amdgpu_spill_lowering_record_required_register_value(
@@ -103,6 +109,75 @@ static iree_status_t loom_amdgpu_spill_lowering_record_required_register_value(
   return iree_ok_status();
 }
 
+static iree_status_t
+loom_amdgpu_spill_lowering_record_per_user_placement_values(
+    loom_amdgpu_spill_lowering_context_t* context,
+    loom_value_id_t first_value_id) {
+  const loom_module_t* module = context->module;
+  for (loom_value_id_t value_id = first_value_id;
+       value_id < module->values.count; ++value_id) {
+    const loom_value_t* value = loom_module_value(module, value_id);
+    const loom_op_t* defining_op = loom_value_def_op(value);
+    if (!loom_low_type_is_register(loom_module_value_type(module, value_id)) ||
+        defining_op == NULL || defining_op->result_count != 1 ||
+        value->use_count == 0 || loom_value_has_attribute_uses(value) ||
+        loom_module_value_has_type_uses(module, value_id)) {
+      continue;
+    }
+    const loom_use_t* uses = loom_value_uses(value);
+    const loom_op_t* user = loom_use_user_op(uses[0]);
+    bool has_private_placement = user != NULL;
+    for (uint32_t i = 1; i < value->use_count; ++i) {
+      has_private_placement &= loom_use_user_op(uses[i]) == user;
+    }
+    if (!has_private_placement) {
+      continue;
+    }
+    const iree_host_size_t minimum_capacity =
+        context->per_user_placement_value_count + 1;
+    if (minimum_capacity > context->per_user_placement_value_capacity) {
+      IREE_RETURN_IF_ERROR(iree_arena_grow_array(
+          context->scratch_arena, context->per_user_placement_value_count,
+          iree_max(minimum_capacity, 8u),
+          sizeof(*context->per_user_placement_value_ids),
+          &context->per_user_placement_value_capacity,
+          (void**)&context->per_user_placement_value_ids));
+    }
+    context->per_user_placement_value_ids
+        [context->per_user_placement_value_count++] = value_id;
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t
+loom_amdgpu_spill_lowering_record_expanded_execution_values(
+    loom_amdgpu_spill_lowering_context_t* context,
+    loom_value_id_t first_value_id) {
+  for (loom_value_id_t value_id = first_value_id;
+       value_id < context->module->values.count; ++value_id) {
+    const loom_type_t type = loom_module_value_type(context->module, value_id);
+    if (!loom_low_type_is_register(type) ||
+        loom_low_register_type_descriptor_set_stable_id(type) !=
+            context->descriptor_set->stable_id ||
+        loom_low_register_type_class_id(type) != context->vgpr_class_id) {
+      continue;
+    }
+    const iree_host_size_t minimum_capacity =
+        context->expanded_execution_value_count + 1;
+    if (minimum_capacity > context->expanded_execution_value_capacity) {
+      IREE_RETURN_IF_ERROR(iree_arena_grow_array(
+          context->scratch_arena, context->expanded_execution_value_count,
+          iree_max(minimum_capacity, 8u),
+          sizeof(*context->expanded_execution_value_ids),
+          &context->expanded_execution_value_capacity,
+          (void**)&context->expanded_execution_value_ids));
+    }
+    context->expanded_execution_value_ids
+        [context->expanded_execution_value_count++] = value_id;
+  }
+  return iree_ok_status();
+}
+
 static const loom_low_descriptor_t* loom_amdgpu_spill_lowering_descriptor_ref(
     const loom_low_descriptor_set_t* descriptor_set,
     loom_amdgpu_descriptor_ref_t descriptor_ref) {
@@ -118,16 +193,25 @@ loom_amdgpu_spill_lowering_scratch_descriptor_ref(
     const loom_low_descriptor_set_t* descriptor_set,
     loom_amdgpu_descriptor_ref_t descriptor_ref) {
   const loom_low_descriptor_t* descriptor =
-      loom_amdgpu_spill_lowering_descriptor_ref(descriptor_set, descriptor_ref);
+      loom_amdgpu_descriptor_ref_descriptor(descriptor_set, descriptor_ref);
+  // Some scratch ISAs require an address register even for a constant offset.
+  // Their generated tables omit the offset-only family.
+  if (descriptor == NULL) {
+    return (loom_amdgpu_spill_descriptor_t){0};
+  }
 
   const loom_amdgpu_descriptor_immediate_slots_t immediate_slots =
       loom_amdgpu_descriptor_immediate_slots(descriptor_set, descriptor);
-  IREE_ASSERT(immediate_slots.address_offset != LOOM_LOW_ID_NONE,
+  IREE_ASSERT(immediate_slots.address_offset !=
+                  LOOM_AMDGPU_DESCRIPTOR_IMMEDIATE_SLOT_NONE,
               "generated spill descriptor must have an address offset");
-  IREE_ASSERT(immediate_slots.address_offset < descriptor->immediate_count,
-              "generated address offset slot must be descriptor-local");
+  const loom_low_descriptor_layout_t* descriptor_layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  IREE_ASSERT(
+      immediate_slots.address_offset < descriptor_layout->immediate_count,
+      "generated address offset slot must be descriptor-local");
   const uint32_t immediate_index =
-      descriptor->immediate_start + immediate_slots.address_offset;
+      descriptor_layout->immediate_start + immediate_slots.address_offset;
   IREE_ASSERT(immediate_index < descriptor_set->immediate_count,
               "generated address offset slot must reference an immediate");
   const loom_low_immediate_t* offset_immediate =
@@ -161,8 +245,7 @@ static void loom_amdgpu_spill_lowering_resolve_storage_reference(
     loom_value_id_t storage_value_id,
     loom_amdgpu_storage_layout_reference_t* out_reference) {
   loom_amdgpu_storage_layout_lookup_reference(&context->storage_layout,
-                                              context->module, storage_value_id,
-                                              out_reference);
+                                              storage_value_id, out_reference);
 }
 
 static bool loom_amdgpu_spill_lowering_storage_space_supported(
@@ -388,34 +471,23 @@ static iree_status_t loom_amdgpu_spill_lowering_make_register_type(
   return loom_module_intern_type(context->module, register_type, out_type);
 }
 
-static iree_status_t loom_amdgpu_spill_lowering_resolve_register_type(
-    const loom_amdgpu_spill_lowering_context_t* context, loom_type_t type,
-    loom_amdgpu_spill_register_t* out_register, bool* out_supported) {
-  *out_register = (loom_amdgpu_spill_register_t){0};
-  *out_supported = false;
+static loom_amdgpu_spill_register_kind_t
+loom_amdgpu_spill_lowering_resolve_register_kind(
+    const loom_amdgpu_spill_lowering_context_t* context, loom_type_t type) {
   if (!loom_low_type_is_register(type) ||
       loom_low_register_type_descriptor_set_stable_id(type) !=
           context->descriptor_set->stable_id) {
-    return iree_ok_status();
+    return LOOM_AMDGPU_SPILL_REGISTER_KIND_UNSUPPORTED;
   }
   const uint16_t class_id = loom_low_register_type_class_id(type);
-  if (class_id == context->vgpr_class_id) {
-    *out_register = (loom_amdgpu_spill_register_t){
-        .kind = LOOM_AMDGPU_SPILL_REGISTER_KIND_VGPR,
-        .unit_bytes = context->vgpr_unit_bytes,
-    };
-    *out_supported = true;
-    return iree_ok_status();
-  }
   if (class_id == context->sgpr_class_id) {
-    *out_register = (loom_amdgpu_spill_register_t){
-        .kind = LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR,
-        .unit_bytes = context->sgpr_unit_bytes,
-    };
-    *out_supported = true;
-    return iree_ok_status();
+    return LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR;
   }
-  return iree_ok_status();
+  if (class_id == context->vgpr_class_id ||
+      class_id == context->agpr_class_id) {
+    return LOOM_AMDGPU_SPILL_REGISTER_KIND_PER_LANE;
+  }
+  return LOOM_AMDGPU_SPILL_REGISTER_KIND_UNSUPPORTED;
 }
 
 static iree_status_t loom_amdgpu_spill_lowering_emit_unsupported_register_type(
@@ -446,24 +518,24 @@ static iree_status_t loom_amdgpu_spill_lowering_emit_unsupported_register_type(
 }
 
 static uint32_t loom_amdgpu_spill_lowering_register_chunk_units(
-    const loom_amdgpu_spill_register_t* spill_register,
-    uint32_t remaining_units) {
-  if (spill_register->kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR) {
+    loom_amdgpu_spill_register_kind_t register_kind, uint32_t remaining_units) {
+  if (register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR) {
     return 1;
   }
   return loom_amdgpu_spill_lowering_chunk_units(remaining_units);
 }
 
 static uint32_t loom_amdgpu_spill_lowering_access_chunk_units(
-    const loom_amdgpu_spill_register_t* spill_register, uint32_t chunk_units,
+    loom_amdgpu_spill_register_kind_t register_kind, uint32_t chunk_units,
     int64_t segment_offset) {
-  if (spill_register->kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR) {
+  if (register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR) {
     return 1;
   }
   IREE_ASSERT(segment_offset >= 0,
               "spill access range must be resolved before chunk selection");
   while (chunk_units > 1) {
-    const uint32_t chunk_byte_length = chunk_units * spill_register->unit_bytes;
+    const uint32_t chunk_byte_length =
+        chunk_units * LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES;
     if (((uint64_t)segment_offset % chunk_byte_length) == 0) {
       return chunk_units;
     }
@@ -496,31 +568,29 @@ static iree_status_t loom_amdgpu_spill_lowering_build_register_convert(
 
 static iree_status_t loom_amdgpu_spill_lowering_materialize_store_value(
     const loom_amdgpu_spill_lowering_context_t* context,
-    loom_rewriter_t* rewriter,
-    const loom_amdgpu_spill_register_t* spill_register, loom_value_id_t value,
-    uint32_t chunk_units, loom_location_id_t location,
-    loom_value_id_t* out_value, loom_type_t* out_type) {
+    loom_rewriter_t* rewriter, loom_amdgpu_spill_register_kind_t register_kind,
+    loom_value_id_t value, uint32_t chunk_units, loom_location_id_t location,
+    loom_value_id_t* out_value) {
   *out_value = value;
-  *out_type = loom_module_value_type(context->module, value);
-  if (spill_register->kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_VGPR) {
+  if (register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_PER_LANE) {
     return iree_ok_status();
   }
   IREE_ASSERT_EQ(chunk_units, 1u);
+  loom_type_t vgpr_type = loom_type_none();
   IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_make_register_type(
-      context, context->vgpr_class_id, 1, out_type));
+      context, context->vgpr_class_id, 1, &vgpr_type));
   return loom_amdgpu_spill_lowering_build_register_convert(
       context, rewriter, LOOM_AMDGPU_DESCRIPTOR_REF_V_MOV_B32_COPY, value,
-      *out_type, location, out_value);
+      vgpr_type, location, out_value);
 }
 
 static iree_status_t loom_amdgpu_spill_lowering_materialize_loaded_value(
     const loom_amdgpu_spill_lowering_context_t* context,
-    loom_rewriter_t* rewriter,
-    const loom_amdgpu_spill_register_t* spill_register, loom_value_id_t value,
-    uint32_t chunk_units, loom_location_id_t location,
+    loom_rewriter_t* rewriter, loom_amdgpu_spill_register_kind_t register_kind,
+    loom_value_id_t value, uint32_t chunk_units, loom_location_id_t location,
     loom_value_id_t* out_value) {
   *out_value = value;
-  if (spill_register->kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_VGPR) {
+  if (register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_PER_LANE) {
     return iree_ok_status();
   }
   IREE_ASSERT_EQ(chunk_units, 1u);
@@ -600,9 +670,9 @@ static iree_status_t loom_amdgpu_spill_lowering_enter_full_exec(
 
 static iree_status_t loom_amdgpu_spill_lowering_make_scratch_load_type(
     const loom_amdgpu_spill_lowering_context_t* context,
-    const loom_amdgpu_spill_register_t* spill_register, uint32_t chunk_units,
+    loom_amdgpu_spill_register_kind_t register_kind, uint32_t chunk_units,
     loom_type_t source_type, loom_type_t* out_type) {
-  if (spill_register->kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR) {
+  if (register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR) {
     return loom_amdgpu_spill_lowering_make_register_type(
         context, context->vgpr_class_id, chunk_units, out_type);
   }
@@ -612,18 +682,6 @@ static iree_status_t loom_amdgpu_spill_lowering_make_scratch_load_type(
   }
   return loom_amdgpu_spill_lowering_make_chunk_type(
       context->module, source_type, chunk_units, out_type);
-}
-
-static uint32_t loom_amdgpu_spill_lowering_register_class_unit_bytes(
-    const loom_low_descriptor_set_t* descriptor_set, uint16_t class_id) {
-  IREE_ASSERT_ARGUMENT(descriptor_set);
-  IREE_ASSERT(class_id < descriptor_set->reg_class_count,
-              "AMDGPU descriptor set must provide generated register class");
-  const loom_low_reg_class_t* reg_class =
-      &descriptor_set->reg_classes[class_id];
-  IREE_ASSERT_EQ(reg_class->alloc_unit_bits,
-                 LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BITS);
-  return reg_class->alloc_unit_bits / 8u;
 }
 
 static iree_status_t loom_amdgpu_spill_lowering_build_slice(
@@ -649,8 +707,8 @@ static iree_status_t loom_amdgpu_spill_lowering_build_slice(
 static iree_status_t loom_amdgpu_spill_lowering_build_storage_address(
     const loom_amdgpu_spill_lowering_context_t* context,
     loom_rewriter_t* rewriter, loom_value_id_t storage,
-    const loom_amdgpu_spill_access_t* access, loom_type_t base_type,
-    loom_location_id_t location, loom_value_id_t* out_address) {
+    const loom_amdgpu_spill_access_t* access, loom_location_id_t location,
+    loom_value_id_t* out_address) {
   *out_address = LOOM_VALUE_ID_INVALID;
   if (access->storage_offset > INT64_MAX) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
@@ -659,8 +717,8 @@ static iree_status_t loom_amdgpu_spill_lowering_build_storage_address(
                             access->storage_offset);
   }
   loom_type_t address_type = loom_type_none();
-  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_make_chunk_type(
-      context->module, base_type, 1, &address_type));
+  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_make_register_type(
+      context, context->vgpr_class_id, 1, &address_type));
   loom_op_t* address_op = NULL;
   IREE_RETURN_IF_ERROR(loom_low_storage_address_build(
       &rewriter->builder, storage, (int64_t)access->storage_offset,
@@ -673,7 +731,7 @@ static iree_status_t loom_amdgpu_spill_lowering_store_chunk(
     const loom_amdgpu_spill_lowering_context_t* context,
     loom_rewriter_t* rewriter, loom_value_id_t storage, loom_value_id_t value,
     uint32_t chunk_units, const loom_amdgpu_spill_access_t* access,
-    loom_type_t value_type, loom_location_id_t location) {
+    loom_location_id_t location) {
   loom_amdgpu_spill_descriptor_t spill_descriptor =
       loom_amdgpu_spill_lowering_scratch_descriptor_ref(
           context->descriptor_set,
@@ -681,11 +739,11 @@ static iree_status_t loom_amdgpu_spill_lowering_store_chunk(
   loom_value_id_t operands[2] = {value, LOOM_VALUE_ID_INVALID};
   iree_host_size_t operand_count = 1;
   int64_t offset = access->segment_offset;
-  if (!loom_amdgpu_spill_lowering_offset_fits_immediate(
+  if (spill_descriptor.descriptor == NULL ||
+      !loom_amdgpu_spill_lowering_offset_fits_immediate(
           spill_descriptor.offset_immediate, offset)) {
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_build_storage_address(
-        context, rewriter, storage, access, value_type, location,
-        &operands[0]));
+        context, rewriter, storage, access, location, &operands[0]));
     operands[1] = value;
     operand_count = 2;
     offset = 0;
@@ -723,11 +781,11 @@ static iree_status_t loom_amdgpu_spill_lowering_load_chunk(
   loom_value_id_t operands[1] = {LOOM_VALUE_ID_INVALID};
   iree_host_size_t operand_count = 0;
   int64_t offset = access->segment_offset;
-  if (!loom_amdgpu_spill_lowering_offset_fits_immediate(
+  if (spill_descriptor.descriptor == NULL ||
+      !loom_amdgpu_spill_lowering_offset_fits_immediate(
           spill_descriptor.offset_immediate, offset)) {
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_build_storage_address(
-        context, rewriter, storage, access, result_type, location,
-        &operands[0]));
+        context, rewriter, storage, access, location, &operands[0]));
     operand_count = 1;
     offset = 0;
     spill_descriptor = loom_amdgpu_spill_lowering_scratch_descriptor_ref(
@@ -754,24 +812,17 @@ static iree_status_t loom_amdgpu_spill_lowering_load_chunk(
 }
 
 static iree_status_t loom_amdgpu_spill_lowering_rewrite_spill(
-    const loom_amdgpu_spill_lowering_context_t* context,
-    loom_rewriter_t* rewriter, loom_op_t* op) {
+    loom_amdgpu_spill_lowering_context_t* context, loom_rewriter_t* rewriter,
+    loom_op_t* op) {
   const loom_value_id_t value = loom_low_spill_value(op);
   const loom_type_t value_type = loom_module_value_type(context->module, value);
-  loom_amdgpu_spill_register_t spill_register = {0};
-  bool register_supported = false;
-  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_resolve_register_type(
-      context, value_type, &spill_register, &register_supported));
-  if (!register_supported) {
+  const loom_amdgpu_spill_register_kind_t register_kind =
+      loom_amdgpu_spill_lowering_resolve_register_kind(context, value_type);
+  if (register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_UNSUPPORTED) {
     return loom_amdgpu_spill_lowering_emit_unsupported_register_type(
         context, op, value, value_type);
   }
   const uint32_t unit_count = loom_low_register_type_unit_count(value_type);
-  if (unit_count == 0) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "AMDGPU spill lowering found a zero-unit spill value");
-  }
 
   const loom_value_id_t storage = loom_low_spill_storage(op);
   loom_amdgpu_storage_layout_reference_t storage_reference = {0};
@@ -782,7 +833,7 @@ static iree_status_t loom_amdgpu_spill_lowering_rewrite_spill(
         context, op, storage, &storage_reference);
   }
   const uint64_t access_byte_length =
-      (uint64_t)unit_count * spill_register.unit_bytes;
+      (uint64_t)unit_count * LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES;
   bool access_supported = false;
   IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_validate_access_range(
       context, op, storage, &storage_reference, loom_low_spill_offset(op),
@@ -793,62 +844,66 @@ static iree_status_t loom_amdgpu_spill_lowering_rewrite_spill(
 
   loom_builder_set_before(&rewriter->builder, op);
   loom_value_id_t saved_exec = LOOM_VALUE_ID_INVALID;
-  // low.spill has no lane-mask operand and snapshots the whole logical register
-  // value. AMDGPU scratch/private packets are lane-private and EXEC-gated, so
-  // emit spill traffic under full EXEC for every supported register class.
-  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_enter_full_exec(
-      context, rewriter, op->location, &saved_exec));
+  // A per-lane definition only assigns the lanes active at its program point.
+  // Preserve the other lanes already accumulated in their lane-private spill
+  // slots by leaving EXEC unchanged. SGPR values describe one wave-wide value
+  // and still require every lane's scratch slot to receive the same snapshot.
+  const bool requires_full_exec =
+      register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR;
+  if (requires_full_exec) {
+    IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_enter_full_exec(
+        context, rewriter, op->location, &saved_exec));
+  }
+  const loom_value_id_t expanded_execution_value_start =
+      context->module->values.count;
   for (uint32_t chunk_start = 0; chunk_start < unit_count;) {
     uint32_t chunk_units = loom_amdgpu_spill_lowering_register_chunk_units(
-        &spill_register, unit_count - chunk_start);
+        register_kind, unit_count - chunk_start);
     const uint64_t chunk_byte_offset =
-        (uint64_t)chunk_start * spill_register.unit_bytes;
+        (uint64_t)chunk_start * LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES;
     const uint64_t chunk_byte_length =
-        (uint64_t)chunk_units * spill_register.unit_bytes;
+        (uint64_t)chunk_units * LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES;
     loom_amdgpu_spill_access_t access = {0};
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_resolve_access(
         &storage_reference, loom_low_spill_offset(op), chunk_byte_offset,
         chunk_byte_length, &access));
     chunk_units = loom_amdgpu_spill_lowering_access_chunk_units(
-        &spill_register, chunk_units, access.segment_offset);
+        register_kind, chunk_units, access.segment_offset);
     loom_value_id_t chunk_value = LOOM_VALUE_ID_INVALID;
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_build_slice(
         rewriter, value, unit_count, chunk_start, chunk_units, value_type,
         op->location, &chunk_value));
-    loom_type_t scratch_value_type = loom_type_none();
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_materialize_store_value(
-        context, rewriter, &spill_register, chunk_value, chunk_units,
-        op->location, &chunk_value, &scratch_value_type));
+        context, rewriter, register_kind, chunk_value, chunk_units,
+        op->location, &chunk_value));
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_store_chunk(
         context, rewriter, storage, chunk_value, chunk_units, &access,
-        scratch_value_type, op->location));
+        op->location));
     chunk_start += chunk_units;
   }
-  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_build_exec_write(
-      context, rewriter, saved_exec, op->location));
+  if (requires_full_exec) {
+    IREE_RETURN_IF_ERROR(
+        loom_amdgpu_spill_lowering_record_expanded_execution_values(
+            context, expanded_execution_value_start));
+    IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_build_exec_write(
+        context, rewriter, saved_exec, op->location));
+  }
   return loom_rewriter_erase(rewriter, op);
 }
 
 static iree_status_t loom_amdgpu_spill_lowering_rewrite_reload(
-    const loom_amdgpu_spill_lowering_context_t* context,
-    loom_rewriter_t* rewriter, loom_op_t* op) {
+    loom_amdgpu_spill_lowering_context_t* context, loom_rewriter_t* rewriter,
+    loom_op_t* op) {
   const loom_value_id_t result = loom_low_reload_result(op);
   const loom_type_t result_type =
       loom_module_value_type(context->module, result);
-  loom_amdgpu_spill_register_t spill_register = {0};
-  bool register_supported = false;
-  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_resolve_register_type(
-      context, result_type, &spill_register, &register_supported));
-  if (!register_supported) {
+  const loom_amdgpu_spill_register_kind_t register_kind =
+      loom_amdgpu_spill_lowering_resolve_register_kind(context, result_type);
+  if (register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_UNSUPPORTED) {
     return loom_amdgpu_spill_lowering_emit_unsupported_register_type(
         context, op, result, result_type);
   }
   const uint32_t unit_count = loom_low_register_type_unit_count(result_type);
-  if (unit_count == 0) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "AMDGPU spill lowering found a zero-unit reload result");
-  }
 
   const loom_value_id_t storage = loom_low_reload_storage(op);
   loom_amdgpu_storage_layout_reference_t storage_reference = {0};
@@ -859,7 +914,7 @@ static iree_status_t loom_amdgpu_spill_lowering_rewrite_reload(
         context, op, storage, &storage_reference);
   }
   const uint64_t access_byte_length =
-      (uint64_t)unit_count * spill_register.unit_bytes;
+      (uint64_t)unit_count * LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES;
   bool access_supported = false;
   IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_validate_access_range(
       context, op, storage, &storage_reference, loom_low_reload_offset(op),
@@ -870,10 +925,19 @@ static iree_status_t loom_amdgpu_spill_lowering_rewrite_reload(
 
   loom_builder_set_before(&rewriter->builder, op);
   loom_value_id_t saved_exec = LOOM_VALUE_ID_INVALID;
-  // low.reload restores the whole logical register value. Load every
-  // lane-private slot under full EXEC before restoring the caller's EXEC mask.
-  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_enter_full_exec(
-      context, rewriter, op->location, &saved_exec));
+  // A per-lane reload defines only the lanes active at its program point,
+  // matching other vector memory instructions. This also lets a backedge reload
+  // share its destination with the prior loop state without clobbering retired
+  // lanes. SGPR reloads still gather a wave-wide scalar snapshot through a
+  // temporary VGPR and therefore require full EXEC.
+  const bool requires_full_exec =
+      register_kind == LOOM_AMDGPU_SPILL_REGISTER_KIND_SGPR;
+  if (requires_full_exec) {
+    IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_enter_full_exec(
+        context, rewriter, op->location, &saved_exec));
+  }
+  const loom_value_id_t expanded_execution_value_start =
+      context->module->values.count;
   const loom_value_id_t value_checkpoint =
       loom_rewriter_value_checkpoint(rewriter);
   loom_value_id_t* loaded_chunks = NULL;
@@ -883,31 +947,36 @@ static iree_status_t loom_amdgpu_spill_lowering_rewrite_reload(
   iree_host_size_t loaded_chunk_count = 0;
   for (uint32_t chunk_start = 0; chunk_start < unit_count;) {
     uint32_t chunk_units = loom_amdgpu_spill_lowering_register_chunk_units(
-        &spill_register, unit_count - chunk_start);
+        register_kind, unit_count - chunk_start);
     const uint64_t chunk_byte_offset =
-        (uint64_t)chunk_start * spill_register.unit_bytes;
+        (uint64_t)chunk_start * LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES;
     const uint64_t chunk_byte_length =
-        (uint64_t)chunk_units * spill_register.unit_bytes;
+        (uint64_t)chunk_units * LOOM_AMDGPU_SCRATCH_SPILL_UNIT_BYTES;
     loom_amdgpu_spill_access_t access = {0};
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_resolve_access(
         &storage_reference, loom_low_reload_offset(op), chunk_byte_offset,
         chunk_byte_length, &access));
     chunk_units = loom_amdgpu_spill_lowering_access_chunk_units(
-        &spill_register, chunk_units, access.segment_offset);
+        register_kind, chunk_units, access.segment_offset);
     loom_type_t chunk_type = result_type;
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_make_scratch_load_type(
-        context, &spill_register, chunk_units, result_type, &chunk_type));
+        context, register_kind, chunk_units, result_type, &chunk_type));
     loom_value_id_t loaded_chunk = LOOM_VALUE_ID_INVALID;
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_load_chunk(
         context, rewriter, storage, chunk_units, chunk_type, &access,
         op->location, &loaded_chunk));
     IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_materialize_loaded_value(
-        context, rewriter, &spill_register, loaded_chunk, chunk_units,
+        context, rewriter, register_kind, loaded_chunk, chunk_units,
         op->location, &loaded_chunks[loaded_chunk_count++]));
     chunk_start += chunk_units;
   }
-  IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_build_exec_write(
-      context, rewriter, saved_exec, op->location));
+  if (requires_full_exec) {
+    IREE_RETURN_IF_ERROR(
+        loom_amdgpu_spill_lowering_record_expanded_execution_values(
+            context, expanded_execution_value_start));
+    IREE_RETURN_IF_ERROR(loom_amdgpu_spill_lowering_build_exec_write(
+        context, rewriter, saved_exec, op->location));
+  }
 
   loom_value_id_t replacement = LOOM_VALUE_ID_INVALID;
   if (loaded_chunk_count == 1) {
@@ -921,8 +990,10 @@ static iree_status_t loom_amdgpu_spill_lowering_rewrite_reload(
   }
   IREE_RETURN_IF_ERROR(loom_rewriter_preserve_result_names_on_new_values(
       rewriter, op, &replacement, 1, value_checkpoint));
-  return loom_rewriter_replace_all_uses_and_erase(rewriter, op, &replacement,
-                                                  1);
+  IREE_RETURN_IF_ERROR(
+      loom_rewriter_replace_all_uses_and_erase(rewriter, op, &replacement, 1));
+  return loom_amdgpu_spill_lowering_record_per_user_placement_values(
+      context, value_checkpoint);
 }
 
 static iree_status_t loom_amdgpu_spill_lowering_collect_ops(
@@ -962,7 +1033,7 @@ static iree_status_t loom_amdgpu_spill_lowering_build_storage_layout(
   const loom_op_t* op = NULL;
   loom_region_for_each_block(body, block) {
     loom_block_for_each_op(block, op) {
-      if (!loom_low_storage_reserve_isa(op)) {
+      if (!loom_low_storage_reserve_isa(op) && !loom_low_storage_view_isa(op)) {
         continue;
       }
       IREE_RETURN_IF_ERROR(
@@ -970,7 +1041,8 @@ static iree_status_t loom_amdgpu_spill_lowering_build_storage_layout(
     }
   }
   loom_low_storage_layout_t source_layout;
-  loom_low_storage_layout_builder_finish(&builder, &source_layout);
+  IREE_RETURN_IF_ERROR(
+      loom_low_storage_layout_builder_finish(&builder, arena, &source_layout));
   return loom_amdgpu_storage_layout_build(&source_layout, arena,
                                           out_storage_layout);
 }
@@ -991,13 +1063,8 @@ static iree_status_t loom_amdgpu_spill_lowering_initialize_context(
       .scratch_arena = scratch_arena,
   };
   out_context->sgpr_class_id = LOOM_AMDGPU_REG_CLASS_ID_SGPR;
-  out_context->sgpr_unit_bytes =
-      loom_amdgpu_spill_lowering_register_class_unit_bytes(
-          descriptor_set, out_context->sgpr_class_id);
   out_context->vgpr_class_id = LOOM_AMDGPU_REG_CLASS_ID_VGPR;
-  out_context->vgpr_unit_bytes =
-      loom_amdgpu_spill_lowering_register_class_unit_bytes(
-          descriptor_set, out_context->vgpr_class_id);
+  out_context->agpr_class_id = loom_amdgpu_agpr_reg_class_id(descriptor_set);
   IREE_RETURN_IF_ERROR(loom_module_intern_string(module, IREE_SV("offset"),
                                                  &out_context->offset_attr_id));
   return loom_amdgpu_spill_lowering_build_storage_layout(
@@ -1040,19 +1107,15 @@ iree_status_t loom_amdgpu_lower_spill_traffic(
 
   loom_rewriter_t rewriter = {0};
   loom_rewriter_initialize(&rewriter, module, scratch_arena);
-  // This is terminal target lowering: no later structural spill layer can
-  // recursively spill its packet helpers. Preserve every created helper and
-  // every existing value consumed by a lowered spill store in registers.
+  // Generated packet helpers cannot recursively spill. The frame loop retains
+  // already-spilled producers separately; an existing source of an authored or
+  // CFG-edge spill can still have other uses that benefit from spilling.
   const loom_value_id_t first_generated_value_id = module->values.count;
   iree_status_t status = iree_ok_status();
   for (iree_host_size_t i = 0; i < op_count && iree_status_is_ok(status); ++i) {
     if (loom_low_spill_isa(ops[i])) {
-      status = loom_amdgpu_spill_lowering_record_required_register_value(
-          &context, loom_low_spill_value(ops[i]));
-      if (iree_status_is_ok(status)) {
-        status = loom_amdgpu_spill_lowering_rewrite_spill(&context, &rewriter,
-                                                          ops[i]);
-      }
+      status =
+          loom_amdgpu_spill_lowering_rewrite_spill(&context, &rewriter, ops[i]);
     } else if (loom_low_reload_isa(ops[i])) {
       status = loom_amdgpu_spill_lowering_rewrite_reload(&context, &rewriter,
                                                          ops[i]);
@@ -1061,6 +1124,9 @@ iree_status_t loom_amdgpu_lower_spill_traffic(
   for (loom_value_id_t value_id = first_generated_value_id;
        value_id < module->values.count && iree_status_is_ok(status);
        ++value_id) {
+    if (!loom_low_type_is_register(loom_module_value_type(module, value_id))) {
+      continue;
+    }
     status = loom_amdgpu_spill_lowering_record_required_register_value(
         &context, value_id);
   }
@@ -1070,6 +1136,14 @@ iree_status_t loom_amdgpu_lower_spill_traffic(
         context.required_register_value_ids;
     out_result->required_register_value_count =
         context.required_register_value_count;
+    out_result->expanded_execution_value_ids =
+        context.expanded_execution_value_ids;
+    out_result->expanded_execution_value_count =
+        context.expanded_execution_value_count;
+    out_result->per_user_placement_value_ids =
+        context.per_user_placement_value_ids;
+    out_result->per_user_placement_value_count =
+        context.per_user_placement_value_count;
   }
   return status;
 }

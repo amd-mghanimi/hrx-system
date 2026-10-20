@@ -61,8 +61,7 @@ static const iree_hal_device_spec_t* FakeHalDeviceSpec(
 }
 
 static iree_hal_device_vtable_t MakeFakeHalDeviceVtable() {
-  iree_hal_device_vtable_t vtable = {};
-  vtable.device_spec = FakeHalDeviceSpec;
+  iree_hal_device_vtable_t vtable = {.device_spec = FakeHalDeviceSpec};
   return vtable;
 }
 
@@ -85,12 +84,12 @@ iree_status_t CreateAmdgpuDeviceSpec(const TestTarget* targets,
   for (iree_host_size_t i = 0; i < target_count && iree_status_is_ok(status);
        ++i) {
     const iree_hal_executable_target_t target = {
-        /*.family=*/IREE_SV("amdgpu"),
-        /*.target_key=*/targets[i].target_key,
-        /*.kind=*/targets[i].kind,
-        /*.priority=*/0,
-        /*.physical_device_affinity=*/targets[i].physical_device_affinity,
-        /*.flags=*/IREE_HAL_EXECUTABLE_TARGET_FLAG_NONE,
+        .family = IREE_SV("amdgpu"),
+        .target_key = targets[i].target_key,
+        .kind = targets[i].kind,
+        .priority = 0,
+        .physical_device_affinity = targets[i].physical_device_affinity,
+        .flags = IREE_HAL_EXECUTABLE_TARGET_FLAG_NONE,
     };
     status =
         iree_hal_device_spec_builder_add_executable_target(&builder, &target);
@@ -136,25 +135,30 @@ void ExpectFailedAdapterResult(const loomc_result_t* result) {
   EXPECT_EQ(ToString(diagnostic->code), "AMDGPU/IREE_HAL");
 }
 
-TargetProfilePtr CreateProfileFromHal(
+TargetProfilePtr SelectTargetFromHal(
     loomc_target_environment_t* target_environment, FakeHalDevice* device,
     iree_hal_physical_device_affinity_t physical_device_affinity,
-    loomc_result_t** out_result) {
+    loomc_result_t** out_result,
+    const iree_hal_executable_target_t** out_executable_target = nullptr) {
   iree_hal_device_t* hal_device = reinterpret_cast<iree_hal_device_t*>(device);
-  const loomc_amdgpu_iree_hal_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_AMDGPU_IREE_HAL_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("fake-amdgpu"),
-      /*.device=*/hal_device,
-      /*.physical_device_affinity=*/physical_device_affinity,
+  const loomc_amdgpu_iree_hal_target_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_AMDGPU_IREE_HAL_TARGET_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("fake-amdgpu"),
+      .device = hal_device,
+      .physical_device_affinity = physical_device_affinity,
+      .target_profile = nullptr,
   };
-  loomc_target_profile_t* profile = nullptr;
-  loomc_status_t status = loomc_target_profile_create_amdgpu_iree_hal(
-      target_environment, &options, loomc_allocator_system(), &profile,
+  loomc_iree_hal_target_selection_t selection = {};
+  loomc_status_t status = loomc_target_select_amdgpu_iree_hal(
+      target_environment, &options, loomc_allocator_system(), &selection,
       out_result);
   LOOMC_EXPECT_OK(status);
-  return TargetProfilePtr(profile);
+  if (out_executable_target != nullptr) {
+    *out_executable_target = selection.executable_target;
+  }
+  return TargetProfilePtr(selection.target_profile);
 }
 
 TEST(LoomcAmdgpuIreeHalTargetTest, CreatesExactProfileFromHalTarget) {
@@ -168,12 +172,16 @@ TEST(LoomcAmdgpuIreeHalTargetTest, CreatesExactProfileFromHalTarget) {
   InitializeFakeDevice(device_spec.get(), &device);
   TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
   loomc_result_t* result = nullptr;
-  TargetProfilePtr profile =
-      CreateProfileFromHal(target_environment.get(), &device,
-                           /*physical_device_affinity=*/0, &result);
+  const iree_hal_executable_target_t* executable_target = nullptr;
+  TargetProfilePtr profile = SelectTargetFromHal(
+      target_environment.get(), &device, /*physical_device_affinity=*/0,
+      &result, &executable_target);
   ResultPtr result_ptr(result);
 
   ASSERT_NE(profile.get(), nullptr);
+  ASSERT_NE(executable_target, nullptr);
+  EXPECT_TRUE(iree_string_view_equal(executable_target->target_key,
+                                     IREE_SV("gfx1151")));
   ExpectSucceededResult(result_ptr.get());
   loomc_amdgpu_target_identity_t identity = {};
   LOOMC_EXPECT_OK(
@@ -183,6 +191,65 @@ TEST(LoomcAmdgpuIreeHalTargetTest, CreatesExactProfileFromHalTarget) {
             LOOMC_AMDGPU_TARGET_FEATURE_UNSUPPORTED);
   EXPECT_EQ(identity.amdhsa_features.xnack,
             LOOMC_AMDGPU_TARGET_FEATURE_UNSUPPORTED);
+}
+
+TEST(LoomcAmdgpuIreeHalTargetTest,
+     FallsBackToGenericWhenExactTargetIsNotModeled) {
+  const TestTarget targets[] = {
+      {IREE_SV("gfx9999"), 1, IREE_HAL_EXECUTABLE_TARGET_KIND_EXACT},
+      {IREE_SV("gfx11-generic"), 1, IREE_HAL_EXECUTABLE_TARGET_KIND_GENERIC},
+  };
+  DeviceSpecPtr device_spec;
+  IREE_ASSERT_OK(
+      CreateAmdgpuDeviceSpec(targets, IREE_ARRAYSIZE(targets), &device_spec));
+  FakeHalDevice device = {};
+  InitializeFakeDevice(device_spec.get(), &device);
+  TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
+  loomc_result_t* result = nullptr;
+  const iree_hal_executable_target_t* executable_target = nullptr;
+  TargetProfilePtr profile = SelectTargetFromHal(
+      target_environment.get(), &device, /*physical_device_affinity=*/0,
+      &result, &executable_target);
+  ResultPtr result_ptr(result);
+
+  ASSERT_NE(profile.get(), nullptr);
+  ASSERT_NE(executable_target, nullptr);
+  EXPECT_TRUE(iree_string_view_equal(executable_target->target_key,
+                                     IREE_SV("gfx11-generic")));
+  ExpectSucceededResult(result_ptr.get());
+  loomc_amdgpu_target_identity_t identity = {};
+  LOOMC_EXPECT_OK(
+      loomc_amdgpu_target_profile_query_identity(profile.get(), &identity));
+  EXPECT_EQ(ToString(identity.target), "gfx11-generic");
+}
+
+TEST(LoomcAmdgpuIreeHalTargetTest, PrefersModeledExactTargetOverGeneric) {
+  const TestTarget targets[] = {
+      {IREE_SV("gfx11-generic"), 1, IREE_HAL_EXECUTABLE_TARGET_KIND_GENERIC},
+      {IREE_SV("gfx1151"), 1, IREE_HAL_EXECUTABLE_TARGET_KIND_EXACT},
+  };
+  DeviceSpecPtr device_spec;
+  IREE_ASSERT_OK(
+      CreateAmdgpuDeviceSpec(targets, IREE_ARRAYSIZE(targets), &device_spec));
+  FakeHalDevice device = {};
+  InitializeFakeDevice(device_spec.get(), &device);
+  TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
+  loomc_result_t* result = nullptr;
+  const iree_hal_executable_target_t* executable_target = nullptr;
+  TargetProfilePtr profile = SelectTargetFromHal(
+      target_environment.get(), &device, /*physical_device_affinity=*/0,
+      &result, &executable_target);
+  ResultPtr result_ptr(result);
+
+  ASSERT_NE(profile.get(), nullptr);
+  ASSERT_NE(executable_target, nullptr);
+  EXPECT_TRUE(iree_string_view_equal(executable_target->target_key,
+                                     IREE_SV("gfx1151")));
+  ExpectSucceededResult(result_ptr.get());
+  loomc_amdgpu_target_identity_t identity = {};
+  LOOMC_EXPECT_OK(
+      loomc_amdgpu_target_profile_query_identity(profile.get(), &identity));
+  EXPECT_EQ(ToString(identity.target), "gfx1151");
 }
 
 TEST(LoomcAmdgpuIreeHalTargetTest, PreservesStructuredAmdhsaFeatureModes) {
@@ -198,8 +265,8 @@ TEST(LoomcAmdgpuIreeHalTargetTest, PreservesStructuredAmdhsaFeatureModes) {
   TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
   loomc_result_t* result = nullptr;
   TargetProfilePtr profile =
-      CreateProfileFromHal(target_environment.get(), &device,
-                           /*physical_device_affinity=*/0, &result);
+      SelectTargetFromHal(target_environment.get(), &device,
+                          /*physical_device_affinity=*/0, &result);
   ResultPtr result_ptr(result);
 
   ASSERT_NE(profile.get(), nullptr);
@@ -225,8 +292,8 @@ TEST(LoomcAmdgpuIreeHalTargetTest,
   TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
   loomc_result_t* result = nullptr;
   TargetProfilePtr profile =
-      CreateProfileFromHal(target_environment.get(), &device,
-                           /*physical_device_affinity=*/0, &result);
+      SelectTargetFromHal(target_environment.get(), &device,
+                          /*physical_device_affinity=*/0, &result);
   ResultPtr result_ptr(result);
 
   EXPECT_EQ(profile.get(), nullptr);
@@ -235,7 +302,7 @@ TEST(LoomcAmdgpuIreeHalTargetTest,
       loomc_result_diagnostic_at(result_ptr.get(), 0);
   ASSERT_NE(diagnostic, nullptr);
   EXPECT_THAT(ToString(diagnostic->message),
-              ::testing::HasSubstr("uses a generic compiler key"));
+              ::testing::HasSubstr("kind does not match its target key"));
 }
 
 TEST(LoomcAmdgpuIreeHalTargetTest,
@@ -253,16 +320,16 @@ TEST(LoomcAmdgpuIreeHalTargetTest,
 
   loomc_result_t* ambiguous_result = nullptr;
   TargetProfilePtr ambiguous_profile =
-      CreateProfileFromHal(target_environment.get(), &device,
-                           /*physical_device_affinity=*/0, &ambiguous_result);
+      SelectTargetFromHal(target_environment.get(), &device,
+                          /*physical_device_affinity=*/0, &ambiguous_result);
   ResultPtr ambiguous_result_ptr(ambiguous_result);
   EXPECT_EQ(ambiguous_profile.get(), nullptr);
   ExpectFailedAdapterResult(ambiguous_result_ptr.get());
 
   loomc_result_t* selected_result = nullptr;
   TargetProfilePtr selected_profile =
-      CreateProfileFromHal(target_environment.get(), &device,
-                           /*physical_device_affinity=*/2, &selected_result);
+      SelectTargetFromHal(target_environment.get(), &device,
+                          /*physical_device_affinity=*/2, &selected_result);
   ResultPtr selected_result_ptr(selected_result);
   ASSERT_NE(selected_profile.get(), nullptr);
   ExpectSucceededResult(selected_result_ptr.get());
@@ -283,33 +350,124 @@ TEST(LoomcAmdgpuIreeHalTargetTest, ProviderRoutesThroughGenericHalRouter) {
   InitializeFakeDevice(device_spec.get(), &device);
   TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
   iree_hal_device_t* hal_device = reinterpret_cast<iree_hal_device_t*>(&device);
-  const loomc_iree_hal_profile_provider_t* providers[] = {
-      loomc_amdgpu_iree_hal_profile_provider(),
+  const loomc_iree_hal_target_provider_t* providers[] = {
+      loomc_amdgpu_iree_hal_target_provider(),
   };
-  const loomc_iree_hal_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_IREE_HAL_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("router"),
-      /*.device=*/hal_device,
-      /*.physical_device_affinity=*/1,
-      /*.providers=*/providers,
-      /*.provider_count=*/IREE_ARRAYSIZE(providers),
+  const loomc_iree_hal_target_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_IREE_HAL_TARGET_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("router"),
+      .device = hal_device,
+      .physical_device_affinity = 1,
+      .target_profile = nullptr,
+      .providers = providers,
+      .provider_count = IREE_ARRAYSIZE(providers),
   };
   loomc_result_t* result = nullptr;
-  loomc_target_profile_t* profile = nullptr;
-  LOOMC_ASSERT_OK(loomc_target_profile_create_iree_hal(
-      target_environment.get(), &options, loomc_allocator_system(), &profile,
+  loomc_iree_hal_target_selection_t selection = {};
+  LOOMC_ASSERT_OK(loomc_target_select_iree_hal(
+      target_environment.get(), &options, loomc_allocator_system(), &selection,
       &result));
-  TargetProfilePtr profile_ptr(profile);
+  TargetProfilePtr profile_ptr(selection.target_profile);
   ResultPtr result_ptr(result);
 
   ASSERT_NE(profile_ptr.get(), nullptr);
+  ASSERT_NE(selection.executable_target, nullptr);
+  EXPECT_TRUE(iree_string_view_equal(selection.executable_target->target_key,
+                                     IREE_SV("gfx1151")));
   ExpectSucceededResult(result_ptr.get());
   loomc_amdgpu_target_identity_t identity = {};
   LOOMC_EXPECT_OK(
       loomc_amdgpu_target_profile_query_identity(profile_ptr.get(), &identity));
   EXPECT_EQ(ToString(identity.target), "gfx1151");
+}
+
+TEST(LoomcAmdgpuIreeHalTargetTest,
+     ForcedProfilePreservesExactCompilerAndLoaderPair) {
+  const TestTarget targets[] = {
+      {IREE_SV("gfx1151"), 1, IREE_HAL_EXECUTABLE_TARGET_KIND_EXACT},
+  };
+  DeviceSpecPtr device_spec;
+  IREE_ASSERT_OK(
+      CreateAmdgpuDeviceSpec(targets, IREE_ARRAYSIZE(targets), &device_spec));
+  FakeHalDevice device = {};
+  InitializeFakeDevice(device_spec.get(), &device);
+  TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
+  loomc_target_profile_t* requested_profile = nullptr;
+  LOOMC_ASSERT_OK(loomc_target_profile_select(
+      target_environment.get(), loomc_make_cstring_view("amdgpu:gfx1151"),
+      loomc_allocator_system(), &requested_profile));
+  TargetProfilePtr requested_profile_ptr(requested_profile);
+  const loomc_iree_hal_target_provider_t* providers[] = {
+      loomc_amdgpu_iree_hal_target_provider(),
+  };
+  const loomc_iree_hal_target_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_IREE_HAL_TARGET_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_string_view_empty(),
+      .device = reinterpret_cast<iree_hal_device_t*>(&device),
+      .physical_device_affinity = 1,
+      .target_profile = requested_profile_ptr.get(),
+      .providers = providers,
+      .provider_count = IREE_ARRAYSIZE(providers),
+  };
+  loomc_iree_hal_target_selection_t selection = {};
+  loomc_result_t* result = nullptr;
+  LOOMC_ASSERT_OK(loomc_target_select_iree_hal(
+      target_environment.get(), &options, loomc_allocator_system(), &selection,
+      &result));
+  TargetProfilePtr selected_profile_ptr(selection.target_profile);
+  ResultPtr result_ptr(result);
+
+  ExpectSucceededResult(result_ptr.get());
+  EXPECT_EQ(selected_profile_ptr.get(), requested_profile_ptr.get());
+  ASSERT_NE(selection.executable_target, nullptr);
+  EXPECT_TRUE(iree_string_view_equal(selection.executable_target->target_key,
+                                     IREE_SV("gfx1151")));
+}
+
+TEST(LoomcAmdgpuIreeHalTargetTest, ForcedProfileMustBeLoadableByDevice) {
+  const TestTarget targets[] = {
+      {IREE_SV("gfx1151"), 1, IREE_HAL_EXECUTABLE_TARGET_KIND_EXACT},
+  };
+  DeviceSpecPtr device_spec;
+  IREE_ASSERT_OK(
+      CreateAmdgpuDeviceSpec(targets, IREE_ARRAYSIZE(targets), &device_spec));
+  FakeHalDevice device = {};
+  InitializeFakeDevice(device_spec.get(), &device);
+  TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
+  loomc_target_profile_t* requested_profile = nullptr;
+  LOOMC_ASSERT_OK(loomc_target_profile_select(
+      target_environment.get(), loomc_make_cstring_view("amdgpu:gfx1100"),
+      loomc_allocator_system(), &requested_profile));
+  TargetProfilePtr requested_profile_ptr(requested_profile);
+  const loomc_iree_hal_target_provider_t* providers[] = {
+      loomc_amdgpu_iree_hal_target_provider(),
+  };
+  const loomc_iree_hal_target_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_IREE_HAL_TARGET_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_string_view_empty(),
+      .device = reinterpret_cast<iree_hal_device_t*>(&device),
+      .physical_device_affinity = 1,
+      .target_profile = requested_profile_ptr.get(),
+      .providers = providers,
+      .provider_count = IREE_ARRAYSIZE(providers),
+  };
+  loomc_iree_hal_target_selection_t selection = {};
+  loomc_result_t* result = nullptr;
+  LOOMC_ASSERT_OK(loomc_target_select_iree_hal(
+      target_environment.get(), &options, loomc_allocator_system(), &selection,
+      &result));
+  TargetProfilePtr selected_profile_ptr(selection.target_profile);
+  ResultPtr result_ptr(result);
+
+  EXPECT_EQ(selected_profile_ptr.get(), nullptr);
+  EXPECT_EQ(selection.executable_target, nullptr);
+  ExpectFailedAdapterResult(result_ptr.get());
 }
 
 TEST(LoomcAmdgpuIreeHalTargetTest, ProviderMissLetsRouterReportUnsupported) {
@@ -320,25 +478,26 @@ TEST(LoomcAmdgpuIreeHalTargetTest, ProviderMissLetsRouterReportUnsupported) {
   InitializeFakeDevice(device_spec.get(), &device);
   TargetEnvironmentPtr target_environment = CreateAmdgpuTargetEnvironment();
   iree_hal_device_t* hal_device = reinterpret_cast<iree_hal_device_t*>(&device);
-  const loomc_iree_hal_profile_provider_t* providers[] = {
-      loomc_amdgpu_iree_hal_profile_provider(),
+  const loomc_iree_hal_target_provider_t* providers[] = {
+      loomc_amdgpu_iree_hal_target_provider(),
   };
-  const loomc_iree_hal_profile_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_IREE_HAL_PROFILE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.identifier=*/loomc_make_cstring_view("miss"),
-      /*.device=*/hal_device,
-      /*.physical_device_affinity=*/0,
-      /*.providers=*/providers,
-      /*.provider_count=*/IREE_ARRAYSIZE(providers),
+  const loomc_iree_hal_target_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_IREE_HAL_TARGET_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = loomc_make_cstring_view("miss"),
+      .device = hal_device,
+      .physical_device_affinity = 0,
+      .target_profile = nullptr,
+      .providers = providers,
+      .provider_count = IREE_ARRAYSIZE(providers),
   };
   loomc_result_t* result = nullptr;
-  loomc_target_profile_t* profile = nullptr;
-  LOOMC_ASSERT_OK(loomc_target_profile_create_iree_hal(
-      target_environment.get(), &options, loomc_allocator_system(), &profile,
+  loomc_iree_hal_target_selection_t selection = {};
+  LOOMC_ASSERT_OK(loomc_target_select_iree_hal(
+      target_environment.get(), &options, loomc_allocator_system(), &selection,
       &result));
-  TargetProfilePtr profile_ptr(profile);
+  TargetProfilePtr profile_ptr(selection.target_profile);
   ResultPtr result_ptr(result);
 
   EXPECT_EQ(profile_ptr.get(), nullptr);

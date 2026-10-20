@@ -1,0 +1,9 @@
+// RUN: emit source-low target=spirv:vulkan1.3+bda output=none
+
+func.def @scalar_f32_arithmetic(%lhs: f32, %rhs: f32) -> (f32, f32, f32, f32) {
+  %sum = scalar.addf %lhs, %rhs : f32
+  %difference = scalar.subf %lhs, %rhs : f32
+  %product = scalar.mulf %lhs, %rhs : f32
+  %quotient = scalar.divf %lhs, %rhs : f32
+  func.return %sum, %difference, %product, %quotient : f32, f32, f32, f32
+}

@@ -26,6 +26,22 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AMDF_BUILD)
 iree_cc_library(
   NAME
+    host_export
+  SRCS
+    "host_export.c"
+  DEPS
+    $<BUILD_LOCAL_INTERFACE:iree::third_party::linux_udmabuf_uapi>
+    ::dma_buf
+    ::file
+    amdf::headers
+    libamdf::src::platform::host_export
+  PUBLIC
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AMDF_BUILD)
+iree_cc_library(
+  NAME
     host_memory
   SRCS
     "host_memory.c"
@@ -33,6 +49,7 @@ iree_cc_library(
     ::file
     ::host_cache
     amdf::headers
+    libamdf::src::allocator
     libamdf::src::platform::host_memory
   PUBLIC
 )
@@ -53,6 +70,20 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AMDF_BUILD)
 iree_cc_library(
   NAME
+    host_reservation
+  SRCS
+    "host_reservation.c"
+  DEPS
+    ::file
+    amdf::headers
+    libamdf::src::platform::host_reservation
+  PUBLIC
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AMDF_BUILD)
+iree_cc_library(
+  NAME
     dma_buf
   HDRS
     "dma_buf.h"
@@ -61,6 +92,20 @@ iree_cc_library(
   DEPS
     ::file
     amdf::headers
+  PUBLIC
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AMDF_BUILD)
+iree_cc_library(
+  NAME
+    observation
+  SRCS
+    "observation.c"
+  DEPS
+    ::file
+    amdf::headers
+    libamdf::src::platform::observation
   PUBLIC
 )
 endif()
@@ -89,6 +134,7 @@ iree_cc_library(
     "instance.c"
   DEPS
     ::file
+    ::host_export
     amdf::headers
     libamdf::src::allocator
     libamdf::src::platform
@@ -141,6 +187,28 @@ iree_cc_library(
     ::instance
     amdf::headers
   PUBLIC
+)
+endif()
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND AMDF_BUILD)
+iree_cc_test(
+  NAME
+    host_export_test
+  SRCS
+    "host_export_test.cc"
+  LINKOPTS
+    "-Wl,--wrap=open"
+    "-Wl,--wrap=ioctl"
+  DEPS
+    $<BUILD_LOCAL_INTERFACE:iree::third_party::linux_udmabuf_uapi>
+    ::host_export
+    ::host_memory
+    amdf::headers
+    iree::third_party::google_test
+    iree::third_party::google_test_main
+    libamdf::src::platform::host_export
+  LABELS
+    "iree-build-requirement=libamdf"
 )
 endif()
 

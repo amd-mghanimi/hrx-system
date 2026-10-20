@@ -6,7 +6,8 @@
 
 #include "config.h"
 #include "diagnostic.h"
-#include "loom/tooling/config/config.h"
+#include "loom/config/text.h"
+#include "loom/config/text_binding.h"
 #include "loomc/iree.h"
 
 static loomc_status_t loomc_config_validate_string_view(
@@ -45,19 +46,12 @@ loomc_status_t loomc_config_validate_text_options(
   return loomc_config_validate_policy_flags(options->flags);
 }
 
-static iree_string_view_t loomc_config_normalize_key(loomc_string_view_t key) {
-  iree_string_view_t normalized_key = iree_string_view_from_loomc(key);
-  normalized_key = iree_string_view_trim(normalized_key);
-  (void)iree_string_view_consume_prefix_char(&normalized_key, '@');
-  return iree_string_view_trim(normalized_key);
-}
-
 static bool loomc_config_binding_overrides_json(
     const loomc_config_options_t* options,
-    const loom_tooling_config_binding_t* json_binding) {
+    const loom_config_text_binding_t* json_binding) {
   for (loomc_host_size_t i = 0; i < options->binding_count; ++i) {
-    iree_string_view_t binding_key =
-        loomc_config_normalize_key(options->bindings[i].key);
+    iree_string_view_t binding_key = loom_config_text_binding_normalize_key(
+        iree_string_view_from_loomc(options->bindings[i].key));
     if (iree_string_view_equal(binding_key, json_binding->key)) {
       return true;
     }
@@ -67,32 +61,32 @@ static bool loomc_config_binding_overrides_json(
 
 static iree_status_t loomc_config_populate_set(
     const loomc_config_options_t* options, iree_allocator_t host_allocator,
-    loom_tooling_config_set_t* config_set) {
-  loom_tooling_config_set_t json_config_set;
-  loom_tooling_config_set_initialize(host_allocator, &json_config_set);
+    loom_config_text_binding_set_t* config_set) {
+  loom_config_text_binding_set_t json_config_set;
+  loom_config_text_binding_set_initialize(host_allocator, &json_config_set);
 
   iree_status_t status = iree_ok_status();
   if (!loomc_string_view_is_empty(options->json_object)) {
-    status = loom_tooling_config_set_append_json_object(
+    status = loom_config_text_binding_set_append_json_object(
         &json_config_set, iree_string_view_from_loomc(options->json_object));
   }
   for (iree_host_size_t i = 0;
        i < json_config_set.binding_count && iree_status_is_ok(status); ++i) {
-    const loom_tooling_config_binding_t* binding = &json_config_set.bindings[i];
+    const loom_config_text_binding_t* binding = &json_config_set.bindings[i];
     if (loomc_config_binding_overrides_json(options, binding)) {
       continue;
     }
-    status = loom_tooling_config_set_append(config_set, binding->key,
-                                            binding->value);
+    status = loom_config_text_binding_set_append(config_set, binding->key,
+                                                 binding->value);
   }
   for (loomc_host_size_t i = 0;
        i < options->binding_count && iree_status_is_ok(status); ++i) {
-    status = loom_tooling_config_set_append(
+    status = loom_config_text_binding_set_append(
         config_set, iree_string_view_from_loomc(options->bindings[i].key),
         iree_string_view_from_loomc(options->bindings[i].value));
   }
 
-  loom_tooling_config_set_deinitialize(&json_config_set);
+  loom_config_text_binding_set_deinitialize(&json_config_set);
   return status;
 }
 
@@ -104,30 +98,32 @@ loomc_status_t loomc_config_apply_text_to_module(
 
   iree_allocator_t host_allocator =
       iree_allocator_from_loomc(options->allocator);
-  loom_tooling_config_set_t config_set;
-  loom_tooling_config_set_initialize(host_allocator, &config_set);
+  loom_config_text_binding_set_t config_set;
+  loom_config_text_binding_set_initialize(host_allocator, &config_set);
 
   loomc_status_t status = loomc_status_from_iree(
       loomc_config_populate_set(options->config, host_allocator, &config_set));
-  loom_tooling_config_materialize_result_t materialize_result = {0};
+  loom_config_application_result_t materialize_result = {0};
   if (loomc_status_is_ok(status)) {
-    loom_tooling_config_materialize_options_t materialize_options;
-    loom_tooling_config_materialize_options_initialize(&materialize_options);
-    materialize_options.config_set = &config_set;
-    status = loomc_status_from_iree(loom_tooling_config_materialize_module(
+    loom_config_text_materialize_options_t materialize_options;
+    loom_config_text_materialize_options_initialize(&materialize_options);
+    materialize_options.binding_set = &config_set;
+    materialize_options.applied_value_sink = options->applied_value_sink;
+    status = loomc_status_from_iree(loom_config_text_materialize_module(
         options->module, &materialize_options, options->block_pool,
         &materialize_result));
   }
   if (loomc_status_is_ok(status) &&
       materialize_result.materialized_count != 0) {
-    status = loomc_result_verify_loom_module(options->module, /*source=*/NULL,
-                                             options->result);
+    status = loomc_result_verify_loom_module(options->context, options->module,
+                                             options->source_resolver,
+                                             /*max_errors=*/0, options->result);
   }
   if (loomc_status_is_ok(status) && loomc_result_succeeded(options->result) &&
       iree_any_bit_set(options->config->flags,
                        LOOMC_CONFIG_POLICY_FLAG_REQUIRE_RESOLVED)) {
     status = loomc_status_from_iree(
-        loom_tooling_config_require_resolved_module(options->module, NULL));
+        loom_config_require_resolved_module(options->module, NULL));
   }
   if (!loomc_status_is_ok(status) &&
       loomc_status_is_result_diagnostic(status)) {
@@ -139,7 +135,6 @@ loomc_status_t loomc_config_apply_text_to_module(
         options->result, NULL, LOOMC_DIAGNOSTIC_SEVERITY_ERROR, diagnostic_code,
         status);
   }
-
-  loom_tooling_config_set_deinitialize(&config_set);
+  loom_config_text_binding_set_deinitialize(&config_set);
   return status;
 }

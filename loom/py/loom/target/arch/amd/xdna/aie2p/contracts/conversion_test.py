@@ -9,20 +9,38 @@
 from __future__ import annotations
 
 import math
-import random
 import struct
-from itertools import pairwise
+from collections.abc import Iterable
+from dataclasses import replace
+
+import pytest
 
 from loom.dialect.scalar import ALL_SCALAR_OPS
 from loom.dialect.scalar import conversion as scalar_conversion
 from loom.dialect.vector import ALL_VECTOR_OPS
 from loom.dialect.vector import defs as vector
+from loom.dsl import Op
 from loom.target.arch.amd.xdna.aie2p.contracts.conversion import (
     AIE2P_CONVERSION_RULES,
 )
 from loom.target.arch.amd.xdna.aie2p.contracts.packet_conversion import (
-    INTEGER_PACK_CASES,
-    INTEGER_WIDEN_CASES,
+    BYTE_TO_HALFWORD_WIDEN_RULE_SHAPES,
+    BYTE_TO_I64_WIDEN_RULE_SHAPES,
+    FLOAT8_PACKET_FORMATS,
+    FLOAT_PACKET_FORMATS,
+    INTEGER_PACK_INSTRUCTIONS,
+    INTEGER_PACK_RULE_SHAPES,
+    INTEGER_TRUNCATION_INSTRUCTIONS,
+    INTEGER_TRUNCATION_RULE_SHAPES,
+    INTEGER_WIDEN_RULE_SHAPES,
+    MXFP4_E2M1_E8M0_X32_SCHEMA,
+    MXFP4_E2M1_E8M0_X64_SCHEMA,
+    MXFP8_E4M3FN_E8M0_X8_SCHEMA,
+    MXFP8_E4M3FN_E8M0_X32_SCHEMA,
+    MXFP8_E4M3FN_E8M0_X64_SCHEMA,
+    Float8PacketFormat,
+    FloatPacketFormat,
+    IntegerPackInstruction,
 )
 from loom.target.arch.amd.xdna.aie2p.core_descriptors import (
     AIE2P_CORE_DESCRIPTOR_SET,
@@ -34,11 +52,16 @@ from loom.target.contracts import (
     EmitDescriptorOp,
     EmitRegisterConcat,
     EmitRegisterSlice,
+    Guard,
+    GuardKind,
     ValueAliasRule,
     ValueRef,
+    Vector,
     compile_lower_rule_set,
 )
 from loom.target.low_descriptors import Constraint, ConstraintKind, OperandRole
+
+_CANONICAL_BF16_NAN = 0x7FC0
 
 
 def _u32(value: int) -> int:
@@ -48,6 +71,11 @@ def _u32(value: int) -> int:
 def _s32(value: int) -> int:
     value = _u32(value)
     return value - (1 << 32) if value & 0x80000000 else value
+
+
+def _s16(value: int) -> int:
+    value &= 0xFFFF
+    return value - (1 << 16) if value & 0x8000 else value
 
 
 def _float_bits(value: float) -> int:
@@ -153,6 +181,401 @@ def _evaluate(rule: DescriptorRule, input_value: int | tuple[int, int]) -> int:
     return result
 
 
+_MX_PACKET_DESCRIPTOR_KEYS = frozenset(
+    {
+        "and.i32",
+        "cmp.eq.i32",
+        "cmp.eqz.i32",
+        "cmp.ge.unsigned.i16x32.el.low32",
+        "cmp.slt.i32",
+        "cmp.ult.i32",
+        "convert.floor.bf16x16.to.i32x16",
+        "extract.i32.immediate",
+        "lshl.i32",
+        "multiply.i16x32.configured",
+        "narrow.trunc.signed.i16x32",
+        "select.i32x16",
+        "select.mask.i32",
+        "select.nonzero.i32",
+        "sub.i32",
+    }
+)
+
+
+def _evaluate_mx_packet_descriptor(
+    descriptor_key: str,
+    operands: dict[str, int],
+    immediates: dict[str, int],
+    state: dict[str, int],
+) -> int:
+    """Evaluates one lane of an MX decode packet descriptor."""
+
+    if descriptor_key == "extract.i32.immediate":
+        assert immediates["idx"] == 0
+        return operands["s1"] & 0xFFFFFFFF
+    if descriptor_key == "and.i32":
+        return operands["s0"] & operands["s1"]
+    if descriptor_key == "sub.i32":
+        return operands["s0"] - operands["s1"]
+    if descriptor_key == "lshl.i32":
+        shift = _s32(operands["s1"])
+        assert -31 <= shift <= 31
+        return operands["s0"] << shift if shift >= 0 else operands["s0"] >> -shift
+    if descriptor_key == "cmp.slt.i32":
+        return int(_s32(operands["s0"]) < _s32(operands["s1"]))
+    if descriptor_key == "cmp.ult.i32":
+        return int(_u32(operands["s0"]) < _u32(operands["s1"]))
+    if descriptor_key == "cmp.eq.i32":
+        return int(_u32(operands["s0"]) == _u32(operands["s1"]))
+    if descriptor_key == "cmp.eqz.i32":
+        return int(_u32(operands["s0"]) == 0)
+    if descriptor_key == "select.nonzero.i32":
+        return operands["s0"] if operands["s2"] else operands["s1"]
+    if descriptor_key == "select.mask.i32":
+        return immediates["imm"] if operands["s0"] else 0
+    if descriptor_key == "cmp.ge.unsigned.i16x32.el.low32":
+        return int((operands["s1"] & 0xFFFF) >= (operands["s2"] & 0xFFFF))
+    if descriptor_key == "select.i32x16":
+        return operands["s1"] if operands["sel"] else operands["s2"]
+    if descriptor_key == "convert.floor.bf16x16.to.i32x16":
+        bf16_value = _bits_float((operands["src"] & 0xFFFF) << 16)
+        # The recipe's retained payload predicate replaces NaN lanes, so the
+        # intermediate integer value is unobservable there.
+        return (
+            0
+            if math.isnan(bf16_value)
+            else math.floor(math.ldexp(bf16_value, operands["shft"]))
+        )
+    if descriptor_key == "multiply.i16x32.configured":
+        assert operands["acc"] == 858
+        return _s16(operands["s1"]) * _s16(operands["s2"])
+    if descriptor_key == "narrow.trunc.signed.i16x32":
+        assert state["rounding"] == 0
+        assert state["srs-mode"] == 1
+        assert state["saturation"] == 0
+        return (_s32(operands["src"]) >> operands["su"]) & 0xFFFF
+    raise AssertionError(f"unmodeled MX packet descriptor {descriptor_key}")
+
+
+_PACKET_LANE_DESCRIPTOR_KEYS = frozenset(
+    {
+        "add.i16x32",
+        "add.i32x16",
+        "and.bits512",
+        "cmp.eqz.i16x32.el.low32",
+        "cmp.ge.unsigned.i32x16.el.low32",
+        "cmp.lt.unsigned.i16x32.el.low32",
+        "cmp.lt.unsigned.i32x16.el.low32",
+        "max.signed.i16x32",
+        "max.unsigned.i16x32",
+        "min.unsigned.i16x32",
+        "narrow.2x.c-to-x.signed.configured",
+        "narrow.2x.c-to-x.unsigned.configured",
+        "or.bits512",
+        "predicate.complete.zero.high32",
+        "select.i16x32.mask64",
+        "select.i32x16.mask64",
+        "sub.i16x32",
+        "sub.i32x16",
+        "widen.2x.w-to-b.signed.configured",
+        "widen.2x.w-to-b.unsigned.configured",
+        "widen.2x.x-to-c.signed.configured",
+        "widen.2x.x-to-c.unsigned.configured",
+        "widen.4x.w-to-c.signed.configured",
+        "widen.4x.w-to-c.unsigned.configured",
+    }
+)
+
+
+def _evaluate_packet_lane_descriptor(
+    descriptor_key: str,
+    operands: dict[str, int],
+    state: dict[str, int],
+) -> int:
+    """Evaluates one lane of shared packet integer machinery."""
+
+    if descriptor_key == "add.i16x32":
+        return (operands["s1"] + operands["s2"]) & 0xFFFF
+    if descriptor_key == "sub.i16x32":
+        return (operands["s1"] - operands["s2"]) & 0xFFFF
+    if descriptor_key == "add.i32x16":
+        return (operands["s1"] + operands["s2"]) & 0xFFFFFFFF
+    if descriptor_key == "sub.i32x16":
+        return (operands["s1"] - operands["s2"]) & 0xFFFFFFFF
+    if descriptor_key == "max.signed.i16x32":
+        return max(_s16(operands["s1"]), _s16(operands["s2"])) & 0xFFFF
+    if descriptor_key == "min.unsigned.i16x32":
+        return min(operands["s1"] & 0xFFFF, operands["s2"] & 0xFFFF)
+    if descriptor_key == "max.unsigned.i16x32":
+        return max(operands["s1"] & 0xFFFF, operands["s2"] & 0xFFFF)
+    if descriptor_key == "and.bits512":
+        return operands["s1"] & operands["s2"]
+    if descriptor_key == "or.bits512":
+        return operands["s1"] | operands["s2"]
+    if descriptor_key == "cmp.eqz.i16x32.el.low32":
+        return int((operands["s2"] & 0xFFFF) == 0)
+    if descriptor_key == "cmp.lt.unsigned.i16x32.el.low32":
+        return int((operands["s1"] & 0xFFFF) < (operands["s2"] & 0xFFFF))
+    if descriptor_key == "cmp.lt.unsigned.i32x16.el.low32":
+        return int((operands["s1"] & 0xFFFFFFFF) < (operands["s2"] & 0xFFFFFFFF))
+    if descriptor_key == "cmp.ge.unsigned.i32x16.el.low32":
+        return int((operands["s1"] & 0xFFFFFFFF) >= (operands["s2"] & 0xFFFFFFFF))
+    if descriptor_key == "predicate.complete.zero.high32":
+        return operands["storage"]
+    if descriptor_key in ("select.i16x32.mask64", "select.i32x16.mask64"):
+        return operands["s2"] if operands["sel"] else operands["s1"]
+    if descriptor_key.startswith("widen.2x.x-to-c."):
+        if state["saturation"] == 1:
+            assert state["ups-mode"] == 0
+            assert operands["su"] == 0
+            return operands["src"] & 0xFFFF
+        assert state["saturation"] == 0
+        assert state["ups-mode"] == 1
+        value = operands["src"] & 0xFFFFFFFF
+        if ".signed." in descriptor_key:
+            value = _s32(value)
+        return value << operands["su"]
+    if descriptor_key.startswith("narrow.2x.c-to-x."):
+        assert state["rounding"] == 0
+        assert state["saturation"] == 0
+        assert state["srs-mode"] == 1
+        value = operands["src"]
+        if ".unsigned." in descriptor_key:
+            value &= (1 << 64) - 1
+        return (value >> operands["su"]) & 0xFFFFFFFF
+    if descriptor_key.startswith(("widen.2x.w-to-b.", "widen.4x.w-to-c.")):
+        if state["saturation"] == 1:
+            assert state["ups-mode"] == 0
+            assert operands["su"] == 0
+            return operands["src"] & 0xFFFF
+        assert state["saturation"] == 0
+        assert state["ups-mode"] == 0
+        assert operands["su"] == 0
+        input_bits = 16 if descriptor_key.startswith("widen.2x.") else 8
+        input_mask = (1 << input_bits) - 1
+        value = operands["src"] & input_mask
+        if ".signed." in descriptor_key and value & (1 << (input_bits - 1)):
+            value -= 1 << input_bits
+        return value & 0xFFFFFFFF
+    raise AssertionError(f"unmodeled packet lane descriptor {descriptor_key}")
+
+
+def _evaluate_packet_lane(
+    rule: DescriptorRule,
+    input_value: int,
+    *,
+    scale_value: int | None = None,
+    result_group_ordinal: int = 0,
+    result_unit_ordinal: int = 0,
+) -> int:
+    """Evaluates one replicated lane through a native packet program."""
+
+    values: dict[ValueRef, int]
+    if scale_value is None:
+        values = {ValueRef.operand("input"): input_value}
+    else:
+        values = {
+            ValueRef.operand("payload"): input_value,
+            ValueRef.operand("auxiliary", element=0): scale_value,
+        }
+    state: dict[str, int] = {}
+    for emit in rule.emit:
+        if isinstance(emit, EmitRegisterSlice):
+            values[emit.result] = values[emit.source]
+            continue
+        if isinstance(emit, EmitRegisterConcat):
+            source_values = [values[source] for source in emit.sources]
+            source_ordinal = (
+                result_group_ordinal
+                if emit.result == ValueRef.result("result")
+                else result_unit_ordinal
+            )
+            assert source_ordinal < len(source_values)
+            values[emit.result] = source_values[source_ordinal]
+            continue
+
+        descriptor_key = emit.descriptor.key.removeprefix("amd.xdna.aie2p.")
+        if not emit.results:
+            assert descriptor_key.startswith("state.")
+            state[descriptor_key.removeprefix("state.").removesuffix(".immediate")] = (
+                emit.immediates["i"]
+            )
+            continue
+        result_ref = next(iter(emit.results.values()))
+        if emit.form is DescriptorEmitForm.CONST:
+            value = emit.immediates["i"]
+        else:
+            operands = {name: values[ref] for name, ref in emit.operands.items()}
+            if descriptor_key in _MX_PACKET_DESCRIPTOR_KEYS:
+                value = _evaluate_mx_packet_descriptor(
+                    descriptor_key, operands, emit.immediates, state
+                )
+            elif descriptor_key == "unpack.u4x64.to.u8x64.configured":
+                assert state["unpack-size"] == 0
+                value = operands["src"] & 0xF
+            elif descriptor_key == "sub.i8x64":
+                value = (operands["s1"] - operands["s2"]) & 0xFF
+            elif descriptor_key == "cmp.lt.signed.i8x64":
+                lhs = operands["s1"] & 0xFF
+                rhs = operands["s2"] & 0xFF
+                lhs = lhs - 0x100 if lhs & 0x80 else lhs
+                rhs = rhs - 0x100 if rhs & 0x80 else rhs
+                value = int(lhs < rhs)
+            elif descriptor_key == "shuffle.x.configured":
+                control = operands["mod"]
+                if control in (20, 21):
+                    value = (operands["s1"] & 0xFF) | ((operands["s2"] & 0xFF) << 8)
+                else:
+                    assert control in (0, 2, 4)
+                    sublane_bits = 8 << (control // 2)
+                    value = operands["s1"] & ((1 << sublane_bits) - 1)
+            elif descriptor_key == "splat.i8x64":
+                value = operands["src"] & 0xFF
+            elif descriptor_key == "splat.i16x32":
+                value = operands["src"] & 0xFFFF
+            elif descriptor_key == "splat.i32x16":
+                value = operands["src"] & 0xFFFFFFFF
+            elif descriptor_key == "select.i8x64":
+                value = operands["s2"] if operands["sel"] else operands["s1"]
+            elif descriptor_key in _PACKET_LANE_DESCRIPTOR_KEYS:
+                value = _evaluate_packet_lane_descriptor(
+                    descriptor_key, operands, state
+                )
+            elif descriptor_key == "accumulator.clear.f32x64":
+                value = 0
+            elif descriptor_key in (
+                "add.f32x16.configured",
+                "add.f32x64.configured",
+                "sub.f32x16.configured",
+                "sub.f32x64.configured",
+            ):
+                assert operands["acc"] == 60
+                lhs = _bits_float(operands["acc1"])
+                rhs = _bits_float(operands["acc2"])
+                value = _float_bits(
+                    lhs + rhs if descriptor_key.startswith("add.") else lhs - rhs
+                )
+            elif descriptor_key.startswith("move."):
+                value = operands["src"]
+            elif descriptor_key.startswith("widen.2x."):
+                assert state["saturation"] == 1
+                assert state["ups-mode"] == 0
+                assert operands["su"] == 0
+                value = operands["src"] & 0xFFFF
+            elif descriptor_key == "narrow.2x.b-to-w.unsigned.configured":
+                assert state["saturation"] in (0, 1)
+                assert state["rounding"] in (0, 12)
+                assert state["srs-mode"] == 0
+                value = operands["src"] & 0xFFFFFFFF
+                value = (
+                    _round_unsigned_to_even(value, operands["su"])
+                    if state["rounding"] == 12
+                    else value >> operands["su"]
+                )
+                if state["saturation"]:
+                    value = min(value, 0xFFFF)
+            elif descriptor_key == "narrow.2x.b-to-w.signed.configured":
+                assert state["saturation"] == 1
+                assert state["rounding"] == 12
+                assert state["srs-mode"] == 0
+                rounded = _round_signed_to_even(_s32(operands["src"]), operands["su"])
+                value = min(max(rounded, -(1 << 15)), (1 << 15) - 1) & 0xFFFF
+            elif descriptor_key in (
+                "pack.w.trunc.configured",
+                "pack.x.trunc.configured",
+            ):
+                assert state["saturation"] == 0
+                assert state["pack-size"] in (0, 1)
+                output_bits = 4 << state["pack-size"]
+                value = operands["src"] & ((1 << output_bits) - 1)
+            elif descriptor_key in (
+                "convert.bf16x16.to.f32x16",
+                "convert.bf16x32.to.f32x32",
+            ):
+                value = (operands["src"] & 0xFFFF) << 16
+            else:
+                raise AssertionError(f"unmodeled packet descriptor {descriptor_key}")
+        values[result_ref] = value
+    return values[ValueRef.result("result")]
+
+
+def _evaluate_integer_truncation_lanes(
+    rule: DescriptorRule,
+    input_values: tuple[int, ...],
+    *,
+    input_bits: int,
+    result_bits: int,
+    source_carrier_count: int,
+) -> tuple[int, ...]:
+    """Evaluates lane compaction across physical X-register boundaries."""
+
+    unit_bits = 256
+    unit_mask = (1 << unit_bits) - 1
+    input_mask = (1 << input_bits) - 1
+    packed_input = sum(
+        (value & input_mask) << (lane * input_bits)
+        for lane, value in enumerate(input_values)
+    )
+    values: dict[ValueRef, int | tuple[int, ...]] = {
+        ValueRef.operand("input"): tuple(
+            (packed_input >> (unit * unit_bits)) & unit_mask
+            for unit in range(source_carrier_count * 2)
+        )
+    }
+
+    for emit in rule.emit:
+        if isinstance(emit, EmitRegisterSlice):
+            source_units = values[emit.source]
+            assert isinstance(source_units, tuple)
+            result_units = source_units[
+                emit.unit_offset : emit.unit_offset + emit.unit_count
+            ]
+            assert len(result_units) == emit.unit_count
+            values[emit.result] = result_units
+            continue
+
+        assert isinstance(emit, EmitDescriptorOp)
+        result_ref = next(iter(emit.results.values()))
+        if emit.form is DescriptorEmitForm.CONST:
+            values[result_ref] = emit.immediates["i"]
+            continue
+
+        assert emit.descriptor.key == "amd.xdna.aie2p.shuffle.x.configured"
+        low_units = values[emit.operands["s1"]]
+        high_units = values[emit.operands["s2"]]
+        control = values[emit.operands["mod"]]
+        assert isinstance(low_units, tuple) and len(low_units) == 2
+        assert isinstance(high_units, tuple) and len(high_units) == 2
+        assert isinstance(control, int) and control in (0, 2, 4)
+
+        sublane_bits = 8 << (control // 2)
+        sublane_mask = (1 << sublane_bits) - 1
+        group_bits = sublane_bits * 2
+        packed_result = 0
+        result_offset = 0
+        for source_units in (low_units, high_units):
+            packed_source = source_units[0] | (source_units[1] << unit_bits)
+            for source_offset in range(0, unit_bits * 2, group_bits):
+                packed_result |= (
+                    (packed_source >> source_offset) & sublane_mask
+                ) << result_offset
+                result_offset += sublane_bits
+        assert result_offset == unit_bits * 2
+        values[result_ref] = (
+            packed_result & unit_mask,
+            (packed_result >> unit_bits) & unit_mask,
+        )
+
+    result_units = values[ValueRef.result("result")]
+    assert isinstance(result_units, tuple) and len(result_units) == 2
+    packed_result = result_units[0] | (result_units[1] << unit_bits)
+    result_mask = (1 << result_bits) - 1
+    return tuple(
+        (packed_result >> (lane * result_bits)) & result_mask
+        for lane in range(len(input_values))
+    )
+
+
 def _reference_f16_to_f32(input_bits: int) -> int:
     sign = (input_bits & 0x8000) << 16
     exponent = (input_bits >> 10) & 0x1F
@@ -200,6 +623,64 @@ def _reference_fp8_to_f32(
     return _float_bits(-value if sign else value)
 
 
+def _reference_e8m0_scale_bf16(payload_bf16: int, scale_bits: int) -> int:
+    """Applies one E8M0 scale byte to an exact BF16 payload."""
+
+    magnitude = payload_bf16 & 0x7FFF
+    if scale_bits == 0xFF or magnitude == _CANONICAL_BF16_NAN:
+        return _CANONICAL_BF16_NAN
+    sign = payload_bf16 & 0x8000
+    if magnitude == 0:
+        return sign
+
+    exponent = magnitude >> 7
+    fraction = magnitude & 0x7F
+    scaled_exponent = exponent + scale_bits - 254
+    if scaled_exponent > 127:
+        return sign | 0x7F80
+    if scaled_exponent >= -126:
+        return sign | ((scaled_exponent + 127) << 7) | fraction
+
+    subnormal_shift = -(scaled_exponent + 126)
+    subnormal = _round_unsigned_to_even(0x80 | fraction, subnormal_shift)
+    return sign | subnormal
+
+
+def _reference_mxfp8_e4m3fn_e8m0_to_bf16(payload_bits: int, scale_bits: int) -> int:
+    """Returns the exact BF16 bits for one MXFP8 E4M3FN/E8M0 lane."""
+
+    payload_bf16 = (
+        _reference_fp8_to_f32(
+            payload_bits,
+            exponent_bits=4,
+            mantissa_bits=3,
+            has_infinity=False,
+        )
+        >> 16
+    )
+    return _reference_e8m0_scale_bf16(payload_bf16, scale_bits)
+
+
+def _reference_mxfp4_e2m1_to_bf16(payload_bits: int) -> int:
+    """Returns the exact BF16 bits for one MXFP4 E2M1 payload lane."""
+
+    sign = (payload_bits & 0x8) << 12
+    magnitude = payload_bits & 0x7
+    if magnitude == 0:
+        return sign
+    if magnitude == 1:
+        return sign | 0x3F00
+    return sign | (0x3F00 + (magnitude << 6))
+
+
+def _reference_mxfp4_e2m1_e8m0_to_bf16(payload_bits: int, scale_bits: int) -> int:
+    """Returns the exact BF16 bits for one MXFP4 E2M1/E8M0 lane."""
+
+    return _reference_e8m0_scale_bf16(
+        _reference_mxfp4_e2m1_to_bf16(payload_bits), scale_bits
+    )
+
+
 def _reference_f32_to_bf16(input_bits: int) -> int:
     exponent = input_bits & 0x7F800000
     fraction = input_bits & 0x007FFFFF
@@ -210,8 +691,21 @@ def _reference_f32_to_bf16(input_bits: int) -> int:
 
 
 def _round_unsigned_to_even(value: int, shift: int) -> int:
+    if shift == 0:
+        return value
     truncated = value >> shift
     remainder = value & ((1 << shift) - 1)
+    halfway = 1 << (shift - 1)
+    if remainder > halfway or (remainder == halfway and truncated & 1):
+        truncated += 1
+    return truncated
+
+
+def _round_signed_to_even(value: int, shift: int) -> int:
+    if shift == 0:
+        return value
+    truncated = value >> shift
+    remainder = value - (truncated << shift)
     halfway = 1 << (shift - 1)
     if remainder > halfway or (remainder == halfway and truncated & 1):
         truncated += 1
@@ -266,6 +760,206 @@ def _reference_f32_to_fp8(
     return sign | magnitude
 
 
+def _f32_fp8_rounding_boundaries(
+    fp8_format: Float8PacketFormat,
+) -> set[int]:
+    """Returns representative binary32 FP8 rounding neighborhoods."""
+
+    values = {
+        0x00000000,
+        0x80000000,
+        0x00000001,
+        0x007FFFFF,
+        0x00800000,
+        0x7F7FFFFF,
+        0xFF7FFFFF,
+        0x7F800000,
+        0xFF800000,
+        0x7F800001,
+        0x7FC00000,
+        0x7FFFFFFF,
+        0xFF800001,
+        0xFFC00000,
+        0xFFFFFFFF,
+    }
+    maximum_finite = (
+        fp8_format.special_payload - 1
+        if fp8_format.has_infinity
+        else fp8_format.nan_payload - 1
+    )
+    mantissa_mask = (1 << fp8_format.mantissa_bits) - 1
+    maximum_normal_exponent = maximum_finite >> fp8_format.mantissa_bits
+    representative_exponents = {
+        1,
+        max(1, maximum_normal_exponent // 2),
+        max(1, maximum_normal_exponent - 1),
+        maximum_normal_exponent,
+    }
+    transition_lower_payloads = {
+        0,
+        1,
+        max(0, mantissa_mask - 1),
+        mantissa_mask,
+    }
+    for exponent in representative_exponents:
+        base = exponent << fp8_format.mantissa_bits
+        transition_lower_payloads.update(
+            {
+                base,
+                base + 1,
+                base + max(0, mantissa_mask - 1),
+                base + mantissa_mask,
+            }
+        )
+    transition_lower_payloads = {
+        payload for payload in transition_lower_payloads if payload < maximum_finite
+    }
+
+    for lower_payload in transition_lower_payloads:
+        lhs_bits = _reference_fp8_to_f32(
+            lower_payload,
+            exponent_bits=7 - fp8_format.mantissa_bits,
+            mantissa_bits=fp8_format.mantissa_bits,
+            has_infinity=fp8_format.has_infinity,
+        )
+        rhs_bits = _reference_fp8_to_f32(
+            lower_payload + 1,
+            exponent_bits=7 - fp8_format.mantissa_bits,
+            mantissa_bits=fp8_format.mantissa_bits,
+            has_infinity=fp8_format.has_infinity,
+        )
+        for f32_bits in (lhs_bits, rhs_bits):
+            for signed_bits in (f32_bits, f32_bits | 0x80000000):
+                values.update(_encoding_neighbors(signed_bits, 32))
+        midpoint = (_bits_float(lhs_bits) + _bits_float(rhs_bits)) * 0.5
+        values.update(_encoding_neighbors(_float_bits(midpoint), 32))
+        values.update(_encoding_neighbors(_float_bits(-midpoint), 32))
+
+    maximum_bits = _reference_fp8_to_f32(
+        maximum_finite,
+        exponent_bits=7 - fp8_format.mantissa_bits,
+        mantissa_bits=fp8_format.mantissa_bits,
+        has_infinity=fp8_format.has_infinity,
+    )
+    previous_bits = _reference_fp8_to_f32(
+        maximum_finite - 1,
+        exponent_bits=7 - fp8_format.mantissa_bits,
+        mantissa_bits=fp8_format.mantissa_bits,
+        has_infinity=fp8_format.has_infinity,
+    )
+    maximum_value = _bits_float(maximum_bits)
+    previous_value = _bits_float(previous_bits)
+    overflow_midpoint = maximum_value + (maximum_value - previous_value) * 0.5
+    values.update(_encoding_neighbors(_float_bits(overflow_midpoint), 32))
+    values.update(_encoding_neighbors(_float_bits(-overflow_midpoint), 32))
+    return values
+
+
+def _encoding_neighbors(value: int, bit_width: int) -> set[int]:
+    mask = (1 << bit_width) - 1
+    return {(value - 1) & mask, value & mask, (value + 1) & mask}
+
+
+def _float_encoding_boundaries(source_format: FloatPacketFormat) -> set[int]:
+    """Returns class and carry boundaries for one floating-point encoding."""
+
+    fraction_mask = source_format.fraction_mask
+    minimum_normal = source_format.hidden_bit
+    infinity = source_format.infinity_bits
+    magnitudes = {
+        0,
+        1,
+        max(fraction_mask - 1, 0),
+        fraction_mask,
+        minimum_normal,
+        minimum_normal + 1,
+        infinity - 1,
+        infinity,
+        infinity + 1,
+        infinity | fraction_mask,
+    }
+    return {
+        magnitude | sign
+        for magnitude in magnitudes
+        for sign in (0, source_format.sign_bit)
+    }
+
+
+def _fp8_encoding_boundaries(fp8_format: Float8PacketFormat) -> set[int]:
+    """Returns the zero, normal, finite, infinity, and NaN FP8 boundaries."""
+
+    fraction_mask = (1 << fp8_format.mantissa_bits) - 1
+    minimum_normal = 1 << fp8_format.mantissa_bits
+    magnitudes = {
+        0,
+        1,
+        max(fraction_mask - 1, 0),
+        fraction_mask,
+        minimum_normal,
+        minimum_normal + 1,
+        fp8_format.special_payload - 1,
+        fp8_format.special_payload,
+        fp8_format.special_payload + 1,
+        fp8_format.nan_payload,
+    }
+    return {magnitude | sign for magnitude in magnitudes for sign in (0, 0x80)}
+
+
+def _e8m0_scale_boundaries(payload_bf16: int) -> set[int]:
+    """Returns E8M0 branch, normalization, overflow, and NaN boundaries."""
+
+    scale_values = {0, 1, 2, 3, 8, 9, 10, 126, 127, 128, 254, 255}
+    magnitude = payload_bf16 & 0x7FFF
+    if magnitude not in (0, _CANONICAL_BF16_NAN):
+        exponent = magnitude >> 7
+        for boundary in (128 - exponent, 382 - exponent):
+            scale_values.update(range(boundary - 1, boundary + 2))
+    return {scale for scale in scale_values if 0 <= scale <= 0xFF}
+
+
+def _mxfp8_scale_boundaries(payload_bits: int) -> set[int]:
+    """Returns the E8M0 boundaries for one MXFP8 payload."""
+
+    payload_bf16 = (
+        _reference_fp8_to_f32(
+            payload_bits,
+            exponent_bits=4,
+            mantissa_bits=3,
+            has_infinity=False,
+        )
+        >> 16
+    )
+    return _e8m0_scale_boundaries(payload_bf16)
+
+
+def _source_fp8_rounding_boundaries(
+    source_format: FloatPacketFormat,
+    fp8_format: Float8PacketFormat,
+) -> set[int]:
+    """Maps representative FP8 boundaries into a source encoding."""
+
+    f32_values = _f32_fp8_rounding_boundaries(fp8_format)
+    if source_format.element == "f32":
+        return f32_values
+    encode = (
+        _reference_f32_to_f16
+        if source_format.element == "f16"
+        else _reference_f32_to_bf16
+    )
+    values = _float_encoding_boundaries(source_format)
+    for f32_bits in f32_values:
+        values.update(_encoding_neighbors(encode(f32_bits), source_format.bit_width))
+    return values
+
+
+def _source_float_to_f32(source_format: FloatPacketFormat, input_bits: int) -> int:
+    if source_format.element == "f16":
+        return _reference_f16_to_f32(input_bits)
+    if source_format.element == "bf16":
+        return input_bits << 16
+    return input_bits
+
+
 def _reference_f32_to_f16(input_bits: int) -> int:
     sign = (input_bits >> 16) & 0x8000
     nonsign = input_bits & 0x7FFFFFFF
@@ -284,6 +978,82 @@ def _reference_f32_to_f16(input_bits: int) -> int:
         return sign
     significand = fraction | 0x00800000
     return sign | _round_unsigned_to_even(significand, 126 - exponent)
+
+
+def _f32_f16_rounding_boundaries() -> set[int]:
+    """Returns binary32 neighborhoods around binary16 class and carry edges."""
+
+    values = {
+        0x00000000,
+        0x80000000,
+        0x33000000,
+        0x33000001,
+        0x337FFFFF,
+        0x33800000,
+        0x387FC000,
+        0x387FE000,
+        0x387FFFFF,
+        0x38800000,
+        0x3F7FEFFF,
+        0x3F7FF000,
+        0x3F7FF001,
+        0x477FDFFF,
+        0x477FE000,
+        0x477FFFFF,
+        0x47800000,
+        0x7F7FFFFF,
+        0xFF7FFFFF,
+        0x7F800000,
+        0xFF800000,
+        0x7F800001,
+        0x7FC00000,
+        0x7FFFFFFF,
+        0xFF800001,
+        0xFFC00000,
+        0xFFFFFFFF,
+    }
+    for exponent in range(32):
+        for mantissa in (
+            0,
+            1,
+            2,
+            3,
+            0x1FE,
+            0x1FF,
+            0x200,
+            0x201,
+            0x3FC,
+            0x3FD,
+            0x3FE,
+            0x3FF,
+        ):
+            widened = _reference_f16_to_f32((exponent << 10) | mantissa)
+            values.update(_encoding_neighbors(widened, 32))
+    return values
+
+
+def _f32_bf16_rounding_boundaries() -> set[int]:
+    """Returns binary32 neighborhoods around bfloat16 class and carry edges."""
+
+    values = set()
+    for magnitude in (0x0000, 0x0001, 0x007F, 0x0080, 0x3F7F, 0x3F80, 0x7F7F):
+        for sign in (0, 0x8000):
+            upper = (sign | magnitude) << 16
+            for remainder in (0, 0x7FFF, 0x8000, 0x8001, 0xFFFF):
+                values.update(_encoding_neighbors(upper | remainder, 32))
+    values.update(
+        {
+            0x7F800000,
+            0xFF800000,
+            0x7F800001,
+            0x7FC00000,
+            0x7FFFFFFF,
+            0xFF800001,
+            0xFFC00000,
+            0xFFFFFFFF,
+        }
+    )
+    return values
 
 
 def _reference_integer_to_f16(value: int) -> int:
@@ -315,12 +1085,31 @@ def _reference_bf16_fptosi_recipe(input_bits: int) -> int:
     return -(2**31) if minimum else result
 
 
-def _rule(report_key: str) -> DescriptorRule:
-    return next(
+def _rule(report_key: str, source_op: Op | None = None) -> DescriptorRule:
+    matches = [
         rule
         for rule in AIE2P_CONVERSION_RULES
-        if isinstance(rule, DescriptorRule) and rule.report_key == report_key
-    )
+        if isinstance(rule, DescriptorRule)
+        and rule.report_key == report_key
+        and (source_op is None or rule.source_op is source_op)
+    ]
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _typed_rule(
+    report_key: str, input_type: Vector, result_type: Vector
+) -> DescriptorRule:
+    matches = [
+        rule
+        for rule in AIE2P_CONVERSION_RULES
+        if isinstance(rule, DescriptorRule)
+        and rule.report_key == report_key
+        and Guard.value_type("input", input_type) in rule.guards
+        and Guard.value_type("result", result_type) in rule.guards
+    ]
+    assert len(matches) == 1
+    return matches[0]
 
 
 def _integer_conversion_case(
@@ -374,14 +1163,14 @@ def test_conversion_programs_are_valid_compact_descriptor_data() -> None:
         rule.emit_count > 0 or rule.alias_ref_count == 1 for rule in compiled.rules
     )
 
-    for report_key in (
-        "native_signed_i8_to_binary32",
-        "native_signed_i16_to_binary32",
-        "native_signed_i32_to_binary32",
-        "native_unsigned_i8_to_binary32",
-        "native_unsigned_i16_to_binary32",
+    for report_key, source_op in (
+        ("exact_signed_i8_to_binary32", scalar_conversion.scalar_sitofp),
+        ("exact_signed_i16_to_binary32", scalar_conversion.scalar_sitofp),
+        ("exact_signed_i32_to_binary32", scalar_conversion.scalar_sitofp),
+        ("exact_unsigned_i8_to_binary32", scalar_conversion.scalar_uitofp),
+        ("exact_unsigned_i16_to_binary32", scalar_conversion.scalar_uitofp),
     ):
-        rule = _rule(report_key)
+        rule = _rule(report_key, source_op)
         assert rule.emit[-2].descriptor.key == (
             "amd.xdna.aie2p.constant.i32.fx2flt-scale"
         )
@@ -390,64 +1179,89 @@ def test_conversion_programs_are_valid_compact_descriptor_data() -> None:
         )
 
 
-def test_integer_width_conversions_match_exact_oracles() -> None:
-    conversions = (
-        (scalar_conversion.scalar_extsi, 8, 16, True),
-        (scalar_conversion.scalar_extsi, 8, 32, True),
-        (scalar_conversion.scalar_extsi, 8, 64, True),
-        (scalar_conversion.scalar_extsi, 16, 32, True),
-        (scalar_conversion.scalar_extsi, 16, 64, True),
-        (scalar_conversion.scalar_extsi, 32, 64, True),
-        (scalar_conversion.scalar_extui, 8, 16, False),
-        (scalar_conversion.scalar_extui, 8, 32, False),
-        (scalar_conversion.scalar_extui, 8, 64, False),
-        (scalar_conversion.scalar_extui, 16, 32, False),
-        (scalar_conversion.scalar_extui, 16, 64, False),
-        (scalar_conversion.scalar_extui, 32, 64, False),
-        (scalar_conversion.scalar_trunci, 16, 8, False),
-        (scalar_conversion.scalar_trunci, 32, 8, False),
-        (scalar_conversion.scalar_trunci, 32, 16, False),
-        (scalar_conversion.scalar_trunci, 64, 8, False),
-        (scalar_conversion.scalar_trunci, 64, 16, False),
-        (scalar_conversion.scalar_trunci, 64, 32, False),
+_INTEGER_WIDTH_CONVERSIONS = (
+    (scalar_conversion.scalar_extsi, 8, 16, True),
+    (scalar_conversion.scalar_extsi, 8, 32, True),
+    (scalar_conversion.scalar_extsi, 8, 64, True),
+    (scalar_conversion.scalar_extsi, 16, 32, True),
+    (scalar_conversion.scalar_extsi, 16, 64, True),
+    (scalar_conversion.scalar_extsi, 32, 64, True),
+    (scalar_conversion.scalar_extui, 8, 16, False),
+    (scalar_conversion.scalar_extui, 8, 32, False),
+    (scalar_conversion.scalar_extui, 8, 64, False),
+    (scalar_conversion.scalar_extui, 16, 32, False),
+    (scalar_conversion.scalar_extui, 16, 64, False),
+    (scalar_conversion.scalar_extui, 32, 64, False),
+    (scalar_conversion.scalar_trunci, 16, 8, False),
+    (scalar_conversion.scalar_trunci, 32, 8, False),
+    (scalar_conversion.scalar_trunci, 32, 16, False),
+    (scalar_conversion.scalar_trunci, 64, 8, False),
+    (scalar_conversion.scalar_trunci, 64, 16, False),
+    (scalar_conversion.scalar_trunci, 64, 32, False),
+)
+
+
+def _assert_integer_width_conversion(
+    source_op: Op,
+    input_bits: int,
+    result_bits: int,
+    signed: bool,
+    values: Iterable[int],
+) -> None:
+    case = _integer_conversion_case(
+        source_op,
+        f"i{input_bits}",
+        f"i{result_bits}",
     )
-    random_source = random.Random(0xA1E2_1064)
-    for source_op, input_bits, result_bits, signed in conversions:
-        case = _integer_conversion_case(
-            source_op,
-            f"i{input_bits}",
-            f"i{result_bits}",
+    result_mask = (1 << result_bits) - 1
+    for input_value in values:
+        reference = input_value
+        if signed and input_value & (1 << (input_bits - 1)):
+            reference -= 1 << input_bits
+        actual = _evaluate_integer_conversion(
+            case,
+            input_value,
+            input_bits,
         )
+        expected = reference & result_mask
+        assert actual & result_mask == expected, (
+            source_op.name,
+            input_bits,
+            result_bits,
+            input_value,
+            actual,
+            expected,
+        )
+
+
+def test_integer_width_conversions_match_boundary_oracles() -> None:
+    for source_op, input_bits, result_bits, signed in _INTEGER_WIDTH_CONVERSIONS:
         input_mask = (1 << input_bits) - 1
-        result_mask = (1 << result_bits) - 1
-        values = [
+        values = {
             0,
             1,
             input_mask >> 1,
             1 << (input_bits - 1),
             input_mask,
-        ]
+        }
+        if result_bits < input_bits:
+            values.update(_encoding_neighbors((1 << result_bits) - 1, input_bits))
+            values.update(_encoding_neighbors(1 << result_bits, input_bits))
+        _assert_integer_width_conversion(
+            source_op, input_bits, result_bits, signed, values
+        )
+
+
+@pytest.mark.exhaustive
+def test_8bit_integer_width_conversions_match_exhaustive_oracles() -> None:
+    for source_op, input_bits, result_bits, signed in _INTEGER_WIDTH_CONVERSIONS:
         if input_bits == 8:
-            values = list(range(1 << input_bits))
-        else:
-            values.extend(random_source.getrandbits(input_bits) for _ in range(2048))
-        for input_value in values:
-            reference = input_value
-            if signed and input_value & (1 << (input_bits - 1)):
-                reference -= 1 << input_bits
-            actual = _evaluate_integer_conversion(
-                case,
-                input_value,
-                input_bits,
-            )
-            expected = reference & result_mask
-            assert actual & result_mask == expected, (
-                source_op.name,
+            _assert_integer_width_conversion(
+                source_op,
                 input_bits,
                 result_bits,
-                input_value,
-                actual,
-                expected,
+                signed,
+                range(1 << input_bits),
             )
 
 
@@ -518,7 +1332,36 @@ def test_native_integer_conversion_preserves_scale_and_status_state() -> None:
     ]
 
 
-def test_native_bfloat16_packet_conversions_preserve_exact_width_and_rounding() -> None:
+def test_native_bfloat16_packet_conversions_publish_subnormal_policy() -> None:
+    for lane_range, minimum_lanes, maximum_lanes in (
+        ("1-15", 1, 15),
+        ("16", 16, 16),
+        ("17-31", 17, 31),
+        ("32", 32, 32),
+    ):
+        f32_type = Vector(
+            "f32", minimum_lanes=minimum_lanes, maximum_lanes=maximum_lanes
+        )
+        bf16_type = Vector(
+            "bf16", minimum_lanes=minimum_lanes, maximum_lanes=maximum_lanes
+        )
+        narrow = _rule(f"native_binary32x{lane_range}_to_bfloat16x{lane_range}")
+        assert narrow.guards == (
+            Guard.value_type("input", f32_type),
+            Guard.value_type("result", bf16_type),
+            Guard.value_not_subnormal_or_instance_flags_has_all(
+                "input", "subnormal", "daz"
+            ),
+        )
+        widen = _rule(f"native_bfloat16x{lane_range}_to_binary32x{lane_range}")
+        assert widen.guards == (
+            Guard.value_type("input", bf16_type),
+            Guard.value_type("result", f32_type),
+            Guard.value_not_subnormal_or_instance_flags_has_all(
+                "input", "subnormal", "daz"
+            ),
+        )
+
     narrow = _rule("native_binary32x32_to_bfloat16x32")
     assert [emit.descriptor.key for emit in narrow.emit] == [
         "amd.xdna.aie2p.state.rounding.immediate",
@@ -531,8 +1374,596 @@ def test_native_bfloat16_packet_conversions_preserve_exact_width_and_rounding() 
         "amd.xdna.aie2p.convert.bf16x32.to.f32x32"
     ]
 
+    partial_narrow = _rule("native_binary32x1-15_to_bfloat16x1-15")
+    assert (
+        Guard.value_type("input", Vector("f32", minimum_lanes=1, maximum_lanes=15))
+        in partial_narrow.guards
+    )
+    assert (
+        Guard.value_type("result", Vector("bf16", minimum_lanes=1, maximum_lanes=15))
+        in partial_narrow.guards
+    )
+    assert [type(emit) for emit in partial_narrow.emit] == [
+        EmitDescriptorOp,
+        EmitDescriptorOp,
+        EmitDescriptorOp,
+        EmitRegisterSlice,
+        EmitRegisterConcat,
+    ]
+    assert [
+        emit.descriptor.key
+        for emit in partial_narrow.emit
+        if isinstance(emit, EmitDescriptorOp)
+    ] == [
+        "amd.xdna.aie2p.move.vector512.to.accumulator512",
+        "amd.xdna.aie2p.state.rounding.immediate",
+        "amd.xdna.aie2p.convert.f32x16.to.bf16x16",
+    ]
+    assert partial_narrow.emit[1].immediates == {"i": 12}
 
-def test_bfloat16_packet_to_signed_i32_is_exact_over_defined_domain() -> None:
+    partial_widen = _rule("native_bfloat16x1-15_to_binary32x1-15")
+    assert (
+        Guard.value_type("input", Vector("bf16", minimum_lanes=1, maximum_lanes=15))
+        in partial_widen.guards
+    )
+    assert (
+        Guard.value_type("result", Vector("f32", minimum_lanes=1, maximum_lanes=15))
+        in partial_widen.guards
+    )
+    assert [type(emit) for emit in partial_widen.emit] == [
+        EmitRegisterSlice,
+        EmitDescriptorOp,
+        EmitDescriptorOp,
+    ]
+    assert [
+        emit.descriptor.key
+        for emit in partial_widen.emit
+        if isinstance(emit, EmitDescriptorOp)
+    ] == [
+        "amd.xdna.aie2p.convert.bf16x16.to.f32x16",
+        "amd.xdna.aie2p.move.accumulator512.to.vector512",
+    ]
+
+    partial_wide_narrow = _rule("native_binary32x17-31_to_bfloat16x17-31")
+    assert [type(emit) for emit in partial_wide_narrow.emit] == [
+        EmitRegisterSlice,
+        EmitDescriptorOp,
+        EmitRegisterSlice,
+        EmitDescriptorOp,
+        EmitRegisterConcat,
+        EmitDescriptorOp,
+        EmitDescriptorOp,
+    ]
+    assert [
+        emit.descriptor.key
+        for emit in partial_wide_narrow.emit
+        if isinstance(emit, EmitDescriptorOp)
+    ] == [
+        "amd.xdna.aie2p.move.vector512.to.accumulator512",
+        "amd.xdna.aie2p.move.vector512.to.accumulator512",
+        "amd.xdna.aie2p.state.rounding.immediate",
+        "amd.xdna.aie2p.convert.f32x32.to.bf16x32",
+    ]
+    assert [partial_wide_narrow.emit[index].unit_offset for index in (0, 2)] == [
+        0,
+        2,
+    ]
+
+    partial_wide_widen = _rule("native_bfloat16x17-31_to_binary32x17-31")
+    assert [type(emit) for emit in partial_wide_widen.emit] == [
+        EmitDescriptorOp,
+        EmitRegisterSlice,
+        EmitDescriptorOp,
+        EmitRegisterSlice,
+        EmitDescriptorOp,
+        EmitRegisterConcat,
+    ]
+    assert [
+        emit.descriptor.key
+        for emit in partial_wide_widen.emit
+        if isinstance(emit, EmitDescriptorOp)
+    ] == [
+        "amd.xdna.aie2p.convert.bf16x32.to.f32x32",
+        "amd.xdna.aie2p.move.accumulator512.to.vector512",
+        "amd.xdna.aie2p.move.accumulator512.to.vector512",
+    ]
+    assert [partial_wide_widen.emit[index].unit_offset for index in (1, 3)] == [
+        0,
+        1,
+    ]
+
+
+def test_float8_packet_widening_covers_every_native_logical_width() -> None:
+    lane_ranges = ("16", "32", "1-15", "17-31")
+    for fp8_format in FLOAT8_PACKET_FORMATS:
+        for lane_range in lane_ranges:
+            for result_name in ("bfloat16", "binary32"):
+                rule = _rule(
+                    f"native_{fp8_format.report_name}x{lane_range}_to_"
+                    f"{result_name}x{lane_range}"
+                )
+                descriptor_keys = [
+                    emit.descriptor.key
+                    for emit in rule.emit
+                    if isinstance(emit, EmitDescriptorOp)
+                ]
+                assert descriptor_keys[:4] == [
+                    "amd.xdna.aie2p.sub.i8x64",
+                    "amd.xdna.aie2p.constant.i32.mova",
+                    "amd.xdna.aie2p.shuffle.x.configured",
+                    "amd.xdna.aie2p.shuffle.x.configured",
+                ]
+                assert all(
+                    ".extract." not in key and ".insert." not in key
+                    for key in descriptor_keys
+                )
+
+
+def test_mxfp8_decode_has_exact_group_schemas_and_shared_packet_program() -> None:
+    rules = tuple(
+        _rule(f"native_mxfp8_e4m3fn_e8m0x{lane_count}_to_bfloat16x{lane_count}")
+        for lane_count in (8, 32, 64)
+    )
+    schemas = (
+        MXFP8_E4M3FN_E8M0_X8_SCHEMA,
+        MXFP8_E4M3FN_E8M0_X32_SCHEMA,
+        MXFP8_E4M3FN_E8M0_X64_SCHEMA,
+    )
+    for lane_count, schema, rule in zip((8, 32, 64), schemas, rules, strict=True):
+        assert rule.source_op is vector.vector_decode
+        assert rule.guards == (
+            Guard.value_type("payload", Vector("f8E4M3", lanes=lane_count)),
+            Guard.value_storage_operand_schema("schema", schema),
+            Guard.operand_segment_count("auxiliary", 1),
+            Guard.value_type("auxiliary", Vector("i32", lanes=1), element=0),
+            Guard.value_type("result", Vector("bf16", lanes=lane_count)),
+        )
+
+    four_x8_group_schema = replace(
+        MXFP8_E4M3FN_E8M0_X32_SCHEMA,
+        scale_group_element_count=8,
+        scale_group_shape=(8,),
+    )
+    assert four_x8_group_schema not in schemas
+    assert rules[0].emit == rules[1].emit
+
+    # The common one-group program is interned across the x8 and x32 guards.
+    compiled = compile_lower_rule_set(
+        ContractFragment(
+            name="amd.xdna.aie2p.mxfp8.packet.test",
+            descriptor_set=AIE2P_CORE_DESCRIPTOR_SET,
+            cases=rules[:2],
+        ),
+        dialect_ops={"vector": ALL_VECTOR_OPS},
+    )
+    assert len(compiled.emits) == len(rules[0].emit)
+    assert compiled.rules[0].emit_start == compiled.rules[1].emit_start
+    assert compiled.rules[0].emit_count == compiled.rules[1].emit_count
+
+    for group_count, rule in zip((1, 1, 2), rules, strict=True):
+        descriptor_keys = [
+            emit.descriptor.key
+            for emit in rule.emit
+            if isinstance(emit, EmitDescriptorOp)
+        ]
+        assert [key for key in descriptor_keys if ".extract." in key] == [
+            "amd.xdna.aie2p.extract.i32.immediate"
+        ] * group_count
+        assert all(".insert." not in key for key in descriptor_keys)
+        assert (
+            descriptor_keys.count("amd.xdna.aie2p.convert.floor.bf16x16.to.i32x16")
+            == 2 * group_count
+        )
+        assert (
+            descriptor_keys.count("amd.xdna.aie2p.multiply.i16x32.configured")
+            == group_count
+        )
+
+    assert isinstance(rules[2].emit[-1], EmitRegisterConcat)
+    assert rules[2].emit[-1].result == ValueRef.result("result")
+    assert any(
+        isinstance(emit, EmitDescriptorOp)
+        and emit.form is DescriptorEmitForm.CONST
+        and emit.immediates.get("i") == -8
+        for emit in rules[2].emit
+    )
+
+
+def test_mxfp4_decode_has_exact_group_schemas_and_one_unpack() -> None:
+    rules = tuple(
+        _rule(f"native_mxfp4_e2m1_e8m0x{lane_count}_to_bfloat16x{lane_count}")
+        for lane_count in (32, 64)
+    )
+    schemas = (MXFP4_E2M1_E8M0_X32_SCHEMA, MXFP4_E2M1_E8M0_X64_SCHEMA)
+    for lane_count, schema, rule in zip((32, 64), schemas, rules, strict=True):
+        assert rule.source_op is vector.vector_decode
+        assert rule.guards == (
+            Guard.value_type("payload", Vector("i32", lanes=lane_count // 8)),
+            Guard.value_storage_operand_schema("schema", schema),
+            Guard.operand_segment_count("auxiliary", 1),
+            Guard.value_type("auxiliary", Vector("i32", lanes=1), element=0),
+            Guard.value_type("result", Vector("bf16", lanes=lane_count)),
+        )
+
+    for group_count, rule in zip((1, 2), rules, strict=True):
+        descriptor_keys = [
+            emit.descriptor.key
+            for emit in rule.emit
+            if isinstance(emit, EmitDescriptorOp)
+        ]
+        assert (
+            descriptor_keys.count("amd.xdna.aie2p.unpack.u4x64.to.u8x64.configured")
+            == 1
+        )
+        assert [key for key in descriptor_keys if ".extract." in key] == [
+            "amd.xdna.aie2p.extract.i32.immediate"
+        ] * group_count
+        assert all(".insert." not in key for key in descriptor_keys)
+        assert (
+            descriptor_keys.count("amd.xdna.aie2p.convert.floor.bf16x16.to.i32x16")
+            == 2 * group_count
+        )
+        assert (
+            descriptor_keys.count("amd.xdna.aie2p.narrow.2x.b-to-w.unsigned.configured")
+            == 8 * group_count
+        )
+
+    assert isinstance(rules[1].emit[-1], EmitRegisterConcat)
+    assert rules[1].emit[-1].result == ValueRef.result("result")
+    assert any(
+        isinstance(emit, EmitDescriptorOp)
+        and emit.form is DescriptorEmitForm.CONST
+        and emit.immediates.get("i") == -8
+        for emit in rules[1].emit
+    )
+
+
+def _assert_mxfp8_packet_decode_matches_oracle(
+    values: Iterable[tuple[int, int]],
+    *,
+    lane_count: int = 8,
+    scale_byte_ordinal: int = 0,
+    result_unit_ordinal: int = 0,
+) -> None:
+    rule = _rule(f"native_mxfp8_e4m3fn_e8m0x{lane_count}_to_bfloat16x{lane_count}")
+    for payload_bits, scale_bits in values:
+        expected = _reference_mxfp8_e4m3fn_e8m0_to_bf16(payload_bits, scale_bits)
+        actual = _evaluate_packet_lane(
+            rule,
+            payload_bits,
+            scale_value=scale_bits << (scale_byte_ordinal * 8),
+            result_group_ordinal=scale_byte_ordinal,
+            result_unit_ordinal=result_unit_ordinal,
+        )
+        assert actual == expected, (
+            hex(payload_bits),
+            hex(scale_bits),
+            hex(actual),
+            hex(expected),
+        )
+
+
+def test_mxfp8_packet_decode_matches_boundary_oracles() -> None:
+    fp8_format = FLOAT8_PACKET_FORMATS[0]
+    payloads = _fp8_encoding_boundaries(fp8_format)
+    _assert_mxfp8_packet_decode_matches_oracle(
+        (
+            (payload, scale)
+            for payload in payloads
+            for scale in _mxfp8_scale_boundaries(payload)
+        ),
+        lane_count=8,
+    )
+    for result_unit_ordinal in range(2):
+        _assert_mxfp8_packet_decode_matches_oracle(
+            (
+                (payload, scale)
+                for payload in payloads
+                for scale in _mxfp8_scale_boundaries(payload)
+            ),
+            lane_count=32,
+            result_unit_ordinal=result_unit_ordinal,
+        )
+    for result_unit_ordinal in range(2):
+        _assert_mxfp8_packet_decode_matches_oracle(
+            (
+                (payload, scale)
+                for payload in payloads
+                for scale in _mxfp8_scale_boundaries(payload)
+            ),
+            lane_count=64,
+            scale_byte_ordinal=1,
+            result_unit_ordinal=result_unit_ordinal,
+        )
+
+
+@pytest.mark.exhaustive
+def test_mxfp8_packet_decode_matches_exhaustive_oracles() -> None:
+    _assert_mxfp8_packet_decode_matches_oracle(
+        (payload, scale) for payload in range(1 << 8) for scale in range(1 << 8)
+    )
+
+
+def _assert_mxfp4_packet_decode_matches_oracle(
+    values: Iterable[tuple[int, int]],
+    *,
+    lane_count: int,
+    scale_byte_ordinal: int,
+    result_unit_ordinal: int,
+) -> None:
+    rule = _rule(f"native_mxfp4_e2m1_e8m0x{lane_count}_to_bfloat16x{lane_count}")
+    for payload_bits, scale_bits in values:
+        expected = _reference_mxfp4_e2m1_e8m0_to_bf16(payload_bits, scale_bits)
+        actual = _evaluate_packet_lane(
+            rule,
+            payload_bits,
+            scale_value=scale_bits << (scale_byte_ordinal * 8),
+            result_group_ordinal=scale_byte_ordinal,
+            result_unit_ordinal=result_unit_ordinal,
+        )
+        assert actual == expected, (
+            hex(payload_bits),
+            hex(scale_bits),
+            result_unit_ordinal,
+            hex(actual),
+            hex(expected),
+        )
+
+
+def test_mxfp4_packet_decode_matches_boundary_oracles() -> None:
+    for lane_count, scale_byte_ordinal in ((32, 0), (64, 1)):
+        for result_unit_ordinal in range(2):
+            _assert_mxfp4_packet_decode_matches_oracle(
+                (
+                    (payload, scale)
+                    for payload in range(1 << 4)
+                    for scale in _e8m0_scale_boundaries(
+                        _reference_mxfp4_e2m1_to_bf16(payload)
+                    )
+                ),
+                lane_count=lane_count,
+                scale_byte_ordinal=scale_byte_ordinal,
+                result_unit_ordinal=result_unit_ordinal,
+            )
+
+
+@pytest.mark.exhaustive
+def test_mxfp4_packet_decode_matches_exhaustive_oracles() -> None:
+    rules = (
+        (32, 0),
+        (64, 1),
+    )
+    for lane_count, scale_byte_ordinal in rules:
+        for result_unit_ordinal in range(2):
+            _assert_mxfp4_packet_decode_matches_oracle(
+                (
+                    (payload, scale)
+                    for payload in range(1 << 4)
+                    for scale in range(1 << 8)
+                ),
+                lane_count=lane_count,
+                scale_byte_ordinal=scale_byte_ordinal,
+                result_unit_ordinal=result_unit_ordinal,
+            )
+
+
+def _assert_float8_packet_widening_matches_oracles(
+    fp8_format: Float8PacketFormat, values: Iterable[int]
+) -> None:
+    bf16_rule = _rule(f"native_{fp8_format.report_name}x32_to_bfloat16x32")
+    f32_rule = _rule(f"native_{fp8_format.report_name}x32_to_binary32x32")
+    for bits in values:
+        expected_f32 = _reference_fp8_to_f32(
+            bits,
+            exponent_bits=7 - fp8_format.mantissa_bits,
+            mantissa_bits=fp8_format.mantissa_bits,
+            has_infinity=fp8_format.has_infinity,
+        )
+        assert _evaluate_packet_lane(bf16_rule, bits) == (expected_f32 >> 16), (
+            fp8_format.element,
+            hex(bits),
+            "bf16",
+        )
+        assert _evaluate_packet_lane(f32_rule, bits) == expected_f32, (
+            fp8_format.element,
+            hex(bits),
+            "f32",
+        )
+
+
+def test_float8_packet_widening_matches_boundary_oracles() -> None:
+    for fp8_format in FLOAT8_PACKET_FORMATS:
+        _assert_float8_packet_widening_matches_oracles(
+            fp8_format, _fp8_encoding_boundaries(fp8_format)
+        )
+
+
+@pytest.mark.exhaustive
+def test_float8_packet_widening_matches_exhaustive_oracles() -> None:
+    for fp8_format in FLOAT8_PACKET_FORMATS:
+        _assert_float8_packet_widening_matches_oracles(fp8_format, range(1 << 8))
+
+
+def test_exact_float16_packet_conversion_covers_every_logical_width() -> None:
+    for _lane_range, minimum_lanes, maximum_lanes in (
+        ("1-16", 1, 16),
+        ("17-31", 17, 31),
+        ("32", 32, 32),
+    ):
+        f32_type = Vector(
+            "f32", minimum_lanes=minimum_lanes, maximum_lanes=maximum_lanes
+        )
+        for element, report_name in (("f16", "binary16"), ("bf16", "bfloat16")):
+            float16_type = Vector(
+                element,
+                minimum_lanes=minimum_lanes,
+                maximum_lanes=maximum_lanes,
+            )
+            widen = _typed_rule(
+                f"exact_{report_name}_to_binary32_packet",
+                float16_type,
+                f32_type,
+            )
+            narrow = _typed_rule(
+                f"exact_binary32_to_{report_name}_packet",
+                f32_type,
+                float16_type,
+            )
+            assert widen.guards == (
+                Guard.value_type("input", float16_type),
+                Guard.value_type("result", f32_type),
+            )
+            assert narrow.guards == (
+                Guard.value_type("input", f32_type),
+                Guard.value_type("result", float16_type),
+            )
+
+
+def _assert_float16_packet_widening_matches_oracle(
+    float16_format: FloatPacketFormat, values: Iterable[int]
+) -> None:
+    rule = _typed_rule(
+        f"exact_{float16_format.report_name}_to_binary32_packet",
+        Vector(float16_format.element, minimum_lanes=1, maximum_lanes=16),
+        Vector("f32", minimum_lanes=1, maximum_lanes=16),
+    )
+    for bits in values:
+        expected = (
+            _reference_f16_to_f32(bits)
+            if float16_format.element == "f16"
+            else bits << 16
+        )
+        assert _evaluate_packet_lane(rule, bits) == expected, hex(bits)
+
+
+def test_float16_packet_widening_matches_boundary_oracles() -> None:
+    for float16_format in (
+        packet_format
+        for packet_format in FLOAT_PACKET_FORMATS
+        if packet_format.bit_width == 16
+    ):
+        _assert_float16_packet_widening_matches_oracle(
+            float16_format, _float_encoding_boundaries(float16_format)
+        )
+
+
+@pytest.mark.exhaustive
+def test_float16_packet_widening_matches_exhaustive_oracles() -> None:
+    for float16_format in (
+        packet_format
+        for packet_format in FLOAT_PACKET_FORMATS
+        if packet_format.bit_width == 16
+    ):
+        _assert_float16_packet_widening_matches_oracle(float16_format, range(1 << 16))
+
+
+def test_float16_packet_narrowing_matches_rounding_boundaries() -> None:
+    for report_name, boundaries, reference in (
+        ("binary16", _f32_f16_rounding_boundaries(), _reference_f32_to_f16),
+        ("bfloat16", _f32_bf16_rounding_boundaries(), _reference_f32_to_bf16),
+    ):
+        result_element = "f16" if report_name == "binary16" else "bf16"
+        rule = _typed_rule(
+            f"exact_binary32_to_{report_name}_packet",
+            Vector("f32", minimum_lanes=1, maximum_lanes=16),
+            Vector(result_element, minimum_lanes=1, maximum_lanes=16),
+        )
+        for bits in boundaries:
+            assert _evaluate_packet_lane(rule, bits) == reference(bits), hex(bits)
+
+
+def test_float8_packet_narrowing_covers_every_native_logical_width() -> None:
+    for source_format in FLOAT_PACKET_FORMATS:
+        lane_ranges = (
+            ("1-16", "17-32")
+            if source_format.bit_width == 16
+            else ("1-16", "17-31", "32")
+        )
+        for fp8_format in FLOAT8_PACKET_FORMATS:
+            for lane_range in lane_ranges:
+                rule = _rule(
+                    f"native_{source_format.report_name}x{lane_range}_to_"
+                    f"{fp8_format.report_name}x{lane_range}"
+                )
+                descriptor_keys = [
+                    emit.descriptor.key
+                    for emit in rule.emit
+                    if isinstance(emit, EmitDescriptorOp)
+                ]
+                assert (
+                    descriptor_keys.count("amd.xdna.aie2p.pack.w.trunc.configured") == 1
+                )
+                assert any(
+                    key.startswith("amd.xdna.aie2p.narrow.2x.b-to-w")
+                    for key in descriptor_keys
+                )
+                assert any(".widen.2x." in key for key in descriptor_keys) == (
+                    source_format.bit_width == 16
+                )
+                assert all(
+                    ".extract." not in key and ".insert." not in key
+                    for key in descriptor_keys
+                )
+
+
+def _assert_float8_packet_narrowing_matches_oracle(
+    source_format: FloatPacketFormat,
+    fp8_format: Float8PacketFormat,
+    values: Iterable[int],
+) -> None:
+    lane_range = "17-32" if source_format.bit_width == 16 else "32"
+    rule = _rule(
+        f"native_{source_format.report_name}x{lane_range}_to_"
+        f"{fp8_format.report_name}x{lane_range}"
+    )
+    for bits in values:
+        expected = _reference_f32_to_fp8(
+            _source_float_to_f32(source_format, bits),
+            exponent_bits=7 - fp8_format.mantissa_bits,
+            mantissa_bits=fp8_format.mantissa_bits,
+            has_infinity=fp8_format.has_infinity,
+        )
+        assert _evaluate_packet_lane(rule, bits) == expected, (
+            source_format.element,
+            fp8_format.element,
+            hex(bits),
+        )
+
+
+def test_float8_packet_narrowing_matches_rounding_boundaries() -> None:
+    for source_format in FLOAT_PACKET_FORMATS:
+        for fp8_format in FLOAT8_PACKET_FORMATS:
+            _assert_float8_packet_narrowing_matches_oracle(
+                source_format,
+                fp8_format,
+                _source_fp8_rounding_boundaries(source_format, fp8_format),
+            )
+
+
+@pytest.mark.exhaustive
+def test_float8_packet_narrowing_matches_exhaustive_16bit_oracles() -> None:
+    for source_format in FLOAT_PACKET_FORMATS:
+        if source_format.bit_width != 16:
+            continue
+        for fp8_format in FLOAT8_PACKET_FORMATS:
+            _assert_float8_packet_narrowing_matches_oracle(
+                source_format,
+                fp8_format,
+                range(1 << 16),
+            )
+
+
+def _assert_bfloat16_fptosi_recipe(values: Iterable[int]) -> None:
+    for input_bits in values:
+        value = _bits_float(input_bits << 16)
+        if not math.isfinite(value) or not -(2**31) <= value < 2**31:
+            continue
+        assert _reference_bf16_fptosi_recipe(input_bits) == math.trunc(value), hex(
+            input_bits
+        )
+
+
+def test_bfloat16_packet_to_signed_i32_is_exact_at_domain_boundaries() -> None:
     rule = _rule("exact_bfloat16x16_to_signed_i32x16")
     assert rule.source_op is vector.vector_fptosi
     assert [
@@ -583,30 +2014,63 @@ def test_bfloat16_packet_to_signed_i32_is_exact_over_defined_domain() -> None:
         "sel": ValueRef.temporary("minimum"),
     }
 
-    for input_bits in range(1 << 16):
-        value = _bits_float(input_bits << 16)
-        if not math.isfinite(value) or not -(2**31) <= value < 2**31:
-            continue
-        assert _reference_bf16_fptosi_recipe(input_bits) == math.trunc(value), hex(
-            input_bits
+    boundary_values = set()
+    for center in (
+        0x0000,
+        0x3F00,
+        0x3F80,
+        0x4000,
+        0x4EFF,
+        0x4F00,
+        0x8000,
+        0xBF00,
+        0xBF80,
+        0xC000,
+        0xCEFF,
+        0xCF00,
+    ):
+        boundary_values.update(_encoding_neighbors(center, 16))
+    _assert_bfloat16_fptosi_recipe(boundary_values)
+
+
+@pytest.mark.exhaustive
+def test_bfloat16_packet_to_signed_i32_is_exact_over_defined_domain() -> None:
+    _assert_bfloat16_fptosi_recipe(range(1 << 16))
+
+
+def test_native_integer_widening_covers_each_logical_carrier_interval() -> None:
+    expected_lane_counts = {
+        ("i8", "i32"): {*range(1, 33), 64},
+        ("i16", "i32"): set(range(1, 33)),
+        ("i16", "i64"): {*range(1, 17), 32},
+        ("i32", "i64"): set(range(1, 17)),
+    }
+    covered_lane_counts = {key: set() for key in expected_lane_counts}
+    for rule_shape in INTEGER_WIDEN_RULE_SHAPES:
+        instruction = rule_shape.instruction
+        key = (instruction.input_element, instruction.result_element)
+        logical_lane_counts = set(
+            range(rule_shape.minimum_lane_count, rule_shape.maximum_lane_count + 1)
         )
+        assert covered_lane_counts[key].isdisjoint(logical_lane_counts)
+        covered_lane_counts[key].update(logical_lane_counts)
+    assert covered_lane_counts == expected_lane_counts
 
-
-def test_native_integer_packet_conversions_are_compact_exact_rules() -> None:
     for source_op, signedness in (
         (vector.vector_extui, "unsigned"),
         (vector.vector_extsi, "signed"),
     ):
-        for widen_case in INTEGER_WIDEN_CASES:
-            rule = _rule(
-                f"native_{signedness}_{widen_case.input_element}x"
-                f"{widen_case.lane_count}_to_{widen_case.result_element}x"
-                f"{widen_case.lane_count}"
-            )
+        for rule_shape in INTEGER_WIDEN_RULE_SHAPES:
+            instruction = rule_shape.instruction
+            rule = _rule(rule_shape.report_key(signedness))
             assert rule.source_op is source_op
             assert rule.descriptor.key == (
-                f"amd.xdna.aie2p.widen.{widen_case.physical_shape}."
+                f"amd.xdna.aie2p.widen.{instruction.physical_shape}."
                 f"{signedness}.configured"
+            )
+            assert rule.guards == (
+                Guard.value_type("input", rule_shape.input_type),
+                Guard.value_type("result", rule_shape.result_type),
             )
             input_slices = [
                 emit
@@ -614,7 +2078,7 @@ def test_native_integer_packet_conversions_are_compact_exact_rules() -> None:
                 if isinstance(emit, EmitRegisterSlice)
                 and emit.result.field == "source_w"
             ]
-            assert len(input_slices) == int(widen_case.slice_input)
+            assert len(input_slices) == int(instruction.slice_input)
             descriptor_keys = [
                 emit.descriptor.key
                 for emit in rule.emit
@@ -628,9 +2092,13 @@ def test_native_integer_packet_conversions_are_compact_exact_rules() -> None:
             ]
             assert descriptor_keys[4:] == (
                 []
-                if widen_case.direct_accumulator_result
+                if (
+                    instruction.direct_accumulator_result
+                    and rule_shape.result_accumulator_unit_count
+                    == instruction.accumulator_unit_count
+                )
                 else ["amd.xdna.aie2p.move.accumulator512.to.vector512"]
-                * widen_case.accumulator_unit_count
+                * rule_shape.result_accumulator_unit_count
             )
             set_ups_mode = next(
                 emit
@@ -638,13 +2106,168 @@ def test_native_integer_packet_conversions_are_compact_exact_rules() -> None:
                 if isinstance(emit, EmitDescriptorOp)
                 and emit.descriptor.key == "amd.xdna.aie2p.state.ups-mode.immediate"
             )
-            assert set_ups_mode.immediates == {"i": widen_case.ups_mode}
+            assert set_ups_mode.immediates == {"i": instruction.ups_mode}
 
-    for pack_case in INTEGER_PACK_CASES:
-        rule = _rule(pack_case.report_key)
-        assert rule.source_op is pack_case.source_op
+
+def test_composed_byte_widening_covers_each_logical_carrier_interval() -> None:
+    shape_families = (
+        (BYTE_TO_HALFWORD_WIDEN_RULE_SHAPES, "i16", set(range(1, 65))),
+        (BYTE_TO_I64_WIDEN_RULE_SHAPES, "i64", set(range(1, 17))),
+    )
+    for rule_shapes, result_element, expected_lane_counts in shape_families:
+        covered_lane_counts: set[int] = set()
+        for rule_shape in rule_shapes:
+            assert rule_shape.input_element == "i8"
+            assert rule_shape.result_element == result_element
+            logical_lane_counts = set(
+                range(
+                    rule_shape.minimum_lane_count,
+                    rule_shape.maximum_lane_count + 1,
+                )
+            )
+            assert covered_lane_counts.isdisjoint(logical_lane_counts)
+            covered_lane_counts.update(logical_lane_counts)
+        assert covered_lane_counts == expected_lane_counts
+
+        for source_op, signedness in (
+            (vector.vector_extui, "unsigned"),
+            (vector.vector_extsi, "signed"),
+        ):
+            for rule_shape in rule_shapes:
+                rule = _rule(rule_shape.report_key(signedness))
+                assert rule.source_op is source_op
+                assert rule.guards == (
+                    Guard.value_type("input", rule_shape.input_type),
+                    Guard.value_type("result", rule_shape.result_type),
+                )
+
+
+def test_byte_to_halfword_widening_uses_exact_interleave_programs() -> None:
+    for source_op, signedness in (
+        (vector.vector_extui, "unsigned"),
+        (vector.vector_extsi, "signed"),
+    ):
+        for rule_shape in BYTE_TO_HALFWORD_WIDEN_RULE_SHAPES:
+            rule = _rule(rule_shape.report_key(signedness))
+            assert rule.source_op is source_op
+            descriptor_emits = tuple(
+                emit for emit in rule.emit if isinstance(emit, EmitDescriptorOp)
+            )
+            descriptor_keys = [emit.descriptor.key for emit in descriptor_emits]
+            signed_prefix = (
+                [
+                    "amd.xdna.aie2p.cmp.lt.signed.i8x64",
+                    "amd.xdna.aie2p.constant.i32.short",
+                    "amd.xdna.aie2p.splat.i8x64",
+                    "amd.xdna.aie2p.select.i8x64",
+                ]
+                if signedness == "signed"
+                else []
+            )
+            assert descriptor_keys == [
+                "amd.xdna.aie2p.sub.i8x64",
+                *signed_prefix,
+                *[
+                    descriptor_key
+                    for _ in range(rule_shape.result_packet_count)
+                    for descriptor_key in (
+                        "amd.xdna.aie2p.constant.i32.mova",
+                        "amd.xdna.aie2p.shuffle.x.configured",
+                    )
+                ],
+            ]
+            assert [
+                emit.immediates["i"]
+                for emit in descriptor_emits
+                if emit.descriptor.key == "amd.xdna.aie2p.constant.i32.mova"
+            ] == list(range(20, 20 + rule_shape.result_packet_count))
+            assert sum(
+                isinstance(emit, EmitRegisterConcat) for emit in rule.emit
+            ) == int(rule_shape.result_packet_count > 1)
+
+
+def test_byte_to_i64_widening_uses_exact_vups_chain() -> None:
+    for source_op, signedness in (
+        (vector.vector_extui, "unsigned"),
+        (vector.vector_extsi, "signed"),
+    ):
+        for rule_shape in BYTE_TO_I64_WIDEN_RULE_SHAPES:
+            rule = _rule(rule_shape.report_key(signedness))
+            assert rule.source_op is source_op
+            descriptor_keys = [
+                emit.descriptor.key
+                for emit in rule.emit
+                if isinstance(emit, EmitDescriptorOp)
+            ]
+            assert descriptor_keys == [
+                "amd.xdna.aie2p.constant.i32.shift",
+                "amd.xdna.aie2p.state.saturation.immediate",
+                "amd.xdna.aie2p.state.ups-mode.immediate",
+                f"amd.xdna.aie2p.widen.4x.w-to-c.{signedness}.configured",
+                "amd.xdna.aie2p.move.accumulator512.to.vector512",
+                "amd.xdna.aie2p.state.ups-mode.immediate",
+                f"amd.xdna.aie2p.widen.2x.x-to-c.{signedness}.configured",
+                *["amd.xdna.aie2p.move.accumulator512.to.vector512"]
+                * rule_shape.result_packet_count,
+            ]
+            state_emits = [
+                emit
+                for emit in rule.emit
+                if isinstance(emit, EmitDescriptorOp)
+                and emit.descriptor.key.startswith("amd.xdna.aie2p.state.")
+            ]
+            assert [emit.immediates["i"] for emit in state_emits] == [0, 0, 1]
+
+
+def test_composed_byte_widening_is_exact_for_every_input_value() -> None:
+    shape_families = (
+        (BYTE_TO_HALFWORD_WIDEN_RULE_SHAPES, 16),
+        (BYTE_TO_I64_WIDEN_RULE_SHAPES, 64),
+    )
+    for rule_shapes, result_bits in shape_families:
+        result_mask = (1 << result_bits) - 1
+        for signedness in ("unsigned", "signed"):
+            for rule_shape in rule_shapes:
+                rule = _rule(rule_shape.report_key(signedness))
+                for result_group_ordinal in range(rule_shape.result_packet_count):
+                    for input_value in range(1 << 8):
+                        expected = input_value
+                        if signedness == "signed" and input_value & 0x80:
+                            expected -= 1 << 8
+                        actual = _evaluate_packet_lane(
+                            rule,
+                            input_value,
+                            result_group_ordinal=result_group_ordinal,
+                        )
+                        assert actual & result_mask == expected & result_mask
+
+
+def test_native_integer_packing_covers_each_logical_carrier_interval() -> None:
+    expected_truncation_lanes = {
+        ("i16", "i8"): set(range(1, 65)),
+    }
+    covered_truncation_lanes = {key: set() for key in expected_truncation_lanes}
+    for rule_shape in INTEGER_PACK_RULE_SHAPES:
+        instruction = rule_shape.instruction
+        if instruction.bit_width is None:
+            key = (instruction.input_element, instruction.result_element)
+            logical_lane_counts = set(
+                range(
+                    rule_shape.minimum_lane_count,
+                    rule_shape.maximum_lane_count + 1,
+                )
+            )
+            assert covered_truncation_lanes[key].isdisjoint(logical_lane_counts)
+            covered_truncation_lanes[key].update(logical_lane_counts)
+
+        rule = _rule(rule_shape.report_key)
+        assert rule.source_op is instruction.source_op
         assert rule.descriptor.key == (
-            f"amd.xdna.aie2p.pack.{pack_case.physical_width}.trunc.configured"
+            f"amd.xdna.aie2p.pack.{instruction.physical_width}.trunc.configured"
+        )
+        assert rule.guards[:2] == (
+            Guard.value_type(instruction.source_field, rule_shape.input_type),
+            Guard.value_type("result", rule_shape.result_type),
         )
         assert [
             emit.descriptor.key
@@ -656,7 +2279,158 @@ def test_native_integer_packet_conversions_are_compact_exact_rules() -> None:
             rule.descriptor.key,
         ]
         assert rule.emit[0].immediates == {"i": 0}
-        assert rule.emit[1].immediates == {"i": pack_case.pack_size}
+        assert rule.emit[1].immediates == {"i": instruction.pack_size}
+        assert sum(isinstance(emit, EmitRegisterSlice) for emit in rule.emit) == int(
+            instruction.pad_result
+        )
+        assert sum(isinstance(emit, EmitRegisterConcat) for emit in rule.emit) == int(
+            instruction.pad_result
+        )
+    assert covered_truncation_lanes == expected_truncation_lanes
+
+    assert {
+        rule_shape.instruction
+        for rule_shape in INTEGER_PACK_RULE_SHAPES
+        if (
+            rule_shape.minimum_lane_count == rule_shape.instruction.native_lane_count
+            and rule_shape.maximum_lane_count
+            == rule_shape.instruction.native_lane_count
+        )
+    } == set(INTEGER_PACK_INSTRUCTIONS)
+
+
+def test_native_integer_shuffle_truncation_covers_every_remaining_width() -> None:
+    expected_lanes_and_controls = {
+        ("i32", "i16"): (set(range(1, 33)), (2,)),
+        ("i32", "i8"): (set(range(1, 33)), (2, 0)),
+        ("i64", "i32"): (set(range(1, 17)), (4,)),
+        ("i64", "i16"): (set(range(1, 17)), (4, 2)),
+        ("i64", "i8"): (set(range(1, 17)), (4, 2, 0)),
+    }
+    covered_lanes = {key: set() for key in expected_lanes_and_controls}
+    for rule_shape in INTEGER_TRUNCATION_RULE_SHAPES:
+        instruction = rule_shape.instruction
+        key = (instruction.input_element, instruction.result_element)
+        assert instruction.shuffle_controls == expected_lanes_and_controls[key][1]
+        logical_lane_counts = set(
+            range(rule_shape.minimum_lane_count, rule_shape.maximum_lane_count + 1)
+        )
+        assert covered_lanes[key].isdisjoint(logical_lane_counts)
+        covered_lanes[key].update(logical_lane_counts)
+
+        rule = _rule(rule_shape.report_key)
+        assert rule.source_op is vector.vector_trunci
+        assert rule.descriptor.key == "amd.xdna.aie2p.shuffle.x.configured"
+        assert rule.guards == (
+            Guard.value_type("input", rule_shape.input_type),
+            Guard.value_type("result", rule_shape.result_type),
+        )
+        descriptor_emits = tuple(
+            emit for emit in rule.emit if isinstance(emit, EmitDescriptorOp)
+        )
+        assert [emit.descriptor.key for emit in descriptor_emits] == [
+            descriptor_key
+            for _ in instruction.shuffle_controls
+            for descriptor_key in (
+                "amd.xdna.aie2p.constant.i32.mova",
+                "amd.xdna.aie2p.shuffle.x.configured",
+            )
+        ]
+        assert [
+            descriptor_emits[index].immediates["i"]
+            for index in range(0, len(descriptor_emits), 2)
+        ] == list(instruction.shuffle_controls)
+        assert sum(isinstance(emit, EmitRegisterSlice) for emit in rule.emit) == (
+            2 if rule_shape.source_carrier_count == 2 else 0
+        )
+
+    assert covered_lanes == {
+        key: lanes for key, (lanes, _) in expected_lanes_and_controls.items()
+    }
+    assert {shape.instruction for shape in INTEGER_TRUNCATION_RULE_SHAPES} == set(
+        INTEGER_TRUNCATION_INSTRUCTIONS
+    )
+
+
+def test_native_integer_shuffle_truncation_preserves_every_lane() -> None:
+    for rule_shape in INTEGER_TRUNCATION_RULE_SHAPES:
+        instruction = rule_shape.instruction
+        input_bits = int(instruction.input_element[1:])
+        result_bits = int(instruction.result_element[1:])
+        input_mask = (1 << input_bits) - 1
+        result_mask = (1 << result_bits) - 1
+        rule = _rule(rule_shape.report_key)
+        for lane_count in range(
+            rule_shape.minimum_lane_count, rule_shape.maximum_lane_count + 1
+        ):
+            input_values = tuple(
+                (
+                    ((lane + 1) * 0x9E3779B97F4A7C15 ^ lane_count * 0xD1B54A32D192ED03)
+                    & input_mask
+                    & ~result_mask
+                )
+                | ((lane * 37 + lane_count * 11) & result_mask)
+                for lane in range(lane_count)
+            )
+            assert _evaluate_integer_truncation_lanes(
+                rule,
+                input_values,
+                input_bits=input_bits,
+                result_bits=result_bits,
+                source_carrier_count=rule_shape.source_carrier_count,
+            ) == tuple(value & result_mask for value in input_values)
+
+
+def test_integer_pack_rejects_unrepresentable_control_values() -> None:
+    with pytest.raises(ValueError, match="one-bit crPackSize"):
+        IntegerPackInstruction("i32", 16, "i16", None)
+
+
+def test_native_integer_truncation_preserves_low_bits_at_boundaries() -> None:
+    boundary_values = {
+        "i16": (0, 1, 0x7F, 0x80, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF),
+        "i32": (
+            0,
+            1,
+            0x200,
+            0x7FFF,
+            0x8000,
+            0xFFFF,
+            0x10000,
+            0x12345678,
+            0x7FFFFFFF,
+            0x80000000,
+            0xFFFFFFFF,
+        ),
+        "i64": (
+            0,
+            1,
+            0x100,
+            0x10000,
+            0x100000000,
+            0x123456789ABCDEF0,
+            0x7FFFFFFFFFFFFFFF,
+            0x8000000000000000,
+            0xFFFFFFFFFFFFFFFF,
+        ),
+    }
+    for rule_shape in (*INTEGER_PACK_RULE_SHAPES, *INTEGER_TRUNCATION_RULE_SHAPES):
+        instruction = rule_shape.instruction
+        if isinstance(instruction, IntegerPackInstruction) and (
+            instruction.bit_width is not None
+        ):
+            continue
+        rule = _rule(rule_shape.report_key)
+        result_bits = (
+            instruction.output_element_bits
+            if isinstance(instruction, IntegerPackInstruction)
+            else int(instruction.result_element[1:])
+        )
+        result_mask = (1 << result_bits) - 1
+        for input_value in boundary_values[instruction.input_element]:
+            assert _evaluate_packet_lane(rule, input_value) == (
+                input_value & result_mask
+            )
 
 
 def test_binary32_to_integer_programs_match_truncation_oracles() -> None:
@@ -720,18 +2494,6 @@ def test_binary32_to_integer_programs_match_truncation_oracles() -> None:
             2**32 - 256,
         )
     }
-    random_source = random.Random(0xA1E2_F2C0)
-    while len(signed_bits) < 1024:
-        bits = random_source.getrandbits(32)
-        value = _bits_float(bits)
-        if math.isfinite(value) and -(2**31) <= value < 2**31:
-            signed_bits.add(bits)
-    while len(unsigned_bits) < 1024:
-        bits = random_source.getrandbits(31)
-        value = _bits_float(bits)
-        if math.isfinite(value) and 0 <= value < 2**32:
-            unsigned_bits.add(bits)
-
     for bits in signed_bits:
         value = _bits_float(bits)
         assert _s32(_evaluate(signed, bits)) == math.trunc(value)
@@ -743,24 +2505,32 @@ def test_binary32_to_integer_programs_match_truncation_oracles() -> None:
             assert _evaluate(unsigned_narrow, bits) == expected
 
 
-def test_integer_to_f32_programs_match_binary32_oracle() -> None:
-    signed_i8 = _rule("native_signed_i8_to_binary32")
-    unsigned_i8 = _rule("native_unsigned_i8_to_binary32")
-    for bits in range(1 << 8):
-        signed = bits - 256 if bits & 0x80 else bits
-        assert _evaluate(signed_i8, bits) == _float_bits(float(signed))
-        assert _evaluate(unsigned_i8, bits) == _float_bits(float(bits))
+def _assert_small_integer_to_f32_oracles(bit_width: int, values: Iterable[int]) -> None:
+    signed_rule = _rule(
+        f"exact_signed_i{bit_width}_to_binary32",
+        scalar_conversion.scalar_sitofp,
+    )
+    unsigned_rule = _rule(
+        f"exact_unsigned_i{bit_width}_to_binary32",
+        scalar_conversion.scalar_uitofp,
+    )
+    sign_bit = 1 << (bit_width - 1)
+    modulus = 1 << bit_width
+    for bits in values:
+        signed = bits - modulus if bits & sign_bit else bits
+        assert _evaluate(signed_rule, bits) == _float_bits(float(signed))
+        assert _evaluate(unsigned_rule, bits) == _float_bits(float(bits))
 
-    signed_i16 = _rule("native_signed_i16_to_binary32")
-    unsigned_i16 = _rule("native_unsigned_i16_to_binary32")
-    for bits in range(1 << 16):
-        assert _evaluate(signed_i16, bits) == _float_bits(
-            float(bits - (1 << 16) if bits & 0x8000 else bits)
-        )
-        assert _evaluate(unsigned_i16, bits) == _float_bits(float(bits))
 
-    signed_i32 = _rule("native_signed_i32_to_binary32")
-    values = [
+def test_integer_to_f32_programs_match_binary32_boundary_oracle() -> None:
+    for bit_width in (8, 16):
+        values = set()
+        for center in (0, 1 << (bit_width - 1), (1 << bit_width) - 1):
+            values.update(_encoding_neighbors(center, bit_width))
+        _assert_small_integer_to_f32_oracles(bit_width, values)
+
+    signed_i32 = _rule("exact_signed_i32_to_binary32", scalar_conversion.scalar_sitofp)
+    values = {
         0,
         1,
         -1,
@@ -769,14 +2539,25 @@ def test_integer_to_f32_programs_match_binary32_oracle() -> None:
         2**24 + 1,
         2**31 - 1,
         -(2**31),
-    ]
-    random_source = random.Random(0xA1E2C0DE)
-    values.extend(_s32(random_source.getrandbits(32)) for _ in range(2048))
+    }
+    for exponent in range(24, 31):
+        values.update(
+            {
+                (1 << exponent) - 1,
+                1 << exponent,
+                (1 << exponent) + 1,
+                -((1 << exponent) - 1),
+                -(1 << exponent),
+                -((1 << exponent) + 1),
+            }
+        )
     for value in values:
         assert _evaluate(signed_i32, _u32(value)) == _float_bits(float(value))
 
-    unsigned_i32 = _rule("exact_unsigned_i32_to_binary32")
-    unsigned_values = [
+    unsigned_i32 = _rule(
+        "exact_unsigned_i32_to_binary32", scalar_conversion.scalar_uitofp
+    )
+    unsigned_values = {
         0,
         1,
         2**24 - 1,
@@ -786,150 +2567,209 @@ def test_integer_to_f32_programs_match_binary32_oracle() -> None:
         2**31,
         2**31 + 1,
         2**32 - 1,
-    ]
-    unsigned_values.extend(random_source.getrandbits(32) for _ in range(2048))
+    }
+    for exponent in range(24, 32):
+        unsigned_values.update(
+            {
+                (1 << exponent) - 1,
+                1 << exponent,
+                min((1 << exponent) + 1, (1 << 32) - 1),
+            }
+        )
     for value in unsigned_values:
         assert _evaluate(unsigned_i32, value) == _float_bits(float(value))
 
 
-def test_16bit_float_widening_programs_match_exhaustive_oracles() -> None:
+def _packet_integer_to_f32_rule(bit_width: int, *, signed: bool) -> DescriptorRule:
+    source_op = vector.vector_sitofp if signed else vector.vector_uitofp
+    signedness = "signed" if signed else "unsigned"
+    return _rule(
+        f"exact_{signedness}_i{bit_width}_to_binary32",
+        source_op,
+    )
+
+
+def _integer_packet_rounding_values(bit_width: int) -> set[int]:
+    mask = (1 << bit_width) - 1
+    sign_bit = 1 << (bit_width - 1)
+    values: set[int] = set()
+    for center in (0, 1, sign_bit, sign_bit - 1, mask):
+        values.update(_encoding_neighbors(center, bit_width))
+    for exponent in range(bit_width):
+        power = 1 << exponent
+        values.update(_encoding_neighbors(power, bit_width))
+        values.update(_encoding_neighbors((-power) & mask, bit_width))
+    if bit_width == 32:
+        # Exercise both sides of even and odd F32 midpoint ties in every
+        # binade where integer conversion rounds away low bits.
+        for exponent in range(24, 32):
+            spacing = 1 << (exponent - 23)
+            half_spacing = spacing // 2
+            for significand in range(4):
+                midpoint = (1 << exponent) + significand * spacing + half_spacing
+                if midpoint <= mask:
+                    values.update(_encoding_neighbors(midpoint, bit_width))
+                negative_midpoint = (-midpoint) & mask
+                values.update(_encoding_neighbors(negative_midpoint, bit_width))
+    return values
+
+
+def test_integer_to_f32_packet_family_is_complete_and_compact() -> None:
+    for signed in (False, True):
+        for bit_width in (8, 16, 32):
+            rule = _packet_integer_to_f32_rule(bit_width, signed=signed)
+            guarded_types = {
+                guard.field: guard.type_pattern
+                for guard in rule.guards
+                if guard.type_pattern is not None
+            }
+            input_type = guarded_types["input"]
+            result_type = guarded_types["result"]
+            assert input_type.element == f"i{bit_width}"
+            assert input_type.minimum_static_elements == 1
+            assert input_type.maximum_static_elements == 16
+            assert result_type.element == "f32"
+            assert result_type.minimum_static_elements == 1
+            assert result_type.maximum_static_elements == 16
+
+            descriptor_keys = [
+                emit.descriptor.key
+                for emit in rule.emit
+                if isinstance(emit, EmitDescriptorOp)
+            ]
+            assert "amd.xdna.aie2p.extract.i32.immediate" not in descriptor_keys
+            assert "amd.xdna.aie2p.insert.i32.register" not in descriptor_keys
+            assert "amd.xdna.aie2p.convert.signed.i32.to.f32" not in descriptor_keys
+            assert "amd.xdna.aie2p.accumulator.clear.f32x64" not in descriptor_keys
+            assert (
+                "amd.xdna.aie2p.move.vector512.to.accumulator512" not in descriptor_keys
+            )
+            assert not any(isinstance(emit, EmitRegisterConcat) for emit in rule.emit)
+            assert descriptor_keys.count(
+                "amd.xdna.aie2p.move.vector512.to.accumulator512.low"
+            ) == (4 if bit_width == 32 else 2)
+            assert descriptor_keys.count("amd.xdna.aie2p.sub.f32x16.configured") == (
+                2 if bit_width == 32 else 1
+            )
+            assert descriptor_keys.count("amd.xdna.aie2p.add.f32x64.configured") == (
+                1 if bit_width == 32 else 0
+            )
+            assert len(rule.emit) <= 33
+
+
+def test_integer_to_f32_packet_programs_match_rounding_boundaries() -> None:
+    for bit_width in (8, 16, 32):
+        signed_rule = _packet_integer_to_f32_rule(bit_width, signed=True)
+        unsigned_rule = _packet_integer_to_f32_rule(bit_width, signed=False)
+        sign_bit = 1 << (bit_width - 1)
+        modulus = 1 << bit_width
+        for bits in _integer_packet_rounding_values(bit_width):
+            signed_value = bits - modulus if bits & sign_bit else bits
+            assert _evaluate_packet_lane(signed_rule, bits) == _float_bits(
+                float(signed_value)
+            )
+            assert _evaluate_packet_lane(unsigned_rule, bits) == _float_bits(
+                float(bits)
+            )
+
+
+@pytest.mark.exhaustive
+def test_small_integer_to_f32_programs_match_exhaustive_oracles() -> None:
+    for bit_width in (8, 16):
+        _assert_small_integer_to_f32_oracles(bit_width, range(1 << bit_width))
+        signed_packet = _packet_integer_to_f32_rule(bit_width, signed=True)
+        unsigned_packet = _packet_integer_to_f32_rule(bit_width, signed=False)
+        sign_bit = 1 << (bit_width - 1)
+        modulus = 1 << bit_width
+        for bits in range(modulus):
+            signed_value = bits - modulus if bits & sign_bit else bits
+            assert _evaluate_packet_lane(signed_packet, bits) == _float_bits(
+                float(signed_value)
+            )
+            assert _evaluate_packet_lane(unsigned_packet, bits) == _float_bits(
+                float(bits)
+            )
+
+
+def _assert_16bit_float_widening_oracles(values: Iterable[int]) -> None:
     f16 = _rule("exact_f16_to_binary32")
     bf16 = _rule("exact_bf16_to_binary32")
-    for bits in range(1 << 16):
+    for bits in values:
         assert _evaluate(f16, bits) == _reference_f16_to_f32(bits)
         assert _evaluate(bf16, bits) == bits << 16
 
 
-def test_float8_widening_programs_match_exhaustive_oracles() -> None:
-    formats = (
-        ("f8e4m3", 4, 3, False),
-        ("f8e5m2", 5, 2, True),
-    )
-    for source_name, exponent_bits, mantissa_bits, has_infinity in formats:
-        f16 = _rule(f"exact_{source_name}_to_f16")
-        bf16 = _rule(f"exact_{source_name}_to_bf16")
-        f32 = _rule(f"exact_{source_name}_to_f32")
-        for bits in range(1 << 8):
-            f32_bits = _reference_fp8_to_f32(
-                bits,
-                exponent_bits=exponent_bits,
-                mantissa_bits=mantissa_bits,
-                has_infinity=has_infinity,
+def test_16bit_float_widening_programs_match_boundary_oracles() -> None:
+    values = set()
+    for source_format in FLOAT_PACKET_FORMATS:
+        if source_format.bit_width == 16:
+            values.update(_float_encoding_boundaries(source_format))
+    _assert_16bit_float_widening_oracles(values)
+
+
+@pytest.mark.exhaustive
+def test_16bit_float_widening_programs_match_exhaustive_oracles() -> None:
+    _assert_16bit_float_widening_oracles(range(1 << 16))
+
+
+def _assert_float8_widening_oracles(
+    fp8_format: Float8PacketFormat, values: Iterable[int]
+) -> None:
+    source_name = fp8_format.report_name
+    f16 = _rule(f"exact_{source_name}_to_f16")
+    bf16 = _rule(f"exact_{source_name}_to_bf16")
+    f32 = _rule(f"exact_{source_name}_to_f32")
+    for bits in values:
+        f32_bits = _reference_fp8_to_f32(
+            bits,
+            exponent_bits=7 - fp8_format.mantissa_bits,
+            mantissa_bits=fp8_format.mantissa_bits,
+            has_infinity=fp8_format.has_infinity,
+        )
+        assert _evaluate(f32, bits) == f32_bits
+        assert _evaluate(bf16, bits) == f32_bits >> 16
+        actual_f16 = _evaluate(f16, bits)
+        if f32_bits & 0x7FFFFFFF > 0x7F800000:
+            assert actual_f16 & 0x7C00 == 0x7C00
+            assert actual_f16 & 0x03FF != 0
+        else:
+            assert actual_f16 == _reference_f32_to_f16(f32_bits), (
+                source_name,
+                hex(bits),
+                hex(actual_f16),
+                hex(_reference_f32_to_f16(f32_bits)),
             )
-            assert _evaluate(f32, bits) == f32_bits
-            assert _evaluate(bf16, bits) == f32_bits >> 16
-            actual_f16 = _evaluate(f16, bits)
-            if f32_bits & 0x7FFFFFFF > 0x7F800000:
-                assert actual_f16 & 0x7C00 == 0x7C00
-                assert actual_f16 & 0x03FF != 0
-            else:
-                assert actual_f16 == _reference_f32_to_f16(f32_bits), (
-                    source_name,
-                    hex(bits),
-                    hex(actual_f16),
-                    hex(_reference_f32_to_f16(f32_bits)),
-                )
+
+
+def test_float8_widening_programs_match_boundary_oracles() -> None:
+    for fp8_format in FLOAT8_PACKET_FORMATS:
+        _assert_float8_widening_oracles(
+            fp8_format, _fp8_encoding_boundaries(fp8_format)
+        )
+
+
+@pytest.mark.exhaustive
+def test_float8_widening_programs_match_exhaustive_oracles() -> None:
+    for fp8_format in FLOAT8_PACKET_FORMATS:
+        _assert_float8_widening_oracles(fp8_format, range(1 << 8))
 
 
 def test_float8_narrowing_programs_match_rounding_oracles() -> None:
-    formats = (
-        ("f8e4m3", 4, 3, False, 0x7E),
-        ("f8e5m2", 5, 2, True, 0x7B),
-    )
-    random_source = random.Random(0xA1E2_F008)
-    for result_name, exponent_bits, mantissa_bits, has_infinity, max_finite in formats:
-        f32_rule = _rule(f"exact_f32_to_{result_name}")
-        values = {
-            0x00000000,
-            0x80000000,
-            0x00000001,
-            0x007FFFFF,
-            0x00800000,
-            0x7F7FFFFF,
-            0xFF7FFFFF,
-            0x7F800000,
-            0xFF800000,
-            0x7F800001,
-            0x7FC00000,
-            0x7FFFFFFF,
-            0xFF800001,
-            0xFFC00000,
-            0xFFFFFFFF,
-        }
-        decoded_positive = [
-            _reference_fp8_to_f32(
-                bits,
-                exponent_bits=exponent_bits,
-                mantissa_bits=mantissa_bits,
-                has_infinity=has_infinity,
-            )
-            for bits in range(max_finite + 1)
-        ]
-        for f32_bits in decoded_positive:
-            values.update(
-                {
-                    _u32(f32_bits - 1),
-                    f32_bits,
-                    _u32(f32_bits + 1),
-                    f32_bits | 0x80000000,
-                }
-            )
-        for lhs_bits, rhs_bits in pairwise(decoded_positive):
-            midpoint = (_bits_float(lhs_bits) + _bits_float(rhs_bits)) * 0.5
-            midpoint_bits = _float_bits(midpoint)
-            negative_midpoint_bits = _float_bits(-midpoint)
-            values.update(
-                {
-                    _u32(midpoint_bits - 1),
-                    midpoint_bits,
-                    _u32(midpoint_bits + 1),
-                    _u32(negative_midpoint_bits - 1),
-                    negative_midpoint_bits,
-                    _u32(negative_midpoint_bits + 1),
-                }
-            )
-        values.update(random_source.getrandbits(32) for _ in range(1024))
-        for bits in values:
-            expected = _reference_f32_to_fp8(
-                bits,
-                exponent_bits=exponent_bits,
-                mantissa_bits=mantissa_bits,
-                has_infinity=has_infinity,
-            )
-            assert _evaluate(f32_rule, bits) == expected, hex(bits)
-
-        f16_rule = _rule(f"exact_f16_to_{result_name}")
-        bf16_rule = _rule(f"exact_bf16_to_{result_name}")
-        source_payloads = {
-            0x0000,
-            0x8000,
-            0x0001,
-            0x03FF,
-            0x0400,
-            0x3C00,
-            0x7BFF,
-            0x7C00,
-            0xFC00,
-            0x7C01,
-            0x7E00,
-            0xFFFF,
-        }
-        source_payloads.update(random_source.getrandbits(16) for _ in range(256))
-        for bits in source_payloads:
-            f16_source = _reference_f16_to_f32(bits)
-            bf16_source = bits << 16
-            assert _evaluate(f16_rule, bits) == _reference_f32_to_fp8(
-                f16_source,
-                exponent_bits=exponent_bits,
-                mantissa_bits=mantissa_bits,
-                has_infinity=has_infinity,
-            )
-            assert _evaluate(bf16_rule, bits) == _reference_f32_to_fp8(
-                bf16_source,
-                exponent_bits=exponent_bits,
-                mantissa_bits=mantissa_bits,
-                has_infinity=has_infinity,
-            )
+    for fp8_format in FLOAT8_PACKET_FORMATS:
+        for source_format in FLOAT_PACKET_FORMATS:
+            rule = _rule(f"exact_{source_format.element}_to_{fp8_format.report_name}")
+            for bits in _source_fp8_rounding_boundaries(source_format, fp8_format):
+                expected = _reference_f32_to_fp8(
+                    _source_float_to_f32(source_format, bits),
+                    exponent_bits=7 - fp8_format.mantissa_bits,
+                    mantissa_bits=fp8_format.mantissa_bits,
+                    has_infinity=fp8_format.has_infinity,
+                )
+                assert _evaluate(rule, bits) == expected, (
+                    source_format.element,
+                    fp8_format.element,
+                    hex(bits),
+                )
 
 
 def test_binary32_to_bfloat16_program_matches_rounding_oracle() -> None:
@@ -954,87 +2794,68 @@ def test_binary32_to_bfloat16_program_matches_rounding_oracle() -> None:
         0xFFC00000,
         0xFFFFFFFF,
     }
-    random_source = random.Random(0xA1E2_BF16)
-    values.update(random_source.getrandbits(32) for _ in range(1024))
     for bits in values:
         assert _evaluate(rule, bits) == _reference_f32_to_bf16(bits)
 
 
+def test_exact_bfloat_value_program_uses_only_shift() -> None:
+    rule = _rule("exactly_representable_binary32_to_bfloat16")
+
+    assert any(
+        guard.kind is GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS
+        for guard in rule.guards
+    )
+    assert any(guard.kind is GuardKind.VALUE_NOT_NAN for guard in rule.guards)
+    assert tuple(emit.descriptor.key for emit in rule.emit) == (
+        "amd.xdna.aie2p.constant.i32.short",
+        "amd.xdna.aie2p.lshl.i32",
+    )
+    assert _evaluate(rule, 0xC2F60000) == 0xC2F6
+
+
+def test_exact_finite_bfloat_values_preserve_nan_class_and_quieting() -> None:
+    rule = _rule("exactly_representable_binary32_to_bfloat16_preserve_nan")
+    assert any(
+        guard.kind is GuardKind.VALUE_FLOAT_EXACTLY_REPRESENTABLE_AS
+        for guard in rule.guards
+    )
+    assert not any(guard.kind is GuardKind.VALUE_NOT_NAN for guard in rule.guards)
+    assert not any("add.i32" in emit.descriptor.key for emit in rule.emit)
+    for payload in range(1 << 16):
+        bits = payload << 16
+        assert _evaluate(rule, bits) == _reference_f32_to_bf16(bits), hex(bits)
+    for bits in (0x7F800001, 0xFF800001, 0x7FBFFFFF, 0xFFFFFFFF):
+        assert _evaluate(rule, bits) == _reference_f32_to_bf16(bits), hex(bits)
+
+
 def test_binary32_to_f16_program_matches_rounding_oracle() -> None:
     rule = _rule("exact_binary32_to_f16")
-    values = {
-        0x00000000,
-        0x80000000,
-        0x33000000,
-        0x33000001,
-        0x337FFFFF,
-        0x33800000,
-        0x387FC000,
-        0x387FE000,
-        0x387FFFFF,
-        0x38800000,
-        0x3F7FEFFF,
-        0x3F7FF000,
-        0x3F7FF001,
-        0x477FDFFF,
-        0x477FE000,
-        0x477FFFFF,
-        0x47800000,
-        0x7F7FFFFF,
-        0x7F800000,
-        0xFF800000,
-        0x7F800001,
-        0x7FC00000,
-        0x7FFFFFFF,
-        0xFF800001,
-        0xFFC00000,
-        0xFFFFFFFF,
-    }
-    # Exercise representative mantissa, exponent, carry, and subnormal
-    # boundaries without redundantly evaluating every binary16 value through
-    # the same already-exhaustive widening program.
-    for exponent in range(32):
-        for mantissa in (
-            0,
-            1,
-            2,
-            3,
-            0x1FE,
-            0x1FF,
-            0x200,
-            0x201,
-            0x3FC,
-            0x3FD,
-            0x3FE,
-            0x3FF,
-        ):
-            widened = _reference_f16_to_f32((exponent << 10) | mantissa)
-            values.update(
-                {
-                    _u32(widened - 1),
-                    widened,
-                    _u32(widened + 1),
-                }
-            )
-    random_source = random.Random(0xA1E2_F16)
-    values.update(random_source.getrandbits(32) for _ in range(2048))
-    for bits in values:
+    for bits in _f32_f16_rounding_boundaries():
         assert _evaluate(rule, bits) == _reference_f32_to_f16(bits), hex(bits)
 
 
-def test_integer_to_f16_programs_match_direct_rounding_oracle() -> None:
-    signed_i8 = _rule("exact_signed_i8_to_f16")
-    unsigned_i8 = _rule("exact_unsigned_i8_to_f16")
-    for bits in range(1 << 8):
-        signed = bits - (1 << 8) if bits & 0x80 else bits
-        assert _evaluate(signed_i8, bits) == _reference_integer_to_f16(signed)
-        assert _evaluate(unsigned_i8, bits) == _reference_integer_to_f16(bits)
+def _assert_small_integer_to_f16_oracles(bit_width: int, values: Iterable[int]) -> None:
+    signed_rule = _rule(f"exact_signed_i{bit_width}_to_f16")
+    unsigned_rule = _rule(f"exact_unsigned_i{bit_width}_to_f16")
+    sign_bit = 1 << (bit_width - 1)
+    modulus = 1 << bit_width
+    for bits in values:
+        signed = bits - modulus if bits & sign_bit else bits
+        assert _evaluate(signed_rule, bits) == _reference_integer_to_f16(signed)
+        assert _evaluate(unsigned_rule, bits) == _reference_integer_to_f16(bits)
 
-    signed_i16 = _rule("exact_signed_i16_to_f16")
-    unsigned_i16 = _rule("exact_unsigned_i16_to_f16")
-    random_source = random.Random(0xA1E2_1F16)
+
+def test_integer_to_f16_programs_match_direct_rounding_boundaries() -> None:
+    i8_values = set()
+    for center in (0x00, 0x7F, 0x80, 0xFF):
+        i8_values.update(_encoding_neighbors(center, 8))
+    _assert_small_integer_to_f16_oracles(8, i8_values)
+
     i16_values = {
-        *range(1 << 8),
+        0x0000,
+        0x0001,
+        0x00FF,
+        0x0100,
         0x03FF,
         0x0400,
         0x07FF,
@@ -1048,11 +2869,7 @@ def test_integer_to_f16_programs_match_direct_rounding_oracle() -> None:
         0xF801,
         0xFFFF,
     }
-    i16_values.update(random_source.getrandbits(16) for _ in range(1024))
-    for bits in i16_values:
-        signed = bits - (1 << 16) if bits & 0x8000 else bits
-        assert _evaluate(signed_i16, bits) == _reference_integer_to_f16(signed)
-        assert _evaluate(unsigned_i16, bits) == _reference_integer_to_f16(bits)
+    _assert_small_integer_to_f16_oracles(16, i16_values)
 
     signed_i32 = _rule("exact_signed_i32_to_f16")
     unsigned_i32 = _rule("exact_unsigned_i32_to_f16")
@@ -1071,8 +2888,13 @@ def test_integer_to_f16_programs_match_direct_rounding_oracle() -> None:
         2**31,
         2**32 - 1,
     }
-    values.update(random_source.getrandbits(32) for _ in range(1024))
     for bits in values:
         signed = _s32(bits)
         assert _evaluate(signed_i32, bits) == _reference_integer_to_f16(signed)
         assert _evaluate(unsigned_i32, bits) == _reference_integer_to_f16(bits)
+
+
+@pytest.mark.exhaustive
+def test_small_integer_to_f16_programs_match_exhaustive_oracles() -> None:
+    for bit_width in (8, 16):
+        _assert_small_integer_to_f16_oracles(bit_width, range(1 << bit_width))

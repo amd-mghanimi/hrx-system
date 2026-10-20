@@ -34,6 +34,19 @@ struct iree_hal_device_group_t {
 
   // Immutable topology matrix built during creation.
   iree_hal_topology_t* topology;
+
+  // Retained source of instrumentation aliases, or NULL for an original group.
+  iree_hal_device_group_t* source_group;
+
+  // Owned instrumentation state, or an empty value for an original group.
+  iree_hal_device_group_wrapper_t wrapper;
+
+  // Stable namespace identity shared only with explicit instrumentation
+  // aliases.
+  const void* memory_domain;
+
+  // Dense wildcard/host/family site count in the memory namespace.
+  uint32_t memory_scope_count;
 };
 
 IREE_API_EXPORT iree_status_t iree_hal_device_group_create_from_device(
@@ -65,6 +78,10 @@ static void iree_hal_device_group_destroy(iree_hal_device_group_t* group) {
   }
   iree_async_frontier_tracker_release(group->frontier_tracker);
   iree_hal_topology_destroy(group->topology, group->host_allocator);
+  if (group->wrapper.vtable) {
+    group->wrapper.vtable->destroy(group->wrapper.self);
+  }
+  iree_hal_device_group_release(group->source_group);
 
   iree_allocator_t host_allocator = group->host_allocator;
   iree_allocator_free(host_allocator, group);
@@ -105,6 +122,146 @@ IREE_API_EXPORT const iree_hal_topology_t* iree_hal_device_group_topology(
     const iree_hal_device_group_t* group) {
   IREE_ASSERT_ARGUMENT(group);
   return group->topology;
+}
+
+IREE_API_EXPORT const void* iree_hal_device_group_memory_domain(
+    const iree_hal_device_group_t* group) {
+  return group->memory_domain;
+}
+
+IREE_API_EXPORT uint32_t
+iree_hal_device_group_memory_scope_count(const iree_hal_device_group_t* group) {
+  return group->memory_scope_count;
+}
+
+typedef struct iree_hal_device_group_slab_pool_dispatch_t {
+  // Next wrapping layer to invoke, or NULL at the terminal constructor.
+  iree_hal_device_group_t* dispatch_group;
+  // Terminal constructor supplied by iree_hal_slab_pool_create.
+  iree_hal_slab_pool_create_leaf_fn_t leaf_fn;
+  // Opaque terminal-constructor state.
+  void* leaf_user_data;
+} iree_hal_device_group_slab_pool_dispatch_t;
+
+static iree_status_t iree_hal_device_group_dispatch_slab_pool_create(
+    void* user_data, iree_hal_device_group_t* request_group,
+    const iree_hal_pool_scope_t* scope,
+    const iree_hal_slab_pool_options_t* options,
+    iree_allocator_t host_allocator, iree_hal_pool_t** out_pool) {
+  iree_hal_device_group_slab_pool_dispatch_t* dispatch = user_data;
+  iree_hal_device_group_t* dispatch_group = dispatch->dispatch_group;
+  if (!dispatch_group) {
+    return dispatch->leaf_fn(dispatch->leaf_user_data, request_group, scope,
+                             options, host_allocator, out_pool);
+  }
+
+  iree_hal_device_group_slab_pool_dispatch_t next_dispatch = {
+      .dispatch_group = dispatch_group->source_group,
+      .leaf_fn = dispatch->leaf_fn,
+      .leaf_user_data = dispatch->leaf_user_data,
+  };
+  const iree_hal_slab_pool_create_callback_t next = {
+      .fn = iree_hal_device_group_dispatch_slab_pool_create,
+      .user_data = &next_dispatch,
+  };
+  if (dispatch_group->wrapper.vtable &&
+      dispatch_group->wrapper.vtable->create_slab_pool) {
+    return dispatch_group->wrapper.vtable->create_slab_pool(
+        dispatch_group->wrapper.self, next, request_group, scope, options,
+        host_allocator, out_pool);
+  }
+  return next.fn(next.user_data, request_group, scope, options, host_allocator,
+                 out_pool);
+}
+
+IREE_API_EXPORT iree_status_t iree_hal_device_group_create_slab_pool(
+    iree_hal_device_group_t* group, const iree_hal_pool_scope_t* scope,
+    const iree_hal_slab_pool_options_t* options,
+    iree_hal_slab_pool_create_leaf_fn_t leaf_fn, void* leaf_user_data,
+    iree_allocator_t host_allocator, iree_hal_pool_t** out_pool) {
+  IREE_ASSERT_ARGUMENT(group);
+  IREE_ASSERT_ARGUMENT(scope);
+  IREE_ASSERT_ARGUMENT(options);
+  IREE_ASSERT_ARGUMENT(leaf_fn);
+  IREE_ASSERT_ARGUMENT(out_pool);
+  *out_pool = NULL;
+  iree_hal_device_group_slab_pool_dispatch_t dispatch = {
+      .dispatch_group = group,
+      .leaf_fn = leaf_fn,
+      .leaf_user_data = leaf_user_data,
+  };
+  return iree_hal_device_group_dispatch_slab_pool_create(
+      &dispatch, group, scope, options, host_allocator, out_pool);
+}
+
+typedef struct iree_hal_device_group_virtual_buffer_dispatch_t {
+  // Next wrapping layer, or NULL at the terminal constructor.
+  iree_hal_device_group_t* dispatch_group;
+  // Terminal constructor supplied by the virtual-buffer API.
+  iree_hal_virtual_buffer_create_callback_t leaf;
+} iree_hal_device_group_virtual_buffer_dispatch_t;
+
+static iree_status_t iree_hal_device_group_dispatch_virtual_buffer_create(
+    void* user_data, iree_hal_device_group_t* request_group,
+    const iree_hal_pool_scope_t* scope,
+    const iree_hal_virtual_buffer_options_t* options,
+    iree_allocator_t host_allocator, iree_hal_buffer_t** out_buffer) {
+  iree_hal_device_group_virtual_buffer_dispatch_t* dispatch = user_data;
+  iree_hal_device_group_t* group = dispatch->dispatch_group;
+  if (!group) {
+    return dispatch->leaf.fn(dispatch->leaf.user_data, request_group, scope,
+                             options, host_allocator, out_buffer);
+  }
+  iree_hal_device_group_virtual_buffer_dispatch_t next_dispatch = {
+      .dispatch_group = group->source_group,
+      .leaf = dispatch->leaf,
+  };
+  const iree_hal_virtual_buffer_create_callback_t next = {
+      .fn = iree_hal_device_group_dispatch_virtual_buffer_create,
+      .user_data = &next_dispatch,
+  };
+  if (group->wrapper.vtable && group->wrapper.vtable->create_virtual_buffer) {
+    return group->wrapper.vtable->create_virtual_buffer(
+        group->wrapper.self, next, request_group, scope, options,
+        host_allocator, out_buffer);
+  }
+  return next.fn(next.user_data, request_group, scope, options, host_allocator,
+                 out_buffer);
+}
+
+IREE_API_EXPORT iree_status_t iree_hal_device_group_create_virtual_buffer(
+    iree_hal_device_group_t* group, const iree_hal_pool_scope_t* scope,
+    const iree_hal_virtual_buffer_options_t* options,
+    iree_hal_virtual_buffer_create_callback_t leaf,
+    iree_allocator_t host_allocator, iree_hal_buffer_t** out_buffer) {
+  iree_hal_device_group_virtual_buffer_dispatch_t dispatch = {
+      .dispatch_group = group,
+      .leaf = leaf,
+  };
+  return iree_hal_device_group_dispatch_virtual_buffer_create(
+      &dispatch, group, scope, options, host_allocator, out_buffer);
+}
+
+// All fallible device assignment has completed. These canonical cells become
+// immutable with group publication, including for dynamically acquired queues.
+static void iree_hal_device_group_assign_memory_scopes(
+    iree_hal_device_group_t* group) {
+  group->memory_domain =
+      group->source_group ? group->source_group->memory_domain : group;
+  uint32_t scope_id = 2;  // Wildcard zero and the host site precede families.
+  for (iree_host_size_t i = 0; i < group->device_count; ++i) {
+    iree_hal_device_t* device = group->devices[i];
+    const iree_hal_device_queue_spec_t* queues =
+        iree_hal_device_spec_queues(iree_hal_device_spec(device));
+    for (uint32_t j = 0; j < queues->family_count; ++j) {
+      iree_hal_queue_family_t* family =
+          (iree_hal_queue_family_t*)iree_hal_device_queue_family(device, j);
+      family->memory.domain = group->memory_domain;
+      family->memory.queue_scope_id = scope_id;
+      scope_id += 2;
+    }
+  }
+  group->memory_scope_count = scope_id;
 }
 
 //===----------------------------------------------------------------------===//
@@ -215,27 +372,24 @@ static bool iree_hal_device_group_specs_have_same_driver_backend(
                                 destination_identity->backend_id);
 }
 
-IREE_API_EXPORT iree_status_t iree_hal_device_group_create_with_replacements(
+IREE_API_EXPORT iree_status_t iree_hal_device_group_create_wrapped(
     iree_hal_device_group_t* source_group,
-    iree_hal_device_group_replacement_callback_t replacement_callback,
-    iree_allocator_t host_allocator, iree_hal_device_group_t** out_group) {
+    iree_hal_device_group_wrapper_t wrapper, iree_allocator_t host_allocator,
+    iree_hal_device_group_t** out_group) {
   IREE_ASSERT_ARGUMENT(source_group);
+  IREE_ASSERT_ARGUMENT(wrapper.vtable);
+  IREE_ASSERT_ARGUMENT(wrapper.vtable->destroy);
+  IREE_ASSERT_ARGUMENT(wrapper.vtable->replace_device);
   IREE_ASSERT_ARGUMENT(out_group);
   *out_group = NULL;
   IREE_TRACE_ZONE_BEGIN(z0);
-
-  if (IREE_UNLIKELY(!replacement_callback.fn)) {
-    IREE_TRACE_ZONE_END(z0);
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "device group replacement callback function is required");
-  }
 
   const iree_host_size_t device_count = source_group->device_count;
   iree_hal_device_group_t* group = NULL;
   iree_status_t status =
       iree_allocator_malloc(host_allocator, sizeof(*group), (void**)&group);
   if (!iree_status_is_ok(status)) {
+    wrapper.vtable->destroy(wrapper.self);
     IREE_TRACE_ZONE_END(z0);
     return status;
   }
@@ -244,6 +398,9 @@ IREE_API_EXPORT iree_status_t iree_hal_device_group_create_with_replacements(
   group->host_allocator = host_allocator;
   group->device_count = device_count;
   group->frontier_tracker = source_group->frontier_tracker;
+  group->source_group = source_group;
+  group->wrapper = wrapper;
+  iree_hal_device_group_retain(source_group);
   iree_async_frontier_tracker_retain(group->frontier_tracker);
   status = iree_hal_topology_clone(source_group->topology, host_allocator,
                                    &group->topology);
@@ -251,9 +408,9 @@ IREE_API_EXPORT iree_status_t iree_hal_device_group_create_with_replacements(
   for (iree_host_size_t i = 0; i < device_count && iree_status_is_ok(status);
        ++i) {
     iree_hal_device_t* replacement_device = NULL;
-    status = replacement_callback.fn(source_group, i, source_group->devices[i],
-                                     replacement_callback.user_data,
-                                     &replacement_device);
+    status = wrapper.vtable->replace_device(wrapper.self, source_group, i,
+                                            source_group->devices[i],
+                                            &replacement_device);
     if (iree_status_is_ok(status) && IREE_UNLIKELY(!replacement_device)) {
       status = iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
@@ -261,6 +418,18 @@ IREE_API_EXPORT iree_status_t iree_hal_device_group_create_with_replacements(
     }
     if (iree_status_is_ok(status)) {
       group->devices[i] = replacement_device;
+      const iree_hal_device_queue_spec_t* source_queues =
+          iree_hal_device_spec_queues(
+              iree_hal_device_spec(source_group->devices[i]));
+      const iree_hal_device_spec_t* replacement_spec =
+          iree_hal_device_spec(replacement_device);
+      if (!replacement_spec ||
+          source_queues->family_count !=
+              iree_hal_device_spec_queues(replacement_spec)->family_count) {
+        status = iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "replacement device must preserve canonical queue family ordinals");
+      }
     } else {
       iree_hal_device_release(replacement_device);
     }
@@ -293,6 +462,7 @@ IREE_API_EXPORT iree_status_t iree_hal_device_group_create_with_replacements(
   }
 
   if (iree_status_is_ok(status)) {
+    iree_hal_device_group_assign_memory_scopes(group);
     *out_group = group;
   } else {
     for (iree_host_size_t i = 0; i < assigned_device_count; ++i) {
@@ -425,6 +595,7 @@ IREE_API_EXPORT iree_status_t iree_hal_device_group_builder_finalize(
   }
 
   if (iree_status_is_ok(status)) {
+    iree_hal_device_group_assign_memory_scopes(group);
     *out_group = group;
   } else {
     for (iree_host_size_t i = 0; i < assigned_device_count; ++i) {

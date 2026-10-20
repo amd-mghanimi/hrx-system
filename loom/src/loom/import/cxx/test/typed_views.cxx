@@ -4,18 +4,28 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <loomcxx/encoding.h>
 #include <loomcxx/kernel.h>
+#include <loomcxx/numeric.h>
 #include <loomcxx/view.h>
 
 namespace loomt = loom::type;
 
-using rows8 = loomt::view<const float, loomt::dynamic, 8>;
+using rows8 = loomt::view<loomt::shape<loomt::dynamic, 8>, const float>;
+using Weight = loomt::float8_e4m3fn_t;
 
 static rows8 preserve_view(rows8 source) { return source; }
 
 template <class View>
 static float read_view(View source) {
   return loom::view::load(source, 2, 3);
+}
+
+template <class Input, class Output>
+static void copy_view_element(Input source, Output destination, unsigned row,
+                              unsigned column) {
+  loom::view::store(loom::view::load(source, row, column), destination, row,
+                    column);
 }
 
 // Specializations retain different shape types through auto return deduction.
@@ -51,15 +61,34 @@ void typed_view_copy(const float* input, float* output, unsigned rows,
 
   auto input_layout = loom::encoding::layout::strided(input_stride, 1u);
   auto output_layout = loom::encoding::layout::dense<2>();
+  auto row_count = loom::index::cast(rows);
   auto source = preserve_view(loom::buffer::view<loomt::dynamic, 8>(
-      input + input_origin, {rows}, input_layout));
+      input + input_origin, {row_count}, input_layout));
   auto destination = loom::buffer::view<loomt::dynamic, 8>(
-      output + output_origin, {rows}, output_layout);
+      output + output_origin, {row_count}, output_layout);
 
-  loomt::size_type row = loom::workitem_id.y;
-  loomt::size_type column = loom::workitem_id.x;
-  if (row < rows) {
-    float value = loom::view::load(source, row, column);
-    loom::view::store(value, destination, row, column);
+  unsigned row = loom::kernel::workitem::id.y;
+  unsigned column = loom::kernel::workitem::id.x;
+  if (loom::index::cast(row) < row_count) {
+    copy_view_element(source, destination, row, column);
   }
+}
+
+[[loom::kernel, loom::workgroup_size(16, 1, 1), loom::workgroup_count(1, 1, 1)]]
+void typed_storage_rank3(
+    [[loom::noalias, loom::assume_aligned(64)]] const Weight* input,
+    [[loom::noalias, loom::assume_aligned(64)]] Weight* output, unsigned rows,
+    unsigned tiles) {
+  loom::assume(rows >= 1 && rows <= 65535);
+  loom::assume(tiles >= 1 && tiles <= 65535);
+  auto layout = loom::encoding::layout::dense<3>();
+  auto schema = loom::encoding::define<loom::encoding::f8e4m3fn{
+      .payload_elements = 16,
+      .scale_group_elements = 16,
+  }>();
+  auto storage = loom::encoding::define(layout, schema);
+  auto source = loom::buffer::view<loomt::dynamic, loomt::dynamic, 16>(
+      input, {rows, tiles}, storage);
+  auto lane = loom::kernel::workitem::id.x;
+  output[lane] = loom::view::load(source, 0, 0, lane);
 }

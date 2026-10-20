@@ -28,7 +28,7 @@ loom_cc_library(
     hdrs = ["util.h"],
     includes = [".."],
     deps = [
-        "//loom/binding/c:loomc",
+        "//loom/binding/c:base",
         "//runtime/src/iree/testing:gtest",
     ],
 )
@@ -46,11 +46,41 @@ loom_cc_test(
 )
 
 loom_cc_test(
+    name = "module_config_test",
+    srcs = ["module_config_test.cc"],
+    deps = [
+        ":test_util",
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/config:schema",
+        "//loom/src/loom/util:stream",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "interop_test",
+    srcs = ["interop_test.cc"],
+    deps = [
+        ":test_util",
+        "//loom/binding/c:interop",
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/error:parameter",
+        "//loom/src/loom/pass:registry",
+        "//loom/src/loom/pass:report",
+        "//loom/src/loom/target:math_policy",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
     name = "base_test",
     srcs = ["base_test.cc"],
     deps = [
         ":test_util",
-        "//loom/binding/c:loomc",
+        "//loom/binding/c:base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -61,7 +91,7 @@ loom_cc_test(
     srcs = ["byte_sequence_test.cc"],
     deps = [
         ":test_util",
-        "//loom/binding/c:loomc",
+        "//loom/binding/c:base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -71,7 +101,7 @@ loom_cc_test(
     name = "iree_adapter_test",
     srcs = ["iree_adapter_test.cc"],
     deps = [
-        "//loom/binding/c:loomc",
+        "//loom/binding/c:base",
         "//runtime/src/iree/base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
@@ -98,6 +128,23 @@ loom_cc_test(
     deps = [
         ":test_util",
         "//loom/binding/c:loomc",
+        "//loom/binding/c/test/testdata:diagnostic_testdata",
+        "//loom/src/loom/error:parameter",
+        "//loom/src/loom/ir",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "diagnostic_test",
+    srcs = ["diagnostic_test.cc"],
+    deps = [
+        ":test_util",
+        "//loom/binding/c:loomc",
+        "//loom/src/loom/error:json_sink",
+        "//loom/src/loom/error:parameter",
+        "//loom/src/loom/util:stream",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -127,6 +174,17 @@ loom_cc_test(
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/io:stream",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "link_index_module_test",
+    srcs = ["link_index_module_test.cc"],
+    deps = [
+        ":test_util",
+        "//loom/binding/c:loomc",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -168,6 +226,17 @@ loom_cc_test(
         "//loom/src/loom/ir",
         "//loom/src/loom/link/testdata:template_selection",
         "//runtime/src/iree/base:core_headers",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+loom_cc_test(
+    name = "link_options_test",
+    srcs = ["link_options_test.cc"],
+    deps = [
+        ":test_util",
+        "//loom/binding/c:loomc",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -217,6 +286,7 @@ loom_cc_test(
     deps = [
         ":test_util",
         "//loom/binding/c:loomc",
+        "//loom/binding/c/test/testdata:diagnostic_types",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -261,7 +331,7 @@ loom_cc_test(
     srcs = ["status_test.cc"],
     deps = [
         ":test_util",
-        "//loom/binding/c:loomc",
+        "//loom/binding/c:base",
         "//runtime/src/iree/base",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
@@ -274,6 +344,7 @@ loom_cc_test(
     deps = [
         ":test_util",
         "//loom/binding/c:loomc",
+        "//loom/src/loom/error:parameter",
         "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/test",
         "//loom/src/loom/target:function_version",

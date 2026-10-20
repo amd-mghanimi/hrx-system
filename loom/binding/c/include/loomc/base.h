@@ -248,11 +248,11 @@ typedef enum loomc_structure_type_e {
   /// `loomc_spirv_vulkan_profile_options_t`.
   LOOMC_STRUCTURE_TYPE_SPIRV_VULKAN_PROFILE_OPTIONS = 23,
 
-  /// `loomc_iree_hal_profile_options_t`.
-  LOOMC_STRUCTURE_TYPE_IREE_HAL_PROFILE_OPTIONS = 24,
+  /// `loomc_iree_hal_target_options_t`.
+  LOOMC_STRUCTURE_TYPE_IREE_HAL_TARGET_OPTIONS = 24,
 
-  /// `loomc_spirv_iree_hal_profile_options_t`.
-  LOOMC_STRUCTURE_TYPE_SPIRV_IREE_HAL_PROFILE_OPTIONS = 25,
+  /// `loomc_spirv_iree_hal_target_options_t`.
+  LOOMC_STRUCTURE_TYPE_SPIRV_IREE_HAL_TARGET_OPTIONS = 25,
 
   /// `loomc_module_function_query_options_t`.
   LOOMC_STRUCTURE_TYPE_MODULE_FUNCTION_QUERY_OPTIONS = 26,
@@ -262,9 +262,6 @@ typedef enum loomc_structure_type_e {
 
   /// `loomc_amdgpu_profile_options_t`.
   LOOMC_STRUCTURE_TYPE_AMDGPU_PROFILE_OPTIONS = 28,
-
-  /// `loomc_amdgpu_emit_options_t`.
-  LOOMC_STRUCTURE_TYPE_AMDGPU_EMIT_OPTIONS = 29,
 
   /// `loomc_artifact_manifest_options_t`.
   LOOMC_STRUCTURE_TYPE_ARTIFACT_MANIFEST_OPTIONS = 30,
@@ -278,8 +275,8 @@ typedef enum loomc_structure_type_e {
   /// `loomc_launch_config_t`.
   LOOMC_STRUCTURE_TYPE_LAUNCH_CONFIG = 34,
 
-  /// `loomc_amdgpu_iree_hal_profile_options_t`.
-  LOOMC_STRUCTURE_TYPE_AMDGPU_IREE_HAL_PROFILE_OPTIONS = 35,
+  /// `loomc_amdgpu_iree_hal_target_options_t`.
+  LOOMC_STRUCTURE_TYPE_AMDGPU_IREE_HAL_TARGET_OPTIONS = 35,
 
   /// `loomc_link_dependency_analysis_options_t`.
   LOOMC_STRUCTURE_TYPE_LINK_DEPENDENCY_ANALYSIS_OPTIONS = 36,
@@ -298,6 +295,27 @@ typedef enum loomc_structure_type_e {
 
   /// `loomc_cxx_import_options_t`.
   LOOMC_STRUCTURE_TYPE_CXX_IMPORT_OPTIONS = 41,
+
+  /// `loomc_compile_artifact_options_t`.
+  LOOMC_STRUCTURE_TYPE_COMPILE_ARTIFACT_OPTIONS = 42,
+
+  /// `loomc_pass_trace_options_t`.
+  LOOMC_STRUCTURE_TYPE_PASS_TRACE_OPTIONS = 43,
+
+  /// `loomc_pass_run_options_t`.
+  LOOMC_STRUCTURE_TYPE_PASS_RUN_OPTIONS = 44,
+
+  /// `loomc_module_verify_options_t`.
+  LOOMC_STRUCTURE_TYPE_MODULE_VERIFY_OPTIONS = 45,
+
+  /// `loomc_native_pass_report_options_t` (exact-version interop).
+  LOOMC_STRUCTURE_TYPE_NATIVE_PASS_REPORT_OPTIONS = 46,
+
+  /// `loomc_native_compile_report_options_t` (exact-version interop).
+  LOOMC_STRUCTURE_TYPE_NATIVE_COMPILE_REPORT_OPTIONS = 47,
+
+  /// `loomc_module_config_options_t`.
+  LOOMC_STRUCTURE_TYPE_MODULE_CONFIG_OPTIONS = 48,
 } loomc_structure_type_t;
 
 /// One loose string option entry.

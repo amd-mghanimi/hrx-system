@@ -4,16 +4,17 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// iree-benchmark-loom binary with build-selected execution providers.
+// iree-benchmark-loom binary with build-selected compiler and device providers.
 
 #include <stddef.h>
 #include <stdio.h>
 
-#include "loom/tooling/execution/execution_provider.h"
-#include "loom/tooling/execution/hal/device_provider.h"
+#include "loom/tooling/execution/hal/testbench_actual.h"
 #include "loom/tooling/input/configured.h"
+#include "loom/tooling/input/loomc_configured.h"
 #include "loom/tools/iree-benchmark-loom/main.h"
-#include "loom/transforms/cleanup/configured.h"
+#include "loomc/iree.h"
+#include "loomc/target/configured.h"
 
 #ifndef IREE_BENCHMARK_LOOM_HAVE_AMDGPU
 #define IREE_BENCHMARK_LOOM_HAVE_AMDGPU 0
@@ -21,97 +22,37 @@
 #ifndef IREE_BENCHMARK_LOOM_HAVE_SPIRV
 #define IREE_BENCHMARK_LOOM_HAVE_SPIRV 0
 #endif  // IREE_BENCHMARK_LOOM_HAVE_SPIRV
+#ifndef IREE_BENCHMARK_LOOM_HAVE_XDNA
+#define IREE_BENCHMARK_LOOM_HAVE_XDNA 0
+#endif  // IREE_BENCHMARK_LOOM_HAVE_XDNA
+#ifndef IREE_BENCHMARK_LOOM_HAVE_TASK
+#define IREE_BENCHMARK_LOOM_HAVE_TASK 0
+#endif  // IREE_BENCHMARK_LOOM_HAVE_TASK
 #ifndef IREE_BENCHMARK_LOOM_HAVE_VM
 #define IREE_BENCHMARK_LOOM_HAVE_VM 0
 #endif  // IREE_BENCHMARK_LOOM_HAVE_VM
 
-#define IREE_BENCHMARK_LOOM_HAVE_ANY_PROVIDER                           \
+#define IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER                    \
   (IREE_BENCHMARK_LOOM_HAVE_AMDGPU || IREE_BENCHMARK_LOOM_HAVE_SPIRV || \
-   IREE_BENCHMARK_LOOM_HAVE_VM)
-#define IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER \
-  (IREE_BENCHMARK_LOOM_HAVE_AMDGPU || IREE_BENCHMARK_LOOM_HAVE_SPIRV)
+   IREE_BENCHMARK_LOOM_HAVE_TASK || IREE_BENCHMARK_LOOM_HAVE_XDNA)
 
 #if IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-#include "loom/target/arch/amdgpu/provider.h"
-#include "loom/tooling/target/amdgpu/device_provider.h"
 #include "loom/tooling/target/amdgpu/testbench_requirements.h"
+#include "loomc/target/amdgpu/iree_hal.h"
 #endif  // IREE_BENCHMARK_LOOM_HAVE_AMDGPU
 #if IREE_BENCHMARK_LOOM_HAVE_SPIRV
-#include "loom/target/arch/spirv/provider.h"
-#include "loom/tooling/target/spirv/device_provider.h"
 #include "loom/tooling/target/spirv/testbench_requirements.h"
+#include "loomc/target/spirv/iree_hal.h"
 #endif  // IREE_BENCHMARK_LOOM_HAVE_SPIRV
+#if IREE_BENCHMARK_LOOM_HAVE_XDNA
+#include "loomc/target/amd/xdna/iree_hal.h"
+#endif  // IREE_BENCHMARK_LOOM_HAVE_XDNA
+#if IREE_BENCHMARK_LOOM_HAVE_TASK
+#include "loomc/target/cpu/iree_hal.h"
+#endif  // IREE_BENCHMARK_LOOM_HAVE_TASK
 #if IREE_BENCHMARK_LOOM_HAVE_VM
-#include "loom/target/arch/vm/provider.h"
 #include "loom/tooling/target/vm/testbench.h"
-
-static const loom_run_execution_provider_t kIreeBenchmarkLoomVmProvider = {
-    .name = IREE_SVL("vm"),
-    .target_provider = &loom_vm_target_provider,
-};
 #endif  // IREE_BENCHMARK_LOOM_HAVE_VM
-
-#if IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-static const loom_run_execution_provider_t kIreeBenchmarkLoomAmdgpuProvider = {
-    .name = IREE_SVL("amdgpu"),
-    .target_provider = &loom_amdgpu_target_provider,
-};
-#endif  // IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-
-#if IREE_BENCHMARK_LOOM_HAVE_SPIRV
-static const loom_run_execution_provider_t kIreeBenchmarkLoomSpirvProvider = {
-    .name = IREE_SVL("spirv"),
-    .target_provider = &loom_spirv_target_provider,
-};
-#endif  // IREE_BENCHMARK_LOOM_HAVE_SPIRV
-
-#if IREE_BENCHMARK_LOOM_HAVE_ANY_PROVIDER
-static const loom_run_execution_provider_t* const
-    kIreeBenchmarkLoomProviders[] = {
-#if IREE_BENCHMARK_LOOM_HAVE_VM
-        &kIreeBenchmarkLoomVmProvider,
-#endif  // IREE_BENCHMARK_LOOM_HAVE_VM
-#if IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-        &kIreeBenchmarkLoomAmdgpuProvider,
-#endif  // IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-#if IREE_BENCHMARK_LOOM_HAVE_SPIRV
-        &kIreeBenchmarkLoomSpirvProvider,
-#endif  // IREE_BENCHMARK_LOOM_HAVE_SPIRV
-};
-#endif  // IREE_BENCHMARK_LOOM_HAVE_ANY_PROVIDER
-
-static const loom_run_execution_provider_set_t kIreeBenchmarkLoomProviderSet = {
-#if IREE_BENCHMARK_LOOM_HAVE_ANY_PROVIDER
-    .providers = kIreeBenchmarkLoomProviders,
-    .provider_count = IREE_ARRAYSIZE(kIreeBenchmarkLoomProviders),
-#else
-    .providers = NULL,
-    .provider_count = 0,
-#endif  // IREE_BENCHMARK_LOOM_HAVE_ANY_PROVIDER
-};
-
-#if IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
-static const loom_device_provider_t* const kIreeBenchmarkLoomDeviceProviders[] =
-    {
-#if IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-        &loom_amdgpu_device_provider,
-#endif  // IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-#if IREE_BENCHMARK_LOOM_HAVE_SPIRV
-        &loom_spirv_vulkan_device_provider,
-#endif  // IREE_BENCHMARK_LOOM_HAVE_SPIRV
-};
-#endif  // IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
-
-static const loom_device_provider_registry_t
-    kIreeBenchmarkLoomDeviceProviderRegistry = {
-#if IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
-        .providers = kIreeBenchmarkLoomDeviceProviders,
-        .provider_count = IREE_ARRAYSIZE(kIreeBenchmarkLoomDeviceProviders),
-#else
-        .providers = NULL,
-        .provider_count = 0,
-#endif  // IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
-};
 
 #if IREE_BENCHMARK_LOOM_HAVE_AMDGPU || IREE_BENCHMARK_LOOM_HAVE_SPIRV
 static iree_status_t iree_benchmark_loom_append_requirement_provider(
@@ -136,11 +77,17 @@ static iree_status_t iree_benchmark_loom_populate_requirement_providers(
     iree_host_size_t* inout_provider_count) {
   (void)user_data;
 #if IREE_BENCHMARK_LOOM_HAVE_AMDGPU
-  loom_testbench_requirement_provider_t amdgpu_provider = {0};
-  loom_amdgpu_hal_testbench_requirement_provider_initialize(hal_context,
-                                                            &amdgpu_provider);
+  loom_testbench_requirement_provider_t descriptor_set_provider = {0};
+  loom_amdgpu_hal_descriptor_set_testbench_requirement_provider_initialize(
+      hal_context, &descriptor_set_provider);
   IREE_RETURN_IF_ERROR(iree_benchmark_loom_append_requirement_provider(
-      provider_capacity, providers, inout_provider_count, amdgpu_provider));
+      provider_capacity, providers, inout_provider_count,
+      descriptor_set_provider));
+  loom_testbench_requirement_provider_t target_provider = {0};
+  loom_amdgpu_hal_target_testbench_requirement_provider_initialize(
+      hal_context, &target_provider);
+  IREE_RETURN_IF_ERROR(iree_benchmark_loom_append_requirement_provider(
+      provider_capacity, providers, inout_provider_count, target_provider));
 #endif  // IREE_BENCHMARK_LOOM_HAVE_AMDGPU
 #if IREE_BENCHMARK_LOOM_HAVE_SPIRV
   loom_testbench_requirement_provider_t vulkan_feature_provider = {0};
@@ -166,39 +113,69 @@ static iree_status_t iree_benchmark_loom_populate_requirement_providers(
 }
 
 int main(int argc, char** argv) {
-  loom_run_execution_environment_t environment;
-  iree_status_t status = loom_run_execution_environment_initialize(
-      &kIreeBenchmarkLoomProviderSet, &environment);
+  loomc_target_environment_t* target_environment = NULL;
+  iree_status_t status =
+      iree_status_from_loomc(loomc_target_environment_create_configured(
+          loomc_allocator_system(), &target_environment));
   if (!iree_status_is_ok(status)) {
     iree_status_fprint(stderr, status);
     iree_status_free(status);
     return 1;
   }
+#if IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
+  const loom_run_hal_target_route_t hal_target_routes[] = {
+#if IREE_BENCHMARK_LOOM_HAVE_AMDGPU
+      {
+          .driver_name = IREE_SV("amdgpu"),
+          .provider = loomc_amdgpu_iree_hal_target_provider(),
+      },
+#endif  // IREE_BENCHMARK_LOOM_HAVE_AMDGPU
+#if IREE_BENCHMARK_LOOM_HAVE_SPIRV
+      {
+          .driver_name = IREE_SV("vulkan"),
+          .provider = loomc_spirv_iree_hal_target_provider(),
+      },
+#endif  // IREE_BENCHMARK_LOOM_HAVE_SPIRV
+#if IREE_BENCHMARK_LOOM_HAVE_XDNA
+      {
+          .driver_name = IREE_SV("xdna"),
+          .provider = loomc_xdna_iree_hal_target_provider(),
+      },
+#endif  // IREE_BENCHMARK_LOOM_HAVE_XDNA
+#if IREE_BENCHMARK_LOOM_HAVE_TASK
+      {
+          .driver_name = IREE_SV("task"),
+          .provider = loomc_cpu_iree_hal_target_provider(),
+      },
+#endif  // IREE_BENCHMARK_LOOM_HAVE_TASK
+  };
+#endif  // IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
 
   iree_benchmark_loom_configuration_t configuration = {
       .input_providers = loom_configured_input_providers(),
       .tool_name = "iree-benchmark-loom",
-      .register_context =
-          loom_run_execution_environment_register_context_callback(
-              &environment),
-      .target_environment =
-          loom_run_execution_environment_target_environment(&environment),
-      .cleanup_pattern_provider_set =
-          loom_cleanup_configured_pattern_provider_set(),
-      .device_provider_registry = &kIreeBenchmarkLoomDeviceProviderRegistry,
+      .target_environment = target_environment,
+      .import = loom_configured_input_loomc_importer(),
+#if IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
+      .hal_target_routes = hal_target_routes,
+      .hal_target_route_count = IREE_ARRAYSIZE(hal_target_routes),
+#endif  // IREE_BENCHMARK_LOOM_HAVE_ANY_DEVICE_PROVIDER
       .populate_requirement_providers =
           {
               .fn = iree_benchmark_loom_populate_requirement_providers,
           },
-      .initialize_low_descriptor_registry =
-          loom_run_execution_environment_low_descriptor_registry_callback(
-              &environment),
   };
 #if IREE_BENCHMARK_LOOM_HAVE_VM
   loom_vm_testbench_t vm_testbench;
-  loom_vm_testbench_initialize(configuration.target_environment,
-                               configuration.cleanup_pattern_provider_set,
-                               iree_allocator_system(), &vm_testbench);
+  status = loom_vm_testbench_initialize(target_environment,
+                                        iree_allocator_system(), &vm_testbench);
+  if (!iree_status_is_ok(status)) {
+    iree_status_fprint(stderr, status);
+    iree_status_free(status);
+    loom_vm_testbench_deinitialize(&vm_testbench);
+    loomc_target_environment_release(target_environment);
+    return 1;
+  }
   configuration.function_call_provider =
       (loom_testbench_function_call_provider_callback_t){
           .fn = loom_vm_testbench_invocation_provider,
@@ -209,6 +186,6 @@ int main(int argc, char** argv) {
 #if IREE_BENCHMARK_LOOM_HAVE_VM
   loom_vm_testbench_deinitialize(&vm_testbench);
 #endif  // IREE_BENCHMARK_LOOM_HAVE_VM
-  loom_run_execution_environment_deinitialize(&environment);
+  loomc_target_environment_release(target_environment);
   return exit_code;
 }

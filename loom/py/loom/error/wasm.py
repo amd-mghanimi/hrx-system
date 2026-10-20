@@ -81,7 +81,7 @@ ERR_WASM_005 = ErrorDef(
         "Wasm target '{target_key}' export '{export_name}' config "
         "'{config_key}' rejected '{op_name}' source memory access in "
         "'@{function_name}': expected a scalar or contiguous SIMD "
-        "linear-memory access rooted at an ABI argument with a 32-bit byte offset"
+        "linear-memory access with a 32-bit byte offset"
     ),
     params=_TARGET_CONTEXT_PARAMS,
 )
@@ -104,10 +104,31 @@ ERR_WASM_006 = ErrorDef(
     ),
 )
 
+# ERR_WASM_007: Wasm dynamic vector window exceeds the native lowering limit.
+ERR_WASM_007 = ErrorDef(
+    domain=ErrorDomain.WASM,
+    code=7,
+    severity=Severity.ERROR,
+    summary="Wasm dynamic vector window exceeds the native lowering limit.",
+    message=(
+        "Wasm target '{target_key}' export '{export_name}' config "
+        "'{config_key}' rejected '{op_name}' in '@{function_name}': "
+        "materializing the runtime-selected packet window requires "
+        "{required_operation_count} Low operations, exceeding the "
+        "per-operation limit of {maximum_operation_count}"
+    ),
+    params=(
+        *_TARGET_CONTEXT_PARAMS,
+        ErrorParam("required_operation_count", ParamKind.U32),
+        ErrorParam("maximum_operation_count", ParamKind.U32),
+    ),
+)
+
 ALL_WASM_ERRORS = (
     ERR_WASM_001,
     ERR_WASM_002,
     ERR_WASM_003,
     ERR_WASM_005,
     ERR_WASM_006,
+    ERR_WASM_007,
 )

@@ -61,8 +61,10 @@ extern "C" {
 // poll cycle where the fd is ready. Doubly-linked list node; proactor owns the
 // list.
 struct iree_async_event_source_t {
-  // Intrusive doubly-linked list for efficient removal.
+  // Next source in the proactor-owned list.
   struct iree_async_event_source_t* next;
+
+  // Previous source in the proactor-owned list.
   struct iree_async_event_source_t* prev;
 
   // Owning proactor (for vtable access in callbacks).
@@ -161,9 +163,8 @@ typedef struct iree_async_proactor_posix_t {
   // the LINK path is used instead (no emulator involvement).
   iree_async_sequence_emulator_t sequence_emulator;
 
-  // Configuration.
+  // Capabilities selected during construction.
   iree_async_proactor_capabilities_t capabilities;
-  uint32_t numa_node;
 } iree_async_proactor_posix_t;
 
 static inline iree_async_proactor_posix_t* iree_async_proactor_posix_cast(

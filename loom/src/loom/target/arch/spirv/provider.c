@@ -36,7 +36,7 @@ static iree_status_t loom_spirv_provider_select_profile(
 const loom_target_provider_t loom_spirv_target_provider = {
     .profile_type = &loom_spirv_target_profile_type,
     .materialize_definition = loom_spirv_target_materialize_definition,
-    .select_low_call_policy = loom_target_select_low_call_policy_require_inline,
+    .select_call_policy = loom_target_select_call_policy_require_inline,
     .register_context = loom_spirv_ops_register_dialect,
     .initialize_low_descriptor_registry =
         loom_spirv_low_descriptor_registry_initialize,

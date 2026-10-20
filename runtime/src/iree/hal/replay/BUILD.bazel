@@ -118,6 +118,8 @@ iree_runtime_cc_library(
         "execute_object.h",
         "execute_operation.c",
         "execute_operation.h",
+        "execute_pool.c",
+        "execute_pool.h",
         "execute_state.c",
         "execute_state.h",
         "execute_vmm.c",
@@ -131,7 +133,6 @@ iree_runtime_cc_library(
         ":format",
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal",
-        "//runtime/src/iree/hal/memory:passthrough_pool",
         "//runtime/src/iree/io:file_handle",
     ],
 )
@@ -142,6 +143,8 @@ iree_runtime_cc_library(
         "recorder.c",
         "recorder_allocator.c",
         "recorder_allocator.h",
+        "recorder_barrier.c",
+        "recorder_barrier.h",
         "recorder_buffer.c",
         "recorder_buffer.h",
         "recorder_command_buffer.c",
@@ -151,9 +154,13 @@ iree_runtime_cc_library(
         "recorder_executable.h",
         "recorder_file.c",
         "recorder_file.h",
+        "recorder_pool.c",
+        "recorder_pool.h",
         "recorder_queue.c",
         "recorder_queue.h",
         "recorder_record.h",
+        "recorder_virtual_buffer.c",
+        "recorder_virtual_buffer.h",
     ],
     hdrs = [
         "recorder.h",
@@ -168,6 +175,23 @@ iree_runtime_cc_library(
         "//runtime/src/iree/base/threading",
         "//runtime/src/iree/hal",
         "//runtime/src/iree/io:file_handle",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "dump_vmm_test",
+    srcs = [
+        "dump_vmm_test.cc",
+    ],
+    deps = [
+        ":dump",
+        ":file_reader",
+        ":file_writer",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/io:file_handle",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
     ],
 )
 
@@ -222,12 +246,32 @@ iree_runtime_cc_test(
         "//runtime/src/iree/base",
         "//runtime/src/iree/hal",
         "//runtime/src/iree/hal/drivers/task/registration",
-        "//runtime/src/iree/hal/memory:passthrough_pool",
+        "//runtime/src/iree/hal/memory:tlsf_pool",
         "//runtime/src/iree/hal/testing:mock_device",
         "//runtime/src/iree/io:file_handle",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
         "//runtime/src/iree/testing:temp_file",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "execute_plan_test",
+    srcs = [
+        "execute_plan_test.cc",
+    ],
+    deps = [
+        ":execute",
+        ":file_reader",
+        ":file_writer",
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/task/registration",
+        "//runtime/src/iree/io:file_handle",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
     ],
 )
 
@@ -294,12 +338,13 @@ iree_runtime_cc_test(
 )
 
 iree_runtime_cc_test(
-    name = "recorder_allocator_test",
+    name = "recorder_vmm_test",
     srcs = [
         "recorder_allocator.h",
-        "recorder_allocator_test.cc",
+        "recorder_vmm_test.cc",
     ],
     deps = [
+        ":file_reader",
         ":format",
         ":recorder",
         "//runtime/src/iree/base",
@@ -317,6 +362,7 @@ iree_runtime_cc_test(
         "recorder_buffer_test.cc",
     ],
     deps = [
+        ":file_reader",
         ":format",
         ":recorder",
         "//runtime/src/iree/base",
@@ -332,6 +378,48 @@ iree_cmake_extra_content(
 if(TARGET iree::hal::drivers::task::registration)
 """,
     inline = True,
+)
+
+iree_runtime_cc_test(
+    name = "recorder_pool_test",
+    srcs = ["recorder_pool_test.cc"],
+    deps = [
+        ":recorder",
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/task/registration",
+        "//runtime/src/iree/io:file_handle",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+    ],
+)
+
+iree_runtime_cc_test(
+    name = "recorder_virtual_buffer_test",
+    srcs = [
+        "execute_operation.h",
+        "execute_state.h",
+        "recorder_virtual_buffer_test.cc",
+    ],
+    deps = [
+        ":dump",
+        ":execute",
+        ":file_reader",
+        ":format",
+        ":recorder",
+        "//runtime/src/iree/async",
+        "//runtime/src/iree/async/util:proactor_pool",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/drivers/task/registration",
+        "//runtime/src/iree/hal/memory:fixed_block_pool",
+        "//runtime/src/iree/io:file_handle",
+        "//runtime/src/iree/testing:gtest",
+        "//runtime/src/iree/testing:gtest_main",
+        "//runtime/src/iree/testing:temp_file",
+    ],
 )
 
 iree_runtime_cc_test(

@@ -22,14 +22,44 @@ iree_status_t loom_low_schedule_setup_order_initialize(
       (void**)&out_order->entry_nodes));
   memset(out_order->completion_nodes, 0xFF,
          node_count * sizeof(*out_order->completion_nodes));
+  memset(out_order->entry_nodes, 0xFF,
+         node_count * sizeof(*out_order->entry_nodes));
   return iree_ok_status();
+}
+
+static bool loom_low_schedule_setup_order_has_per_user_placement(
+    const loom_low_schedule_build_state_t* state,
+    const loom_low_schedule_node_t* node, bool* out_requires_register) {
+  *out_requires_register = false;
+  const iree_bitmap_t per_user_placement_values =
+      state->options->per_user_placement_values;
+  if (node->result_count != 1 || per_user_placement_values.bit_count == 0) {
+    return false;
+  }
+  const loom_value_id_t value_id =
+      state->value_domain
+          ->value_ids[loom_low_schedule_node_const_result_ordinals(node)[0]];
+  if (value_id >= per_user_placement_values.bit_count ||
+      !iree_bitmap_test(per_user_placement_values, value_id)) {
+    return false;
+  }
+  *out_requires_register =
+      value_id < state->options->required_register_values.bit_count &&
+      iree_bitmap_test(state->options->required_register_values, value_id);
+  return true;
 }
 
 static bool loom_low_schedule_setup_order_is_member(
     const loom_low_schedule_build_state_t* state,
-    const loom_low_schedule_node_t* node, bool is_repair) {
+    const loom_low_schedule_node_t* node, bool order_structural_setup) {
   if (node->kind == LOOM_LOW_SCHEDULE_NODE_STRUCTURAL) {
-    if (is_repair) {
+    if (order_structural_setup) {
+      return true;
+    }
+    bool requires_register = false;
+    if (loom_low_schedule_setup_order_has_per_user_placement(
+            state, node, &requires_register) &&
+        requires_register) {
       return true;
     }
     if (!iree_any_bit_set(node->flags,
@@ -42,30 +72,99 @@ static bool loom_low_schedule_setup_order_is_member(
     // and issue-slot scheduling instead of acquiring these ordering edges.
     const loom_low_schedule_value_record_t* result =
         &state->values[loom_low_schedule_node_const_result_ordinals(node)[0]];
+    if (!loom_low_schedule_value_requires_register(result)) {
+      return false;
+    }
     const uint16_t domain = loom_low_schedule_unspillable_completion_domain_id(
         state, result->register_class_id);
     return domain != UINT16_MAX && result->unit_count == 1 &&
            state->pressure_limits.unspillable_completion_domains[domain]
                    .capacity == 1;
   }
-  // Input-free materializations carry no source register lifetime. Leave them
-  // available to pressure scheduling: delaying a wide clear behind its peers
-  // can let narrow producers fragment the register bank that it needs.
-  if (!is_repair || node->result_count != 1 || node->operand_count == 0) {
+  if (node->result_count != 1) {
     return false;
   }
-  const loom_value_id_t value_id =
-      state->values[loom_low_schedule_node_const_result_ordinals(node)[0]]
-          .value_id;
-  return value_id < state->options->per_user_rematerialized_values.bit_count &&
-         iree_bitmap_test(state->options->per_user_rematerialized_values,
-                          value_id);
+  // Input-free rematerializable values remain pressure-scheduled. A required
+  // private value cannot be cloned and instead retains the complete target
+  // setup chain that produced it.
+  bool requires_register = false;
+  const bool has_per_user_placement =
+      loom_low_schedule_setup_order_has_per_user_placement(state, node,
+                                                           &requires_register);
+  return has_per_user_placement &&
+         (node->operand_count != 0 || requires_register);
+}
+
+// Artificial prerequisites must preserve the footprint of storage that
+// allocation cannot spill. Keep conversions and contractions available
+// to pressure scheduling so those inputs can retire before independent work.
+static bool loom_low_schedule_setup_order_preserves_required_pressure(
+    const loom_low_schedule_build_state_t* state,
+    const loom_low_schedule_node_t* node) {
+  if (node->result_count != 1) {
+    return false;
+  }
+  const loom_low_schedule_value_record_t* result =
+      &state->values[loom_low_schedule_node_const_result_ordinals(node)[0]];
+  const uint16_t result_pressure_set =
+      result->unit_count != 0
+          ? loom_low_reg_class_pressure_set_id(
+                &state->target.descriptor_set
+                     ->reg_classes[result->register_class_id])
+          : 0;
+  uint64_t operand_units = 0;
+  const loom_value_ordinal_t* operands =
+      loom_low_schedule_node_const_operand_ordinals(node);
+  for (uint16_t i = 0; i < node->operand_count; ++i) {
+    const loom_low_schedule_value_record_t* operand =
+        &state->values[operands[i]];
+    if (operand->unit_count == 0 ||
+        !loom_low_schedule_value_requires_register(operand)) {
+      continue;
+    }
+    if (operand->register_class_id != result->register_class_id &&
+        (result_pressure_set == 0 ||
+         loom_low_reg_class_pressure_set_id(
+             &state->target.descriptor_set
+                  ->reg_classes[operand->register_class_id]) !=
+             result_pressure_set)) {
+      // A singleton may constrain the same storage more tightly than its
+      // source class. Retaining the flexible source does not add storage, and
+      // the fixed destination still needs its exclusion ordering.
+      const loom_low_descriptor_set_t* descriptors =
+          state->target.descriptor_set;
+      if (result->unit_count != 1 ||
+          !iree_all_bits_set(
+              descriptors->reg_classes[result->register_class_id].flags,
+              LOOM_LOW_REG_CLASS_FLAG_EXPLICIT_PHYSICAL_REGISTERS) ||
+          descriptors->reg_classes[result->register_class_id]
+                  .allocatable_count != 1 ||
+          !loom_low_descriptor_set_find_physical_register_candidate(
+              descriptors, operand->register_class_id,
+              loom_low_descriptor_set_physical_register_candidate(
+                  descriptors, result->register_class_id, 0),
+              NULL)) {
+        return false;
+      }
+    }
+    operand_units += operand->unit_count;
+  }
+  if (operand_units == 0) {
+    return true;
+  }
+  return loom_low_schedule_value_requires_register(result) &&
+         operand_units <= result->unit_count &&
+         !iree_any_bit_set(node->flags,
+                           LOOM_LOW_SCHEDULE_NODE_FLAG_EARLY_CLOBBER |
+                               LOOM_LOW_SCHEDULE_NODE_FLAG_LATE_READS);
 }
 
 void loom_low_schedule_setup_order_classify_node(
     loom_low_schedule_build_state_t* state, loom_low_schedule_node_t* node,
-    bool is_repair) {
-  if (loom_low_schedule_setup_order_is_member(state, node, is_repair)) {
+    bool order_structural_setup) {
+  if (loom_low_schedule_setup_order_is_member(state, node,
+                                              order_structural_setup) &&
+      loom_low_schedule_setup_order_preserves_required_pressure(state, node)) {
     node->flags |= LOOM_LOW_SCHEDULE_NODE_FLAG_ORDERED_SETUP;
     state->setup_order.has_members = true;
   }
@@ -93,7 +192,7 @@ static iree_status_t loom_low_schedule_setup_order_append(
           .value_operand_index = LOOM_LOW_ID_NONE,
           .kind = LOOM_LOW_SCHEDULE_DEPENDENCY_ORDER,
       },
-      state->arena);
+      state->dependency_arena);
 }
 
 iree_status_t loom_low_schedule_setup_order_finish(
@@ -114,6 +213,7 @@ iree_status_t loom_low_schedule_setup_order_finish(
       const uint32_t node_index = i - 1;
       const loom_low_schedule_node_t* node = &state->nodes[node_index];
       const uint32_t successor = order->completion_nodes[node_index];
+      const uint32_t value_successor = order->entry_nodes[node_index];
       order->completion_nodes[node_index] = node_index;
       order->entry_nodes[node_index] = node_index;
       if (iree_any_bit_set(node->flags,
@@ -121,7 +221,11 @@ iree_status_t loom_low_schedule_setup_order_finish(
         range_end = node_index;
         continue;
       }
-      if (successor <= node_index || successor >= range_end ||
+      // An order-only successor does not consume the produced value. Grouping
+      // unrelated readers around their next state writer would retain all of
+      // their inputs together instead of completing each private setup.
+      if (successor != value_successor || successor <= node_index ||
+          successor >= range_end ||
           !iree_any_bit_set(node->flags,
                             LOOM_LOW_SCHEDULE_NODE_FLAG_ORDERED_SETUP)) {
         continue;

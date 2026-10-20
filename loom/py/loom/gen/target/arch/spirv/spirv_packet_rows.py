@@ -42,17 +42,26 @@ from loom.target.arch.spirv.atomic import (  # noqa: E402
     float_atomic_cas_strategies,
     float_atomic_descriptor_key,
 )
+from loom.target.arch.spirv.barrier import CONTROL_BARRIER_CASES  # noqa: E402
 from loom.target.arch.spirv.builtins import (  # noqa: E402
     BUILTIN_DIMENSIONS,
     BUILTIN_INDEX_QUERIES,
+    BUILTIN_SCALAR_INDEX_QUERIES,
 )
 from loom.target.arch.spirv.cooperative_matrix import (  # noqa: E402
     COOPERATIVE_MATRIX_CASES,
+    COOPERATIVE_MATRIX_TYPES,
     CooperativeMatrixCase,
+    cooperative_matrix_memory_variants,
 )
 from loom.target.arch.spirv.descriptors import SPIRV_LOGICAL_CORE_DESCRIPTOR_SET  # noqa: E402
+from loom.target.arch.spirv.extended_math import (  # noqa: E402
+    EXTENDED_MATH_INSTRUCTIONS,
+)
 from loom.target.arch.spirv.ordinary_vector import (  # noqa: E402
+    NATIVE_ORDINARY_VECTOR_LANE_COUNTS,
     ORDINARY_VECTOR_INSTRUCTIONS,
+    ORDINARY_VECTOR_SHUFFLE_INSTRUCTIONS,
     OrdinaryVectorComponentType,
     OrdinaryVectorInstructionType,
     OrdinaryVectorType,
@@ -60,24 +69,29 @@ from loom.target.arch.spirv.ordinary_vector import (  # noqa: E402
 from loom.target.arch.spirv.ordinary_vector_bit_layout import (  # noqa: E402
     ORDINARY_VECTOR_BIT_LAYOUT_INSTRUCTIONS,
 )
+from loom.target.arch.spirv.ordinary_vector_conversion import (  # noqa: E402
+    ORDINARY_VECTOR_CONVERSION_INSTRUCTIONS,
+)
 from loom.target.arch.spirv.ordinary_vector_float import (  # noqa: E402
     ORDINARY_VECTOR_FLOAT_BINARY_INSTRUCTIONS,
+    ORDINARY_VECTOR_FLOAT_COMPARE_INSTRUCTIONS,
+    ORDINARY_VECTOR_FLOAT_SCALE_INSTRUCTIONS,
 )
 from loom.target.arch.spirv.ordinary_vector_integer import (  # noqa: E402
+    INTEGER_BIT_COUNT_INSTRUCTIONS,
     ORDINARY_VECTOR_INTEGER_INSTRUCTIONS,
-)
-from loom.target.arch.spirv.ordinary_vector_integer_conversion import (  # noqa: E402
-    ORDINARY_VECTOR_INTEGER_CONVERSION_INSTRUCTIONS,
 )
 from loom.target.arch.spirv.scalar_alu import (  # noqa: E402
     BOOLEAN_BINARY_OPERATIONS,
     BOOLEAN_CONSTANTS,
     FLOAT_BINARY_OPERATIONS,
+    FLOAT_COMPARE_PREDICATES,
+    FLOAT_COMPARE_TYPES,
     FLOAT_SCALAR_ALU_TYPES,
     INTEGER_BITWISE_BINARY_OPERATIONS,
     INTEGER_SCALAR_ALU_TYPE_PAIRS,
     OFFSET64_COMPARE_PREDICATES,
-    SCALAR_ALU_TYPES,
+    SCALAR_SELECT_TYPES,
     SIGNED_INTEGER_BINARY_OPERATIONS,
     SIGNED_INTEGER_COMPARE_PREDICATES,
     SIGNED_INTEGER_SCALAR_ALU_TYPES,
@@ -104,16 +118,30 @@ from loom.target.arch.spirv.scalar_memory import (  # noqa: E402
     STORAGE_BUFFER_SCALARS,
     StorageBufferScalar,
 )
+from loom.target.arch.spirv.subgroup import (  # noqa: E402
+    SPIRV_SUBGROUP_BALLOT_PACKING_INSTRUCTIONS,
+    SPIRV_SUBGROUP_INSTRUCTIONS,
+)
 from loom.target.low_descriptors import (  # noqa: E402
     Descriptor,
     ImmediateFlag,
     ImmediateKind,
+    OperandRole,
     descriptor_set_relative_name,
 )
 
 _PACKET_MAX_OPERAND_COUNT = 4
 _PACKET_OPERAND_TYPE_CAPACITY = 3
-_FLOAT_BINARY_OPCODES = frozenset(row.opcode for row in FLOAT_BINARY_OPERATIONS)
+_FLOAT_BINARY_OPCODES = frozenset(row.opcode for row in (*FLOAT_BINARY_OPERATIONS, *ORDINARY_VECTOR_FLOAT_SCALE_INSTRUCTIONS))
+_FLOAT_CONVERSION_OPCODES = frozenset(
+    {
+        "LOOM_SPIRV_OP_F_CONVERT",
+        "LOOM_SPIRV_OP_CONVERT_S_TO_F",
+        "LOOM_SPIRV_OP_CONVERT_U_TO_F",
+        "LOOM_SPIRV_OP_CONVERT_F_TO_S",
+        "LOOM_SPIRV_OP_CONVERT_F_TO_U",
+    }
+)
 
 
 def _c_identifier(value: str) -> str:
@@ -215,25 +243,31 @@ class _PacketRow:
     form: str
     result_type: str | None = None
     operand_types: tuple[str, ...] = ()
-    result_count: int = 0
-    has_immediate: bool = False
+    immediate_count: int = 0
     literal_word_count: int = 0
     memory_alignment: int = 0
     no_contraction: bool = False
     coordinate_byte_shift: int = 0
-    builtin: str | None = None
+    builtin_variable: str | None = None
     component_index: int | None = None
     execution_scope: str | None = None
+    group_operation_scope: str | None = None
+    # SPIR-V GroupOperation literal, present only for arithmetic collectives.
+    group_operation: str | None = None
     memory_scope: str | None = None
     memory_semantics: str | None = None
-    cooperative_matrix_layout: str | None = None
-    cooperative_matrix_element_stride: int = 0
     cooperative_matrix_operands: str | None = None
     atomic_scope: str | None = None
     atomic_storage_semantics: str | None = None
     atomic_success_ordering: int | None = None
     atomic_integer_scalar: str | None = None
     atomic_float_operation: int | None = None
+    extended_instruction_set: str | None = None
+    extended_instruction: str | None = None
+
+    @property
+    def result_count(self) -> int:
+        return int(self.result_type is not None)
 
     def encoded_operand_types(self) -> tuple[str, ...]:
         if len(self.operand_types) <= _PACKET_OPERAND_TYPE_CAPACITY:
@@ -242,12 +276,59 @@ class _PacketRow:
             return self.operand_types[:1]
         raise ValueError(f"{self.descriptor_key}: packet operand types do not fit")
 
-    def render(self, value_type_refs: dict[str, int]) -> str:
+    def payload_initializer(self) -> str:
+        # Member names are part of the identity: equal object bytes do not make
+        # different active union members interchangeable. Explicitly brace each
+        # nested aggregate instead of relying on flattened member designators.
+        members = {
+            "scalar_constant": {
+                "literal_word_count": self.literal_word_count or None,
+            },
+            "access_chain": {
+                "coordinate_byte_shift": self.coordinate_byte_shift or None,
+            },
+            "builtin_load": {
+                "variable": self.builtin_variable,
+                "component_index": self.component_index,
+            },
+            "barrier": {
+                "execution_scope": self.execution_scope,
+                "memory_scope": self.memory_scope,
+                "memory_semantics": self.memory_semantics,
+            },
+            "group_non_uniform": {
+                "execution_scope": self.group_operation_scope,
+                "operation": self.group_operation,
+            },
+            "cooperative_matrix": {
+                "operands": self.cooperative_matrix_operands,
+            },
+            "atomic": {
+                "memory_scope": self.atomic_scope,
+                "storage_semantics": self.atomic_storage_semantics,
+                "success_ordering": self.atomic_success_ordering,
+                "integer_scalar": self.atomic_integer_scalar,
+                "float_operation": self.atomic_float_operation,
+            },
+            "extended_instruction": {
+                "instruction_set": self.extended_instruction_set,
+                "instruction": self.extended_instruction,
+            },
+        }
+        initializers = []
+        for member, fields in members.items():
+            field_initializers = [f".{name} = {value}," for name, value in fields.items() if value is not None]
+            if field_initializers:
+                initializers.append(f".{member} = {{ {' '.join(field_initializers)} }}")
+        return "{ " + ", ".join(initializers) + " }" if initializers else "{}"
+
+    def render(self, value_type_refs: dict[str, int], payload_ref: int) -> str:
         encoded_operand_types = self.encoded_operand_types()
         lines = [
             f"    [{_descriptor_ref_constant_name(self.descriptor_key)}] =",
             "        {",
             f"            .opcode = {self.opcode},",
+            f"            .payload_ref = {payload_ref},",
             f"            .form = {self.form},",
             f"            .result_type_ref = {value_type_refs[self.result_type or _unknown_value()]},",
         ]
@@ -256,65 +337,26 @@ class _PacketRow:
             lines.append("                {")
             lines.extend(f"                    {value_type_refs[operand_type]}," for operand_type in encoded_operand_types)
             lines.append("                },")
-        lines.extend(
-            [
-                f"            .result_count = {self.result_count},",
-                f"            .operand_count = {len(self.operand_types)},",
-            ]
-        )
-        if self.literal_word_count:
-            lines.append(f"            .payload.scalar_constant.literal_word_count = {self.literal_word_count},")
+        lines.append(f"            .operand_count = {len(self.operand_types)},")
         if self.memory_alignment:
             lines.append(f"            .memory_alignment = {self.memory_alignment},")
         if self.no_contraction:
             lines.append("            .flags = LOOM_SPIRV_PACKET_FLAG_NO_CONTRACTION,")
-        if self.coordinate_byte_shift:
-            lines.append(f"            .payload.access_chain.coordinate_byte_shift = {self.coordinate_byte_shift},")
-        if self.builtin is not None:
-            lines.append(f"            .payload.builtin_load.builtin = {self.builtin},")
-        if self.component_index is not None:
-            lines.append(f"            .payload.builtin_load.component_index = {self.component_index},")
-        if self.execution_scope is not None:
-            lines.append(f"            .payload.barrier.execution_scope = {self.execution_scope},")
-        if self.memory_scope is not None:
-            lines.append(f"            .payload.barrier.memory_scope = {self.memory_scope},")
-        if self.memory_semantics is not None:
-            lines.append(f"            .payload.barrier.memory_semantics = {self.memory_semantics},")
-        if self.cooperative_matrix_layout is not None:
-            lines.append(f"            .payload.cooperative_matrix.layout = {self.cooperative_matrix_layout},")
-        if self.cooperative_matrix_element_stride:
-            lines.append(f"            .payload.cooperative_matrix.element_stride = {self.cooperative_matrix_element_stride},")
-        if self.cooperative_matrix_operands is not None:
-            lines.append(f"            .payload.cooperative_matrix.operands = {self.cooperative_matrix_operands},")
-        if self.atomic_scope is not None:
-            lines.append(f"            .payload.atomic.memory_scope = {self.atomic_scope},")
-        if self.atomic_storage_semantics is not None:
-            lines.append(f"            .payload.atomic.storage_semantics = {self.atomic_storage_semantics},")
-        if self.atomic_success_ordering is not None:
-            lines.append(f"            .payload.atomic.success_ordering = {self.atomic_success_ordering},")
-        if self.atomic_integer_scalar is not None:
-            lines.append(f"            .payload.atomic.integer_scalar = {self.atomic_integer_scalar},")
-        if self.atomic_float_operation is not None:
-            lines.append(f"            .payload.atomic.float_operation = {self.atomic_float_operation},")
         lines.append("        },")
         return "\n".join(lines)
 
 
 def _control_barrier_rows() -> list[_PacketRow]:
-    memory_semantics = "LOOM_SPIRV_MEMORY_SEMANTICS_ACQUIRE_RELEASE_MASK | LOOM_SPIRV_MEMORY_SEMANTICS_WORKGROUP_MEMORY_MASK"
     return [
         _PacketRow(
-            f"spirv.op_control_barrier.{scope}.workgroup.acq_rel",
+            case.descriptor_key,
             opcode="LOOM_SPIRV_OP_CONTROL_BARRIER",
             form="LOOM_SPIRV_PACKET_FORM_CONTROL_BARRIER",
-            execution_scope=scope_enum,
-            memory_scope="LOOM_SPIRV_SCOPE_WORKGROUP",
-            memory_semantics=memory_semantics,
+            execution_scope=case.scope.execution_scope,
+            memory_scope=case.scope.memory_scope,
+            memory_semantics=case.memory_semantics,
         )
-        for scope, scope_enum in (
-            ("subgroup", "LOOM_SPIRV_SCOPE_SUBGROUP"),
-            ("workgroup", "LOOM_SPIRV_SCOPE_WORKGROUP"),
-        )
+        for case in CONTROL_BARRIER_CASES
     ]
 
 
@@ -366,7 +408,7 @@ def _atomic_rows_for_scope(
                     opcode=operation.opcode,
                     form="LOOM_SPIRV_PACKET_FORM_ATOMIC",
                     operand_types=(pointer_value, scalar_value),
-                    has_immediate=True,
+                    immediate_count=1,
                     **common,
                 )
             )
@@ -383,8 +425,7 @@ def _atomic_rows_for_scope(
                 form="LOOM_SPIRV_PACKET_FORM_ATOMIC",
                 result_type=scalar_value,
                 operand_types=(pointer_value, scalar_value),
-                result_count=1,
-                has_immediate=True,
+                immediate_count=1,
                 **common,
             )
         )
@@ -401,8 +442,7 @@ def _atomic_rows_for_scope(
             form="LOOM_SPIRV_PACKET_FORM_ATOMIC_COMPARE_EXCHANGE",
             result_type=scalar_value,
             operand_types=(pointer_value, scalar_value, scalar_value),
-            result_count=1,
-            has_immediate=True,
+            immediate_count=1,
             atomic_success_ordering=success_ordering.ordinal,
             **common,
         )
@@ -443,7 +483,7 @@ def _float_atomic_rows_for_scope(
                         opcode=operation.native_opcode,
                         form="LOOM_SPIRV_PACKET_FORM_ATOMIC",
                         operand_types=(pointer_value, scalar_value),
-                        has_immediate=True,
+                        immediate_count=1,
                         **common,
                     )
                 )
@@ -461,8 +501,7 @@ def _float_atomic_rows_for_scope(
                     form="LOOM_SPIRV_PACKET_FORM_ATOMIC",
                     result_type=scalar_value,
                     operand_types=(pointer_value, scalar_value),
-                    result_count=1,
-                    has_immediate=True,
+                    immediate_count=1,
                     **common,
                 )
             )
@@ -491,8 +530,7 @@ def _float_atomic_rows_for_scope(
                     form="LOOM_SPIRV_PACKET_FORM_ATOMIC_FLOAT_BITCAST",
                     result_type=scalar_value,
                     operand_types=(integer_pointer_value, scalar_value),
-                    result_count=1,
-                    has_immediate=True,
+                    immediate_count=1,
                     **integer_common,
                 )
             )
@@ -511,8 +549,7 @@ def _float_atomic_rows_for_scope(
                 form="LOOM_SPIRV_PACKET_FORM_ATOMIC_FLOAT_CAS",
                 result_type=scalar_value if form == "rmw" else None,
                 operand_types=(integer_pointer_value, scalar_value),
-                result_count=1 if form == "rmw" else 0,
-                has_immediate=True,
+                immediate_count=1,
                 atomic_float_operation=operation.cas_operation,
                 **integer_common,
             )
@@ -538,8 +575,7 @@ def _float_atomic_rows_for_scope(
                     scalar_value,
                     scalar_value,
                 ),
-                result_count=1,
-                has_immediate=True,
+                immediate_count=1,
                 atomic_success_ordering=success_ordering.ordinal,
                 atomic_integer_scalar=scalar.integer_scalar_enum,
                 **common,
@@ -566,7 +602,6 @@ def _storage_buffer_rows_for_scalar(
                 _storage_buffer_address_value(),
                 _offset64_value(),
             ),
-            result_count=1,
         ),
         _PacketRow(
             f"spirv.op_load.storage_buffer.{scalar.suffix}",
@@ -574,7 +609,6 @@ def _storage_buffer_rows_for_scalar(
             form="LOOM_SPIRV_PACKET_FORM_LOAD_ALIGNED",
             result_type=_scalar_value(scalar),
             operand_types=(_physical_storage_buffer_pointer_value(scalar),),
-            result_count=1,
             memory_alignment=scalar.byte_width,
         ),
         _PacketRow(
@@ -609,7 +643,6 @@ def _raw_storage_buffer_byte_rows() -> tuple[_PacketRow, ...]:
             form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
             result_type=u32_value,
             operand_types=(byte_value,),
-            result_count=1,
         ),
         _PacketRow(
             f"spirv.op_uconvert.u32.{scalar.suffix}",
@@ -617,7 +650,6 @@ def _raw_storage_buffer_byte_rows() -> tuple[_PacketRow, ...]:
             form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
             result_type=byte_value,
             operand_types=(u32_value,),
-            result_count=1,
         ),
     )
 
@@ -637,7 +669,6 @@ def _workgroup_rows() -> list[_PacketRow]:
                     _workgroup_array_pointer_value(scalar),
                     _offset64_value(),
                 ),
-                result_count=1,
                 coordinate_byte_shift=scalar.byte_width.bit_length() - 1,
             )
         )
@@ -654,7 +685,6 @@ def _workgroup_rows() -> list[_PacketRow]:
                         "LOOM_SPIRV_SCALAR_TYPE_S32",
                     ),
                 ),
-                result_count=1,
             )
         )
         rows.append(
@@ -664,7 +694,6 @@ def _workgroup_rows() -> list[_PacketRow]:
                 form="LOOM_SPIRV_PACKET_FORM_LOAD_ALIGNED",
                 result_type=_scalar_value(scalar),
                 operand_types=(_workgroup_pointer_value(scalar),),
-                result_count=1,
                 memory_alignment=scalar.byte_width,
             )
         )
@@ -683,7 +712,7 @@ def _workgroup_rows() -> list[_PacketRow]:
     return rows
 
 
-def _cooperative_matrix_rows_for_case(case: CooperativeMatrixCase) -> list[_PacketRow]:
+def _cooperative_matrix_mul_add_row(case: CooperativeMatrixCase) -> _PacketRow:
     lhs_scalar = case.lhs_scalar
     rhs_scalar = case.rhs_scalar
     accumulator_scalar = case.accumulator_scalar
@@ -712,93 +741,52 @@ def _cooperative_matrix_rows_for_case(case: CooperativeMatrixCase) -> list[_Pack
         columns=case.accumulator_columns,
         matrix_use="LOOM_SPIRV_COOPERATIVE_MATRIX_USE_MATRIX_ACCUMULATOR_KHR",
     )
-    row_major_layout = "LOOM_SPIRV_COOPERATIVE_MATRIX_LAYOUT_ROW_MAJOR_KHR"
-    lhs_element_stride = case.lhs_columns
-    rhs_element_stride = case.rhs_columns
-    accumulator_element_stride = case.accumulator_columns
-    result_element_stride = case.accumulator_columns
-    return [
-        _PacketRow(
-            case.descriptor_key(
-                "op_cooperative_matrix_load_khr",
-                role="lhs",
-                layout="row_major",
-            ),
-            opcode="LOOM_SPIRV_OP_COOPERATIVE_MATRIX_LOAD_KHR",
-            form="LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_LOAD",
-            result_type=lhs_value,
-            operand_types=(_physical_storage_buffer_pointer_value(lhs_scalar),),
-            result_count=1,
-            memory_alignment=16,
-            cooperative_matrix_layout=row_major_layout,
-            cooperative_matrix_element_stride=lhs_element_stride,
-        ),
-        _PacketRow(
-            case.descriptor_key(
-                "op_cooperative_matrix_load_khr",
-                role="rhs",
-                layout="row_major",
-            ),
-            opcode="LOOM_SPIRV_OP_COOPERATIVE_MATRIX_LOAD_KHR",
-            form="LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_LOAD",
-            result_type=rhs_value,
-            operand_types=(_physical_storage_buffer_pointer_value(rhs_scalar),),
-            result_count=1,
-            memory_alignment=16,
-            cooperative_matrix_layout=row_major_layout,
-            cooperative_matrix_element_stride=rhs_element_stride,
-        ),
-        _PacketRow(
-            case.descriptor_key(
-                "op_cooperative_matrix_load_khr",
-                role="init",
-                layout="row_major",
-            ),
-            opcode="LOOM_SPIRV_OP_COOPERATIVE_MATRIX_LOAD_KHR",
-            form="LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_LOAD",
-            result_type=accumulator_value,
-            operand_types=(_physical_storage_buffer_pointer_value(accumulator_scalar),),
-            result_count=1,
-            memory_alignment=16,
-            cooperative_matrix_layout=row_major_layout,
-            cooperative_matrix_element_stride=accumulator_element_stride,
-        ),
-        _PacketRow(
-            case.descriptor_key(
-                "op_cooperative_matrix_mul_add_khr",
-                role=None,
-                include_operand_mode=True,
-            ),
-            opcode="LOOM_SPIRV_OP_COOPERATIVE_MATRIX_MUL_ADD_KHR",
-            form="LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_MUL_ADD",
-            result_type=result_value,
-            operand_types=(lhs_value, rhs_value, accumulator_value),
-            result_count=1,
-            cooperative_matrix_operands=case.packet_operand_mask,
-        ),
-        _PacketRow(
-            case.descriptor_key(
-                "op_cooperative_matrix_store_khr",
-                role="result",
-                layout="row_major",
-            ),
-            opcode="LOOM_SPIRV_OP_COOPERATIVE_MATRIX_STORE_KHR",
-            form="LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_STORE",
-            operand_types=(
-                _physical_storage_buffer_pointer_value(result_scalar),
-                result_value,
-            ),
-            memory_alignment=16,
-            cooperative_matrix_layout=row_major_layout,
-            cooperative_matrix_element_stride=result_element_stride,
-        ),
-    ]
+    return _PacketRow(
+        case.descriptor_key("op_cooperative_matrix_mul_add_khr", include_operand_mode=True),
+        opcode="LOOM_SPIRV_OP_COOPERATIVE_MATRIX_MUL_ADD_KHR",
+        form="LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_MUL_ADD",
+        result_type=result_value,
+        operand_types=(lhs_value, rhs_value, accumulator_value),
+        cooperative_matrix_operands=case.packet_operand_mask,
+    )
 
 
 def _cooperative_matrix_rows() -> list[_PacketRow]:
     rows: list[_PacketRow] = []
-    for case in COOPERATIVE_MATRIX_CASES:
-        rows.extend(_cooperative_matrix_rows_for_case(case))
+    stride_type = _value_type("LOOM_SPIRV_VALUE_CLASS_SCALAR", "LOOM_SPIRV_SCALAR_TYPE_U32")
+    for matrix_type in COOPERATIVE_MATRIX_TYPES:
+        value = _cooperative_matrix_value(
+            scalar_enum=matrix_type.scalar.scalar_enum,
+            rows=matrix_type.rows,
+            columns=matrix_type.columns,
+            matrix_use=matrix_type.use_c_expression,
+        )
+        rows.append(
+            _PacketRow(
+                matrix_type.constructor_key,
+                opcode="LOOM_SPIRV_OP_COMPOSITE_CONSTRUCT",
+                form="LOOM_SPIRV_PACKET_FORM_COMPOSITE_CONSTRUCT",
+                result_type=value,
+                operand_types=(_scalar_value(matrix_type.scalar),),
+            )
+        )
+        for role in matrix_type.source_roles:
+            is_load = role != "result"
+            for memory in cooperative_matrix_memory_variants(matrix_type.scalar):
+                pointer_type = _workgroup_pointer_value if memory.space == "workgroup" else _physical_storage_buffer_pointer_value
+                pointer = pointer_type(memory.carrier)
+                rows.append(
+                    _PacketRow(
+                        matrix_type.memory_key(role, memory),
+                        opcode="LOOM_SPIRV_OP_COOPERATIVE_MATRIX_LOAD_KHR" if is_load else "LOOM_SPIRV_OP_COOPERATIVE_MATRIX_STORE_KHR",
+                        form="LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_LOAD" if is_load else "LOOM_SPIRV_PACKET_FORM_COOPERATIVE_MATRIX_STORE",
+                        result_type=value if is_load else None,
+                        operand_types=(pointer, stride_type) if is_load else (pointer, value, stride_type),
+                        memory_alignment=16,
+                        immediate_count=1,
+                    )
+                )
+    rows.extend(_cooperative_matrix_mul_add_row(case) for case in COOPERATIVE_MATRIX_CASES)
     return rows
 
 
@@ -807,10 +795,9 @@ def _scalar_binary_row(scalar: ScalarAluType, operation: ScalarBinaryOperation) 
     return _PacketRow(
         f"spirv.op_{operation.descriptor_suffix}.{scalar.suffix}",
         opcode=operation.opcode,
-        form="LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE",
+        form="LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE",
         result_type=scalar_value,
         operand_types=(scalar_value, scalar_value),
-        result_count=1,
         no_contraction=operation.opcode in _FLOAT_BINARY_OPCODES,
     )
 
@@ -822,8 +809,7 @@ def _integer_constant_row(scalar_pair: IntegerAluTypePair) -> _PacketRow:
         opcode="LOOM_SPIRV_OP_CONSTANT",
         form="LOOM_SPIRV_PACKET_FORM_SCALAR_CONSTANT",
         result_type=_alu_scalar_value(scalar),
-        result_count=1,
-        has_immediate=True,
+        immediate_count=1,
         literal_word_count=scalar_pair.literal_word_count,
     )
 
@@ -837,8 +823,7 @@ def _float_constant_row(scalar: FloatConstantType) -> _PacketRow:
             "LOOM_SPIRV_VALUE_CLASS_SCALAR",
             scalar.scalar_enum,
         ),
-        result_count=1,
-        has_immediate=True,
+        immediate_count=1,
         literal_word_count=scalar.literal_word_count,
     )
 
@@ -849,7 +834,6 @@ def _boolean_constant_row(row: BooleanConstant) -> _PacketRow:
         opcode=row.opcode,
         form="LOOM_SPIRV_PACKET_FORM_BOOLEAN_CONSTANT",
         result_type=_bool_value(),
-        result_count=1,
     )
 
 
@@ -858,10 +842,9 @@ def _boolean_binary_row(operation: ScalarBinaryOperation) -> _PacketRow:
     return _PacketRow(
         f"spirv.op_{operation.descriptor_suffix}.bool",
         opcode=operation.opcode,
-        form="LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE",
+        form="LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE",
         result_type=bool_value,
         operand_types=(bool_value, bool_value),
-        result_count=1,
     )
 
 
@@ -881,7 +864,7 @@ def _conversion_row(row: ScalarConversion) -> _PacketRow:
         form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
         result_type=_alu_scalar_value(row.result_type),
         operand_types=(_alu_scalar_value(row.source_type),),
-        result_count=1,
+        no_contraction=row.opcode in _FLOAT_CONVERSION_OPCODES,
     )
 
 
@@ -892,7 +875,6 @@ def _integer_value_view_row(row: IntegerValueViewConversion) -> _PacketRow:
         form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
         result_type=_alu_scalar_value(row.result_type),
         operand_types=(_alu_scalar_value(row.source_type),),
-        result_count=1,
     )
 
 
@@ -912,7 +894,6 @@ def _conversion_rows() -> list[_PacketRow]:
                 form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
                 result_type=_offset64_value(),
                 operand_types=(scalar_value,),
-                result_count=1,
             )
         )
         if scalar_pair.bit_width < 64:
@@ -923,7 +904,6 @@ def _conversion_rows() -> list[_PacketRow]:
                     form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
                     result_type=_offset64_value(),
                     operand_types=(_alu_scalar_value(scalar_pair.signed),),
-                    result_count=1,
                 )
             )
         rows.append(
@@ -933,7 +913,6 @@ def _conversion_rows() -> list[_PacketRow]:
                 form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
                 result_type=scalar_value,
                 operand_types=(_offset64_value(),),
-                result_count=1,
             )
         )
     return rows
@@ -947,17 +926,68 @@ def _ordinary_vector_rows() -> list[_PacketRow]:
             form=row.packet_form,
             result_type=_ordinary_vector_instruction_value(row.result_type),
             operand_types=tuple(_ordinary_vector_instruction_value(operand_type) for operand_type in row.operand_types),
-            result_count=1,
-            has_immediate=row.component_index_maximum is not None,
-            no_contraction=row.opcode in _FLOAT_BINARY_OPCODES,
+            immediate_count=int(row.component_index_maximum is not None),
+            no_contraction=row.opcode in _FLOAT_BINARY_OPCODES or row.opcode in _FLOAT_CONVERSION_OPCODES,
         )
         for row in (
             *ORDINARY_VECTOR_INSTRUCTIONS,
             *ORDINARY_VECTOR_FLOAT_BINARY_INSTRUCTIONS,
+            *ORDINARY_VECTOR_FLOAT_SCALE_INSTRUCTIONS,
+            *ORDINARY_VECTOR_FLOAT_COMPARE_INSTRUCTIONS,
             *ORDINARY_VECTOR_INTEGER_INSTRUCTIONS,
-            *ORDINARY_VECTOR_INTEGER_CONVERSION_INSTRUCTIONS,
+            *INTEGER_BIT_COUNT_INSTRUCTIONS,
+            *ORDINARY_VECTOR_CONVERSION_INSTRUCTIONS,
             *ORDINARY_VECTOR_BIT_LAYOUT_INSTRUCTIONS,
+            *SPIRV_SUBGROUP_BALLOT_PACKING_INSTRUCTIONS,
         )
+    ]
+
+
+def _ordinary_vector_shuffle_rows() -> list[_PacketRow]:
+    return [
+        _PacketRow(
+            row.key,
+            opcode=row.opcode,
+            form=row.packet_form,
+            result_type=_ordinary_vector_instruction_value(row.result_type),
+            operand_types=(
+                _ordinary_vector_instruction_value(row.source0_type),
+                _ordinary_vector_instruction_value(row.source1_type),
+            ),
+            immediate_count=len(row.selector_names),
+        )
+        for row in ORDINARY_VECTOR_SHUFFLE_INSTRUCTIONS
+    ]
+
+
+def _subgroup_rows() -> list[_PacketRow]:
+    return [
+        _PacketRow(
+            row.key,
+            opcode=row.opcode,
+            form=row.packet_form,
+            result_type=_ordinary_vector_instruction_value(row.result_type),
+            operand_types=tuple(_ordinary_vector_instruction_value(operand_type) for operand_type in row.operand_types),
+            group_operation_scope="LOOM_SPIRV_SCOPE_SUBGROUP",
+            group_operation=row.group_operation,
+            immediate_count=int(row.clustered),
+        )
+        for row in SPIRV_SUBGROUP_INSTRUCTIONS
+    ]
+
+
+def _extended_math_rows() -> list[_PacketRow]:
+    return [
+        _PacketRow(
+            row.descriptor_key,
+            opcode="LOOM_SPIRV_OP_EXT_INST",
+            form="LOOM_SPIRV_PACKET_FORM_EXTENDED_INSTRUCTION",
+            result_type=_ordinary_vector_instruction_value(row.value_type),
+            operand_types=tuple(_ordinary_vector_instruction_value(row.value_type) for _ in row.operation.operand_names),
+            extended_instruction_set=("LOOM_SPIRV_EXTENDED_INSTRUCTION_SET_GLSL_STD_450"),
+            extended_instruction=row.operation.instruction_c_enum,
+        )
+        for row in EXTENDED_MATH_INSTRUCTIONS
     ]
 
 
@@ -971,12 +1001,27 @@ def _builtin_index_rows() -> list[_PacketRow]:
                 "LOOM_SPIRV_VALUE_CLASS_SCALAR",
                 "LOOM_SPIRV_SCALAR_TYPE_S32",
             ),
-            result_count=1,
-            builtin=query.builtin_enum,
+            builtin_variable=query.variable_enum,
             component_index=dimension.component_index,
         )
         for query in BUILTIN_INDEX_QUERIES
         for dimension in BUILTIN_DIMENSIONS
+    ]
+
+
+def _builtin_scalar_index_rows() -> list[_PacketRow]:
+    return [
+        _PacketRow(
+            f"spirv.op_load_builtin.{query.descriptor_suffix}",
+            opcode="LOOM_SPIRV_OP_LOAD",
+            form="LOOM_SPIRV_PACKET_FORM_LOAD_BUILTIN",
+            result_type=_value_type(
+                "LOOM_SPIRV_VALUE_CLASS_SCALAR",
+                "LOOM_SPIRV_SCALAR_TYPE_S32",
+            ),
+            builtin_variable=query.variable_enum,
+        )
+        for query in BUILTIN_SCALAR_INDEX_QUERIES
     ]
 
 
@@ -986,26 +1031,23 @@ def _coordinate_binary_rows() -> list[_PacketRow]:
         _PacketRow(
             "spirv.op_iadd.offset64",
             opcode="LOOM_SPIRV_OP_I_ADD",
-            form="LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE",
+            form="LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE",
             result_type=offset64_value,
             operand_types=(offset64_value, offset64_value),
-            result_count=1,
         ),
         _PacketRow(
             "spirv.op_isub.offset64",
             opcode="LOOM_SPIRV_OP_I_SUB",
-            form="LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE",
+            form="LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE",
             result_type=offset64_value,
             operand_types=(offset64_value, offset64_value),
-            result_count=1,
         ),
         _PacketRow(
             "spirv.op_imul.offset64",
             opcode="LOOM_SPIRV_OP_I_MUL",
-            form="LOOM_SPIRV_PACKET_FORM_BINARY_SAME_TYPE",
+            form="LOOM_SPIRV_PACKET_FORM_BINARY_LHS_TYPE",
             result_type=offset64_value,
             operand_types=(offset64_value, offset64_value),
-            result_count=1,
         ),
     ]
     return rows
@@ -1023,15 +1065,6 @@ def _coordinate_unary_rows() -> list[_PacketRow]:
             form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
             result_type=i32_value,
             operand_types=(i32_value,),
-            result_count=1,
-        ),
-        _PacketRow(
-            "spirv.op_bit_count.i32",
-            opcode="LOOM_SPIRV_OP_BIT_COUNT",
-            form="LOOM_SPIRV_PACKET_FORM_UNARY_TYPED",
-            result_type=i32_value,
-            operand_types=(i32_value,),
-            result_count=1,
         ),
     ]
 
@@ -1045,12 +1078,11 @@ def _mul_add_rows() -> list[_PacketRow]:
             form="LOOM_SPIRV_PACKET_FORM_INTEGER_MUL_ADD",
             result_type=i32_value,
             operand_types=(i32_value, i32_value, i32_value),
-            result_count=1,
         ),
     ]
 
 
-def _integer_compare_rows() -> list[_PacketRow]:
+def _compare_rows() -> list[_PacketRow]:
     offset64_value = _offset64_value()
     bool_value = _bool_value()
     rows = [
@@ -1060,7 +1092,6 @@ def _integer_compare_rows() -> list[_PacketRow]:
             form="LOOM_SPIRV_PACKET_FORM_COMPARE_SAME_TYPE",
             result_type=bool_value,
             operand_types=(_alu_scalar_value(scalar), _alu_scalar_value(scalar)),
-            result_count=1,
         )
         for scalar in SIGNED_INTEGER_SCALAR_ALU_TYPES
         for predicate in SIGNED_INTEGER_COMPARE_PREDICATES
@@ -1076,10 +1107,25 @@ def _integer_compare_rows() -> list[_PacketRow]:
                     _alu_scalar_value(scalar_pair.unsigned),
                     _alu_scalar_value(scalar_pair.unsigned),
                 ),
-                result_count=1,
             )
             for scalar_pair in INTEGER_SCALAR_ALU_TYPE_PAIRS
             for predicate in UNSIGNED_ORDERED_INTEGER_COMPARE_PREDICATES
+        ]
+    )
+    rows.extend(
+        [
+            _PacketRow(
+                f"spirv.op_{predicate.descriptor_suffix}.{compare_type.scalar.suffix}",
+                opcode=predicate.opcode,
+                form="LOOM_SPIRV_PACKET_FORM_COMPARE_SAME_TYPE",
+                result_type=bool_value,
+                operand_types=(
+                    _alu_scalar_value(compare_type.scalar),
+                    _alu_scalar_value(compare_type.scalar),
+                ),
+            )
+            for compare_type in FLOAT_COMPARE_TYPES
+            for predicate in FLOAT_COMPARE_PREDICATES
         ]
     )
     rows.extend(
@@ -1090,7 +1136,6 @@ def _integer_compare_rows() -> list[_PacketRow]:
                 form="LOOM_SPIRV_PACKET_FORM_COMPARE_SAME_TYPE",
                 result_type=bool_value,
                 operand_types=(offset64_value, offset64_value),
-                result_count=1,
             )
             for predicate in OFFSET64_COMPARE_PREDICATES
         ]
@@ -1113,9 +1158,8 @@ def _select_rows() -> list[_PacketRow]:
                 _alu_scalar_value(scalar),
                 _alu_scalar_value(scalar),
             ),
-            result_count=1,
         )
-        for scalar in SCALAR_ALU_TYPES
+        for scalar in SCALAR_SELECT_TYPES
     ]
     bf16_value = _value_type(
         "LOOM_SPIRV_VALUE_CLASS_SCALAR",
@@ -1128,7 +1172,6 @@ def _select_rows() -> list[_PacketRow]:
             form="LOOM_SPIRV_PACKET_FORM_SELECT",
             result_type=bf16_value,
             operand_types=(bool_value, bf16_value, bf16_value),
-            result_count=1,
         )
     )
     rows.append(
@@ -1138,7 +1181,6 @@ def _select_rows() -> list[_PacketRow]:
             form="LOOM_SPIRV_PACKET_FORM_SELECT",
             result_type=bool_value,
             operand_types=(bool_value, bool_value, bool_value),
-            result_count=1,
         )
     )
     rows.append(
@@ -1148,7 +1190,6 @@ def _select_rows() -> list[_PacketRow]:
             form="LOOM_SPIRV_PACKET_FORM_SELECT",
             result_type=offset64_value,
             operand_types=(bool_value, offset64_value, offset64_value),
-            result_count=1,
         )
     )
     rows.append(
@@ -1158,7 +1199,6 @@ def _select_rows() -> list[_PacketRow]:
             form="LOOM_SPIRV_PACKET_FORM_SELECT",
             result_type=buffer_address,
             operand_types=(bool_value, buffer_address, buffer_address),
-            result_count=1,
         )
     )
     return rows
@@ -1182,18 +1222,21 @@ def _packet_rows() -> tuple[_PacketRow, ...]:
             opcode="LOOM_SPIRV_OP_CONSTANT",
             form="LOOM_SPIRV_PACKET_FORM_SCALAR_CONSTANT",
             result_type=_offset64_value(),
-            result_count=1,
-            has_immediate=True,
+            immediate_count=1,
             literal_word_count=2,
         ),
         *_scalar_binary_rows(),
         *_conversion_rows(),
         *_ordinary_vector_rows(),
+        *_ordinary_vector_shuffle_rows(),
+        *_subgroup_rows(),
+        *_extended_math_rows(),
         *_builtin_index_rows(),
+        *_builtin_scalar_index_rows(),
         *_coordinate_binary_rows(),
         *_coordinate_unary_rows(),
         *_mul_add_rows(),
-        *_integer_compare_rows(),
+        *_compare_rows(),
         *_select_rows(),
         *_storage_buffer_rows(),
         *_raw_storage_buffer_byte_rows(),
@@ -1232,11 +1275,15 @@ def _validate_rows(rows: tuple[_PacketRow, ...], descriptors: tuple[Descriptor, 
         raise ValueError("SPIR-V descriptors are missing packet rows: " + ", ".join(missing_row_keys))
 
     for row in rows:
-        immediates = descriptors_by_key[row.descriptor_key].immediates
-        if len(immediates) != int(row.has_immediate) or any(
+        descriptor = descriptors_by_key[row.descriptor_key]
+        result_count = sum(operand.role is OperandRole.RESULT for operand in descriptor.operands)
+        if row.result_type == _unknown_value() or row.result_count != result_count:
+            raise ValueError(f"{row.descriptor_key}: packet result type must match descriptor result count")
+        immediates = descriptor.immediates
+        if len(immediates) != row.immediate_count or any(
             immediate.kind not in (ImmediateKind.SIGNED, ImmediateKind.UNSIGNED, ImmediateKind.ENUM) or ImmediateFlag.DEFAULT_VALUE in immediate.flags for immediate in immediates
         ):
-            expected = "one required integer immediate" if row.has_immediate else "no immediates"
+            expected = "no immediates" if row.immediate_count == 0 else ("one required integer immediate" if row.immediate_count == 1 else f"{row.immediate_count} required integer immediates")
             raise ValueError(f"{row.descriptor_key}: emission requires {expected}")
 
     over_capacity_rows = sorted(row.descriptor_key for row in rows if len(row.operand_types) > _PACKET_MAX_OPERAND_COUNT)
@@ -1274,10 +1321,23 @@ def _interned_value_types(
     return tuple(value_types), value_type_refs
 
 
+def _interned_payloads(rows: tuple[_PacketRow, ...]) -> tuple[tuple[str, ...], tuple[int, ...]]:
+    payloads = {"{}": 0}
+    row_refs = []
+    for row in rows:
+        payload = row.payload_initializer()
+        row_refs.append(payloads.setdefault(payload, len(payloads)))
+    if len(payloads) > 1 << 16:
+        raise ValueError("SPIR-V packet payload refs exceed uint16_t storage")
+    return tuple(payloads), tuple(row_refs)
+
+
 def generate_tables() -> str:
     rows = _packet_rows()
     _validate_rows(rows, SPIRV_LOGICAL_CORE_DESCRIPTOR_SET.descriptors)
     value_types, value_type_refs = _interned_value_types(rows)
+    payloads, payload_refs = _interned_payloads(rows)
+    builtin_queries = (*BUILTIN_INDEX_QUERIES, *BUILTIN_SCALAR_INDEX_QUERIES)
     lines = [
         "// Copyright 2026 The IREE Authors",
         "//",
@@ -1289,13 +1349,26 @@ def generate_tables() -> str:
         "",
         f'static_assert(LOOM_SPIRV_PACKET_MAX_OPERAND_COUNT == {_PACKET_MAX_OPERAND_COUNT}, "generated packet operand maximum");',
         f'static_assert(LOOM_SPIRV_PACKET_OPERAND_TYPE_CAPACITY == {_PACKET_OPERAND_TYPE_CAPACITY}, "generated packet operand-type capacity");',
+        f'static_assert(LOOM_SPIRV_PACKET_VECTOR_SHUFFLE_MAX_RESULT_LANES == {max(NATIVE_ORDINARY_VECTOR_LANE_COUNTS)}, "generated vector shuffle result-lane maximum");',
+        f'static_assert(LOOM_SPIRV_BUILTIN_VARIABLE_COUNT == {len(builtin_queries)}, "generated builtin variable count");',
+        "",
+        "const loom_spirv_builtin_variable_info_t loom_spirv_builtin_variables[] = {",
+        *(
+            f'    [{query.variable_enum}] = {{ .name = IREE_SVL("{query.mnemonic_suffix}"), .builtin = {query.builtin_enum}, .component_count = {query.component_count} }},'
+            for query in builtin_queries
+        ),
+        "};",
         "",
         "const loom_spirv_value_type_t loom_spirv_packet_value_types[] = {",
         *(f"    {value_type}," for value_type in value_types),
         "};",
         "",
+        "const loom_spirv_packet_payload_t loom_spirv_packet_payloads[] = {",
+        *(f"    {payload}," for payload in payloads),
+        "};",
+        "",
         "static const loom_spirv_packet_row_t kSpirvLogicalCorePacketRows[] = {",
-        *(row.render(value_type_refs) for row in rows),
+        *(row.render(value_type_refs, payload_ref) for row, payload_ref in zip(rows, payload_refs, strict=True)),
         "};",
         "",
     ]

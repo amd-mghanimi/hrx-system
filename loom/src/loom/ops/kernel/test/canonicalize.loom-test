@@ -238,3 +238,58 @@ kernel.def @unused_exact_broadcast_keeps_conditional() {
   }
   kernel.return
 }
+
+// ====
+
+// Unit axes preserve the identity even with dynamic dispatch dimensions.
+kernel.def @unit_dispatch_coordinates(%x: index, %y: index, %z: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%x, %y, %z) workgroup_size(%unit, %unit, %unit) : index
+} launch() {
+  %x = kernel.workitem.dispatch.id<x> : index
+  %y = kernel.workitem.dispatch.id<y> : index
+  %z = kernel.workitem.dispatch.id<z> : index
+  test.use %x, %y, %z : index, index, index
+  kernel.return
+}
+
+// ----
+kernel.def @unit_dispatch_coordinates(%x: index, %y: index, %z: index) {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%x, %y, %z) workgroup_size(%unit, %unit, %unit) : index
+} launch() {
+  %x = kernel.workgroup.id<x> : index
+  %y = kernel.workgroup.id<y> : index
+  %z = kernel.workgroup.id<z> : index
+  test.use %x, %y, %z : index, index, index
+  kernel.return
+}
+
+// ====
+
+// Other axes do not prevent a unit axis from becoming a workgroup coordinate.
+// Neither a non-unit axis nor an unknown axis has that identity.
+kernel.def @mixed_dispatch_coordinates(%groups: index, %size: index) {
+  %unit = index.constant 1 : index
+  %wide_axis = index.constant 4 : index
+  kernel.launch.config workgroups(%groups, %groups, %groups) workgroup_size(%unit, %wide_axis, %size) : index
+} launch() {
+  %x = kernel.workitem.dispatch.id<x> : index
+  %y = kernel.workitem.dispatch.id<y> : index
+  %z = kernel.workitem.dispatch.id<z> : index
+  test.use %x, %y, %z : index, index, index
+  kernel.return
+}
+
+// ----
+kernel.def @mixed_dispatch_coordinates(%groups: index, %size: index) {
+  %unit = index.constant 1 : index
+  %wide_axis = index.constant 4 : index
+  kernel.launch.config workgroups(%groups, %groups, %groups) workgroup_size(%unit, %wide_axis, %size) : index
+} launch() {
+  %x = kernel.workgroup.id<x> : index
+  %y = kernel.workitem.dispatch.id<y> : index
+  %z = kernel.workitem.dispatch.id<z> : index
+  test.use %x, %y, %z : index, index, index
+  kernel.return
+}

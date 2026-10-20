@@ -2,7 +2,7 @@
 #include <loomcxx/kernel.h>
 [[loom::kernel]] void entry(unsigned short* output) {
   // ERROR@+1: LOWERING/059 "subgroup mask requires an i32 or i64 result"
-  output[0] = loom::subgroup_ballot<unsigned short>(true);
+  output[0] = loom::kernel::subgroup::vote::ballot<unsigned short>(true);
 }
 
 // ====
@@ -14,8 +14,9 @@
 #include <loomcxx/kernel.h>
 void entry() {
   // ERROR@+1: LOWERING/059 "kernel.barrier selector is not a permitted enum value"
-  loom::barrier<loom::memory_space::global, loom::atomic::scope::system,
-                loom::atomic::ordering::acq_rel>();
+  loom::kernel::barrier<loom::memory_space::global,
+                        loom::atomic::scope::system,
+                        loom::atomic::ordering::acq_rel>();
 }
 
 // ====

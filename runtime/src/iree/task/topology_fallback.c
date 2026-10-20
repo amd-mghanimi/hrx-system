@@ -43,6 +43,11 @@ iree_task_topology_node_id_t iree_task_topology_query_current_node(void) {
   return 0;
 }
 
+iree_numa_node_id_t iree_task_topology_query_numa_node(
+    const iree_task_topology_t* topology) {
+  return IREE_NUMA_NODE_ANY;
+}
+
 iree_status_t iree_task_topology_fixup_constructive_sharing_masks(
     iree_task_topology_t* topology) {
   // No-op.
@@ -97,7 +102,6 @@ iree_status_t iree_task_topology_initialize_from_physical_cores(
     iree_task_topology_distribution_t distribution,
     iree_host_size_t max_core_count, iree_task_topology_t* out_topology) {
   iree_task_topology_initialize_fallback(max_core_count, out_topology);
-  out_topology->node_id = node_id;
   return iree_ok_status();
 }
 

@@ -96,13 +96,13 @@ check.benchmark<@selected> @selected_benchmark
 // ====
 // RUN: verify
 #include <loomcxx/check.h>
-// ERROR@+1: LOWERING/059 "check declarations require one check annotation on void()"
+// ERROR@+1: LOWERING/059 "check declarations require one check annotation on a non-variadic void function"
 [[loom::check_case]] int wrong_result() { return 1; }
 
 // ====
 // RUN: verify
 #include <loomcxx/check.h>
-// ERROR@+1: LOWERING/059 "check declarations require one check annotation on void()"
+// ERROR@+1: LOWERING/059 "check_case requires void() and no arguments"
 [[loom::check_case]] void parameterized(int value) {}
 
 // ====
@@ -142,7 +142,7 @@ LOOM_CHECK_CASE(arithmetic) {
 #include <loomcxx/check.h>
 int identity(int value) { return value; }
 LOOM_CHECK_CASE(conversion) {
-  // ERROR@+1: LOWERING/059 "runtime conversions are not supported in check cases"
+  // ERROR@+1: LOWERING/059 "runtime conversions are not supported in check records"
   const long long actual = identity(3);
 }
 
@@ -187,14 +187,14 @@ LOOM_CHECK_CASE(second) {
 // RUN: verify
 #include <loomcxx/check.h>
 void ordinary() {}
-// ERROR@+1: LOWERING/059 "check benchmark must reference a check case"
+// ERROR@+1: LOWERING/059 "check benchmark must reference a check record"
 LOOM_CHECK_BENCHMARK(wrong_target, ordinary);
 
 // ====
 // RUN: verify
 #include <loomcxx/check.h>
 LOOM_CHECK_CASE(target) {}
-// ERROR@+1: LOWERING/059 "check benchmarks are declarations referencing a case, without a body"
+// ERROR@+1: LOWERING/059 "check benchmarks are declarations referencing a record, without a body"
 LOOM_CHECK_BENCHMARK(body, target) {}
 
 // ====

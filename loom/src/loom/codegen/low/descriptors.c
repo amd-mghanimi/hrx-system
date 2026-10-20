@@ -10,6 +10,23 @@
 
 #include "loom/util/stable_id.h"
 
+bool loom_low_operand_reads_after_write(
+    const loom_low_descriptor_set_t* descriptor_set,
+    const loom_low_operand_t* operand, uint16_t reg_class_id,
+    uint32_t subgroup_size) {
+  for (uint16_t i = 0; i < operand->reg_class_alt_count; ++i) {
+    const loom_low_reg_class_alt_t* alternative =
+        &descriptor_set->reg_class_alts[operand->reg_class_alt_start + i];
+    if (alternative->reg_class_id == reg_class_id) {
+      return iree_any_bit_set(alternative->flags,
+                              LOOM_LOW_REG_CLASS_ALT_FLAG_LATE_READ) &&
+             (alternative->late_read_subgroup_size == 0 ||
+              alternative->late_read_subgroup_size == subgroup_size);
+    }
+  }
+  return false;
+}
+
 static iree_string_view_t loom_low_descriptor_set_string_view(
     const loom_low_descriptor_set_t* descriptor_set,
     loom_string_ref_t string_ref) {
@@ -193,9 +210,11 @@ static bool loom_low_descriptor_constraint_ties_operands(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor, uint16_t result_operand_index,
     uint16_t packet_operand_index) {
-  for (uint16_t i = 0; i < descriptor->constraint_count; ++i) {
+  const loom_low_descriptor_layout_t* layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  for (uint16_t i = 0; i < layout->constraint_count; ++i) {
     const loom_low_constraint_t* constraint =
-        &descriptor_set->constraints[descriptor->constraint_start + i];
+        &descriptor_set->constraints[layout->constraint_start + i];
     if (constraint->kind == LOOM_LOW_CONSTRAINT_KIND_TIED &&
         constraint->lhs_operand_index == result_operand_index &&
         constraint->rhs_operand_index == packet_operand_index) {
@@ -209,10 +228,10 @@ bool loom_low_descriptor_operands_are_tied(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor, uint16_t lhs_operand_index,
     uint16_t rhs_operand_index) {
-  const loom_low_operand_t* operands =
-      &descriptor_set->operands[descriptor->operand_start];
-  const loom_low_operand_t* lhs = &operands[lhs_operand_index];
-  const loom_low_operand_t* rhs = &operands[rhs_operand_index];
+  const loom_low_operand_t* lhs = loom_low_descriptor_operand(
+      descriptor_set, descriptor, lhs_operand_index);
+  const loom_low_operand_t* rhs = loom_low_descriptor_operand(
+      descriptor_set, descriptor, rhs_operand_index);
   if (lhs->role == LOOM_LOW_OPERAND_ROLE_RESULT &&
       loom_low_descriptor_operand_maps_to_packet_operand(
           descriptor_set, descriptor, rhs_operand_index)) {
@@ -236,20 +255,18 @@ bool loom_low_descriptor_operand_maps_to_packet_operand(
   if (descriptor_operand_index < descriptor->result_count) {
     return false;
   }
-  const loom_low_operand_t* operand =
-      &descriptor_set
-           ->operands[descriptor->operand_start + descriptor_operand_index];
+  const loom_low_operand_t* operand = loom_low_descriptor_operand(
+      descriptor_set, descriptor, descriptor_operand_index);
   return loom_low_operand_role_is_packet_operand(operand->role);
 }
 
 const loom_low_operand_t* loom_low_descriptor_implicit_resource_operand(
     const loom_low_descriptor_set_t* descriptor_set,
     const loom_low_descriptor_t* descriptor) {
-  const loom_low_operand_t* operands =
-      &descriptor_set->operands[descriptor->operand_start];
   for (uint16_t i = descriptor->result_count; i < descriptor->operand_count;
        ++i) {
-    const loom_low_operand_t* operand = &operands[i];
+    const loom_low_operand_t* operand =
+        loom_low_descriptor_operand(descriptor_set, descriptor, i);
     if (operand->role == LOOM_LOW_OPERAND_ROLE_RESOURCE &&
         iree_any_bit_set(operand->flags, LOOM_LOW_OPERAND_FLAG_IMPLICIT)) {
       return operand;
@@ -264,9 +281,8 @@ uint16_t loom_low_descriptor_operand_packet_index(
     uint16_t descriptor_operand_index) {
   IREE_ASSERT_TRUE(loom_low_descriptor_operand_maps_to_packet_operand(
       descriptor_set, descriptor, descriptor_operand_index));
-  const loom_low_operand_t* operand =
-      &descriptor_set
-           ->operands[descriptor->operand_start + descriptor_operand_index];
+  const loom_low_operand_t* operand = loom_low_descriptor_operand(
+      descriptor_set, descriptor, descriptor_operand_index);
   IREE_ASSERT_NE(operand->source_value_index, LOOM_LOW_ID_NONE);
   return operand->source_value_index;
 }
@@ -395,8 +411,8 @@ bool loom_low_descriptor_set_lookup_register_class(
 const loom_low_descriptor_t* loom_low_descriptor_set_descriptor_at(
     const loom_low_descriptor_set_t* descriptor_set,
     uint32_t descriptor_ordinal) {
-  if (descriptor_set == NULL ||
-      descriptor_ordinal >= descriptor_set->descriptor_count) {
+  if (descriptor_set == NULL || !loom_low_descriptor_set_has_descriptor(
+                                    descriptor_set, descriptor_ordinal)) {
     return NULL;
   }
   return &descriptor_set->descriptors[descriptor_ordinal];
@@ -411,12 +427,13 @@ loom_low_descriptor_memory_effect_summary(
   if (descriptor == NULL) {
     return summary;
   }
-  for (uint16_t i = 0; i < descriptor->effect_count; ++i) {
-    const uint32_t effect_index = descriptor->effect_start + i;
+  const loom_low_descriptor_layout_t* layout =
+      loom_low_descriptor_layout(descriptor_set, descriptor);
+  for (uint16_t i = 0; i < layout->effect_count; ++i) {
+    const uint32_t effect_index = layout->effect_start + i;
     IREE_ASSERT(effect_index < descriptor_set->effect_count);
     const loom_low_effect_t* effect = &descriptor_set->effects[effect_index];
-    if (effect->kind != LOOM_LOW_EFFECT_KIND_READ &&
-        effect->kind != LOOM_LOW_EFFECT_KIND_WRITE) {
+    if (!loom_low_effect_is_memory_access(effect)) {
       continue;
     }
     if (effect->width_bits == 0 || (effect->width_bits % 8u) != 0) {
@@ -453,7 +470,8 @@ uint32_t loom_low_descriptor_set_descriptor_ordinal(
     return LOOM_LOW_DESCRIPTOR_ORDINAL_NONE;
   }
   const uintptr_t ordinal = offset / sizeof(*descriptor_set->descriptors);
-  if (ordinal >= descriptor_set->descriptor_count || ordinal > UINT32_MAX) {
+  if (ordinal > UINT32_MAX || !loom_low_descriptor_set_has_descriptor(
+                                  descriptor_set, (uint32_t)ordinal)) {
     return LOOM_LOW_DESCRIPTOR_ORDINAL_NONE;
   }
   return (uint32_t)ordinal;
@@ -466,13 +484,19 @@ const loom_low_asm_form_t* loom_low_descriptor_set_asm_form_at(
       asm_form_ordinal >= descriptor_set->asm_form_count) {
     return NULL;
   }
-  return &descriptor_set->asm_forms[asm_form_ordinal];
+  const loom_low_asm_form_t* asm_form =
+      &descriptor_set->asm_forms[asm_form_ordinal];
+  return loom_low_descriptor_set_has_descriptor(descriptor_set,
+                                                asm_form->descriptor_ordinal)
+             ? asm_form
+             : NULL;
 }
 
 uint32_t loom_low_descriptor_set_lookup_canonical_asm_form(
     const loom_low_descriptor_set_t* descriptor_set,
     uint32_t descriptor_ordinal) {
-  if (descriptor_ordinal >= descriptor_set->descriptor_count) {
+  if (!loom_low_descriptor_set_has_descriptor(descriptor_set,
+                                              descriptor_ordinal)) {
     return LOOM_LOW_ASM_FORM_ORDINAL_NONE;
   }
   const loom_low_descriptor_view_t* descriptor_view =
@@ -484,27 +508,41 @@ uint32_t loom_low_descriptor_set_lookup_canonical_asm_form(
   return descriptor_view->canonical_asm_form_ordinal;
 }
 
-uint32_t loom_low_descriptor_set_lookup_descriptor(
-    const loom_low_descriptor_set_t* descriptor_set, iree_string_view_t key) {
+uint32_t loom_low_descriptor_set_lookup_descriptor_by_id(
+    const loom_low_descriptor_set_t* descriptor_set, uint64_t stable_id) {
   uint32_t low = 0;
   uint32_t high = descriptor_set->descriptor_ref_count;
   while (low < high) {
     const uint32_t mid = low + (high - low) / 2;
-    const loom_low_descriptor_ref_t* descriptor_ref =
-        &descriptor_set->descriptor_refs[mid];
-    iree_string_view_t descriptor_ref_key = loom_low_descriptor_set_string_view(
-        descriptor_set, descriptor_ref->key_string_ref);
-    const int comparison = iree_string_view_compare(descriptor_ref_key, key);
-    if (comparison == 0) {
-      return descriptor_ref->descriptor_ordinal;
+    const uint32_t ordinal = descriptor_set->descriptor_refs[mid];
+    const uint64_t candidate_id =
+        descriptor_set->descriptors[ordinal].stable_id;
+    if (candidate_id == stable_id) {
+      return loom_low_descriptor_set_has_descriptor(descriptor_set, ordinal)
+                 ? ordinal
+                 : LOOM_LOW_DESCRIPTOR_ORDINAL_NONE;
     }
-    if (comparison < 0) {
+    if (candidate_id < stable_id) {
       low = mid + 1;
     } else {
       high = mid;
     }
   }
   return LOOM_LOW_DESCRIPTOR_ORDINAL_NONE;
+}
+
+uint32_t loom_low_descriptor_set_lookup_descriptor(
+    const loom_low_descriptor_set_t* descriptor_set, iree_string_view_t key) {
+  const uint32_t ordinal = loom_low_descriptor_set_lookup_descriptor_by_id(
+      descriptor_set, loom_low_descriptor_stable_id_from_key(key));
+  if (ordinal == LOOM_LOW_DESCRIPTOR_ORDINAL_NONE) {
+    return ordinal;
+  }
+  const iree_string_view_t candidate_key = loom_low_descriptor_set_string_view(
+      descriptor_set, descriptor_set->descriptors[ordinal].key_string_ref);
+  return iree_string_view_equal(candidate_key, key)
+             ? ordinal
+             : LOOM_LOW_DESCRIPTOR_ORDINAL_NONE;
 }
 
 uint32_t loom_low_descriptor_set_lookup_asm_form(
@@ -519,7 +557,8 @@ uint32_t loom_low_descriptor_set_lookup_asm_form(
         descriptor_set, asm_form->mnemonic_string_ref);
     const int comparison = iree_string_view_compare(asm_mnemonic, mnemonic);
     if (comparison == 0) {
-      if (asm_form->descriptor_ordinal >= descriptor_set->descriptor_count) {
+      if (!loom_low_descriptor_set_has_descriptor(
+              descriptor_set, asm_form->descriptor_ordinal)) {
         return LOOM_LOW_ASM_FORM_ORDINAL_NONE;
       }
       return mid;

@@ -23,8 +23,12 @@ typedef struct iree_tokenizer_decoder_sequence_t {
 } iree_tokenizer_decoder_sequence_t;
 
 typedef struct iree_tokenizer_decoder_sequence_state_t {
+  // Streaming decoder prefix.
   iree_tokenizer_decoder_state_t base;
+  // Number of child states stored after this sequence prefix.
   iree_host_size_t child_count;
+  // First child whose final output has not completely passed downstream.
+  iree_host_size_t finalize_child;
   // Child states stored contiguously after this struct.
   // Access via: (uint8_t*)state + state->child_state_offsets[i]
 } iree_tokenizer_decoder_sequence_state_t;
@@ -40,12 +44,12 @@ iree_status_t iree_tokenizer_decoder_sequence_allocate(
 
   // Validate child count: require at least 2 children.
   // Sequences with 0 or 1 children should not be created - the JSON parser
-  // handles these cases by returning NULL (empty) or the single child directly.
+  // handles these cases with a join decoder or the single child directly.
   if (child_count < 2) {
     return iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "sequence decoder requires at least 2 children, got %" PRIhsz
-        "; use NULL for empty or pass single child directly",
+        "; use a join decoder for empty or pass single child directly",
         child_count);
   }
   if (child_count > IREE_TOKENIZER_DECODER_SEQUENCE_MAX_DEPTH) {
@@ -143,10 +147,9 @@ iree_status_t iree_tokenizer_decoder_sequence_allocate(
     }
   }
 
-  // POSITION_SENSITIVE + PARTIAL_UTF8 is unsupported: the first-token handler
-  // uses direct memcpy (position-sensitive space stripping) before byte-token
-  // dispatch, so a partial-UTF8 first token would bypass the accumulator.
-  // Degrade to NONE (streaming decode) for safety.
+  // Reverse-mapping raw ByteLevel token text cannot retain a composed
+  // position-dependent transform. Keep that decoder chain active instead of
+  // substituting untransformed raw bytes for its first-token output.
   if (iree_all_bits_set(
           capabilities,
           IREE_TOKENIZER_DECODER_CAPABILITY_POSITION_SENSITIVE |
@@ -194,7 +197,6 @@ static void iree_tokenizer_decoder_sequence_destroy(
 static iree_status_t iree_tokenizer_decoder_sequence_state_initialize(
     const iree_tokenizer_decoder_t* base_decoder, void* storage,
     iree_tokenizer_decoder_state_t** out_state) {
-  IREE_TRACE_ZONE_BEGIN(z0);
   const iree_tokenizer_decoder_sequence_t* decoder =
       (const iree_tokenizer_decoder_sequence_t*)base_decoder;
   iree_tokenizer_decoder_sequence_state_t* state =
@@ -208,19 +210,16 @@ static iree_status_t iree_tokenizer_decoder_sequence_state_initialize(
   for (iree_host_size_t i = 0; i < decoder->child_count; ++i) {
     void* child_storage = (uint8_t*)storage + decoder->child_state_offsets[i];
     iree_tokenizer_decoder_state_t* child_state = NULL;
-    IREE_RETURN_AND_END_ZONE_IF_ERROR(
-        z0, iree_tokenizer_decoder_state_initialize(
-                decoder->children[i], child_storage, &child_state));
+    IREE_RETURN_IF_ERROR(iree_tokenizer_decoder_state_initialize(
+        decoder->children[i], child_storage, &child_state));
   }
 
   *out_state = &state->base;
-  IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
 }
 
 static void iree_tokenizer_decoder_sequence_state_deinitialize(
     iree_tokenizer_decoder_state_t* base_state) {
-  IREE_TRACE_ZONE_BEGIN(z0);
   iree_tokenizer_decoder_sequence_state_t* state =
       (iree_tokenizer_decoder_sequence_state_t*)base_state;
   const iree_tokenizer_decoder_sequence_t* decoder =
@@ -232,7 +231,6 @@ static void iree_tokenizer_decoder_sequence_state_deinitialize(
                                           decoder->child_state_offsets[i - 1]);
     iree_tokenizer_decoder_state_deinitialize(child_state);
   }
-  IREE_TRACE_ZONE_END(z0);
 }
 
 // Gets the child state at index |i|.
@@ -297,35 +295,52 @@ static iree_status_t iree_tokenizer_decoder_sequence_state_finalize(
   const iree_tokenizer_decoder_sequence_t* decoder =
       (const iree_tokenizer_decoder_sequence_t*)base_state->decoder;
 
-  // Finalize first decoder to get any pending data.
-  if (decoder->child_count == 0) {
-    *out_written = 0;
-    return iree_ok_status();
-  }
-
-  iree_tokenizer_decoder_state_t* first_state =
-      iree_tokenizer_decoder_sequence_get_child_state(state, decoder, 0);
-  iree_host_size_t written = 0;
-  IREE_RETURN_IF_ERROR(
-      iree_tokenizer_decoder_state_finalize(first_state, output, &written));
-
-  // Pass finalized output through remaining decoders.
-  for (iree_host_size_t i = 1; i < decoder->child_count; ++i) {
+  *out_written = 0;
+  iree_status_t status = iree_ok_status();
+  bool made_progress = true;
+  while (iree_status_is_ok(status) && made_progress &&
+         state->finalize_child < decoder->child_count) {
     iree_tokenizer_decoder_state_t* child_state =
-        iree_tokenizer_decoder_sequence_get_child_state(state, decoder, i);
+        iree_tokenizer_decoder_sequence_get_child_state(state, decoder,
+                                                        state->finalize_child);
+    iree_host_size_t written = 0;
+    status =
+        iree_tokenizer_decoder_state_finalize(child_state, output, &written);
+    const bool upstream_pending =
+        iree_tokenizer_decoder_state_has_pending(child_state);
+    made_progress = written > 0 || !upstream_pending;
+    if (written && iree_status_is_resource_exhausted(status)) {
+      // An exhausted child can still have emitted a valid prefix. Transform
+      // it before returning any bytes; shrinking may free credit to resume.
+      iree_status_ignore(status);
+      status = iree_ok_status();
+    }
 
-    // First, finalize this child to flush its pending data.
-    iree_host_size_t child_finalize_written = 0;
-    IREE_RETURN_IF_ERROR(iree_tokenizer_decoder_state_finalize(
-        child_state,
-        iree_make_mutable_string_view(output.data + written,
-                                      output.size - written),
-        &child_finalize_written));
-    written += child_finalize_written;
+    // Final bytes have the same downstream consumers as ordinary bytes.
+    // Shrinking stages transform the emitted span in place before any later
+    // child is allowed to finish its own stream.
+    for (iree_host_size_t i = state->finalize_child + 1;
+         i < decoder->child_count && written && iree_status_is_ok(status);
+         ++i) {
+      iree_tokenizer_decoder_state_t* downstream_state =
+          iree_tokenizer_decoder_sequence_get_child_state(state, decoder, i);
+      const iree_string_view_t intermediate =
+          iree_make_string_view(output.data, written);
+      const iree_tokenizer_string_list_t input = {1, &intermediate};
+      iree_host_size_t consumed = 0;
+      iree_host_size_t transformed = 0;
+      status = iree_tokenizer_decoder_state_process(
+          downstream_state, input, output, &consumed, &transformed);
+      written = transformed;
+    }
+    output.data += written;
+    output.size -= written;
+    *out_written += written;
+    if (iree_status_is_ok(status) && !upstream_pending) {
+      ++state->finalize_child;
+    }
   }
-
-  *out_written = written;
-  return iree_ok_status();
+  return status;
 }
 
 static bool iree_tokenizer_decoder_sequence_state_has_pending(

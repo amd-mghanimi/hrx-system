@@ -11,6 +11,89 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    call
+  HDRS
+    "call.h"
+  DEPS
+    ::assignment
+    iree::base
+    loom::ir
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    edge_affinity
+  HDRS
+    "edge_affinity.h"
+  SRCS
+    "edge_affinity.c"
+  DEPS
+    iree::base
+    iree::base::internal
+    iree::base::internal::arena
+    loom::ir
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    edge_affinity_test
+  SRCS
+    "edge_affinity_test.cc"
+  DEPS
+    ::edge_affinity
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_library(
+  NAME
+    placement
+  HDRS
+    "placement.h"
+  SRCS
+    "placement.c"
+  DEPS
+    ::edge_affinity
+    ::target_constraints
+    ::unit_location
+    iree::base
+    iree::base::internal
+    iree::base::internal::arena
+    loom::analysis::liveness
+    loom::codegen::low::descriptors
+    loom::codegen::low::placement
+    loom::codegen::low::representation_binding
+    loom::codegen::low::storage_relation
+    loom::ir
+    loom::ops::low
+    loom::util::segmented_storage
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    placement_test
+  SRCS
+    "placement_test.cc"
+  DEPS
+    ::placement
+    ::target_constraints
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::low::builder
+    loom::codegen::low::placement
+    loom::codegen::low::storage_identity
+    loom::ir
+    loom::ops::low
+    loom::target::registers
+)
+
+loom_cc_library(
+  NAME
     active_capacity
   HDRS
     "active_capacity.h"
@@ -87,6 +170,7 @@ loom_cc_library(
     iree::base::internal::arena
     loom::analysis::liveness
     loom::codegen::low::descriptors
+    loom::util::segmented_storage
   PUBLIC
 )
 
@@ -136,7 +220,6 @@ loom_cc_library(
     ::move_plan
     ::storage
     ::table
-    ::unit_location
     iree::base
     iree::base::internal::arena
     loom::analysis::liveness
@@ -144,6 +227,73 @@ loom_cc_library(
     loom::ir
     loom::ops::low
   PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    numbering
+  HDRS
+    "numbering.h"
+  SRCS
+    "numbering.c"
+  DEPS
+    ::interval_assignment
+    ::move
+    ::storage
+    ::storage_lease
+    ::storage_lease_index
+    ::target_constraints
+    ::unit_liveness
+    iree::base
+    iree::base::internal::arena
+    loom::codegen::low::placement
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    numbering_test
+  SRCS
+    "numbering_test.cc"
+  DEPS
+    ::numbering
+    ::storage_lease_index
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_library(
+  NAME
+    preference
+  HDRS
+    "preference.h"
+  SRCS
+    "preference.c"
+  DEPS
+    ::assignment
+    ::assignment_map
+    ::storage
+    ::target_constraints
+    iree::base
+    iree::base::internal
+    iree::base::internal::arena
+    loom::analysis::liveness
+    loom::codegen::low::descriptors
+    loom::codegen::low::placement
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    preference_test
+  SRCS
+    "preference_test.cc"
+  DEPS
+    ::preference
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 loom_cc_library(
@@ -159,13 +309,14 @@ loom_cc_library(
     ::assignment_map
     ::live_range
     ::physical_domains
+    ::preference
     ::scalar_packing
     ::spill_plan
-    ::spill_traffic
     ::storage
     ::storage_lease
     ::target_constraints
     ::unit_liveness
+    ::write_interference
     iree::base
     iree::base::internal
     iree::base::internal::arena
@@ -191,6 +342,20 @@ loom_cc_test(
     loom::target::residency
 )
 
+loom_cc_test(
+  NAME
+    search_covering_spill_test
+  SRCS
+    "search_covering_spill_test.cc"
+  DEPS
+    ::search
+    ::storage_lease
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+)
+
 loom_cc_library(
   NAME
     edge_alias
@@ -200,6 +365,7 @@ loom_cc_library(
     "edge_alias.c"
   DEPS
     ::assignment
+    ::unit_liveness
     iree::base
     loom::analysis::consumption
     loom::analysis::liveness
@@ -207,6 +373,21 @@ loom_cc_library(
     loom::codegen::low::storage_relation
     loom::ir
   PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    edge_alias_test
+  SRCS
+    "edge_alias_test.cc"
+  DEPS
+    ::edge_alias
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::ops::low
+    loom::target::registers
 )
 
 loom_cc_library(
@@ -233,6 +414,22 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_test(
+  NAME
+    concat_reservation_test
+  SRCS
+    "concat_reservation_test.cc"
+  DEPS
+    ::active_set
+    ::concat_reservation
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+    loom::target::registers
+    loom::target::residency
+)
+
 loom_cc_library(
   NAME
     coalescing
@@ -247,6 +444,7 @@ loom_cc_library(
     ::edge_alias
     ::live_range
     ::physical_domains
+    ::placement
     ::search
     ::storage
     ::target_constraints
@@ -305,7 +503,6 @@ loom_cc_library(
     "spill_traffic.c"
   DEPS
     iree::base
-    loom::analysis::liveness
     loom::ir
     loom::ops::low
   PUBLIC
@@ -454,13 +651,16 @@ loom_cc_library(
     "storage_lease.c"
   DEPS
     ::assignment
+    ::live_range
     ::storage
     ::storage_lease_index
     ::table
+    ::unit_liveness
     iree::base
     iree::base::internal::arena
     loom::analysis::liveness
     loom::codegen::low::descriptors
+    loom::codegen::low::placement
     loom::codegen::low::storage_lease
     loom::ir
   PUBLIC
@@ -486,9 +686,11 @@ loom_cc_test(
   DEPS
     ::storage_lease
     ::storage_lease_index
+    ::unit_liveness
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::codegen::low::placement
     loom::ir
 )
 
@@ -506,6 +708,7 @@ loom_cc_library(
     iree::base::internal::arena
     loom::analysis::liveness
     loom::codegen::low::descriptors
+    loom::codegen::low::placement
     loom::ir
     loom::target::registers
     loom::util::adaptive_sort
@@ -521,10 +724,12 @@ loom_cc_library(
     "interval_order.c"
   DEPS
     ::live_range
+    ::unit_liveness
     iree::base
     iree::base::internal::arena
     loom::analysis::liveness
     loom::codegen::low::descriptors
+    loom::codegen::low::placement
     loom::util::adaptive_sort
   PUBLIC
 )
@@ -579,6 +784,19 @@ loom_cc_library(
   PUBLIC
 )
 
+loom_cc_test(
+  NAME
+    physical_domains_test
+  SRCS
+    "physical_domains_test.cc"
+  DEPS
+    ::physical_domains
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::target::test::descriptors
+)
+
 loom_cc_library(
   NAME
     scalar_packing
@@ -625,6 +843,7 @@ loom_cc_library(
     ::storage_lease
     ::target_constraints
     ::unit_liveness
+    ::write_interference
     iree::base
     iree::base::internal::arena
     loom::analysis::consumption
@@ -633,6 +852,7 @@ loom_cc_library(
     loom::codegen::low::placement
     loom::ir
     loom::ops::low
+    loom::util::adaptive_sort
     loom::util::cfg_graph
   PUBLIC
 )
@@ -665,6 +885,7 @@ loom_cc_library(
     ::interval_order
     ::live_range
     ::physical_domains
+    ::preference
     ::scalar_packing
     ::search
     ::spill_plan
@@ -674,7 +895,9 @@ loom_cc_library(
     ::table
     ::target_constraints
     ::unit_liveness
+    ::write_interference
     iree::base
+    iree::base::internal
     iree::base::internal::arena
     loom::analysis::consumption
     loom::analysis::liveness
@@ -683,6 +906,7 @@ loom_cc_library(
     loom::codegen::low::placement
     loom::codegen::low::target_binding
     loom::ir
+    loom::target::residency
     loom::util::cfg_graph
   PUBLIC
 )
@@ -698,6 +922,9 @@ loom_cc_test(
     iree::testing::gtest
     iree::testing::gtest_main
     loom::ir
+    loom::ops::test
+    loom::target::registers
+    loom::util::cfg_graph
 )
 
 loom_cc_test(
@@ -715,6 +942,101 @@ loom_cc_test(
 
 loom_cc_library(
   NAME
+    write_interference
+  HDRS
+    "write_interference.h"
+  SRCS
+    "write_interference.c"
+  DEPS
+    ::assignment
+    ::assignment_map
+    ::move
+    ::unit_liveness
+    ::write_interference_flow
+    iree::base
+    iree::base::internal::arena
+    loom::analysis::liveness
+    loom::codegen::low::descriptors
+    loom::codegen::low::placement
+    loom::codegen::low::read_retention
+    loom::codegen::low::target_binding
+    loom::ir
+    loom::target::registers
+    loom::util::cfg_graph
+    loom::util::index_set
+    loom::util::segmented_storage
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    write_interference_test
+  SRCS
+    "write_interference_test.cc"
+  DEPS
+    ::placement
+    ::target_constraints
+    ::unit_liveness_builder
+    ::write_interference
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::analysis::liveness
+    loom::codegen::low::builder
+    loom::codegen::low::placement
+    loom::codegen::low::read_retention
+    loom::codegen::low::storage_identity
+    loom::ir
+    loom::ops::low
+    loom::target::registers
+    loom::util::cfg_graph
+)
+
+loom_cc_library(
+  NAME
+    write_interference_flow
+  HDRS
+    "write_interference_flow.h"
+  SRCS
+    "write_interference_flow.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::analysis::liveness
+    loom::ops::low
+    loom::util::cfg_graph
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    clobber_index
+  HDRS
+    "clobber_index.h"
+  SRCS
+    "clobber_index.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::codegen::low::descriptors
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    clobber_index_test
+  SRCS
+    "clobber_index_test.cc"
+  DEPS
+    ::clobber_index
+    iree::base::internal::arena
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::codegen::low::descriptors
+)
+
+loom_cc_library(
+  NAME
     unit_liveness
   HDRS
     "unit_liveness.h"
@@ -722,6 +1044,7 @@ loom_cc_library(
     "unit_liveness.c"
   DEPS
     ::assignment
+    ::clobber_index
     ::live_range
     ::storage
     iree::base
@@ -729,10 +1052,36 @@ loom_cc_library(
     loom::analysis::liveness
     loom::codegen::low::descriptors
     loom::codegen::low::placement
+    loom::ir
+    loom::target::registers
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    unit_liveness_builder
+  HDRS
+    "unit_liveness_builder.h"
+  SRCS
+    "unit_liveness_builder.c"
+  DEPS
+    ::call
+    ::clobber_index
+    ::live_range
+    ::storage
+    ::unit_liveness
+    ::write_interference
+    iree::base
+    iree::base::internal::arena
+    loom::analysis::liveness
+    loom::codegen::low::descriptors
+    loom::codegen::low::placement
+    loom::codegen::low::representation_binding
     loom::codegen::low::target_binding
     loom::ir
     loom::ops::low
-    loom::util::adaptive_sort
+    loom::target::registers
+    loom::util::cfg_graph
   PUBLIC
 )
 
@@ -759,6 +1108,7 @@ loom_cc_test(
   DEPS
     ::destructive_reuse
     ::unit_liveness
+    ::unit_liveness_builder
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
@@ -772,24 +1122,34 @@ loom_cc_test(
     "unit_liveness_test.cc"
   DEPS
     ::unit_liveness
+    ::unit_liveness_builder
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
+    loom::analysis::liveness
+    loom::codegen::low::builder
     loom::ir
+    loom::ops::low
+    loom::target::registers
+    loom::util::cfg_graph
 )
 
 loom_cc_library(
   NAME
     target_constraints
   HDRS
+    "fixed_storage_index.h"
     "target_constraints.h"
   SRCS
+    "fixed_storage_index.c"
     "target_constraints.c"
   DEPS
     ::assignment
+    ::call
     ::live_range
     ::storage
     ::unit_liveness
+    ::unit_location
     iree::base
     iree::base::internal::arena
     loom::analysis::liveness
@@ -800,10 +1160,10 @@ loom_cc_library(
     loom::codegen::low::target_binding
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::low
     loom::target::registers
-    loom::util::adaptive_sort
   PUBLIC
 )
 
@@ -835,10 +1195,8 @@ loom_cc_library(
     "unit_location.c"
   DEPS
     ::assignment
-    ::live_range
     ::move
     ::storage
-    ::unit_liveness
     iree::base
     loom::codegen::low::descriptors
   PUBLIC
@@ -851,6 +1209,38 @@ loom_cc_test(
     "unit_location_test.cc"
   DEPS
     ::unit_location
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+loom_cc_library(
+  NAME
+    storage_liveness_index
+  HDRS
+    "storage_liveness_index.h"
+  SRCS
+    "storage_liveness_index.c"
+  DEPS
+    ::assignment
+    ::live_range
+    ::move
+    ::storage
+    ::unit_liveness
+    ::unit_location
+    iree::base
+    iree::base::internal::arena
+    loom::codegen::low::descriptors
+  PUBLIC
+)
+
+loom_cc_test(
+  NAME
+    storage_liveness_index_test
+  SRCS
+    "storage_liveness_index_test.cc"
+  DEPS
+    ::storage_liveness_index
+    iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
 )
@@ -890,7 +1280,6 @@ loom_cc_test(
     "move_sequence_test.cc"
   DEPS
     ::move_sequence
-    ::storage
     iree::base::internal::arena
     iree::testing::gtest
     iree::testing::gtest_main
@@ -905,16 +1294,20 @@ loom_cc_library(
     "move_plan.c"
   DEPS
     ::assignment_map
+    ::live_range
     ::move
     ::move_sequence
     ::storage
+    ::storage_liveness_index
     ::target_constraints
     ::unit_liveness
     ::unit_location
+    ::write_interference
     iree::base
     iree::base::internal::arena
     loom::codegen::low::descriptors
     loom::codegen::low::schedule
+    loom::codegen::low::storage_layout
     loom::ir
   PUBLIC
 )
@@ -982,10 +1375,11 @@ loom_cc_library(
     "packet_move.c"
   DEPS
     ::assignment_map
+    ::live_range
     ::move_plan
     ::move_topology
+    ::storage
     ::table
-    ::unit_location
     iree::base
     iree::base::internal::arena
     loom::analysis::liveness
@@ -1011,9 +1405,11 @@ loom_cc_library(
     loom::codegen::low::descriptors
     loom::codegen::low::placement
     loom::codegen::low::storage_lease
+    loom::codegen::low::storage_transport
     loom::codegen::low::target_binding
     loom::ir
     loom::util::cfg_graph
+    loom::util::cfg_loop
   PUBLIC
 )
 
@@ -1044,6 +1440,7 @@ loom_cc_library(
     loom::codegen::low::diagnostics
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
   PUBLIC
 )

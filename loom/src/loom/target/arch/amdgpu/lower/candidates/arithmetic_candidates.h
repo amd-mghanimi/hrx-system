@@ -31,8 +31,9 @@ typedef loom_amdgpu_descriptor_ref_t
         [LOOM_AMDGPU_FMA_MIX_SOURCE_KIND_COUNT_];
 
 typedef struct loom_amdgpu_packed_ternary_descriptor_candidate_t {
-  // Descriptor ref selected when present in the descriptor set.
-  loom_amdgpu_descriptor_ref_t descriptor_ref;
+  // Descriptor refs indexed by scalar-broadcast source bits a, b, c. The
+  // all-vector entry establishes availability; tied candidates only use it.
+  loom_amdgpu_descriptor_ref_t descriptor_refs[8];
   // Source operand index consumed at each descriptor source position.
   uint8_t source_permutation[LOOM_AMDGPU_PACKED_TERNARY_SOURCE_COUNT];
   // Flags describing selected descriptor packet semantics.
@@ -84,6 +85,15 @@ extern const loom_amdgpu_packed_ternary_descriptor_candidate_t
 // Number of packed f16 vector.fmaf descriptor candidates.
 enum {
   kLoomAmdgpuPackedFmafF16DescriptorCandidateCount = 2u,
+};
+
+// Descriptor candidates for packed bf16 vector.fmaf packets.
+extern const loom_amdgpu_packed_ternary_descriptor_candidate_t
+    kLoomAmdgpuPackedFmafBF16DescriptorCandidates[];
+
+// Number of packed bf16 vector.fmaf descriptor candidates.
+enum {
+  kLoomAmdgpuPackedFmafBF16DescriptorCandidateCount = 1u,
 };
 
 // Descriptor candidates for packed f32 vector.fmaf packets.

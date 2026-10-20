@@ -34,6 +34,8 @@ struct amdf_gpu_umd_user_queue_mapping_t {
 };
 
 struct FakeNativeState {
+  // Native construction calls reached after public input validation.
+  uint32_t create_call_count = 0;
   amdf_status_t create_status = AMDF_STATUS_OK;
   amdf_status_t map_status = AMDF_STATUS_OK;
   amdf_status_t mapping_destroy_status = AMDF_STATUS_OK;
@@ -129,13 +131,13 @@ class GpuUserQueueTest : public ::testing::Test {
   }
 
   amdf_gpu_user_queue_create_info_t MakeCreateInfo() const {
-    amdf_gpu_user_queue_create_info_t create_info = {};
-    create_info.type = AMDF_STRUCTURE_TYPE_GPU_USER_QUEUE_CREATE_INFO;
-    create_info.structure_size = sizeof(create_info);
-    create_info.priority = AMDF_QUEUE_PRIORITY_NORMAL;
-    create_info.producer_mode = AMDF_QUEUE_PRODUCER_MODE_SINGLE;
-    create_info.required_capabilities =
-        AMDF_USER_QUEUE_CAPABILITY_HOST_PRODUCER;
+    amdf_gpu_user_queue_create_info_t create_info = {
+        .type = AMDF_STRUCTURE_TYPE_GPU_USER_QUEUE_CREATE_INFO,
+        .structure_size = sizeof(create_info),
+        .priority = AMDF_QUEUE_PRIORITY_NORMAL,
+        .producer_mode = AMDF_QUEUE_PRODUCER_MODE_SINGLE,
+        .required_capabilities = AMDF_USER_QUEUE_CAPABILITY_HOST_PRODUCER,
+    };
     create_info.scratch.memory = const_cast<amdf_memory_t*>(&scratch_);
     create_info.scratch.access_ordinal = 1;
     create_info.scratch.byte_offset = 4096;
@@ -168,9 +170,10 @@ TEST_F(GpuUserQueueTest, RetainsQueueAcrossRejectedDestruction) {
   EXPECT_EQ(consumer_state_.observed_create.scratch.byte_length,
             create_info.scratch.byte_length);
 
-  amdf_user_queue_info_t queue_info = {};
-  queue_info.type = AMDF_STRUCTURE_TYPE_USER_QUEUE_INFO;
-  queue_info.structure_size = sizeof(queue_info);
+  amdf_user_queue_info_t queue_info = {
+      .type = AMDF_STRUCTURE_TYPE_USER_QUEUE_INFO,
+      .structure_size = sizeof(queue_info),
+  };
   ASSERT_EQ(amdf_user_queue_query_info(queue_, &queue_info), AMDF_STATUS_OK);
   EXPECT_TRUE(amdf_queue_id_is_valid(&queue_info.queue_id));
   EXPECT_EQ(queue_info.priority, AMDF_QUEUE_PRIORITY_NORMAL);
@@ -181,9 +184,10 @@ TEST_F(GpuUserQueueTest, RetainsQueueAcrossRejectedDestruction) {
   EXPECT_EQ(amdf_status_code(amdf_user_queue_destroy(queue_)),
             AMDF_STATUS_CODE_BUSY);
 
-  amdf_user_queue_mapping_info_t mapping_info = {};
-  mapping_info.type = AMDF_STRUCTURE_TYPE_USER_QUEUE_MAPPING_INFO;
-  mapping_info.structure_size = sizeof(mapping_info);
+  amdf_user_queue_mapping_info_t mapping_info = {
+      .type = AMDF_STRUCTURE_TYPE_USER_QUEUE_MAPPING_INFO,
+      .structure_size = sizeof(mapping_info),
+  };
   ASSERT_EQ(amdf_user_queue_mapping_query_info(mapping_, &mapping_info),
             AMDF_STATUS_OK);
   EXPECT_TRUE(
@@ -277,9 +281,10 @@ TEST_F(GpuUserQueueTest, DeviceMappingRetainsExactProducer) {
   EXPECT_EQ(consumer_state_.observed_producer, &producer_.umd);
   EXPECT_EQ(amdf_child_tracker_count(&producer_.base.children), 1u);
 
-  amdf_user_queue_mapping_info_t info = {};
-  info.type = AMDF_STRUCTURE_TYPE_USER_QUEUE_MAPPING_INFO;
-  info.structure_size = sizeof(info);
+  amdf_user_queue_mapping_info_t info = {
+      .type = AMDF_STRUCTURE_TYPE_USER_QUEUE_MAPPING_INFO,
+      .structure_size = sizeof(info),
+  };
   ASSERT_EQ(amdf_user_queue_mapping_query_info(mapping_, &info),
             AMDF_STATUS_OK);
   EXPECT_TRUE(
@@ -289,6 +294,80 @@ TEST_F(GpuUserQueueTest, DeviceMappingRetainsExactProducer) {
   ASSERT_EQ(amdf_user_queue_mapping_destroy(mapping_), AMDF_STATUS_OK);
   mapping_ = nullptr;
   EXPECT_EQ(amdf_child_tracker_count(&producer_.base.children), 0u);
+}
+
+TEST_F(GpuUserQueueTest, DispatchTimestampsRequireExplicitQueueSelection) {
+  current_family.command_type = AMDF_QUEUE_COMMAND_TYPE_GPU_AQL;
+  current_family.format_version = AMDF_GPU_AQL_QUEUE_FORMAT_VERSION_1;
+  current_family.format_features =
+      AMDF_GPU_AQL_FORMAT_FEATURE_DISPATCH_TIMESTAMPS;
+  for (const bool enabled : {false, true}) {
+    SCOPED_TRACE(enabled);
+    auto create_info = MakeCreateInfo();
+    create_info.flags =
+        enabled ? AMDF_GPU_USER_QUEUE_FLAG_DISPATCH_TIMESTAMPS : 0;
+    ASSERT_EQ(
+        amdf_gpu_user_queue_create(&consumer_.base, &create_info, &queue_),
+        AMDF_STATUS_OK);
+    EXPECT_EQ(consumer_state_.observed_create.dispatch_timestamps, enabled);
+    EXPECT_EQ(consumer_state_.observed_create.command_type,
+              AMDF_QUEUE_COMMAND_TYPE_GPU_AQL);
+    ASSERT_EQ(amdf_user_queue_destroy(queue_), AMDF_STATUS_OK);
+    queue_ = nullptr;
+  }
+  EXPECT_EQ(consumer_state_.create_call_count, 2u);
+}
+
+TEST_F(GpuUserQueueTest, RejectsUnavailableDispatchTimestampsBeforeCreation) {
+  struct Case {
+    // Native language selected by the family.
+    amdf_queue_command_type_t command_type;
+    // Available operations in that language's feature namespace.
+    amdf_queue_format_features_t format_features;
+  };
+  // Format bits are local to their command language. Even a coincident bit in
+  // a PM4/SDMA family must not enable an AQL-only native property.
+  constexpr Case kCases[] = {
+      {AMDF_QUEUE_COMMAND_TYPE_GPU_PM4, 0},
+      {AMDF_QUEUE_COMMAND_TYPE_GPU_PM4,
+       AMDF_GPU_AQL_FORMAT_FEATURE_DISPATCH_TIMESTAMPS},
+      {AMDF_QUEUE_COMMAND_TYPE_GPU_SDMA, 0},
+      {AMDF_QUEUE_COMMAND_TYPE_GPU_SDMA,
+       AMDF_GPU_AQL_FORMAT_FEATURE_DISPATCH_TIMESTAMPS},
+      {AMDF_QUEUE_COMMAND_TYPE_GPU_AQL, 0},
+  };
+  auto create_info = MakeCreateInfo();
+  create_info.flags = AMDF_GPU_USER_QUEUE_FLAG_DISPATCH_TIMESTAMPS;
+  auto* const sentinel = reinterpret_cast<amdf_user_queue_t*>(uintptr_t{1});
+  for (const auto& test : kCases) {
+    SCOPED_TRACE(test.command_type);
+    SCOPED_TRACE(test.format_features);
+    current_family.command_type = test.command_type;
+    current_family.format_features = test.format_features;
+    auto* output = sentinel;
+    EXPECT_EQ(
+        amdf_gpu_user_queue_create(&consumer_.base, &create_info, &output),
+        amdf_make_api_status(AMDF_STATUS_CODE_UNSUPPORTED));
+    EXPECT_EQ(output, sentinel);
+  }
+  EXPECT_EQ(consumer_state_.create_call_count, 0u);
+  EXPECT_EQ(amdf_child_tracker_count(&consumer_.base.children), 0u);
+}
+
+TEST_F(GpuUserQueueTest, RejectsUnknownQueueFlagsBeforeCreation) {
+  auto create_info = MakeCreateInfo();
+  auto* const sentinel = reinterpret_cast<amdf_user_queue_t*>(uintptr_t{1});
+  for (const uint32_t flags : {2u, 3u, UINT32_MAX}) {
+    SCOPED_TRACE(flags);
+    create_info.flags = flags;
+    auto* output = sentinel;
+    EXPECT_EQ(
+        amdf_gpu_user_queue_create(&consumer_.base, &create_info, &output),
+        amdf_make_api_status(AMDF_STATUS_CODE_INVALID_ARGUMENT));
+    EXPECT_EQ(output, sentinel);
+  }
+  EXPECT_EQ(consumer_state_.create_call_count, 0u);
+  EXPECT_EQ(amdf_child_tracker_count(&consumer_.base.children), 0u);
 }
 
 TEST_F(GpuUserQueueTest, RejectsInvalidScratchWithoutPublishingOutput) {
@@ -310,16 +389,51 @@ TEST_F(GpuUserQueueTest, RejectsInvalidScratchWithoutPublishingOutput) {
   EXPECT_EQ(queue_, nullptr);
 }
 
-TEST_F(GpuUserQueueTest, RejectsNonPowerOfTwoRingWithoutPublishingOutput) {
+TEST_F(GpuUserQueueTest, RejectsInvalidRingCapacityWithoutNativeConstruction) {
   amdf_gpu_user_queue_create_info_t create_info = MakeCreateInfo();
-  create_info.ring_byte_length = 12288;
   auto* const sentinel = reinterpret_cast<amdf_user_queue_t*>(uintptr_t{1});
-  queue_ = sentinel;
-  EXPECT_EQ(amdf_status_code(amdf_gpu_user_queue_create(&consumer_.base,
-                                                        &create_info, &queue_)),
-            AMDF_STATUS_CODE_OUT_OF_RANGE);
-  EXPECT_EQ(queue_, sentinel);
-  queue_ = nullptr;
+  for (uint64_t capacity : {UINT64_C(2048), UINT64_C(12288), UINT64_C(131072),
+                            UINT64_C(1) << 32, UINT64_MAX}) {
+    SCOPED_TRACE(capacity);
+    create_info.ring_byte_length = capacity;
+    auto* queue = sentinel;
+    EXPECT_EQ(amdf_status_code(amdf_gpu_user_queue_create(
+                  &consumer_.base, &create_info, &queue)),
+              AMDF_STATUS_CODE_OUT_OF_RANGE);
+    EXPECT_EQ(queue, sentinel);
+    EXPECT_EQ(consumer_state_.observed_create.ring_byte_length, 0u);
+    EXPECT_EQ(amdf_child_tracker_count(&consumer_.base.children), 0u);
+  }
+}
+
+TEST_F(GpuUserQueueTest, PreservesRequestedRingCapacity) {
+  for (uint64_t capacity : {UINT64_C(4096), UINT64_C(16384), UINT64_C(65536)}) {
+    SCOPED_TRACE(capacity);
+    auto create_info = MakeCreateInfo();
+    create_info.ring_byte_length = capacity;
+    ASSERT_EQ(
+        amdf_gpu_user_queue_create(&consumer_.base, &create_info, &queue_),
+        AMDF_STATUS_OK);
+    EXPECT_EQ(consumer_state_.observed_create.ring_byte_length, capacity);
+    amdf_user_queue_info_t info = {
+        .type = AMDF_STRUCTURE_TYPE_USER_QUEUE_INFO,
+        .structure_size = sizeof(info),
+    };
+    ASSERT_EQ(amdf_user_queue_query_info(queue_, &info), AMDF_STATUS_OK);
+    EXPECT_EQ(info.ring_byte_length, capacity);
+    ASSERT_EQ(amdf_user_queue_map(queue_, nullptr, &mapping_), AMDF_STATUS_OK);
+    amdf_user_queue_mapping_info_t mapping_info = {
+        .type = AMDF_STRUCTURE_TYPE_USER_QUEUE_MAPPING_INFO,
+        .structure_size = sizeof(mapping_info),
+    };
+    ASSERT_EQ(amdf_user_queue_mapping_query_info(mapping_, &mapping_info),
+              AMDF_STATUS_OK);
+    EXPECT_EQ(mapping_info.ring_byte_length, capacity);
+    ASSERT_EQ(amdf_user_queue_mapping_destroy(mapping_), AMDF_STATUS_OK);
+    mapping_ = nullptr;
+    ASSERT_EQ(amdf_user_queue_destroy(queue_), AMDF_STATUS_OK);
+    queue_ = nullptr;
+  }
 }
 
 TEST_F(GpuUserQueueTest, ValidatesTheSelectedScratchAccess) {
@@ -401,6 +515,7 @@ amdf_status_t amdf_gpu_umd_user_queue_create(
     amdf_gpu_umd_user_queue_t** out_queue,
     amdf_gpu_umd_user_queue_result_t* out_result) {
   FakeNativeState* state = device->state;
+  ++state->create_call_count;
   state->observed_create = *create_info;
   if (!amdf_status_is_ok(state->create_status)) {
     return state->create_status;

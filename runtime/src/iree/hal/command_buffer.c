@@ -92,7 +92,6 @@ IREE_API_EXPORT iree_host_size_t iree_hal_command_buffer_validation_state_size(
 }
 
 IREE_API_EXPORT void iree_hal_command_buffer_initialize(
-    iree_hal_allocator_t* device_allocator,
     const iree_hal_queue_family_t* queue_family,
     iree_hal_command_buffer_mode_t mode,
     iree_hal_command_category_t command_categories,
@@ -127,7 +126,7 @@ IREE_API_EXPORT void iree_hal_command_buffer_initialize(
   // implementation.
   IF_VALIDATING(command_buffer, {
     iree_hal_command_buffer_initialize_validation(
-        device_allocator, command_buffer, VALIDATION_STATE(command_buffer));
+        command_buffer, VALIDATION_STATE(command_buffer));
   });
 }
 
@@ -269,29 +268,135 @@ IREE_API_EXPORT iree_status_t iree_hal_command_buffer_end_debug_group(
   return _VTABLE_DISPATCH(command_buffer, end_debug_group)(command_buffer);
 }
 
-IREE_API_EXPORT iree_status_t iree_hal_command_buffer_execution_barrier(
-    iree_hal_command_buffer_t* command_buffer,
-    iree_hal_execution_stage_t source_stage_mask,
-    iree_hal_execution_stage_t target_stage_mask,
-    iree_hal_execution_barrier_flags_t flags,
-    iree_host_size_t memory_barrier_count,
-    const iree_hal_memory_barrier_t* memory_barriers,
-    iree_host_size_t buffer_barrier_count,
-    const iree_hal_buffer_barrier_t* buffer_barriers) {
+IREE_API_EXPORT iree_status_t
+iree_hal_barrier_validate(const iree_hal_barrier_t* barrier,
+                          const iree_hal_queue_family_t* queue_family) {
+  if (IREE_UNLIKELY(
+          !barrier ||
+          (barrier->memory_barrier_count && !barrier->memory_barriers) ||
+          (barrier->buffer_barrier_count && !barrier->buffer_barriers))) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "barrier descriptor storage is null");
+  }
+  if (IREE_UNLIKELY(!iree_hal_memory_effects_is_supported(barrier->effects))) {
+    return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                            "memory transition is not qualified");
+  }
+  const bool supports_host =
+      iree_any_bit_set(queue_family->spec->flags,
+                       IREE_HAL_QUEUE_FAMILY_SPEC_FLAG_HOST_MEMORY_BARRIERS);
+  const uint32_t queue_effects =
+      IREE_HAL_MEMORY_EFFECT_GLOBAL_RELEASE_TO_SYSTEM |
+      IREE_HAL_MEMORY_EFFECT_GLOBAL_ACQUIRE_FROM_SYSTEM |
+      IREE_HAL_MEMORY_EFFECT_RANGE_RELEASE_TO_SYSTEM |
+      IREE_HAL_MEMORY_EFFECT_RANGE_ACQUIRE_FROM_SYSTEM |
+      (supports_host ? IREE_HAL_MEMORY_EFFECT_HOST_FLUSH |
+                           IREE_HAL_MEMORY_EFFECT_HOST_INVALIDATE
+                     : 0);
+  if (IREE_UNLIKELY(barrier->effects.bits & ~queue_effects)) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "barrier effects require an executor unavailable on this queue family");
+  }
+  const iree_hal_barrier_flags_t supported_flags =
+      IREE_HAL_BARRIER_FLAG_ACQUIRE_SYSTEM_SCOPE |
+      IREE_HAL_BARRIER_FLAG_RELEASE_SYSTEM_SCOPE;
+  if (IREE_UNLIKELY(barrier->flags & ~supported_flags)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "unsupported barrier flags: 0x%016" PRIx64,
+                            barrier->flags & ~supported_flags);
+  }
+  const iree_hal_execution_stage_t supported_stages =
+      IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
+      IREE_HAL_EXECUTION_STAGE_COMMAND_PROCESS |
+      IREE_HAL_EXECUTION_STAGE_DISPATCH | IREE_HAL_EXECUTION_STAGE_TRANSFER |
+      IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE | IREE_HAL_EXECUTION_STAGE_HOST |
+      IREE_HAL_EXECUTION_STAGE_ATOMIC;
+  if (IREE_UNLIKELY((barrier->source_stage_mask | barrier->target_stage_mask) &
+                    ~supported_stages)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "unsupported barrier execution stage");
+  }
+  const iree_hal_access_scope_t supported_scopes =
+      IREE_HAL_ACCESS_SCOPE_INDIRECT_COMMAND_READ |
+      IREE_HAL_ACCESS_SCOPE_CONSTANT_READ |
+      IREE_HAL_ACCESS_SCOPE_DISPATCH_READ |
+      IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE |
+      IREE_HAL_ACCESS_SCOPE_TRANSFER_READ |
+      IREE_HAL_ACCESS_SCOPE_TRANSFER_WRITE | IREE_HAL_ACCESS_SCOPE_HOST_READ |
+      IREE_HAL_ACCESS_SCOPE_HOST_WRITE | IREE_HAL_ACCESS_SCOPE_MEMORY_READ |
+      IREE_HAL_ACCESS_SCOPE_MEMORY_WRITE | IREE_HAL_ACCESS_SCOPE_ATOMIC_READ |
+      IREE_HAL_ACCESS_SCOPE_ATOMIC_WRITE;
+  iree_hal_access_scope_t scopes = 0;
+  uint32_t recipe_effects = 0;
+  for (iree_host_size_t i = 0; i < barrier->memory_barrier_count; ++i) {
+    scopes |= barrier->memory_barriers[i].source_scope |
+              barrier->memory_barriers[i].target_scope;
+  }
+  for (iree_host_size_t i = 0; i < barrier->buffer_barrier_count; ++i) {
+    const iree_hal_buffer_barrier_t* buffer_barrier =
+        &barrier->buffer_barriers[i];
+    scopes |= buffer_barrier->source_scope | buffer_barrier->target_scope;
+    if (!buffer_barrier->recipe) {
+      continue;
+    }
+    IREE_RETURN_IF_ERROR(
+        iree_hal_memory_transition_recipe_validate(buffer_barrier->recipe));
+    for (uint32_t j = 0; j < buffer_barrier->recipe->operation_count; ++j) {
+      const iree_hal_memory_transition_executor_t executor =
+          buffer_barrier->recipe->operations[j].executor;
+      if (IREE_UNLIKELY(
+              executor != IREE_HAL_MEMORY_TRANSITION_EXECUTOR_QUEUE &&
+              !(supports_host &&
+                (executor == IREE_HAL_MEMORY_TRANSITION_EXECUTOR_HOST_DIRECT ||
+                 executor == IREE_HAL_MEMORY_TRANSITION_EXECUTOR_HOST_API)))) {
+        return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "buffer barrier recipe executor is unavailable "
+                                "on this queue family");
+      }
+    }
+    recipe_effects |= buffer_barrier->recipe->effects.bits;
+  }
+  if (IREE_UNLIKELY(scopes & ~supported_scopes)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "unsupported barrier access scope");
+  }
+  const uint32_t required_recipe_effects =
+      barrier->effects.bits & IREE_HAL_MEMORY_EFFECT_RESOURCE_MASK;
+  if (IREE_UNLIKELY(recipe_effects != required_recipe_effects)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "buffer barrier recipes do not cover the ranged effects");
+  }
+  return iree_ok_status();
+}
+
+IREE_API_EXPORT iree_status_t
+iree_hal_command_buffer_barrier(iree_hal_command_buffer_t* command_buffer,
+                                const iree_hal_barrier_t* barrier) {
   IREE_ASSERT_ARGUMENT(command_buffer);
+  IREE_RETURN_IF_ERROR(
+      iree_hal_barrier_validate(barrier, command_buffer->queue_family));
   IREE_TRACE_ZONE_BEGIN(z0);
   IF_VALIDATING(command_buffer, {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
-        z0,
-        iree_hal_command_buffer_execution_barrier_validation(
-            command_buffer, VALIDATION_STATE(command_buffer), source_stage_mask,
-            target_stage_mask, flags, memory_barrier_count, memory_barriers,
-            buffer_barrier_count, buffer_barriers));
+        z0, iree_hal_command_buffer_barrier_validation(
+                command_buffer, VALIDATION_STATE(command_buffer), barrier));
   });
-  iree_status_t status = _VTABLE_DISPATCH(command_buffer, execution_barrier)(
-      command_buffer, source_stage_mask, target_stage_mask, flags,
-      memory_barrier_count, memory_barriers, buffer_barrier_count,
-      buffer_barriers);
+
+  // Global prepared actions and explicit minimum flags have identical native
+  // semantics. Resolve those once while preserving ranged effects and their
+  // copied buffer recipes for the native recorder.
+  iree_hal_barrier_t resolved = *barrier;
+  resolved.flags = iree_hal_barrier_resolve_flags(barrier);
+  resolved.effects.bits &= IREE_HAL_MEMORY_EFFECT_RESOURCE_MASK;
+  iree_status_t status = iree_ok_status();
+  if (resolved.source_stage_mask || resolved.target_stage_mask ||
+      resolved.flags || resolved.memory_barrier_count ||
+      resolved.buffer_barrier_count) {
+    status =
+        _VTABLE_DISPATCH(command_buffer, barrier)(command_buffer, &resolved);
+  }
   IREE_TRACE_ZONE_END(z0);
   return status;
 }

@@ -1,0 +1,45 @@
+// RUN: emit source-low output=low
+
+// Exact extrema retain comparison predicates in K registers through the
+// signed-zero tie and NaN-policy selections. Fast extrema use native MIN/MAX
+// only when both semantic differences are disabled.
+x86.target<avx512> @target
+
+func.def target(@target) @float_extrema_families(%f32_lhs: vector<16xf32>, %f32_rhs: vector<16xf32>, %f64_lhs: vector<8xf64>, %f64_rhs: vector<8xf64>) -> (vector<16xf32>, vector<16xf32>, vector<8xf64>, vector<8xf64>, vector<16xf32>, vector<8xf64>) {
+  %f32_minimum = vector.minimumf %f32_lhs, %f32_rhs : vector<16xf32>
+  %f32_minnum = vector.minnumf %f32_lhs, %f32_rhs : vector<16xf32>
+  %f64_maximum = vector.maximumf %f64_lhs, %f64_rhs : vector<8xf64>
+  %f64_maxnum = vector.maxnumf %f64_lhs, %f64_rhs : vector<8xf64>
+  %f32_fast = vector.minnumf<nnan|nsz> %f32_lhs, %f32_rhs : vector<16xf32>
+  %f64_fast = vector.maximumf<nnan|nsz> %f64_lhs, %f64_rhs : vector<8xf64>
+  func.return %f32_minimum, %f32_minnum, %f64_maximum, %f64_maxnum, %f32_fast, %f64_fast : vector<16xf32>, vector<16xf32>, vector<8xf64>, vector<8xf64>, vector<16xf32>, vector<8xf64>
+}
+
+// ----
+low.func.def target<x86.avx512.core>(@target) abi(object_function) abi_layout({signature = (vector<16xf32>, vector<16xf32>, vector<8xf64>, vector<8xf64>) -> (vector<16xf32>, vector<16xf32>, vector<8xf64>, vector<8xf64>, vector<16xf32>, vector<8xf64>)}) @float_extrema_families(%f32_lhs: reg<x86.zmm>, %f32_rhs: reg<x86.zmm>, %f64_lhs: reg<x86.zmm>, %f64_rhs: reg<x86.zmm>) -> (reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>, reg<x86.zmm>) asm {
+  %26 = vcmpps %f32_lhs, %f32_rhs, 17
+  %27 = vblendmps %26, %f32_lhs, %f32_rhs
+  %28 = vcmpps %f32_lhs, %f32_rhs, 0
+  %29 = vpord %f32_lhs, %f32_rhs
+  %30 = vblendmps %28, %29, %27
+  %31 = vcmpps %f32_lhs, %f32_lhs, 3
+  %32 = vblendmps %31, %f32_lhs, %30
+  %33 = vcmpps %f32_rhs, %f32_rhs, 3
+  %f32_minimum = vblendmps %33, %f32_rhs, %32
+  %41 = vblendmps %31, %f32_rhs, %30
+  %f32_minnum = vblendmps %33, %f32_lhs, %41
+  %44 = vcmppd %f64_lhs, %f64_rhs, 30
+  %45 = vblendmpd %44, %f64_lhs, %f64_rhs
+  %46 = vcmppd %f64_lhs, %f64_rhs, 0
+  %47 = vpandd %f64_lhs, %f64_rhs
+  %48 = vblendmpd %46, %47, %45
+  %49 = vcmppd %f64_lhs, %f64_lhs, 3
+  %50 = vblendmpd %49, %f64_lhs, %48
+  %51 = vcmppd %f64_rhs, %f64_rhs, 3
+  %f64_maximum = vblendmpd %51, %f64_rhs, %50
+  %59 = vblendmpd %49, %f64_rhs, %48
+  %f64_maxnum = vblendmpd %51, %f64_lhs, %59
+  %f32_fast = vminps %f32_lhs, %f32_rhs
+  %f64_fast = vmaxpd %f64_lhs, %f64_rhs
+  return %f32_minimum, %f32_minnum, %f64_maximum, %f64_maxnum, %f32_fast, %f64_fast
+}

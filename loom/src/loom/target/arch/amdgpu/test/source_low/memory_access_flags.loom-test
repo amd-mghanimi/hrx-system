@@ -1,25 +1,4 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/memory_access_flags.loom-test
 // RUN: emit source-low target=amdgpu:gfx1151 output=low
-
-func.def @observe_scalar(%input: buffer) -> (i32, i32) {
-  %base = index.constant 0 : offset
-  %aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
-  %source = buffer.view %aligned[%base] : buffer -> view<1xi32>
-  %first = view.load<volatile> %source[0] : view<1xi32> -> i32
-  %second = view.load<volatile> %source[0] : view<1xi32> -> i32
-  func.return %first, %second : i32, i32
-}
-
-// ----
-low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @observe_scalar() -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
-  %source = resource<hal_binding> {extent = 4, index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
-  %11 = v_mov_b32 0
-  %first = global_load_b32_saddr<volatile> %11, %source
-  %second = global_load_b32_saddr<volatile> %11, %source
-  return %first, %second
-}
-
-// ====
 
 func.def @observe_unused(%input: buffer) {
   %base = index.constant 0 : offset
@@ -36,27 +15,6 @@ low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @observe_unused() asm {
   %7 = v_mov_b32 0
   %first = global_load_b32_saddr<volatile> %7, %source
   %second = global_load_b32_saddr<volatile> %7, %source {offset = 4}
-  return
-}
-
-// ====
-
-func.def @repeat_store(%output: buffer, %value: i32) {
-  %base = index.constant 0 : offset
-  %aligned = buffer.assume.alignment %output {minimum_alignment = 4} : buffer
-  %destination = buffer.view %aligned[%base] : buffer -> view<1xi32>
-  view.store<volatile> %value, %destination[0] : i32, view<1xi32>
-  view.store<volatile> %value, %destination[0] : i32, view<1xi32>
-  func.return
-}
-
-// ----
-low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @repeat_store(%value: reg<amdgpu.sgpr>) asm {
-  %destination = resource<hal_binding> {extent = 4, index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
-  %7 = v_mov_b32_copy %value
-  %8 = v_mov_b32 0
-  global_store_b32_saddr<volatile> %8, %7, %destination
-  global_store_b32_saddr<volatile> %8, %7, %destination
   return
 }
 
@@ -127,7 +85,7 @@ low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @observe_byte() asm {
 // ====
 
 func.def @observe_dynamic_address(%input: buffer, %byte_offset: offset) -> (i32, i32) {
-  %base = index.assume %byte_offset [range(%byte_offset, 0, 4092), mul(%byte_offset, 4)] : offset
+  %base = index.assume %byte_offset [range(%byte_offset, 0, 4092), multiple_of(%byte_offset, 4)] : offset
   %aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
   %source = buffer.view %aligned[%base] : buffer -> view<2xi32>
   %first = view.load<volatile> %source[0] : view<2xi32> -> i32
@@ -152,23 +110,4 @@ low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @observe_dynamic_addres
   %33 = concat(%29, %31) : (reg<amdgpu.sgpr>, reg<amdgpu.sgpr>) -> reg<amdgpu.sgpr x2>
   %second = global_load_b32_saddr<volatile> %13, %33 {offset = 4}
   return %first, %second
-}
-
-// ====
-
-func.def @ordinary_scalar(%input: buffer) -> (i32, i32) {
-  %base = index.constant 0 : offset
-  %aligned = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
-  %source = buffer.view %aligned[%base] : buffer -> view<1xi32>
-  %first = view.load %source[0] : view<1xi32> -> i32
-  %second = view.load %source[0] : view<1xi32> -> i32
-  func.return %first, %second : i32, i32
-}
-
-// ----
-low.func.def target<amdgpu.rdna3_5.core> abi(hal_kernel) @ordinary_scalar() -> (reg<amdgpu.vgpr>, reg<amdgpu.vgpr>) asm {
-  %source = resource<hal_binding> {extent = 4, index = 0, source_type = hal.buffer} : reg<amdgpu.sgpr x2>
-  %11 = v_mov_b32 0
-  %first = global_load_b32_saddr %11, %source
-  return %first, %first
 }

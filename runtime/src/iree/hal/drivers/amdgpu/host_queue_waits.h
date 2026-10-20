@@ -7,6 +7,7 @@
 #ifndef IREE_HAL_DRIVERS_AMDGPU_HOST_QUEUE_WAITS_H_
 #define IREE_HAL_DRIVERS_AMDGPU_HOST_QUEUE_WAITS_H_
 
+#include "iree/hal/drivers/amdgpu/barrier.h"
 #include "iree/hal/drivers/amdgpu/host_queue.h"
 
 #ifdef __cplusplus
@@ -45,6 +46,8 @@ typedef struct iree_hal_amdgpu_wait_resolution_t {
   bool needs_deferral;
   // Padding reserved to keep the fence scopes aligned.
   uint8_t reserved[2];
+  // Captured payload visibility, separate from dependency/control visibility.
+  iree_hal_amdgpu_queue_barriers_t payload_barriers;
   // Number of wait semaphore edges represented by this resolution.
   uint32_t wait_count;
   // Queue profiling flags describing how this resolution was reached.

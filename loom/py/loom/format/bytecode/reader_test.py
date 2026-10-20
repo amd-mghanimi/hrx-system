@@ -24,6 +24,7 @@ from loom.dialect.test.defs import (
     test_parameterized_attr,
     test_parameterized_attr_array,
     test_signed_enum_set_attrs,
+    test_string_array_attrs,
     test_symbol_array_attrs,
     test_symbol_set_attrs,
 )
@@ -94,6 +95,7 @@ from loom.ir import (
     StaticDim,
     StorageSpace,
     StorageType,
+    StringArrayAttr,
     Symbol,
     SymbolKind,
     SymbolName,
@@ -371,7 +373,7 @@ def _make_predicate_function_module() -> Module:
     module = Module(name="test")
     argument_id = module.add_value(Value(name="M", type=INDEX))
     predicate = Predicate(
-        kind="mul",
+        kind="multiple_of",
         args=(
             PredicateArg(tag="value", value=argument_id),
             PredicateArg(tag="const", value=16),
@@ -583,7 +585,7 @@ class TestMalformedSymbolReferences:
         with pytest.raises(BytecodeError, match="source root region index"):
             read_module(bytes(data))
 
-    def test_dependency_target_interfaces_must_be_known(self) -> None:
+    def test_dependency_role_must_contribute_to_reachability(self) -> None:
         module = Module(name="test")
         _make_func(module, "target", [], is_declaration=True)
         _make_func(
@@ -624,7 +626,7 @@ class TestMalformedSymbolReferences:
             SYMBOL_INTERFACE_FLAG_MASK + 1,
         )
 
-        with pytest.raises(BytecodeError, match="target interfaces"):
+        with pytest.raises(BytecodeError, match="dependency contract"):
             read_module(bytes(data))
 
 
@@ -2204,6 +2206,34 @@ class TestEnumArrayAttributeWireFormat:
             reader._read_attr_value(data, 0)
 
 
+class TestStringArrayAttributeWireFormat:
+    def _read_string_array(self, data: bytes) -> tuple[StringArrayAttr, int]:
+        reader = BytecodeReader(b"", op_decls=[test_string_array_attrs])
+        reader._strings = ["", "gfx12-generic", "gfx1250"]
+        attr_def = reader._attr_def_for_op_attr(
+            "test.string_array_attrs", "required_values"
+        )
+        value, offset = reader._read_attr_value(data, 0, attr_def=attr_def)
+        assert isinstance(value, StringArrayAttr)
+        return value, offset
+
+    def test_reads_ordered_duplicate_strings(self) -> None:
+        value, offset = self._read_string_array(bytes([19, 3, 1, 2, 1]))
+
+        assert value == StringArrayAttr(["gfx12-generic", "gfx1250", "gfx12-generic"])
+        assert offset == 5
+
+    def test_rejects_oversized_array(self) -> None:
+        data = bytes([19]) + encode_varint(0x10000)
+
+        with pytest.raises(BytecodeError, match="exceeds UINT16_MAX"):
+            self._read_string_array(data)
+
+    def test_rejects_out_of_range_string(self) -> None:
+        with pytest.raises(BytecodeError, match="string_id 3 out of range"):
+            self._read_string_array(bytes([19, 1, 3]))
+
+
 class TestSignedEnumSetAttributeWireFormat:
     def _read_signed_enum_set(self, data: bytes) -> tuple[SignedEnumSetAttr, int]:
         reader = BytecodeReader(b"", op_decls=[test_signed_enum_set_attrs])
@@ -2503,6 +2533,32 @@ class TestParameterizedAttributeArrayWireFormat:
 
 
 class TestLocationRoundTrips:
+    def test_duplicate_location_rows_preserve_wire_ids(self) -> None:
+        module = Module(name="test")
+        location = FileLocation(
+            source_id=0, start_line=42, start_col=3, end_line=42, end_col=58
+        )
+        module.sources.append("model.loom")
+        first_location_id = module.locations.add(location)
+        second_location_id = module.locations.append(location)
+        _make_func(module, "first", [], is_declaration=True)
+        _make_func(module, "second", [], is_declaration=True)
+        assert module.symbols[0].op is not None
+        assert module.symbols[1].op is not None
+        module.symbols[0].op.location_id = first_location_id
+        module.symbols[1].op.location_id = second_location_id
+
+        loaded = _roundtrip(module)
+
+        assert len(loaded.locations) == 3
+        assert loaded.symbols[0].op is not None
+        assert loaded.symbols[1].op is not None
+        assert loaded.symbols[0].op.location_id == first_location_id
+        assert loaded.symbols[1].op.location_id == second_location_id
+        assert loaded.locations.get(first_location_id) == location
+        assert loaded.locations.get(second_location_id) == location
+        assert loaded.locations.add(location) == first_location_id
+
     def test_file_location_survives(self) -> None:
         from loom.ir import FileLocation
 

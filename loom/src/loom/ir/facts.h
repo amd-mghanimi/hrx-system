@@ -7,8 +7,9 @@
 // Value facts: per-value dataflow analysis properties.
 //
 // A loom_value_facts_t is a 32-byte summary of what is known about an
-// SSA value: signed integer range [lo, hi], largest known divisor, and
-// cached predicate flags (non-negative, non-zero, power-of-two, etc.).
+// SSA value: integer or finite floating-point interval [lo, hi], largest known
+// integer divisor, and cached predicate flags (non-negative, non-zero,
+// power-of-two, floating-point classes, etc.).
 //
 // Facts are the building blocks of loom's always-on value analysis.
 // They are maintained incrementally by the rewriter during
@@ -65,7 +66,7 @@ enum loom_value_fact_flag_bits_e {
   // The signed range lower bound is > 0. Implies NON_NEGATIVE and
   // NON_ZERO.
   LOOM_VALUE_FACT_POSITIVE = 1u << 2,
-  // The value is known to be a power of two. Set by pow2() predicates
+  // The value is known to be a power of two. Set by power_of_two() predicates
   // or when an exact value is a power of two. Preserved across
   // recompute_flags since it may come from predicates rather than
   // range analysis.
@@ -77,12 +78,12 @@ enum loom_value_fact_flag_bits_e {
   LOOM_VALUE_FACT_EXACT = 1u << 4,
   // The range is [0, 1]. Typical for i1 comparison results.
   LOOM_VALUE_FACT_BOOLEAN = 1u << 5,
-  // The value has a floating-point type. When EXACT is also set,
-  // range_lo/range_hi contain a host double carrying the value rounded to its
-  // declared scalar type (via memcpy), not an integer range. The declared type
-  // is external to this compact summary and must accompany payload access.
-  // Non-exact float facts do not carry range bounds, but may carry semantic
-  // predicate facts such as NOT_NAN or FINITE.
+  // The value has a floating-point type. When FINITE and a retained interval
+  // are also present, range_lo/range_hi contain host doubles carrying inclusive
+  // bounds rounded to the declared scalar type (via memcpy), not integers.
+  // EXACT identifies a single retained bit pattern. The declared type is
+  // external to this compact summary and must accompany payload access. Float
+  // class facts may exist without a retained interval.
   LOOM_VALUE_FACT_FLOAT = 1u << 6,
   // The value cannot be NaN. This may come from an exact float value or a
   // checked predicate; it is meaningful only for floating-point typed values.
@@ -108,6 +109,10 @@ enum loom_value_fact_flag_bits_e {
   // This is independent of whether each lane observes the same mask value.
   LOOM_VALUE_FACT_SUBGROUP_LANE_MASK = 1u << 10,
   // The value is the full x-dimension workitem id domain for a kernel launch.
+  // For floating-point facts, bits 14 through 19 instead encode the exact
+  // destination float-type set queried through
+  // loom_value_facts_exact_float_types(). Callers must not inspect these
+  // physical bits directly.
   LOOM_VALUE_FACT_TOPOLOGY_WORKITEM_X = 1u << 14,
   // The value is the full y-dimension workitem id domain for a kernel launch.
   LOOM_VALUE_FACT_TOPOLOGY_WORKITEM_Y = 1u << 15,
@@ -193,26 +198,6 @@ typedef enum loom_value_fact_uniform_scope_e {
 typedef uint32_t loom_value_fact_extension_id_t;
 #define LOOM_VALUE_FACT_EXTENSION_ID_NONE ((loom_value_fact_extension_id_t)0)
 
-// Target-independent memory space for storage roots, views, and fences.
-typedef enum loom_value_fact_memory_space_e {
-  // No usable memory-space fact is known.
-  LOOM_VALUE_FACT_MEMORY_SPACE_UNKNOWN = 0,
-  // Device-visible global storage.
-  LOOM_VALUE_FACT_MEMORY_SPACE_GLOBAL = 1,
-  // Workgroup/shared storage.
-  LOOM_VALUE_FACT_MEMORY_SPACE_WORKGROUP = 2,
-  // Invocation-private storage.
-  LOOM_VALUE_FACT_MEMORY_SPACE_PRIVATE = 3,
-  // Read-only constant storage.
-  LOOM_VALUE_FACT_MEMORY_SPACE_CONSTANT = 4,
-  // Host-visible storage.
-  LOOM_VALUE_FACT_MEMORY_SPACE_HOST = 5,
-  // Descriptor-backed storage identity.
-  LOOM_VALUE_FACT_MEMORY_SPACE_DESCRIPTOR = 6,
-  // Target-generic device storage.
-  LOOM_VALUE_FACT_MEMORY_SPACE_GENERIC = 7,
-} loom_value_fact_memory_space_t;
-
 // Target-independent topology value family.
 typedef enum loom_value_fact_topology_value_kind_e {
   // No topology value family is known.
@@ -266,12 +251,14 @@ typedef struct loom_value_fact_topology_domain_t {
 // Per-value analysis facts. 32 bytes, cache-friendly for dense arrays.
 typedef struct loom_value_facts_t {
   // Signed integer range [lo, hi], inclusive. Default (unknown):
-  // [INT64_MIN, INT64_MAX]. For float types with EXACT set, range_lo contains
-  // a host double carrying the value rounded to its declared scalar type (via
-  // memcpy); range_hi == range_lo. The declared type is stored in the IR.
+  // [INT64_MIN, INT64_MAX]. For float types with a retained finite interval,
+  // this contains the encoded host-double lower endpoint. The sentinel pair
+  // [INT64_MIN, INT64_MAX] means no retained float interval. The declared type
+  // is stored in the IR.
   int64_t range_lo;
-  // Inclusive upper bound, or the same encoded double as range_lo for an exact
-  // floating-point value. INT64_MAX represents an unbounded upper endpoint.
+  // Inclusive integer upper bound or encoded host-double float upper endpoint.
+  // INT64_MAX represents an unbounded integer endpoint; paired with an
+  // INT64_MIN lower payload it means no retained float interval.
   int64_t range_hi;
 
   // Known divisor (>= 1). Joining alternative values takes the GCD; applying
@@ -347,6 +334,28 @@ bool loom_value_facts_mark_topology_domain(
     loom_value_facts_t* facts, loom_value_fact_topology_value_kind_t value_kind,
     loom_value_fact_topology_axis_t axis);
 
+// Returns the float types that can represent every finite value described by
+// |facts| without changing its numerical value. Returns an empty set for
+// integer facts. Float class predicates remain independent; consumers that
+// require finite values must also query FINITE. Known nonfinite values satisfy
+// every destination format because they introduce no finite value.
+loom_scalar_type_set_t loom_value_facts_exact_float_types(
+    loom_value_facts_t facts);
+
+// Replaces the exact destination float-type set carried by |facts|. |facts|
+// must describe a floating-point value. Non-float type bits in |types| are
+// ignored.
+void loom_value_facts_set_exact_float_types(loom_value_facts_t* facts,
+                                            loom_scalar_type_set_t types);
+
+// Returns true when every finite value described by |facts| is exactly
+// representable in |type|.
+static inline bool loom_value_facts_is_exact_float_type(
+    loom_value_facts_t facts, loom_scalar_type_t type) {
+  return loom_scalar_type_set_contains(
+      loom_value_facts_exact_float_types(facts), type);
+}
+
 // Tightens facts to the dynamic extent domain. Extents are non-negative
 // integer sizes; incompatible float or negative-only facts degrade to the
 // conservative non-negative extent range.
@@ -376,11 +385,26 @@ loom_value_facts_t loom_value_facts_make_signed_raw_bits(uint64_t raw_bits,
 loom_value_facts_t loom_value_facts_sign_extend(loom_value_facts_t source_facts,
                                                 int32_t source_bit_count);
 
+// Returns facts for an unsigned extension from |source_bit_count|. Fixed-width
+// integer facts use a signed numeric domain, so ranges crossing zero
+// conservatively become the complete unsigned source domain. The source bit
+// count comes from a verified fixed-width integer type narrower than 63 bits.
+loom_value_facts_t loom_value_facts_zero_extend(loom_value_facts_t source_facts,
+                                                int32_t source_bit_count);
+
 // Interprets a mathematical integer result modulo 2^bit_count, where bit_count
 // is a fixed-width integer width in [1, 64]. One-bit results use [0, 1]; wider
 // results use the signed domain. Retains exact values and non-crossing ranges,
 // and reduces divisibility to the factors preserved by modular arithmetic.
 loom_value_facts_t loom_value_facts_wrap_integer(
+    loom_value_facts_t source_facts, int32_t bit_count);
+
+// Interprets a mathematical integer result modulo 2^bit_count and returns its
+// unsigned numeric facts. Widths through 63 retain exact unsigned values and
+// bounded ranges. The fact lattice cannot represent the upper half of an
+// unsigned 64-bit domain, so any result reaching that half conservatively
+// becomes the complete nonnegative i64 envelope. |bit_count| is in [1, 64].
+loom_value_facts_t loom_value_facts_wrap_unsigned_integer(
     loom_value_facts_t source_facts, int32_t bit_count);
 
 // Returns conservative unsigned range facts for a value with |bit_count|
@@ -649,7 +673,8 @@ static inline bool loom_value_facts_as_exact_bool(loom_value_facts_t facts,
 
 static inline bool loom_value_facts_divisible_by(loom_value_facts_t facts,
                                                  int64_t divisor) {
-  return facts.known_divisor % divisor == 0;
+  // Exact zero's stored divisor of one does not constrain divisibility.
+  return loom_value_facts_is_zero(facts) || facts.known_divisor % divisor == 0;
 }
 
 // Returns true if all values described by |facts| fit in a signed integer with
@@ -684,6 +709,17 @@ static inline bool loom_value_facts_fit_unsigned_bit_count(
   return (uint64_t)facts.range_hi <= maximum_value;
 }
 
+// Returns true when reducing |facts| modulo the unsigned |bit_count| domain
+// cannot change them. A nonexact range ending at the signed fact lattice's
+// maximum may be a saturated mathematical result, so it cannot prove identity
+// at the 63- or 64-bit boundary.
+static inline bool loom_value_facts_unsigned_wrap_is_identity(
+    loom_value_facts_t facts, uint8_t bit_count) {
+  return loom_value_facts_fit_unsigned_bit_count(facts, bit_count) &&
+         (bit_count < 63 || loom_value_facts_is_exact(facts) ||
+          facts.range_hi != INT64_MAX);
+}
+
 // Returns true if the facts carry no information (full range, unit
 // divisor, no flags).
 static inline bool loom_value_facts_is_unknown(loom_value_facts_t facts) {
@@ -706,38 +742,20 @@ static inline bool loom_value_facts_equal(loom_value_facts_t a,
 // Meet
 //===----------------------------------------------------------------------===//
 
+// Out-of-line floating-point arm of loom_value_facts_meet. Keeping this path
+// out of the header avoids replicating interval decoding at integer-only join
+// sites.
+void loom_value_facts_meet_float(const loom_value_facts_t* a,
+                                 const loom_value_facts_t* b,
+                                 loom_value_facts_t* out);
+
 // Conservative join: widens range to the outer bounds, weakens divisor
 // to the GCD. Used at join points (scf.if yields, block arguments).
-static inline void loom_value_facts_meet(
-    const loom_value_facts_t* IREE_RESTRICT a,
-    const loom_value_facts_t* IREE_RESTRICT b,
-    loom_value_facts_t* IREE_RESTRICT out) {
+static inline void loom_value_facts_meet(const loom_value_facts_t* a,
+                                         const loom_value_facts_t* b,
+                                         loom_value_facts_t* out) {
   if (loom_value_facts_is_float(*a) || loom_value_facts_is_float(*b)) {
-    *out = loom_value_facts_unknown();
-    if (loom_value_facts_is_float(*a) && loom_value_facts_is_float(*b)) {
-      out->flags = LOOM_VALUE_FACT_FLOAT |
-                   (a->flags & b->flags &
-                    (LOOM_VALUE_FACT_NAN | LOOM_VALUE_FACT_INF |
-                     LOOM_VALUE_FACT_NOT_NAN | LOOM_VALUE_FACT_NOT_INF |
-                     LOOM_VALUE_FACT_FINITE | LOOM_VALUE_FACT_NOT_SUBNORMAL));
-      if (loom_value_facts_is_exact(*a) && loom_value_facts_is_exact(*b) &&
-          a->range_lo == b->range_lo) {
-        out->range_lo = a->range_lo;
-        out->range_hi = a->range_hi;
-        out->flags |= LOOM_VALUE_FACT_EXACT;
-      }
-    }
-    if (loom_value_facts_is_exact(*out)) {
-      loom_value_facts_mark_cluster_uniform(out);
-    } else if (loom_value_facts_is_lane_varying(*a) ||
-               loom_value_facts_is_lane_varying(*b)) {
-      loom_value_facts_mark_lane_varying(out);
-    } else {
-      const loom_value_fact_uniform_scope_t uniform_scope =
-          iree_min(loom_value_facts_uniform_scope(*a),
-                   loom_value_facts_uniform_scope(*b));
-      loom_value_facts_mark_uniform_at_scope(out, uniform_scope);
-    }
+    loom_value_facts_meet_float(a, b, out);
     return;
   }
 
@@ -821,6 +839,13 @@ typedef struct loom_value_fact_predicate_conflict_t {
 // predicate, floating-point type, and execution distribution flags.
 void loom_value_facts_recompute_flags(loom_value_facts_t* facts);
 
+// Tightens finite integer bounds to multiples of the known divisor and
+// updates cached flags, preserving independent predicates and distribution.
+// Floating-point facts and unbounded endpoints remain unchanged. Intervals
+// containing no representable multiple stay conservative because the lattice
+// has no empty set.
+void loom_value_facts_refine_divisible_range(loom_value_facts_t* facts);
+
 // Returns true when |predicate| is statically impossible for |facts|. This is a
 // validation query, not a transfer function: callers that accept user assumes
 // should diagnose true results before applying the predicate to avoid turning
@@ -869,18 +894,58 @@ void loom_value_facts_subi(const loom_value_facts_t* lhs,
 void loom_value_facts_muli(const loom_value_facts_t* lhs,
                            const loom_value_facts_t* rhs,
                            loom_value_facts_t* out);
+// Unsigned division in a verified integer width in [1, 64]. Inputs and results
+// use the declared signed fact representation, except i1 uses Boolean [0, 1]
+// facts; arithmetic interprets their raw bits as unsigned.
 void loom_value_facts_divui(const loom_value_facts_t* lhs,
-                            const loom_value_facts_t* rhs,
+                            const loom_value_facts_t* rhs, int32_t bit_count,
                             loom_value_facts_t* out);
 void loom_value_facts_divsi(const loom_value_facts_t* lhs,
                             const loom_value_facts_t* rhs,
                             loom_value_facts_t* out);
+// Unsigned remainder with the same width and representation contract as
+// divui.
 void loom_value_facts_remui(const loom_value_facts_t* lhs,
-                            const loom_value_facts_t* rhs,
+                            const loom_value_facts_t* rhs, int32_t bit_count,
                             loom_value_facts_t* out);
+// Proves that unsigned remainder returns the dividend unchanged. The same
+// width and signed fact representation as divui apply; the proof excludes
+// zero divisors and requires every dividend to be smaller than every divisor.
+bool loom_value_facts_remui_is_identity(loom_value_facts_t lhs,
+                                        loom_value_facts_t rhs,
+                                        int32_t bit_count);
 void loom_value_facts_remsi(const loom_value_facts_t* lhs,
                             const loom_value_facts_t* rhs,
                             loom_value_facts_t* out);
+
+// Quotient semantics for inverse interval inference. Right shifts are floor
+// division by a positive power of two, including arithmetic shifts of negative
+// dividends. The scale operand is a divisor or a shift amount, respectively.
+typedef enum loom_value_facts_quotient_kind_e {
+  LOOM_VALUE_FACTS_QUOTIENT_DIVUI,
+  LOOM_VALUE_FACTS_QUOTIENT_DIVSI,
+  LOOM_VALUE_FACTS_QUOTIENT_CEILDIVUI,
+  LOOM_VALUE_FACTS_QUOTIENT_CEILDIVSI,
+  LOOM_VALUE_FACTS_QUOTIENT_FLOORDIVSI,
+  LOOM_VALUE_FACTS_QUOTIENT_SHRUI,
+  LOOM_VALUE_FACTS_QUOTIENT_SHRSI,
+} loom_value_facts_quotient_kind_t;
+
+// Returns an interval containing every dividend that can produce |quotient|
+// for any |scale| in a verified integer width in [1, 64]. Inputs and results
+// use signed fact representation, except i1 uses Boolean [0, 1]. Scale may be
+// an interval; no assumption that it is constant or positive is implicit.
+//
+// This is a preimage, not multiplication of the quotient's endpoints: rounding
+// residues, signed zero quotients, raw unsigned bits and wide products matter.
+// Bounds saturate to the carrier; split intervals are conservatively widened.
+// This lattice does not encode unreachable inputs. A possible zero divisor,
+// invalid shift or signed quotient overflow yields the carrier domain, without
+// assuming undefined behavior eliminates the corresponding input. The result
+// carries no distribution or divisibility from the quotient.
+loom_value_facts_t loom_value_facts_quotient_preimage(
+    loom_value_facts_quotient_kind_t kind, int32_t bit_count,
+    loom_value_facts_t quotient, loom_value_facts_t scale);
 
 // Shifts.
 void loom_value_facts_shli(const loom_value_facts_t* lhs,
@@ -896,17 +961,31 @@ void loom_value_facts_shrsi(const loom_value_facts_t* lhs,
                             const loom_value_facts_t* rhs,
                             loom_value_facts_t* out);
 
-// Bitwise.
+// Fixed-width rotates are total: the signed amount is reduced modulo the
+// verified integer width in [1, 64]. Exact operands produce exact raw-bit
+// results; otherwise only execution distribution is retained.
+void loom_value_facts_rotli(const loom_value_facts_t* lhs,
+                            const loom_value_facts_t* rhs, int32_t bit_count,
+                            loom_value_facts_t* out);
+void loom_value_facts_rotri(const loom_value_facts_t* lhs,
+                            const loom_value_facts_t* rhs, int32_t bit_count,
+                            loom_value_facts_t* out);
+
+// Bitwise AND retains the strongest power-of-two divisor from either input
+// and rounds its upper bound down to that divisor.
 void loom_value_facts_andi(const loom_value_facts_t* lhs,
                            const loom_value_facts_t* rhs,
                            loom_value_facts_t* out);
 
-// Retains the maximum operand lower bound and a finite bit-width upper bound
-// when both operands are nonnegative. Either operand's nonzero proof survives,
-// including predicate-derived proofs whose ranges span zero.
+// Bitwise OR retains the common power-of-two divisor and, for nonnegative
+// operands, the maximum lower bound and a bit-width upper bound rounded down
+// to that divisor. Either operand's nonzero proof survives, including
+// predicate-derived proofs whose ranges span zero.
 void loom_value_facts_ori(const loom_value_facts_t* lhs,
                           const loom_value_facts_t* rhs,
                           loom_value_facts_t* out);
+// Bitwise XOR retains the common power-of-two divisor and, for nonnegative
+// operands, a bit-width upper bound rounded down to that divisor.
 void loom_value_facts_xori(const loom_value_facts_t* lhs,
                            const loom_value_facts_t* rhs,
                            loom_value_facts_t* out);

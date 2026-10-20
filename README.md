@@ -31,9 +31,12 @@ layer as `lib/libamdhip64.so`.
 
 ## Building
 
+The following builds the HRX GPU runtime and installable packages. For runtime
+or compiler-only builds, start with the [build guide](BUILDING.md).
+
 Use a ROCm installation or unpacked ROCm build environment that provides HSA,
-AQL profile headers, and a ROCm LLVM toolchain. The CI path uses ROCm clang and
-forces libraries into `lib`.
+AQL profile headers, and a ROCm LLVM toolchain. These commands select ROCm Clang
+and install libraries under `lib`.
 
 The blessed local command path uses `dev.py` to keep setup, hook configuration,
 and build-lane selection consistent:
@@ -96,15 +99,20 @@ Useful options:
 |--------|---------|---------|
 | `IREE_DEPENDENCY_MODE` | `pinned` | Controls dependency resolution: `pinned`, `package`, or `auto`. |
 | `LIBHRX_BUILD` | ON | Build libhrx and compatibility targets. |
-| `LIBHRX_BUILD_CTS` | `${IREE_BUILD_TESTS}` | Build libhrx CTS binaries. |
+| `LIBHRX_BUILD_CTS` | `ON` when libhrx and tests are enabled | Build libhrx CTS binaries. |
 | `LIBHRX_BUILD_HIP_BINDING` | ON | Build the HIP runtime API compatibility DLL. |
-| `LIBHRX_BUILD_PASSTHROUGH` | ON | Build HIP passthrough/interception tools. |
+| `LIBHRX_BUILD_PASSTHROUGH` | `ON` on Linux, `OFF` elsewhere | Build HIP passthrough/interception tools. |
 | `IREE_BUILD_TESTS` | ON | Build IREE runtime tests and CTS targets. |
 | `HRX_INSTALL_TESTS` | `${IREE_BUILD_TESTS}` | Install a relocatable CTest tree. |
 | `IREE_HAL_DRIVER_AMDGPU` | ON | Build the AMDGPU runtime HAL driver. |
 | `IREE_ROCM_DEPENDENCY_MODE` | empty | Overrides ROCm header dependency resolution: `pinned`, `package`, or `auto`; empty selects package mode when `IREE_ROCM_PATH` is set. |
 | `IREE_ROCM_PATH` | empty | ROCm or TheRock SDK root used for package-mode ROCm headers and device tooling. |
 | `IREE_HAL_AMDGPU_TARGETS` | checked-in AMDGPU generic set | AMDGPU target selectors supported by the runtime build. |
+
+`BUILD_SHARED_LIBS=ON` builds runtime components as shared libraries for in-tree
+development. Public HRX installation and `find_package(hrx)` use a build
+configured with `BUILD_SHARED_LIBS=OFF`, which incorporates the private runtime
+components into `libhrx`.
 
 `IREE_DEPENDENCY_MODE=pinned` uses the checked-in source lock and is the
 repository default. `package` requires embedding or distribution builds to

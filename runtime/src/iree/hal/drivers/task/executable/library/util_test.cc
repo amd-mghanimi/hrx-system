@@ -16,10 +16,10 @@ namespace {
 
 TEST(ExecutableLibraryUtilTest, AcceptsCurrentLibraryVersion) {
   const iree_hal_executable_library_header_t header = {
-      /*.version=*/IREE_HAL_EXECUTABLE_LIBRARY_VERSION_LATEST,
+      .version = IREE_HAL_EXECUTABLE_LIBRARY_VERSION_LATEST,
   };
   const iree_hal_executable_library_v0_t library = {
-      /*.header=*/&header,
+      .header = &header,
   };
   const iree_hal_executable_library_v0_t* result = nullptr;
 
@@ -28,40 +28,64 @@ TEST(ExecutableLibraryUtilTest, AcceptsCurrentLibraryVersion) {
   EXPECT_EQ(&library, result);
 }
 
-TEST(ExecutableLibraryUtilTest, RejectsPreviousLibraryVersion) {
+TEST(ExecutableLibraryUtilTest, AcceptsMinimumLibraryVersion) {
   const iree_hal_executable_library_header_t header = {
-      /*.version=*/IREE_HAL_EXECUTABLE_LIBRARY_VERSION_LATEST - 1,
+      .version = IREE_HAL_EXECUTABLE_LIBRARY_VERSION_MINIMUM,
   };
   const iree_hal_executable_library_v0_t library = {
-      /*.header=*/&header,
+      .header = &header,
   };
   const iree_hal_executable_library_v0_t* result = nullptr;
 
+  IREE_ASSERT_OK(iree_hal_executable_library_validate_query_result(
+      &library.header, &result));
+  EXPECT_EQ(&library, result);
+}
+
+TEST(ExecutableLibraryUtilTest, RejectsLibraryVersionOutsideSupportedRange) {
+  const iree_hal_executable_library_header_t old_header = {
+      .version = IREE_HAL_EXECUTABLE_LIBRARY_VERSION_MINIMUM - 1,
+  };
+  const iree_hal_executable_library_v0_t old_library = {
+      .header = &old_header,
+  };
+  const iree_hal_executable_library_v0_t* result = nullptr;
   IREE_EXPECT_STATUS_IS(IREE_STATUS_FAILED_PRECONDITION,
                         iree_hal_executable_library_validate_query_result(
-                            &library.header, &result));
+                            &old_library.header, &result));
+  EXPECT_EQ(nullptr, result);
+
+  const iree_hal_executable_library_header_t future_header = {
+      .version = IREE_HAL_EXECUTABLE_LIBRARY_VERSION_LATEST + 1,
+  };
+  const iree_hal_executable_library_v0_t future_library = {
+      .header = &future_header,
+  };
+  IREE_EXPECT_STATUS_IS(IREE_STATUS_FAILED_PRECONDITION,
+                        iree_hal_executable_library_validate_query_result(
+                            &future_library.header, &result));
   EXPECT_EQ(nullptr, result);
 }
 
 TEST(ExecutableLibraryUtilTest, ReportsFixedWorkgroupLocalMemory) {
   const iree_hal_executable_dispatch_attrs_v0_t attributes = {
-      /*.flags=*/{},
-      /*.local_memory_pages=*/3,
-      /*.binding_count=*/{},
-      /*.reserved_0=*/{},
-      /*.workgroup_size_x=*/4,
-      /*.workgroup_size_y=*/2,
-      /*.workgroup_size_z=*/1,
-      /*.parameter_count=*/{},
+      .flags = {},
+      .local_memory_pages = 3,
+      .binding_count = {},
+      .reserved_0 = {},
+      .workgroup_size_x = 4,
+      .workgroup_size_y = 2,
+      .workgroup_size_z = 1,
+      .parameter_count = {},
   };
   const iree_hal_executable_library_v0_t library = {
-      /*.header=*/{},
-      /*.exports=*/
-      {
-          /*.count=*/1,
-          /*.ptrs=*/{},
-          /*.attrs=*/&attributes,
-      },
+      .header = {},
+      .exports =
+          {
+              .count = 1,
+              .ptrs = {},
+              .attrs = &attributes,
+          },
   };
 
   iree_hal_executable_function_info_t output;
@@ -80,34 +104,34 @@ TEST(ExecutableLibraryUtilTest, ReportsFixedWorkgroupLocalMemory) {
 
 TEST(ExecutableLibraryUtilTest, InitializesUnspecifiedParameterFields) {
   const iree_hal_executable_dispatch_parameter_v0_t parameter = {
-      /*.type=*/IREE_HAL_EXECUTABLE_DISPATCH_PARAM_TYPE_V0_BINDING,
-      /*.size=*/sizeof(void*),
-      /*.flags=*/IREE_HAL_EXECUTABLE_DISPATCH_PARAM_FLAG_V0_NONE,
-      /*.name=*/UINT16_MAX,
-      /*.offset=*/0,
+      .type = IREE_HAL_EXECUTABLE_DISPATCH_PARAM_TYPE_V0_BINDING,
+      .size = sizeof(void*),
+      .flags = IREE_HAL_EXECUTABLE_DISPATCH_PARAM_FLAG_V0_NONE,
+      .name = UINT16_MAX,
+      .offset = 0,
   };
   const iree_hal_executable_dispatch_parameter_v0_t* parameters[] = {
       &parameter,
   };
   const iree_hal_executable_dispatch_attrs_v0_t attributes = {
-      /*.flags=*/{},
-      /*.local_memory_pages=*/{},
-      /*.binding_count=*/{},
-      /*.reserved_0=*/{},
-      /*.workgroup_size_x=*/{},
-      /*.workgroup_size_y=*/{},
-      /*.workgroup_size_z=*/{},
-      /*.parameter_count=*/1,
+      .flags = {},
+      .local_memory_pages = {},
+      .binding_count = {},
+      .reserved_0 = {},
+      .workgroup_size_x = {},
+      .workgroup_size_y = {},
+      .workgroup_size_z = {},
+      .parameter_count = 1,
   };
   const iree_hal_executable_library_v0_t library = {
-      /*.header=*/{},
-      /*.exports=*/
-      {
-          /*.count=*/1,
-          /*.ptrs=*/{},
-          /*.attrs=*/&attributes,
-          /*.params=*/parameters,
-      },
+      .header = {},
+      .exports =
+          {
+              .count = 1,
+              .ptrs = {},
+              .attrs = &attributes,
+              .params = parameters,
+          },
   };
 
   iree_hal_executable_function_parameter_t output;

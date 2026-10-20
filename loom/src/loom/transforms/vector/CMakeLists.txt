@@ -35,11 +35,16 @@ loom_cc_library(
     "combine_patterns.c"
   DEPS
     iree::base
+    iree::base::internal
+    loom::analysis::symbolic_expr
     loom::ir
+    loom::ops::index::comparison
     loom::ops::scalar
     loom::ops::vector
     loom::rewrite::pattern_registry
     loom::rewrite::rewriter
+    loom::transforms::cleanup::patterns
+    loom::transforms::conversion::chain
   PUBLIC
 )
 
@@ -112,7 +117,7 @@ loom_cc_library(
     "sink_single_use_reads.c"
   DEPS
     iree::base
-    loom::analysis::motion
+    loom::analysis::read_motion
     loom::ir
     loom::ops::op_defs
     loom::pass::types
@@ -160,6 +165,7 @@ loom_cc_library(
     loom::analysis::matrix_fragment_layout
     loom::analysis::motion
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::combining
     loom::ops::encoding
@@ -181,20 +187,158 @@ loom_cc_library(
 
 loom_cc_library(
   NAME
-    packet_legalization
+    bitstream_packet_legalization
   HDRS
-    "packet_legalization.h"
+    "bitstream_packet_legalization.h"
   SRCS
-    "packet_legalization.c"
+    "bitstream_packet_legalization.c"
+  DEPS
+    ::packet_legalization
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::scalar
+    loom::ops::vector
+    loom::rewrite::rewriter
+    loom::target::legalization
+    loom::util::fact_table
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    cast_packet_legalization
+  HDRS
+    "cast_packet_legalization.h"
+  SRCS
+    "cast_packet_legalization.c"
+  DEPS
+    ::packet_legalization
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::vector
+    loom::rewrite::rewriter
+    loom::target::legalization
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    component_packet_legalization
+  HDRS
+    "component_packet_legalization.h"
+  SRCS
+    "component_packet_legalization.c"
+  DEPS
+    ::packet_legalization
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::op_defs
+    loom::ops::vector
+    loom::rewrite::rewriter
+    loom::target::contract
+    loom::target::legalization
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    packet_boundary_projection
+  HDRS
+    "packet_boundary_projection.h"
+  SRCS
+    "packet_boundary_projection.c"
   DEPS
     iree::base
+    loom::codegen::low::pipeline::pass_environment
+    loom::ir
+    loom::ops::vector
+    loom::target::contract
+    loom::target::facts
+    loom::target::function_version
+    loom::transforms::boundary::projection_core
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    packet_legalization
+  HDRS
+    "packet_insert_legalization.h"
+    "packet_legalization.h"
+    "packet_plan.h"
+  SRCS
+    "packet_insert_legalization.c"
+    "packet_legalization.c"
+    "packet_materialization.c"
+    "packet_materialization.h"
+    "packet_plan.c"
+  DEPS
+    iree::base
+    iree::base::internal
     loom::analysis::motion
     loom::analysis::view_regions
     loom::ir
     loom::ops::buffer
     loom::ops::index
+    loom::ops::scalar
     loom::ops::scf
     loom::ops::vector
+    loom::ops::view
+    loom::rewrite::rewriter
+    loom::target::contract
+    loom::target::legalization
+    loom::util::fact_table
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    reduction_legalization
+  HDRS
+    "reduction_legalization.h"
+  SRCS
+    "reduction_legalization.c"
+  DEPS
+    iree::base
+    loom::ir
+    loom::ops::vector
+    loom::rewrite::rewriter
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    table_legalization
+  HDRS
+    "table_legalization.h"
+  SRCS
+    "table_legalization.c"
+  DEPS
+    iree::base
+    iree::base::internal::arena
+    loom::ir
+    loom::ops::vector
+    loom::rewrite::rewriter
+    loom::target::legalization
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    shape_legalization
+  HDRS
+    "shape_legalization.h"
+  SRCS
+    "shape_legalization.c"
+  DEPS
+    iree::base
+    loom::ir
+    loom::ops::index
+    loom::ops::vector
+    loom::ops::view
     loom::rewrite::rewriter
     loom::target::legalization
   PUBLIC
@@ -204,17 +348,26 @@ loom_cc_library(
   NAME
     target_legalization
   HDRS
+    "memory_legalization.h"
     "target_legalization.h"
   SRCS
+    "memory_legalization.c"
     "target_legalization.c"
   DEPS
+    ::bitstream_packet_legalization
+    ::cast_packet_legalization
+    ::packet_legalization
+    ::reduction_legalization
     ::to_scalar
     iree::base
     loom::ir
     loom::ops::kernel
     loom::ops::scf
     loom::ops::vector
+    loom::rewrite::rewriter
     loom::target::legalization
+    loom::util::fact_table
+    loom::util::numeric_format
   PUBLIC
 )
 

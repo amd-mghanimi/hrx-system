@@ -8,10 +8,31 @@
 
 #include <string.h>
 
-#include "loom/target/launch.h"
-
 enum {
   LOOM_RUN_HAL_DEFAULT_MAX_OUTPUT_ELEMENT_COUNT = 1024,
+};
+
+struct loom_run_hal_dispatch_sequence_direct_step_t {
+  // Retained executable dispatched by this step.
+  iree_hal_executable_t* executable;
+  // Resolved function dispatched by this step.
+  iree_hal_executable_function_t function;
+  // Static dispatch geometry captured during preparation.
+  iree_hal_dispatch_config_t config;
+  // Byte-addressed constants captured in HAL ABI order.
+  uint8_t constants[LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH];
+  // Live byte length of |constants|, including ABI padding.
+  iree_host_size_t constant_byte_length;
+  // First binding in the sequence's flattened binding table.
+  iree_host_size_t binding_offset;
+  // Number of flattened bindings consumed by this step.
+  iree_host_size_t binding_count;
+  // Dense execution epoch ordinal assigned during preparation.
+  iree_host_size_t epoch_ordinal;
+  // Semaphore pool slot signaled by this step.
+  iree_host_size_t signal_semaphore_ordinal;
+  // Number of semaphore pool slots used by the preceding epoch.
+  iree_host_size_t wait_semaphore_count;
 };
 
 void loom_run_hal_invocation_options_initialize(
@@ -19,6 +40,21 @@ void loom_run_hal_invocation_options_initialize(
   *out_options = (loom_run_hal_invocation_options_t){
       .workgroup_count = {1, 1, 1},
   };
+}
+
+bool loom_run_hal_invocation_options_equal(
+    const loom_run_hal_invocation_options_t* lhs,
+    const loom_run_hal_invocation_options_t* rhs) {
+  if (!iree_string_view_equal(lhs->function_name, rhs->function_name) ||
+      lhs->constant_byte_length != rhs->constant_byte_length) {
+    return false;
+  }
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(lhs->workgroup_count); ++i) {
+    if (lhs->workgroup_count[i] != rhs->workgroup_count[i]) {
+      return false;
+    }
+  }
+  return memcmp(lhs->constants, rhs->constants, lhs->constant_byte_length) == 0;
 }
 
 void loom_run_hal_invocation_request_initialize(
@@ -39,7 +75,6 @@ void loom_run_hal_invocation_plan_deinitialize(
     return;
   }
   loom_run_hal_binding_list_deinitialize(&plan->expected_bindings);
-  iree_hal_allocator_release(plan->expected_binding_allocator);
   loom_run_hal_binding_list_deinitialize(&plan->bindings);
   *plan = (loom_run_hal_invocation_plan_t){0};
 }
@@ -78,6 +113,15 @@ void loom_run_hal_dispatch_batch_options_initialize(
       .dispatch_count = 1,
       .command_buffer_mode = IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED |
                              IREE_HAL_COMMAND_BUFFER_MODE_UNRETAINED,
+      .execute_flags =
+          IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME,
+  };
+}
+
+void loom_run_hal_dispatch_sequence_options_initialize(
+    loom_run_hal_dispatch_sequence_options_t* out_options) {
+  *out_options = (loom_run_hal_dispatch_sequence_options_t){
+      .command_buffer_mode = IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
       .execute_flags =
           IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME,
   };
@@ -127,9 +171,23 @@ void loom_run_hal_dispatch_sequence_deinitialize(
   if (sequence == NULL) {
     return;
   }
-  iree_hal_command_buffer_release(sequence->command_buffer);
-  iree_hal_semaphore_release(sequence->semaphore);
+  iree_hal_command_buffer_release(sequence->command_buffer.command_buffer);
+  for (iree_host_size_t i = 0; i < sequence->direct.step_count; ++i) {
+    iree_hal_executable_release(sequence->direct.steps[i].executable);
+  }
+  for (iree_host_size_t i = 0; i < sequence->direct.semaphore_count; ++i) {
+    iree_hal_semaphore_release(sequence->direct.semaphores[i]);
+  }
+  iree_allocator_free(sequence->host_allocator, sequence->direct.storage);
+  iree_hal_semaphore_release(sequence->command_buffer.completion_semaphore);
   *sequence = (loom_run_hal_dispatch_sequence_t){0};
+}
+
+bool loom_run_hal_dispatch_sequence_is_prepared(
+    const loom_run_hal_dispatch_sequence_t* sequence) {
+  return sequence != NULL &&
+         sequence->representation !=
+             LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_NONE;
 }
 
 void loom_run_hal_invocation_result_initialize(
@@ -220,16 +278,15 @@ iree_status_t loom_run_hal_artifact_prepare(
         IREE_STATUS_INVALID_ARGUMENT,
         "HAL artifact was not emitted for the active device target");
   }
-  if (artifact->artifact == NULL ||
-      artifact->artifact->executable_data == NULL ||
-      iree_byte_sequence_length(artifact->artifact->executable_data) == 0) {
+  if (artifact->contents == NULL ||
+      iree_byte_sequence_length(artifact->contents) == 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL artifact has no executable contents");
   }
 
   iree_byte_span_t executable_data = iree_byte_span_empty();
   iree_status_t status = iree_byte_sequence_clone(
-      artifact->artifact->executable_data, host_allocator, &executable_data);
+      artifact->contents, host_allocator, &executable_data);
   if (iree_status_is_ok(status)) {
     iree_hal_executable_load_params_t load_params;
     iree_hal_executable_load_params_initialize(&load_params);
@@ -249,9 +306,6 @@ iree_status_t loom_run_hal_prepared_candidate_prepare(
   loom_run_hal_prepared_candidate_initialize(out_candidate);
   iree_status_t status = loom_run_hal_artifact_prepare(
       runtime, artifact, host_allocator, &out_candidate->executable);
-  if (iree_status_is_ok(status)) {
-    out_candidate->target_bundle = artifact->artifact->target_bundle;
-  }
   if (!iree_status_is_ok(status)) {
     loom_run_hal_prepared_candidate_deinitialize(out_candidate);
   }
@@ -303,9 +357,8 @@ iree_status_t loom_run_hal_binding_list_total_byte_length(
 
 static iree_const_byte_span_t loom_run_hal_dispatch_constants(
     const loom_run_hal_invocation_options_t* options) {
-  return iree_make_const_byte_span(
-      (const uint8_t*)options->constants,
-      options->constant_count * sizeof(options->constants[0]));
+  return iree_make_const_byte_span(options->constants,
+                                   options->constant_byte_length);
 }
 
 static iree_status_t loom_run_hal_select_single_function_name(
@@ -353,11 +406,13 @@ static iree_status_t loom_run_hal_record_dispatch_sequence_edge(
       .target_scope = IREE_HAL_ACCESS_SCOPE_DISPATCH_READ |
                       IREE_HAL_ACCESS_SCOPE_DISPATCH_WRITE,
   };
-  return iree_hal_command_buffer_execution_barrier(
-      command_buffer, IREE_HAL_EXECUTION_STAGE_DISPATCH,
-      IREE_HAL_EXECUTION_STAGE_DISPATCH, IREE_HAL_EXECUTION_BARRIER_FLAG_NONE,
-      /*memory_barrier_count=*/1, &memory_barrier,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/NULL);
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .memory_barrier_count = 1,
+      .memory_barriers = &memory_barrier,
+  };
+  return iree_hal_command_buffer_barrier(command_buffer, &execution_barrier);
 }
 
 static iree_status_t loom_run_hal_record_dispatch_batch(
@@ -506,12 +561,13 @@ static iree_status_t loom_run_hal_record_indirect_dispatch_sequence(
     iree_hal_queue_t* queue, iree_host_size_t step_count,
     const loom_run_hal_dispatch_sequence_step_t* steps,
     iree_host_size_t binding_count,
+    iree_hal_command_buffer_mode_t command_buffer_mode,
     iree_hal_command_buffer_t** out_command_buffer) {
   *out_command_buffer = NULL;
 
   iree_hal_command_buffer_t* command_buffer = NULL;
   iree_status_t status = iree_hal_command_buffer_create(
-      iree_hal_queue_family(queue), IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT,
+      iree_hal_queue_family(queue), command_buffer_mode,
       IREE_HAL_COMMAND_CATEGORY_DISPATCH, binding_count, &command_buffer);
   if (iree_status_is_ok(status)) {
     status = iree_hal_command_buffer_begin(command_buffer);
@@ -576,11 +632,11 @@ static iree_status_t loom_run_hal_queue_dispatch_prepare_options(
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL queue dispatch requires an executable");
   }
-  if (options->constant_count > LOOM_RUN_HAL_MAX_CONSTANT_COUNT) {
+  if (options->constant_byte_length > LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
-        "HAL dispatch constant count %" PRIhsz " exceeds maximum %d",
-        options->constant_count, LOOM_RUN_HAL_MAX_CONSTANT_COUNT);
+        "HAL dispatch constant byte length %" PRIhsz " exceeds maximum %d",
+        options->constant_byte_length, LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH);
   }
   if (binding_count > LOOM_RUN_HAL_MAX_BINDING_COUNT) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
@@ -605,8 +661,8 @@ static iree_status_t loom_run_hal_queue_dispatch_prepare_options(
       options->workgroup_count[0], options->workgroup_count[1],
       options->workgroup_count[2]);
   memcpy(out_dispatch->constants, options->constants,
-         options->constant_count * sizeof(options->constants[0]));
-  out_dispatch->constant_count = options->constant_count;
+         options->constant_byte_length);
+  out_dispatch->constant_byte_length = options->constant_byte_length;
   out_dispatch->binding_count = binding_count;
   out_dispatch->semaphore = semaphore;
   out_dispatch->next_signal_value = 1;
@@ -639,8 +695,7 @@ static iree_status_t loom_run_hal_queue_dispatch_execute_on_queue(
       .values = binding_refs,
   };
   const iree_const_byte_span_t constants = iree_make_const_byte_span(
-      dispatch->constants,
-      dispatch->constant_count * sizeof(dispatch->constants[0]));
+      dispatch->constants, dispatch->constant_byte_length);
   uint64_t signal_value = dispatch->next_signal_value;
   const iree_hal_semaphore_list_t wait_semaphores =
       iree_hal_semaphore_list_empty();
@@ -652,11 +707,11 @@ static iree_status_t loom_run_hal_queue_dispatch_execute_on_queue(
   iree_status_t status = iree_hal_queue_dispatch(
       queue, wait_semaphores, signal_semaphores, dispatch->executable,
       dispatch->function, dispatch->config, constants, bindings,
-      IREE_HAL_DISPATCH_FLAG_BORROW_RESOURCE_LIFETIMES);
+      /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_BORROW_RESOURCE_LIFETIMES);
   if (iree_status_is_ok(status)) {
-    status = iree_hal_semaphore_wait(dispatch->semaphore, signal_value,
-                                     iree_infinite_timeout(),
-                                     IREE_ASYNC_WAIT_FLAG_NONE);
+    status = loom_run_hal_semaphore_wait(dispatch->semaphore, signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE);
   }
   if (iree_status_is_ok(status)) {
     ++dispatch->next_signal_value;
@@ -700,8 +755,7 @@ iree_status_t loom_run_hal_invocation_execute(
 static iree_status_t loom_run_hal_transfer_bindings(
     const loom_run_hal_runtime_t* runtime,
     const iree_hal_semaphore_list_t wait_semaphore_list,
-    iree_hal_buffer_params_t target_buffer_params,
-    loom_run_hal_binding_list_t* binding_list) {
+    iree_hal_pool_t* target_pool, loom_run_hal_binding_list_t* binding_list) {
   if (runtime->device == NULL) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL runtime is not initialized");
@@ -741,8 +795,6 @@ static iree_status_t loom_run_hal_transfer_bindings(
     }
   }
 
-  iree_hal_allocator_t* device_allocator =
-      iree_hal_device_allocator(runtime->device);
   iree_tooling_buffer_binding_t
       staged_bindings[LOOM_RUN_HAL_MAX_BINDING_COUNT] = {0};
   iree_hal_transfer_operation_t
@@ -755,16 +807,18 @@ static iree_status_t loom_run_hal_transfer_bindings(
     target->kind = source->kind;
     if (source->buffer_view != NULL) {
       status = iree_hal_buffer_view_create_uninitialized_like(
-          device_allocator, target_buffer_params, source->buffer_view,
+          target_pool, /*min_alignment=*/0, source->buffer_view,
           &target->buffer_view);
       if (iree_status_is_ok(status)) {
         target->buffer = iree_hal_buffer_view_buffer(target->buffer_view);
         iree_hal_buffer_retain(target->buffer);
       }
     } else {
-      status = iree_hal_allocator_allocate_buffer(
-          device_allocator, target_buffer_params, source->byte_length,
-          &target->buffer);
+      status = iree_hal_pool_allocate_buffer(
+          target_pool,
+          iree_hal_make_pool_reservation_request(
+              iree_max(source->byte_length, 1u), /*min_alignment=*/0),
+          iree_infinite_timeout(), &target->buffer);
     }
     if (iree_status_is_ok(status)) {
       target->byte_offset = 0;
@@ -802,14 +856,14 @@ static iree_status_t loom_run_hal_transfer_bindings(
         .semaphores = &completion_semaphore,
         .payload_values = &completion_value,
     };
-    status = iree_hal_queue_transfer(runtime->transfer_queue,
-                                     wait_semaphore_list, signal_semaphore_list,
-                                     binding_list->count, transfer_operations);
+    status = iree_hal_queue_transfer(
+        runtime->transfer_queue, wait_semaphore_list, signal_semaphore_list,
+        binding_list->count, transfer_operations, /*barriers=*/NULL);
   }
   if (iree_status_is_ok(status)) {
-    status = iree_hal_semaphore_wait(completion_semaphore, completion_value,
-                                     iree_infinite_timeout(),
-                                     IREE_ASYNC_WAIT_FLAG_NONE);
+    status = loom_run_hal_semaphore_wait(completion_semaphore, completion_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE);
   }
   if (iree_status_is_ok(status)) {
     for (iree_host_size_t i = 0; i < binding_list->count; ++i) {
@@ -830,27 +884,14 @@ iree_status_t loom_run_hal_transfer_bindings_to_host(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     loom_run_hal_binding_list_t* binding_list) {
   if (binding_list->count == 0) {
-    return loom_run_hal_transfer_bindings(runtime, wait_semaphore_list,
-                                          (iree_hal_buffer_params_t){0},
-                                          binding_list);
+    return iree_ok_status();
   }
   if (runtime->transfer_queue == NULL) {
     return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                             "HAL device has no provisioned transfer queue");
   }
-  const iree_hal_queue_family_ordinal_t transfer_family_ordinal =
-      iree_hal_queue_family_ordinal(
-          iree_hal_queue_family(runtime->transfer_queue));
-  const iree_hal_buffer_params_t host_buffer_params = {
-      .usage = IREE_HAL_BUFFER_USAGE_TRANSFER | IREE_HAL_BUFFER_USAGE_MAPPING,
-      .access = IREE_HAL_MEMORY_ACCESS_ALL,
-      .type =
-          IREE_HAL_MEMORY_TYPE_HOST_LOCAL | IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE,
-      .queue_family_affinity =
-          iree_hal_make_queue_family_affinity(transfer_family_ordinal),
-  };
   return loom_run_hal_transfer_bindings(runtime, wait_semaphore_list,
-                                        host_buffer_params, binding_list);
+                                        runtime->staging_pool, binding_list);
 }
 
 static iree_status_t loom_run_hal_binding_specs_validate(
@@ -871,10 +912,8 @@ static iree_status_t loom_run_hal_binding_specs_validate(
 }
 
 static iree_status_t loom_run_hal_parse_binding_specs(
-    const loom_run_hal_binding_specs_t* specs,
-    iree_hal_buffer_params_t buffer_params,
-    iree_hal_allocator_t* device_allocator, iree_allocator_t host_allocator,
-    loom_run_hal_binding_list_t* out_list) {
+    const loom_run_hal_binding_specs_t* specs, iree_hal_pool_t* pool,
+    iree_allocator_t host_allocator, loom_run_hal_binding_list_t* out_list) {
   IREE_RETURN_IF_ERROR(
       loom_run_hal_binding_specs_validate(specs, IREE_SV("HAL")));
   IREE_RETURN_IF_ERROR(loom_run_hal_binding_list_initialize_count(
@@ -884,9 +923,9 @@ static iree_status_t loom_run_hal_parse_binding_specs(
       iree_tooling_value_io_context_allocate(host_allocator, &context);
   for (iree_host_size_t i = 0; iree_status_is_ok(status) && i < specs->count;
        ++i) {
-    status = iree_tooling_buffer_binding_spec_parse(
-        context, specs->values[i], buffer_params, device_allocator,
-        &out_list->values[i]);
+    status = iree_tooling_buffer_binding_spec_parse(context, specs->values[i],
+                                                    pool, /*min_alignment=*/0,
+                                                    &out_list->values[i]);
   }
   iree_tooling_value_io_context_free(context);
   if (!iree_status_is_ok(status)) {
@@ -952,14 +991,14 @@ static iree_status_t loom_run_hal_compare_binding_bytes(
   bool actual_mapping_active = false;
   iree_status_t status = iree_hal_buffer_map_range(
       expected->buffer, IREE_HAL_MAPPING_MODE_SCOPED,
-      IREE_HAL_MEMORY_ACCESS_READ, expected->byte_offset, expected->byte_length,
-      &expected_mapping);
+      IREE_HAL_MEMORY_ACCESS_READ, IREE_HAL_BUFFER_MAP_FLAG_NONE,
+      expected->byte_offset, expected->byte_length, &expected_mapping);
   if (iree_status_is_ok(status)) {
     expected_mapping_active = true;
     status = iree_hal_buffer_map_range(
         actual->buffer, IREE_HAL_MAPPING_MODE_SCOPED,
-        IREE_HAL_MEMORY_ACCESS_READ, actual->byte_offset, actual->byte_length,
-        &actual_mapping);
+        IREE_HAL_MEMORY_ACCESS_READ, IREE_HAL_BUFFER_MAP_FLAG_NONE,
+        actual->byte_offset, actual->byte_length, &actual_mapping);
     actual_mapping_active = iree_status_is_ok(status);
   }
   if (iree_status_is_ok(status) &&
@@ -1041,11 +1080,13 @@ static iree_status_t loom_run_hal_process_invocation_bindings(
 
 static iree_status_t loom_run_hal_invocation_plan_validate(
     const loom_run_hal_invocation_plan_t* plan) {
-  if (plan->options.constant_count > LOOM_RUN_HAL_MAX_CONSTANT_COUNT) {
-    return iree_make_status(
-        IREE_STATUS_OUT_OF_RANGE,
-        "HAL dispatch constant count %" PRIhsz " exceeds maximum %d",
-        plan->options.constant_count, LOOM_RUN_HAL_MAX_CONSTANT_COUNT);
+  if (plan->options.constant_byte_length >
+      LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "HAL dispatch constant byte length %" PRIhsz
+                            " exceeds maximum %d",
+                            plan->options.constant_byte_length,
+                            LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH);
   }
   if (plan->bindings.count > LOOM_RUN_HAL_MAX_BINDING_COUNT) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
@@ -1064,33 +1105,6 @@ static iree_status_t loom_run_hal_invocation_plan_validate(
   return iree_ok_status();
 }
 
-static iree_status_t loom_run_hal_prepared_candidate_validate_dispatch(
-    const loom_run_hal_prepared_candidate_t* candidate,
-    const loom_run_hal_invocation_plan_t* plan) {
-  const loom_target_bundle_t* target_bundle = candidate->target_bundle;
-  if (target_bundle == NULL) {
-    return iree_ok_status();
-  }
-  if (target_bundle->snapshot == NULL || target_bundle->export_plan == NULL) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "HAL prepared candidate target bundle is missing "
-                            "snapshot or export plan");
-  }
-  if (target_bundle->export_plan->abi_kind != LOOM_TARGET_ABI_HAL_KERNEL) {
-    return iree_make_status(
-        IREE_STATUS_INVALID_ARGUMENT,
-        "HAL prepared candidate target bundle must use HAL kernel ABI");
-  }
-  const loom_target_dispatch_workgroup_count_t workgroup_count = {
-      .x = plan->options.workgroup_count[0],
-      .y = plan->options.workgroup_count[1],
-      .z = plan->options.workgroup_count[2],
-  };
-  return loom_target_validate_hal_dispatch_workgroup_count(
-      target_bundle->snapshot, &target_bundle->export_plan->hal_kernel,
-      &workgroup_count);
-}
-
 iree_status_t loom_run_hal_queue_dispatch_prepare(
     const loom_run_hal_runtime_t* runtime,
     const loom_run_hal_prepared_candidate_t* candidate,
@@ -1102,8 +1116,6 @@ iree_status_t loom_run_hal_queue_dispatch_prepare(
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL prepared candidate requires an executable");
   }
-  IREE_RETURN_IF_ERROR(
-      loom_run_hal_prepared_candidate_validate_dispatch(candidate, plan));
   if (runtime->device == NULL) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL runtime is not initialized");
@@ -1180,8 +1192,6 @@ iree_status_t loom_run_hal_dispatch_batch_prepare_from_binding_ring(
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL prepared candidate requires an executable");
   }
-  IREE_RETURN_IF_ERROR(
-      loom_run_hal_prepared_candidate_validate_dispatch(candidate, plan));
   if (runtime->device == NULL || runtime->dispatch_queue == NULL) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL runtime is not initialized");
@@ -1293,8 +1303,6 @@ static iree_status_t loom_run_hal_dispatch_sequence_plan_ring_validate(
                                 ring_index, step_index);
       }
       IREE_RETURN_IF_ERROR(loom_run_hal_invocation_plan_validate(plan));
-      IREE_RETURN_IF_ERROR(loom_run_hal_prepared_candidate_validate_dispatch(
-          candidates[step_index], plan));
     }
   }
   return iree_ok_status();
@@ -1369,57 +1377,252 @@ iree_status_t loom_run_hal_dispatch_sequence_batch_prepare_from_plan_ring(
   return status;
 }
 
-iree_status_t loom_run_hal_dispatch_sequence_prepare(
-    const loom_run_hal_runtime_t* runtime, iree_host_size_t step_count,
+static iree_status_t loom_run_hal_dispatch_sequence_validate(
+    iree_host_size_t step_count,
     const loom_run_hal_dispatch_sequence_step_t* steps,
-    loom_run_hal_dispatch_sequence_t* out_sequence) {
-  loom_run_hal_dispatch_sequence_initialize(out_sequence);
-  if (runtime->device == NULL || runtime->dispatch_queue == NULL) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "HAL runtime is not initialized");
-  }
+    iree_host_size_t* out_binding_count,
+    loom_run_hal_dispatch_sequence_representation_t* out_representation) {
+  *out_binding_count = 0;
+  *out_representation = LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_NONE;
   if (step_count == 0) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL dispatch sequence must contain a step");
   }
+  if (steps == NULL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL dispatch sequence steps are required");
+  }
 
   iree_host_size_t binding_count = 0;
   for (iree_host_size_t step_index = 0; step_index < step_count; ++step_index) {
-    IREE_ASSERT(steps[step_index].candidate != NULL);
-    IREE_ASSERT(steps[step_index].candidate->executable != NULL);
-    IREE_ASSERT(steps[step_index].binding_count == 0 ||
-                steps[step_index].binding_lengths != NULL);
-    if (step_index != 0 && steps[step_index].execution_epoch <
-                               steps[step_index - 1].execution_epoch) {
+    const loom_run_hal_dispatch_sequence_step_t* step = &steps[step_index];
+    if (step->candidate == NULL || step->candidate->executable == NULL) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "HAL dispatch sequence step %" PRIhsz
+                              " requires a prepared executable",
+                              step_index);
+    }
+    if (step->binding_count != 0 && step->binding_lengths == NULL) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "HAL dispatch sequence step %" PRIhsz
+                              " requires binding lengths",
+                              step_index);
+    }
+    if (step->options.constant_byte_length >
+        LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH) {
+      return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "HAL dispatch sequence step %" PRIhsz
+                              " constant byte length exceeds capacity",
+                              step_index);
+    }
+    if (step_index != 0 &&
+        step->execution_epoch < steps[step_index - 1].execution_epoch) {
       return iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
           "HAL dispatch sequence epoch decreases at step %" PRIhsz, step_index);
     }
-    if (steps[step_index].binding_count > LOOM_RUN_HAL_MAX_BINDING_COUNT) {
+    if (step->binding_count > LOOM_RUN_HAL_MAX_BINDING_COUNT) {
       return iree_make_status(
           IREE_STATUS_OUT_OF_RANGE,
           "HAL dispatch sequence step binding count exceeds capacity");
     }
-    if (!iree_host_size_checked_add(
-            binding_count, steps[step_index].binding_count, &binding_count) ||
+    const loom_run_hal_dispatch_sequence_representation_t representation =
+        step->representation;
+    if (representation !=
+            LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_COMMAND_BUFFER &&
+        representation !=
+            LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_DIRECT) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "HAL dispatch sequence step %" PRIhsz
+                              " has no submission representation",
+                              step_index);
+    }
+    if (*out_representation ==
+        LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_NONE) {
+      *out_representation = representation;
+    } else if (*out_representation != representation) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "HAL dispatch sequence mixes direct array programs and indirect "
+          "HAL kernels");
+    }
+
+    if (!iree_host_size_checked_add(binding_count, step->binding_count,
+                                    &binding_count) ||
         binding_count > UINT32_C(0x00FFFFFF)) {
       return iree_make_status(
           IREE_STATUS_OUT_OF_RANGE,
-          "HAL dispatch sequence indirect binding count exceeds slot limits");
+          "HAL dispatch sequence binding count exceeds slot limits");
     }
   }
+  *out_binding_count = binding_count;
+  return iree_ok_status();
+}
 
-  iree_status_t status = loom_run_hal_record_indirect_dispatch_sequence(
-      runtime->dispatch_queue, step_count, steps, binding_count,
-      &out_sequence->command_buffer);
+static iree_status_t loom_run_hal_dispatch_sequence_prepare_direct(
+    iree_hal_device_t* device, iree_host_size_t step_count,
+    const loom_run_hal_dispatch_sequence_step_t* steps,
+    iree_host_size_t binding_count, iree_allocator_t host_allocator,
+    loom_run_hal_dispatch_sequence_t* out_sequence) {
+  iree_host_size_t epoch_count = 1;
+  iree_host_size_t current_epoch_step_count = 1;
+  iree_host_size_t semaphore_count = 1;
+  for (iree_host_size_t step_index = 1; step_index < step_count; ++step_index) {
+    if (steps[step_index].execution_epoch ==
+        steps[step_index - 1].execution_epoch) {
+      ++current_epoch_step_count;
+    } else {
+      semaphore_count = iree_max(semaphore_count, current_epoch_step_count);
+      current_epoch_step_count = 1;
+      ++epoch_count;
+    }
+  }
+  semaphore_count = iree_max(semaphore_count, current_epoch_step_count);
+
+  iree_host_size_t storage_size = 0;
+  iree_host_size_t steps_offset = 0;
+  iree_host_size_t semaphores_offset = 0;
+  iree_host_size_t payload_values_offset = 0;
+  iree_host_size_t binding_lengths_offset = 0;
+  iree_host_size_t binding_refs_offset = 0;
+  IREE_RETURN_IF_ERROR(IREE_STRUCT_LAYOUT(
+      0, &storage_size,
+      IREE_STRUCT_FIELD(step_count,
+                        loom_run_hal_dispatch_sequence_direct_step_t,
+                        &steps_offset),
+      IREE_STRUCT_FIELD(semaphore_count, iree_hal_semaphore_t*,
+                        &semaphores_offset),
+      IREE_STRUCT_FIELD(semaphore_count, uint64_t, &payload_values_offset),
+      IREE_STRUCT_FIELD(binding_count, iree_device_size_t,
+                        &binding_lengths_offset),
+      IREE_STRUCT_FIELD(binding_count, iree_hal_buffer_ref_t,
+                        &binding_refs_offset)));
+
+  out_sequence->host_allocator = host_allocator;
+  uint8_t* storage = NULL;
+  iree_status_t status =
+      iree_allocator_malloc(host_allocator, storage_size, (void**)&storage);
   if (iree_status_is_ok(status)) {
+    memset(storage, 0, storage_size);
+    out_sequence->direct.storage = storage;
+    out_sequence->direct.steps =
+        (loom_run_hal_dispatch_sequence_direct_step_t*)(storage + steps_offset);
+    out_sequence->direct.semaphores =
+        (iree_hal_semaphore_t**)(storage + semaphores_offset);
+    out_sequence->direct.payload_values =
+        (uint64_t*)(storage + payload_values_offset);
+    out_sequence->direct.binding_lengths =
+        (iree_device_size_t*)(storage + binding_lengths_offset);
+    out_sequence->direct.binding_refs =
+        (iree_hal_buffer_ref_t*)(storage + binding_refs_offset);
+    out_sequence->direct.step_count = step_count;
+    out_sequence->direct.semaphore_count = semaphore_count;
+    out_sequence->direct.epoch_count = epoch_count;
+  }
+
+  for (iree_host_size_t semaphore_index = 0;
+       iree_status_is_ok(status) && semaphore_index < semaphore_count;
+       ++semaphore_index) {
     status = iree_hal_semaphore_create(
-        runtime->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+        device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
         /*initial_value=*/0, IREE_HAL_SEMAPHORE_FLAG_DEFAULT,
-        &out_sequence->semaphore);
+        &out_sequence->direct.semaphores[semaphore_index]);
+  }
+
+  iree_host_size_t binding_offset = 0;
+  iree_host_size_t current_epoch_ordinal = 0;
+  iree_host_size_t current_epoch_step_ordinal = 0;
+  iree_host_size_t previous_epoch_count = 0;
+  for (iree_host_size_t step_index = 0;
+       iree_status_is_ok(status) && step_index < step_count; ++step_index) {
+    const loom_run_hal_dispatch_sequence_step_t* source = &steps[step_index];
+    if (step_index != 0 &&
+        source->execution_epoch != steps[step_index - 1].execution_epoch) {
+      previous_epoch_count = current_epoch_step_ordinal;
+      current_epoch_step_ordinal = 0;
+      ++current_epoch_ordinal;
+    }
+
+    loom_run_hal_dispatch_sequence_direct_step_t* target =
+        &out_sequence->direct.steps[step_index];
+    status = loom_run_hal_lookup_dispatch_function(
+        source->candidate->executable, &source->options, &target->function);
+    if (!iree_status_is_ok(status)) {
+      break;
+    }
+
+    target->executable = source->candidate->executable;
+    iree_hal_executable_retain(target->executable);
+    target->config = iree_hal_make_static_dispatch_config(
+        source->options.workgroup_count[0], source->options.workgroup_count[1],
+        source->options.workgroup_count[2]);
+    memcpy(target->constants, source->options.constants,
+           source->options.constant_byte_length);
+    target->constant_byte_length = source->options.constant_byte_length;
+    target->binding_offset = binding_offset;
+    target->binding_count = source->binding_count;
+    target->epoch_ordinal = current_epoch_ordinal;
+    target->signal_semaphore_ordinal = current_epoch_step_ordinal++;
+    target->wait_semaphore_count = previous_epoch_count;
+    if (source->binding_count != 0) {
+      memcpy(&out_sequence->direct.binding_lengths[binding_offset],
+             source->binding_lengths,
+             source->binding_count * sizeof(source->binding_lengths[0]));
+    }
+    binding_offset += source->binding_count;
   }
   if (iree_status_is_ok(status)) {
-    out_sequence->next_signal_value = 1;
+    out_sequence->direct.terminal_step_count = current_epoch_step_ordinal;
+    out_sequence->direct.next_epoch_signal_value = 1;
+  }
+  return status;
+}
+
+iree_status_t loom_run_hal_dispatch_sequence_prepare(
+    const loom_run_hal_runtime_t* runtime, iree_host_size_t step_count,
+    const loom_run_hal_dispatch_sequence_step_t* steps,
+    const loom_run_hal_dispatch_sequence_options_t* options,
+    iree_allocator_t host_allocator,
+    loom_run_hal_dispatch_sequence_t* out_sequence) {
+  loom_run_hal_dispatch_sequence_initialize(out_sequence);
+  iree_host_size_t binding_count = 0;
+  loom_run_hal_dispatch_sequence_representation_t representation =
+      LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_NONE;
+  IREE_RETURN_IF_ERROR(loom_run_hal_dispatch_sequence_validate(
+      step_count, steps, &binding_count, &representation));
+  if (runtime == NULL || runtime->device == NULL ||
+      runtime->dispatch_queue == NULL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL runtime is not initialized");
+  }
+  if (options == NULL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL dispatch sequence options are required");
+  }
+
+  out_sequence->representation = representation;
+  iree_status_t status = iree_ok_status();
+  if (representation == LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_DIRECT) {
+    status = loom_run_hal_dispatch_sequence_prepare_direct(
+        runtime->device, step_count, steps, binding_count, host_allocator,
+        out_sequence);
+  } else {
+    status = loom_run_hal_record_indirect_dispatch_sequence(
+        runtime->dispatch_queue, step_count, steps, binding_count,
+        options->command_buffer_mode,
+        &out_sequence->command_buffer.command_buffer);
+    if (iree_status_is_ok(status)) {
+      status = iree_hal_semaphore_create(
+          runtime->device, IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
+          /*initial_value=*/0, IREE_HAL_SEMAPHORE_FLAG_DEFAULT,
+          &out_sequence->command_buffer.completion_semaphore);
+    }
+    if (iree_status_is_ok(status)) {
+      out_sequence->command_buffer.next_signal_value = 1;
+      out_sequence->command_buffer.execute_flags = options->execute_flags;
+    }
+  }
+  if (iree_status_is_ok(status)) {
     out_sequence->binding_count = binding_count;
   } else {
     loom_run_hal_dispatch_sequence_deinitialize(out_sequence);
@@ -1427,35 +1630,212 @@ iree_status_t loom_run_hal_dispatch_sequence_prepare(
   return status;
 }
 
+static iree_status_t loom_run_hal_dispatch_sequence_validate_binding_table(
+    loom_run_hal_dispatch_sequence_t* sequence,
+    iree_hal_buffer_binding_table_t binding_table) {
+  if (binding_table.count != sequence->binding_count) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL dispatch sequence binding count %" PRIhsz
+                            " must match prepared binding count %" PRIhsz,
+                            binding_table.count, sequence->binding_count);
+  }
+  if (binding_table.count != 0 && binding_table.bindings == NULL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL dispatch sequence bindings are required");
+  }
+  if (sequence->representation !=
+      LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_DIRECT) {
+    return iree_ok_status();
+  }
+  for (iree_host_size_t binding_index = 0; binding_index < binding_table.count;
+       ++binding_index) {
+    const iree_hal_buffer_binding_t binding =
+        binding_table.bindings[binding_index];
+    if (binding.buffer == NULL) {
+      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                              "HAL dispatch sequence binding %" PRIhsz
+                              " has no buffer",
+                              binding_index);
+    }
+    const iree_hal_buffer_ref_t indirect_ref =
+        iree_hal_make_indirect_buffer_ref(
+            (uint32_t)binding_index, /*offset=*/0,
+            sequence->direct.binding_lengths[binding_index]);
+    iree_hal_buffer_ref_t* resolved_ref =
+        &sequence->direct.binding_refs[binding_index];
+    IREE_RETURN_IF_ERROR(iree_hal_buffer_binding_table_resolve_ref(
+        binding_table, indirect_ref, resolved_ref));
+    IREE_RETURN_IF_ERROR(iree_hal_buffer_validate_range(
+        resolved_ref->buffer, resolved_ref->offset, resolved_ref->length));
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t loom_run_hal_dispatch_sequence_wait_direct_frontier(
+    const loom_run_hal_dispatch_sequence_t* sequence,
+    iree_host_size_t semaphore_count, iree_status_t status) {
+  for (iree_host_size_t semaphore_index = 0; semaphore_index < semaphore_count;
+       ++semaphore_index) {
+    status = iree_status_join(
+        status, loom_run_hal_semaphore_wait(
+                    sequence->direct.semaphores[semaphore_index],
+                    sequence->direct.payload_values[semaphore_index],
+                    iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
+  }
+  return status;
+}
+
+static iree_status_t loom_run_hal_dispatch_sequence_execute_direct(
+    iree_hal_queue_t* queue, loom_run_hal_dispatch_sequence_t* sequence,
+    iree_hal_buffer_binding_table_t binding_table) {
+  const uint64_t first_epoch_value = sequence->direct.next_epoch_signal_value;
+  if (first_epoch_value > IREE_HAL_SEMAPHORE_MAX_VALUE ||
+      sequence->direct.epoch_count >
+          IREE_HAL_SEMAPHORE_MAX_VALUE - first_epoch_value + 1) {
+    return iree_make_status(
+        IREE_STATUS_RESOURCE_EXHAUSTED,
+        "HAL dispatch sequence exhausted reusable timeline payload values");
+  }
+  // Reserve the complete range before admission so a failed attempt never
+  // reuses a payload that an accepted operation may still publish.
+  sequence->direct.next_epoch_signal_value += sequence->direct.epoch_count;
+
+  iree_host_size_t current_wait_semaphore_count =
+      sequence->direct.predecessor_semaphore_count;
+  iree_host_size_t accepted_epoch_step_count = 0;
+  uint64_t accepted_epoch_signal_value = 0;
+  iree_status_t status = iree_ok_status();
+  for (iree_host_size_t step_index = 0;
+       iree_status_is_ok(status) && step_index < sequence->direct.step_count;
+       ++step_index) {
+    const loom_run_hal_dispatch_sequence_direct_step_t* step =
+        &sequence->direct.steps[step_index];
+    const uint64_t step_signal_value = first_epoch_value + step->epoch_ordinal;
+
+    iree_hal_semaphore_list_t wait_semaphores = iree_hal_semaphore_list_empty();
+    const iree_host_size_t wait_semaphore_count =
+        step->wait_semaphore_count != 0
+            ? step->wait_semaphore_count
+            : sequence->direct.predecessor_semaphore_count;
+    if (step->signal_semaphore_ordinal == 0) {
+      current_wait_semaphore_count = wait_semaphore_count;
+      accepted_epoch_step_count = 0;
+      if (step->wait_semaphore_count != 0) {
+        const uint64_t wait_value = step_signal_value - 1;
+        for (iree_host_size_t i = 0; i < wait_semaphore_count; ++i) {
+          sequence->direct.payload_values[i] = wait_value;
+        }
+      }
+    }
+    if (wait_semaphore_count != 0) {
+      wait_semaphores = (iree_hal_semaphore_list_t){
+          .count = wait_semaphore_count,
+          .semaphores = sequence->direct.semaphores,
+          .payload_values = sequence->direct.payload_values,
+      };
+    }
+    iree_hal_semaphore_t* signal_semaphore =
+        sequence->direct.semaphores[step->signal_semaphore_ordinal];
+    uint64_t signal_value = step_signal_value;
+    const iree_hal_semaphore_list_t signal_semaphores = {
+        .count = 1,
+        .semaphores = &signal_semaphore,
+        .payload_values = &signal_value,
+    };
+    status = iree_hal_queue_dispatch(
+        queue, wait_semaphores, signal_semaphores, step->executable,
+        step->function, step->config,
+        iree_make_const_byte_span(step->constants, step->constant_byte_length),
+        (iree_hal_buffer_ref_list_t){
+            .count = step->binding_count,
+            .values = &sequence->direct.binding_refs[step->binding_offset],
+        },
+        /*barriers=*/NULL, IREE_HAL_DISPATCH_FLAG_BORROW_RESOURCE_LIFETIMES);
+    if (iree_status_is_ok(status)) {
+      accepted_epoch_step_count = step->signal_semaphore_ordinal + 1;
+      accepted_epoch_signal_value = step_signal_value;
+    }
+  }
+
+  if (!iree_status_is_ok(status)) {
+    // Accepted slots supersede the same slots in the captured wait frontier.
+    // Unaccepted slots retain their prior payloads, producing the exact mixed
+    // frontier whose completion releases every borrowed submission resource.
+    for (iree_host_size_t i = 0; i < accepted_epoch_step_count; ++i) {
+      sequence->direct.payload_values[i] = accepted_epoch_signal_value;
+    }
+    sequence->direct.predecessor_semaphore_count =
+        iree_max(current_wait_semaphore_count, accepted_epoch_step_count);
+    status = loom_run_hal_dispatch_sequence_wait_direct_frontier(
+        sequence, sequence->direct.predecessor_semaphore_count, status);
+    return status;
+  }
+
+  const uint64_t terminal_signal_value =
+      first_epoch_value + sequence->direct.epoch_count - 1;
+  // The terminal epoch is both this call's host completion and the device
+  // predecessor captured by the first epoch of the next execution.
+  for (iree_host_size_t i = 0; i < sequence->direct.terminal_step_count; ++i) {
+    sequence->direct.payload_values[i] = terminal_signal_value;
+  }
+  sequence->direct.predecessor_semaphore_count =
+      sequence->direct.terminal_step_count;
+  status = loom_run_hal_dispatch_sequence_wait_direct_frontier(
+      sequence, sequence->direct.predecessor_semaphore_count, iree_ok_status());
+  return status;
+}
+
 iree_status_t loom_run_hal_dispatch_sequence_execute(
     const loom_run_hal_runtime_t* runtime,
     loom_run_hal_dispatch_sequence_t* sequence,
     iree_hal_buffer_binding_table_t binding_table) {
-  IREE_ASSERT(runtime->device != NULL);
-  IREE_ASSERT(runtime->dispatch_queue != NULL);
-  IREE_ASSERT(sequence->command_buffer != NULL);
-  IREE_ASSERT(sequence->semaphore != NULL);
-  IREE_ASSERT(binding_table.count == sequence->binding_count);
+  if (runtime == NULL || runtime->device == NULL ||
+      runtime->dispatch_queue == NULL) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL runtime is not initialized");
+  }
+  if (!loom_run_hal_dispatch_sequence_is_prepared(sequence)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "HAL dispatch sequence is not prepared");
+  }
+  IREE_RETURN_IF_ERROR(loom_run_hal_dispatch_sequence_validate_binding_table(
+      sequence, binding_table));
+  if (sequence->representation ==
+      LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_DIRECT) {
+    return loom_run_hal_dispatch_sequence_execute_direct(
+        runtime->dispatch_queue, sequence, binding_table);
+  }
+  IREE_ASSERT(sequence->representation ==
+              LOOM_RUN_HAL_DISPATCH_SEQUENCE_REPRESENTATION_COMMAND_BUFFER);
+  IREE_ASSERT(sequence->command_buffer.command_buffer != NULL);
+  IREE_ASSERT(sequence->command_buffer.completion_semaphore != NULL);
 
-  uint64_t signal_value = sequence->next_signal_value;
+  uint64_t signal_value = sequence->command_buffer.next_signal_value;
+  uint64_t wait_value = signal_value - 1;
   const iree_hal_semaphore_list_t wait_semaphores =
-      iree_hal_semaphore_list_empty();
+      signal_value == 1
+          ? iree_hal_semaphore_list_empty()
+          : (iree_hal_semaphore_list_t){
+                .count = 1,
+                .semaphores = &sequence->command_buffer.completion_semaphore,
+                .payload_values = &wait_value,
+            };
   const iree_hal_semaphore_list_t signal_semaphores = {
       .count = 1,
-      .semaphores = &sequence->semaphore,
+      .semaphores = &sequence->command_buffer.completion_semaphore,
       .payload_values = &signal_value,
   };
   iree_status_t status = iree_hal_queue_execute(
       runtime->dispatch_queue, wait_semaphores, signal_semaphores,
-      sequence->command_buffer, binding_table,
-      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME);
+      sequence->command_buffer.command_buffer, binding_table,
+      sequence->command_buffer.execute_flags);
   if (iree_status_is_ok(status)) {
-    status = iree_hal_semaphore_wait(sequence->semaphore, signal_value,
-                                     iree_infinite_timeout(),
-                                     IREE_ASYNC_WAIT_FLAG_NONE);
+    status = loom_run_hal_semaphore_wait(
+        sequence->command_buffer.completion_semaphore, signal_value,
+        iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE);
   }
   if (iree_status_is_ok(status)) {
-    ++sequence->next_signal_value;
+    ++sequence->command_buffer.next_signal_value;
   }
   return status;
 }
@@ -1484,9 +1864,9 @@ iree_status_t loom_run_hal_dispatch_batch_execute(
       batch->command_buffer, iree_hal_buffer_binding_table_empty(),
       batch->execute_flags);
   if (iree_status_is_ok(status)) {
-    status = iree_hal_semaphore_wait(batch->semaphore, signal_value,
-                                     iree_infinite_timeout(),
-                                     IREE_ASYNC_WAIT_FLAG_NONE);
+    status = loom_run_hal_semaphore_wait(batch->semaphore, signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE);
   }
   if (iree_status_is_ok(status)) {
     ++batch->next_signal_value;
@@ -1535,11 +1915,11 @@ iree_status_t loom_run_hal_invocation_plan_prepare_from_specs(
       loom_run_hal_binding_specs_validate(bindings, IREE_SV("HAL")));
   IREE_RETURN_IF_ERROR(loom_run_hal_binding_specs_validate(
       expected_bindings, IREE_SV("expected HAL")));
-  if (options->constant_count > LOOM_RUN_HAL_MAX_CONSTANT_COUNT) {
+  if (options->constant_byte_length > LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
-        "HAL dispatch constant count %" PRIhsz " exceeds maximum %d",
-        options->constant_count, LOOM_RUN_HAL_MAX_CONSTANT_COUNT);
+        "HAL dispatch constant byte length %" PRIhsz " exceeds maximum %d",
+        options->constant_byte_length, LOOM_RUN_HAL_MAX_CONSTANT_BYTE_LENGTH);
   }
   if (expected_bindings->count != 0 &&
       expected_bindings->count != bindings->count) {
@@ -1553,54 +1933,23 @@ iree_status_t loom_run_hal_invocation_plan_prepare_from_specs(
                             "HAL runtime is not initialized");
   }
 
-  iree_hal_buffer_params_t input_staging_params = {0};
   if (bindings->count != 0) {
     if (runtime->transfer_queue == NULL) {
       return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
                               "HAL device has no provisioned transfer queue");
     }
-    const iree_hal_queue_family_ordinal_t transfer_family_ordinal =
-        iree_hal_queue_family_ordinal(
-            iree_hal_queue_family(runtime->transfer_queue));
-    input_staging_params = (iree_hal_buffer_params_t){
-        .usage = IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE,
-        .access = IREE_HAL_MEMORY_ACCESS_ALL,
-        .type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL |
-                IREE_HAL_MEMORY_TYPE_DEVICE_VISIBLE,
-        .queue_family_affinity =
-            iree_hal_make_queue_family_affinity(transfer_family_ordinal),
-    };
   }
   iree_status_t status = loom_run_hal_parse_binding_specs(
-      bindings, input_staging_params,
-      iree_hal_device_allocator(runtime->device), allocator,
-      &out_plan->bindings);
+      bindings, runtime->staging_pool, allocator, &out_plan->bindings);
   if (iree_status_is_ok(status) && bindings->count != 0) {
-    const iree_hal_buffer_params_t device_buffer_params = {
-        .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
-        .access = IREE_HAL_MEMORY_ACCESS_ALL,
-        .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-        .queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY,
-    };
     status = loom_run_hal_transfer_bindings(
-        runtime, iree_hal_semaphore_list_empty(), device_buffer_params,
+        runtime, iree_hal_semaphore_list_empty(), runtime->device_pool,
         &out_plan->bindings);
   }
   if (iree_status_is_ok(status) && expected_bindings->count != 0) {
-    status =
-        iree_hal_allocator_create_heap(IREE_SV("heap"), allocator, allocator,
-                                       &out_plan->expected_binding_allocator);
-  }
-  if (iree_status_is_ok(status) && expected_bindings->count != 0) {
-    const iree_hal_buffer_params_t expected_buffer_params = {
-        .usage = IREE_HAL_BUFFER_USAGE_MAPPING,
-        .access = IREE_HAL_MEMORY_ACCESS_ALL,
-        .type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL,
-    };
-    status = loom_run_hal_parse_binding_specs(
-        expected_bindings, expected_buffer_params,
-        out_plan->expected_binding_allocator, allocator,
-        &out_plan->expected_bindings);
+    status = loom_run_hal_parse_binding_specs(expected_bindings,
+                                              runtime->staging_pool, allocator,
+                                              &out_plan->expected_bindings);
   }
   if (iree_status_is_ok(status)) {
     out_plan->options = *options;
@@ -1648,8 +1997,6 @@ iree_status_t loom_run_hal_invocation_dispatch_plan(
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL prepared candidate requires an executable");
   }
-  IREE_RETURN_IF_ERROR(
-      loom_run_hal_prepared_candidate_validate_dispatch(candidate, plan));
   if (runtime->device == NULL) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "HAL runtime is not initialized");

@@ -1,0 +1,231 @@
+// Native SIMD functions use the platform pointer ABI. Vector values stay
+// inside the function while loads, arithmetic, and stores use descriptor-owned
+// VEX facts.
+global.rodata.def @addends = align(16) bytes("01000000fbffffff6400000000000080")
+
+global.rodata.def @reverse_lanes = align(32) bytes("0f0e0d0c0b0a090807060504030201000f0e0d0c0b0a09080706050403020100")
+
+// Independently owned results still obey the instruction's physical ties.
+low.func.def public target<x86.avx2.core> abi(object_function) @independent_integer_updates(%left32: reg<x86.gpr32>, %right32: reg<x86.gpr32>, %left64: reg<x86.gpr64>, %right64: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %sum = add.gpr32 %left32, %right32 : reg<x86.gpr32>
+  %difference = sub.gpr64 %left64, %right64 : reg<x86.gpr64>
+  mov.store.gpr32 %left32, %output {disp32 = 0}
+  mov.store.gpr32 %sum, %output {disp32 = 4}
+  mov.store.gpr64 %left64, %output {disp32 = 8}
+  mov.store.gpr64 %difference, %output {disp32 = 16}
+  return
+}
+
+// Exact source lanes lower into artifact-owned data before this object is
+// independently linked. Alternating values cover each storage width without
+// being mistaken for the uniform broadcast path.
+func.def public @write_exact_avx2_lanes(%byte_output: buffer, %word_output: buffer, %dword_output: buffer, %qword_output: buffer) {
+  %origin = index.constant 0 : offset
+  %byte_view = buffer.view %byte_output[%origin] : buffer -> view<16xi8>
+  %word_view = buffer.view %word_output[%origin] : buffer -> view<8xbf16>
+  %dword_view = buffer.view %dword_output[%origin] : buffer -> view<8xf32>
+  %qword_view = buffer.view %qword_output[%origin] : buffer -> view<4xi64>
+
+  %i8_low = scalar.constant 1 : i8
+  %i8_high = scalar.constant -2 : i8
+  %bytes = vector.from_elements %i8_low, %i8_high, %i8_low, %i8_high, %i8_low, %i8_high, %i8_low, %i8_high, %i8_low, %i8_high, %i8_low, %i8_high, %i8_low, %i8_high, %i8_low, %i8_high : vector<16xi8>
+  %bf16_low = scalar.constant 1.5 : bf16
+  %bf16_high = scalar.constant -2.0 : bf16
+  %words = vector.from_elements %bf16_low, %bf16_high, %bf16_low, %bf16_high, %bf16_low, %bf16_high, %bf16_low, %bf16_high : vector<8xbf16>
+  %f32_low = scalar.constant 1.5 : f32
+  %f32_high = scalar.constant -2.25 : f32
+  %dwords = vector.from_elements %f32_low, %f32_high, %f32_low, %f32_high, %f32_low, %f32_high, %f32_low, %f32_high : vector<8xf32>
+  %i64_low = scalar.constant 81985529216486895 : i64
+  %i64_high = scalar.constant -2 : i64
+  %qwords = vector.from_elements %i64_low, %i64_high, %i64_low, %i64_high : vector<4xi64>
+
+  vector.store %bytes, %byte_view[0] : vector<16xi8>, view<16xi8>
+  vector.store %words, %word_view[0] : vector<8xbf16>, view<8xbf16>
+  vector.store %dwords, %dword_view[0] : vector<8xf32>, view<8xf32>
+  vector.store %qwords, %qword_view[0] : vector<4xi64>, view<4xi64>
+  func.return
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) @add_i32x4(%lhs: reg<x86.gpr64>, %rhs: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %lhs_vector = vmovdqu32.load.xmm %lhs {disp32 = 0}
+  %rhs_vector = vmovdqu32.load.xmm %rhs {disp32 = 0}
+  %sum = vpaddd.xmm %lhs_vector, %rhs_vector
+  vmovdqu32.store.xmm %sum, %output {disp32 = 0}
+  return
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) @add_constant_i32x4(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %input_vector = vmovdqu32.load.xmm %input {disp32 = 0}
+  %constant = avx2.vmovdqu.rodata.xmm @addends
+  %sum = vpaddd.xmm %input_vector, %constant
+  vmovdqu32.store.xmm %sum, %output {disp32 = 0}
+  return
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) @reverse_i8x32_lanes(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %input_vector = vmovdqu32.load.ymm %input {disp32 = 0}
+  %control = avx2.vmovdqu.rodata.ymm @reverse_lanes
+  %result = vpshufb.ymm %input_vector, %control
+  vmovdqu32.store.ymm %result, %output {disp32 = 0}
+  return
+}
+
+// Deliberately unaligned authored storage proves that native stack traffic uses
+// the unaligned vector move family rather than relying on frame alignment.
+low.func.def public target<x86.avx2.core> abi(object_function) @spill_i8x32(%input: reg<x86.gpr64>, %output: reg<x86.gpr64>) asm {
+  %slot = storage {byte_alignment = 1, byte_length = 35} : low.storage<stack>
+  %value = vmovdqu32.load.ymm %input {disp32 = 0}
+  low.spill %value, %slot {offset = 3} : reg<x86.ymm>, low.storage<stack>
+  %restored = low.reload %slot {offset = 3} : low.storage<stack> -> reg<x86.ymm>
+  vmovdqu32.store.ymm %restored, %output {disp32 = 0}
+  return
+}
+
+// Integer and vector results advance through independent two-register banks.
+// The third value in each bank crosses the same caller-owned overflow block.
+low.func.def target<x86.avx2.core> abi(object_function) @private_mixed_results(%v0: reg<x86.ymm>, %g0: reg<x86.gpr64>, %v1: reg<x86.ymm>, %g1: reg<x86.gpr64>, %v2: reg<x86.ymm>, %g2: reg<x86.gpr64>) -> (reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>) asm {
+  return %v2, %g2, %v0, %g0, %v1, %g1
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) @write_mixed_results(%input: reg<x86.gpr64>, %vector_output: reg<x86.gpr64>, %scalar_output: reg<x86.gpr64>) asm {
+  %v0 = vmovdqu32.load.ymm %input {disp32 = 0}
+  %v1 = vmovdqu32.load.ymm %input {disp32 = 32}
+  %v2 = vmovdqu32.load.ymm %input {disp32 = 64}
+  %g0 = mov.imm64 17
+  %g1 = mov.imm64 29
+  %g2 = mov.imm64 43
+  %rv0, %rg0, %rv1, %rg1, %rv2, %rg2 = low.func.call @private_mixed_results(%v0, %g0, %v1, %g1, %v2, %g2) : (reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>) -> (reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>)
+  vmovdqu32.store.ymm %rv0, %vector_output {disp32 = 0}
+  vmovdqu32.store.ymm %rv1, %vector_output {disp32 = 32}
+  vmovdqu32.store.ymm %rv2, %vector_output {disp32 = 64}
+  mov.store.gpr64 %rg0, %scalar_output {disp32 = 0}
+  mov.store.gpr64 %rg1, %scalar_output {disp32 = 8}
+  mov.store.gpr64 %rg2, %scalar_output {disp32 = 16}
+  return
+}
+
+// INTEGER and SSE argument banks advance independently. The seventh integer
+// and ninth vector values cross onto the stack at different aligned offsets.
+low.func.decl import(native, "native_vector_mix") target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, vector<8xi32>) -> ()}) @native_vector_mix(%output: reg<x86.gpr64>, %v0: reg<x86.ymm>, %g0: reg<x86.gpr64>, %v1: reg<x86.ymm>, %g1: reg<x86.gpr64>, %v2: reg<x86.ymm>, %g2: reg<x86.gpr64>, %v3: reg<x86.ymm>, %g3: reg<x86.gpr64>, %v4: reg<x86.ymm>, %g4: reg<x86.gpr64>, %v5: reg<x86.ymm>, %g5: reg<x86.gpr64>, %v6: reg<x86.ymm>, %g6: reg<x86.gpr64>, %v7: reg<x86.ymm>, %v8: reg<x86.ymm>)
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, i64, vector<8xi32>, vector<8xi32>) -> ()}) @call_vector_mix(%output: reg<x86.gpr64>, %v0: reg<x86.ymm>, %g0: reg<x86.gpr64>, %v1: reg<x86.ymm>, %g1: reg<x86.gpr64>, %v2: reg<x86.ymm>, %g2: reg<x86.gpr64>, %v3: reg<x86.ymm>, %g3: reg<x86.gpr64>, %v4: reg<x86.ymm>, %g4: reg<x86.gpr64>, %v5: reg<x86.ymm>, %g5: reg<x86.gpr64>, %v6: reg<x86.ymm>, %g6: reg<x86.gpr64>, %v7: reg<x86.ymm>, %v8: reg<x86.ymm>) asm {
+  low.func.call @native_vector_mix(%output, %v0, %g0, %v1, %g1, %v2, %g2, %v3, %g3, %v4, %g4, %v5, %g5, %v6, %g6, %v7, %v8) : (reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.gpr64>, reg<x86.ymm>, reg<x86.ymm>)
+  return
+}
+
+// Scalar SSE stack arguments use their significant four- and eight-byte forms.
+low.func.decl import(native, "native_scalar_stack") target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, f32, f64, f32, f64, f32, f64, f32, f64, f32, f64) -> ()}) @native_scalar_stack(%output: reg<x86.gpr64>, %f0: reg<x86.xmm>, %d0: reg<x86.xmm>, %f1: reg<x86.xmm>, %d1: reg<x86.xmm>, %f2: reg<x86.xmm>, %d2: reg<x86.xmm>, %f3: reg<x86.xmm>, %d3: reg<x86.xmm>, %f4: reg<x86.xmm>, %d4: reg<x86.xmm>)
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, f32, f64, f32, f64, f32, f64, f32, f64, f32, f64) -> ()}) @call_scalar_stack(%output: reg<x86.gpr64>, %f0: reg<x86.xmm>, %d0: reg<x86.xmm>, %f1: reg<x86.xmm>, %d1: reg<x86.xmm>, %f2: reg<x86.xmm>, %d2: reg<x86.xmm>, %f3: reg<x86.xmm>, %d3: reg<x86.xmm>, %f4: reg<x86.xmm>, %d4: reg<x86.xmm>) asm {
+  low.func.call @native_scalar_stack(%output, %f0, %d0, %f1, %d1, %f2, %d2, %f3, %d3, %f4, %d4) : (reg<x86.gpr64>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>, reg<x86.xmm>)
+  return
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (f32) -> (f32)}) @identity_f32(%value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  return %value
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (f64) -> (f64)}) @identity_f64(%value: reg<x86.xmm>) -> (reg<x86.xmm>) asm {
+  return %value
+}
+
+// Scalar source memory keeps every payload bit, including signaling NaNs,
+// through dynamic view origins, strided subviews, and the native return ABI.
+func.def public @copy_scalar_f32(%input: buffer, %output: buffer, %base: offset, %row: index, %column: index) -> (f32) {
+  %origin = index.assume %base [range(%base, 0, 12), multiple_of(%base, 4)] : offset
+  %row_bounded = index.assume %row [range(%row, 0, 1)] : index
+  %column_bounded = index.assume %column [range(%column, 0, 4)] : index
+  %layout = encoding.layout.strided [13, 1] : encoding<layout>
+  %source = buffer.view %input[%origin] : buffer -> view<4x8xf32, %layout>
+  %destination = buffer.view %output[%origin] : buffer -> view<4x8xf32, %layout>
+  %source_crop = view.subview %source[1, 1] : view<4x8xf32, %layout> -> view<2x5xf32, %layout>
+  %destination_crop = view.subview %destination[1, 1] : view<4x8xf32, %layout> -> view<2x5xf32, %layout>
+  %first = view.load %source[0, 0] : view<4x8xf32, %layout> -> f32
+  view.store %first, %destination[0, 0] : f32, view<4x8xf32, %layout>
+  %value = view.load %source_crop[%row_bounded, %column_bounded] : view<2x5xf32, %layout> -> f32
+  view.store %value, %destination_crop[%row_bounded, %column_bounded] : f32, view<2x5xf32, %layout>
+  func.return %value : f32
+}
+
+func.def public @copy_scalar_f64(%input: buffer, %output: buffer, %base: offset, %row: index, %column: index) -> (f64) {
+  %origin = index.assume %base [range(%base, 0, 24), multiple_of(%base, 8)] : offset
+  %row_bounded = index.assume %row [range(%row, 0, 1)] : index
+  %column_bounded = index.assume %column [range(%column, 0, 4)] : index
+  %layout = encoding.layout.strided [13, 1] : encoding<layout>
+  %source = buffer.view %input[%origin] : buffer -> view<4x8xf64, %layout>
+  %destination = buffer.view %output[%origin] : buffer -> view<4x8xf64, %layout>
+  %source_crop = view.subview %source[1, 1] : view<4x8xf64, %layout> -> view<2x5xf64, %layout>
+  %destination_crop = view.subview %destination[1, 1] : view<4x8xf64, %layout> -> view<2x5xf64, %layout>
+  %first = view.load %source[0, 0] : view<4x8xf64, %layout> -> f64
+  view.store %first, %destination[0, 0] : f64, view<4x8xf64, %layout>
+  %value = view.load %source_crop[%row_bounded, %column_bounded] : view<2x5xf64, %layout> -> f64
+  view.store %value, %destination_crop[%row_bounded, %column_bounded] : f64, view<2x5xf64, %layout>
+  func.return %value : f64
+}
+
+// Narrow integer values retain only their significant low bits on entry and
+// after calls. The wrappers expose the normalized carrier as i32 so linked C++
+// can observe the complete Low value rather than only the narrow ABI result.
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i1) -> (i32)}) @widen_i1(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i8) -> (i32)}) @widen_i8(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i16) -> (i32)}) @widen_i16(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+// Dead inputs retain their public SysV positions but require no normalization
+// or entry transport inside the function.
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32, i1, i8, f8E4M3, f8E5M2, i16) -> (i32)}) @retain_first_narrow(%value: reg<x86.gpr32>, %unused_i1: reg<x86.gpr32>, %unused_i8: reg<x86.gpr32>, %unused_f8e4m3: reg<x86.gpr32>, %unused_f8e5m2: reg<x86.gpr32>, %unused_i16: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+low.func.decl import(native, "native_narrow_i1") target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32) -> (i1)}) @native_narrow_i1(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>)
+
+low.func.decl import(native, "native_narrow_i8") target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32) -> (i8)}) @native_narrow_i8(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>)
+
+low.func.decl import(native, "native_narrow_i16") target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32) -> (i16)}) @native_narrow_i16(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>)
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32) -> (i32)}) @call_narrow_i1(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %result = low.func.call @native_narrow_i1(%value) : (reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %result
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32) -> (i32)}) @call_narrow_i8(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %result = low.func.call @native_narrow_i8(%value) : (reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %result
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32) -> (i32)}) @call_narrow_i16(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %result = low.func.call @native_narrow_i16(%value) : (reg<x86.gpr32>) -> (reg<x86.gpr32>)
+  return %result
+}
+
+low.func.decl import(native, "native_ignored_i8_result") target<x86.avx2.core> abi(object_function) abi_layout({signature = () -> (i8)}) @native_ignored_i8_result() -> (reg<x86.gpr32>)
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (i32) -> (i32)}) @ignore_narrow_call_result(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %unused = low.func.call @native_ignored_i8_result() : () -> (reg<x86.gpr32>)
+  return %value
+}
+
+// Half-precision scalars cross the platform boundary in XMM registers while
+// Low retains their bits in GPR32 carriers. The ninth value crosses the
+// independent SSE exhaustion boundary and occupies one eight-byte stack slot.
+low.func.decl import(native, "native_f16_stack") target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, f16, f16, f16, f16, f16, f16, f16, f16, f16) -> ()}) @native_f16_stack(%output: reg<x86.gpr64>, %v0: reg<x86.gpr32>, %v1: reg<x86.gpr32>, %v2: reg<x86.gpr32>, %v3: reg<x86.gpr32>, %v4: reg<x86.gpr32>, %v5: reg<x86.gpr32>, %v6: reg<x86.gpr32>, %v7: reg<x86.gpr32>, %v8: reg<x86.gpr32>)
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, f16, f16, f16, f16, f16, f16, f16, f16, f16) -> ()}) @call_f16_stack(%output: reg<x86.gpr64>, %v0: reg<x86.gpr32>, %v1: reg<x86.gpr32>, %v2: reg<x86.gpr32>, %v3: reg<x86.gpr32>, %v4: reg<x86.gpr32>, %v5: reg<x86.gpr32>, %v6: reg<x86.gpr32>, %v7: reg<x86.gpr32>, %v8: reg<x86.gpr32>) asm {
+  low.func.call @native_f16_stack(%output, %v0, %v1, %v2, %v3, %v4, %v5, %v6, %v7, %v8) : (reg<x86.gpr64>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>, reg<x86.gpr32>)
+  return
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (f16) -> (f16)}) @identity_f16(%value: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  return %value
+}
+
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (vector<8xi32>) -> (vector<8xi32>)}) @identity_i32x8(%value: reg<x86.ymm>) -> (reg<x86.ymm>) asm {
+  return %value
+}

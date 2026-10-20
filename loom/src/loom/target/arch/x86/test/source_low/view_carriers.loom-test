@@ -1,0 +1,131 @@
+// RUN: emit source-low target=x86:avx2 output=low
+
+// Selecting views from different roots preserves their nonzero byte origins
+// through an inlined vector-copy helper. The destination has a record header.
+func.def inline @copy_record_payload(%source: view<16xi32>, %destination: view<32xi32>) {
+  %begin = index.constant 0 : index
+  %end = index.constant 8 : index
+  %step = index.constant 4 : index
+  %unroll = index.constant 2 : index
+  scf.for %position = [%begin to %end step %step] unroll(%unroll) {
+    %output_position = index.add %position, %step : index
+    %values = vector.load %source[%position] : view<16xi32> -> vector<4xi32>
+    vector.store %values, %destination[%output_position] : vector<4xi32>, view<32xi32>
+  }
+  func.return
+}
+
+func.def public @copy_selected_record(%first_input: buffer, %second_input: buffer, %output_input: buffer, %use_first: i1) {
+  %first_storage = buffer.assume.alignment %first_input {minimum_alignment = 16} : buffer
+  %second_storage = buffer.assume.alignment %second_input {minimum_alignment = 16} : buffer
+  %output_storage = buffer.assume.alignment %output_input {minimum_alignment = 16} : buffer
+  %first_origin = index.constant 16 : offset
+  %second_origin = index.constant 32 : offset
+  %output_origin = index.constant 48 : offset
+  %first = buffer.view %first_storage[%first_origin] : buffer -> view<16xi32>
+  %second = buffer.view %second_storage[%second_origin] : buffer -> view<16xi32>
+  %output = buffer.view %output_storage[%output_origin] : buffer -> view<32xi32>
+  %selected = scf.select %use_first, %first, %second : view<16xi32>
+  func.call @copy_record_payload(%selected, %output) : (view<16xi32>, view<32xi32>)
+  func.return
+}
+
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, buffer, buffer, i1) -> ()}) @copy_selected_record(%first_storage: reg<x86.gpr64>, %second_storage: reg<x86.gpr64>, %output_storage: reg<x86.gpr64>, %use_first: reg<x86.gpr32>) asm {
+  %first_origin = mov.imm64 16
+  %second_origin = mov.imm64 32
+  low.cond_br %use_first, ^_bb1, ^_bb2 : reg<x86.gpr32>
+^_bb1:
+  low.br ^_bb3(%first_storage: reg<x86.gpr64>, %first_origin: reg<x86.gpr64>)
+^_bb2:
+  low.br ^_bb3(%second_storage: reg<x86.gpr64>, %second_origin: reg<x86.gpr64>)
+^_bb3(%selected_root: reg<x86.gpr64>, %selected_offset: reg<x86.gpr64>):
+  %values = vmovdqu32.load.indexed.xmm %selected_root, %selected_offset {disp32 = 0, scale = 1}
+  %45 = mov.imm64 64
+  vmovdqu32.store.indexed.xmm %values, %output_storage, %45 {disp32 = 0, scale = 1}
+  %values_1 = vmovdqu32.load.indexed.xmm %selected_root, %selected_offset {disp32 = 16, scale = 1}
+  %47 = mov.imm64 80
+  vmovdqu32.store.indexed.xmm %values_1, %output_storage, %47 {disp32 = 0, scale = 1}
+  return
+}
+
+// ====
+
+// Complete addresses survive rotation between distinct storage roots.
+func.def public @rotate_distinct_views(%first: buffer, %second: buffer, %first_origin_input: offset, %second_origin_input: offset, %count_input: index, %seed: i32) -> (i32) {
+  %first_origin = index.assume %first_origin_input [range(%first_origin_input, 0, 128), multiple_of(%first_origin_input, 4)] : offset
+  %second_origin = index.assume %second_origin_input [range(%second_origin_input, 0, 128), multiple_of(%second_origin_input, 4)] : offset
+  %count = index.assume %count_input [range(%count_input, 0, 257)] : index
+  %first_storage = buffer.assume.alignment %first {minimum_alignment = 4} : buffer
+  %second_storage = buffer.assume.alignment %second {minimum_alignment = 4} : buffer
+  %first_view = buffer.view %first_storage[%first_origin] : buffer -> view<1xi32>
+  %second_view = buffer.view %second_storage[%second_origin] : buffer -> view<1xi32>
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %last, %other = scf.for %position = [%begin to %count step %step](%current = %first_view : view<1xi32>, %next = %second_view : view<1xi32>) -> (view<1xi32>, view<1xi32>) {
+    %ordinal = index.cast %position : index to i32
+    %value = scalar.addi %seed, %ordinal : i32
+    view.store %value, %current[0] : i32, view<1xi32>
+    scf.yield %next, %current : view<1xi32>, view<1xi32>
+  }
+  %value = view.load %last[0] : view<1xi32> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) @rotate_distinct_views(%first_storage: reg<x86.gpr64>, %second_storage: reg<x86.gpr64>, %first_origin: reg<x86.gpr64>, %second_origin: reg<x86.gpr64>, %count: reg<x86.gpr64>, %seed: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+  %first_view = lea.add_scale %first_storage, %first_origin {disp32 = 0, scale = 1}
+  %second_view = lea.add_scale %second_storage, %second_origin {disp32 = 0, scale = 1}
+  %begin = mov.imm64 0
+  low.br ^_bb1(%begin: reg<x86.gpr64>, %first_view: reg<x86.gpr64>, %second_view: reg<x86.gpr64>)
+^_bb1(%position: reg<x86.gpr64>, %current: reg<x86.gpr64>, %next: reg<x86.gpr64>):
+  low.op.cond_br<x86.scalar.cmp.branch.gpr64>(%position, %count) {predicate = 12}, ^_bb2, ^_bb3 : (reg<x86.gpr64>, reg<x86.gpr64>)
+^_bb2:
+  %ordinal = mov.trunc.gpr32.gpr64 %position
+  %46 = copy %seed : reg<x86.gpr32> -> reg<x86.gpr32>
+  %value$47 = add.gpr32 %46, %ordinal
+  mov.store.gpr32 %value$47, %current {disp32 = 0}
+  %48 = lea.disp %position {disp32 = 1}
+  low.br ^_bb1(%48: reg<x86.gpr64>, %next: reg<x86.gpr64>, %current: reg<x86.gpr64>)
+^_bb3:
+  %value$49 = mov.load.gpr32 %current {disp32 = 0}
+  return %value$49
+}
+
+// ====
+
+// A returned view carries its complete origin, including nested subviews.
+func.def public @return_subview(%input: buffer, %origin_input: offset, %position_input: index) -> (view<3xi32>) {
+  %origin = index.assume %origin_input [range(%origin_input, 0, 4096), multiple_of(%origin_input, 4)] : offset
+  %position = index.assume %position_input [range(%position_input, 0, 3)] : index
+  %storage = buffer.assume.alignment %input {minimum_alignment = 4} : buffer
+  %whole = buffer.view %storage[%origin] : buffer -> view<8xi32>
+  %outer = view.subview %whole[1] : view<8xi32> -> view<7xi32>
+  %inner = view.subview %outer[%position] : view<7xi32> -> view<3xi32>
+  %refined = view.refine %inner : view<3xi32> -> view<3xi32>
+  func.return %refined : view<3xi32>
+}
+
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) @return_subview(%storage: reg<x86.gpr64>, %origin: reg<x86.gpr64>, %position: reg<x86.gpr64>) -> (reg<x86.gpr64>) asm {
+  %15 = mov.imm64 4
+  %16 = copy %position : reg<x86.gpr64> -> reg<x86.gpr64>
+  %17 = imul.gpr64 %16, %15
+  %18 = copy %origin : reg<x86.gpr64> -> reg<x86.gpr64>
+  %19 = add.gpr64 %18, %17
+  %refined = lea.add_scale %storage, %19 {disp32 = 4, scale = 1}
+  return %refined
+}
+
+// ====
+
+func.def public @load_view_argument(%input: view<3xi32>) -> (i32) {
+  %value = view.load %input[1] : view<3xi32> -> i32
+  func.return %value : i32
+}
+
+// ----
+low.func.def public target<x86.avx2.core> abi(object_function) @load_view_argument(%input: reg<x86.gpr64>) -> (reg<x86.gpr32>) asm {
+  %value = mov.load.gpr32 %input {disp32 = 4}
+  return %value
+}

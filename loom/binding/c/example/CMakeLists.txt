@@ -29,6 +29,17 @@ loom_cc_binary(
 
 loom_cc_binary(
   NAME
+    compile_artifact
+  SRCS
+    "compile_artifact.c"
+  DEPS
+    iree::base
+    loom::binding::c::loomc
+    loom::binding::c::target::configured
+)
+
+loom_cc_binary(
+  NAME
     link_modules
   SRCS
     "link_modules.c"

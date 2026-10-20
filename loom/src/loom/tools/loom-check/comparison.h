@@ -14,8 +14,9 @@ extern "C" {
 #endif
 
 // Compares actual_output against the case's exact golden or independent
-// whole-line CHECK/CHECK-NOT globs. Records the verdict and mismatch details.
-// Returns an error for malformed checks or allocation failure.
+// whole-line CHECK/CHECK-NOT/CHECK-COUNT-N globs. Count checks require exactly
+// N matching lines in the complete output. Records verdict and mismatch
+// details. Returns an error for malformed checks or allocation failure.
 iree_status_t loom_check_compare_output(const loom_test_case_t* test_case,
                                         iree_allocator_t allocator,
                                         loom_check_result_t* result);

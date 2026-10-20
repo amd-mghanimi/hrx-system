@@ -1,4 +1,3 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/nested_view_selection.loom-test
 // RUN: emit source-low target=x86:avx2 output=low
 
 // A derived selection retains both the selected buffer and its byte base.
@@ -22,7 +21,7 @@ func.def @derived_selection(%first: buffer, %second: buffer, %third: buffer, %po
 }
 
 // ----
-low.func.def target<x86.avx2.core> abi(object_function) @derived_selection(%first_aligned: reg<x86.gpr64>, %second_aligned: reg<x86.gpr64>, %third_aligned: reg<x86.gpr64>, %position: reg<x86.gpr64>, %select_first: reg<x86.gpr32>, %select_pair: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, buffer, buffer, index, i1, i1) -> (i32)}) @derived_selection(%first_aligned: reg<x86.gpr64>, %second_aligned: reg<x86.gpr64>, %third_aligned: reg<x86.gpr64>, %position: reg<x86.gpr64>, %select_first: reg<x86.gpr32>, %select_pair: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   %base0 = mov.imm64 4
   %base1 = mov.imm64 8
   %base2 = mov.imm64 12
@@ -32,13 +31,12 @@ low.func.def target<x86.avx2.core> abi(object_function) @derived_selection(%firs
 ^_bb2:
   low.br ^_bb3(%second_aligned: reg<x86.gpr64>, %base1: reg<x86.gpr64>)
 ^_bb3(%pair_root: reg<x86.gpr64>, %pair_offset: reg<x86.gpr64>):
-  %54 = copy %position : reg<x86.gpr64> -> reg<x86.gpr64>
-  %55 = shl.imm.gpr64 %54 {shift = 2}
-  %56 = copy %pair_offset : reg<x86.gpr64> -> reg<x86.gpr64>
-  %57 = add.gpr64 %56, %55
+  %53 = copy %position : reg<x86.gpr64> -> reg<x86.gpr64>
+  %54 = shl.imm.gpr64 %53 {shift = 2}
+  %55 = lea %pair_offset, %54
   low.cond_br %select_pair, ^_bb4, ^_bb5 : reg<x86.gpr32>
 ^_bb4:
-  low.br ^_bb6(%pair_root: reg<x86.gpr64>, %57: reg<x86.gpr64>)
+  low.br ^_bb6(%pair_root: reg<x86.gpr64>, %55: reg<x86.gpr64>)
 ^_bb5:
   low.br ^_bb6(%third_aligned: reg<x86.gpr64>, %base2: reg<x86.gpr64>)
 ^_bb6(%selected_root: reg<x86.gpr64>, %selected_offset: reg<x86.gpr64>):
@@ -74,7 +72,7 @@ func.def @selection_with_side_effects(%first: buffer, %second: buffer, %third: b
 }
 
 // ----
-low.func.def target<x86.avx2.core> abi(object_function) @selection_with_side_effects(%first_aligned: reg<x86.gpr64>, %second_aligned: reg<x86.gpr64>, %third_aligned: reg<x86.gpr64>, %select_first: reg<x86.gpr32>, %select_pair: reg<x86.gpr32>, %enter: reg<x86.gpr32>, %side: reg<x86.gpr32>, %initial: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
+low.func.def target<x86.avx2.core> abi(object_function) abi_layout({signature = (buffer, buffer, buffer, i1, i1, i1, i1, i32) -> (i32)}) @selection_with_side_effects(%first_aligned: reg<x86.gpr64>, %second_aligned: reg<x86.gpr64>, %third_aligned: reg<x86.gpr64>, %select_first: reg<x86.gpr32>, %select_pair: reg<x86.gpr32>, %enter: reg<x86.gpr32>, %side: reg<x86.gpr32>, %initial: reg<x86.gpr32>) -> (reg<x86.gpr32>) asm {
   low.cond_br %enter, ^producer, ^exit : reg<x86.gpr32>
 ^producer:
   mov.store.gpr32 %initial, %third_aligned {disp32 = 0}

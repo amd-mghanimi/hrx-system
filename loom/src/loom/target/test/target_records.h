@@ -15,6 +15,14 @@
 extern "C" {
 #endif
 
+// Synthetic target rows, including a device whose workers use low_core.
+typedef enum loom_test_target_kind_e {
+  LOOM_TEST_TARGET_KIND_LOW_CORE = 1,
+  LOOM_TEST_TARGET_KIND_QUIRKY = 2,
+  LOOM_TEST_TARGET_KIND_DEVICE = 3,
+  LOOM_TEST_TARGET_KIND_COUNT_ = 4,
+} loom_test_target_kind_t;
+
 // Typed fact identity shared by synthetic test target profiles and IR records.
 extern const loom_target_fact_type_t loom_test_target_fact_type;
 

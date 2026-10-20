@@ -15,7 +15,6 @@ func.def @folds_constant_branch_and_removes_dead(%a: i32, %b: i32) -> (i32) {
 
 // ----
 func.def @folds_constant_branch_and_removes_dead(%a: i32, %b: i32) -> (i32) {
-  %cond = scalar.constant 1 : i1
   %sum = test.addi %a, %b : i32
   func.return %sum : i32
 }
@@ -762,8 +761,8 @@ func.def @threads_direct_branch_through_known_block_arg(%cond: i1, %a: i32, %b: 
 
 // ----
 func.def @threads_direct_branch_through_known_block_arg(%cond: i1, %a: i32, %b: i32) -> (i32) {
-  cfg.cond_br %cond, ^left, ^exit
-^left:
+  cfg.cond_br %cond, ^taken, ^exit
+^taken:
   cfg.br ^ret(%a: i32)
 ^exit:
   cfg.br ^ret(%b: i32)
@@ -1011,7 +1010,7 @@ func.def @closed_signature_carrier() {
   func.return
 ^unused:
   %width = index.constant 16 : index
-  test.decl @nested_signature(%storage: pool<[%width]>) -> (i32)
+  test.decl @nested_signature(%storage: group<[%width]>) -> (i32)
   cfg.br ^exit
 }
 

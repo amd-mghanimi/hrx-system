@@ -10,23 +10,60 @@
 iree_add_all_subdirs()
 
 if(LOOM_TARGET_ARCH_SPIRV)
+loom_generated_file(
+  NAME
+    collective_rows_gen
+  GENERATOR
+    loom::py::loom::gen::target::arch::spirv::collective_rows
+  OUTPUT
+    "collective_rows.inl"
+  OUTPUT_FLAG
+    "--tables"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV)
+loom_generated_file(
+  NAME
+    workgroup_reduce_rows_gen
+  GENERATOR
+    loom::py::loom::gen::target::arch::spirv::collective_rows
+  OUTPUT
+    "workgroup_reduce_rows.inl"
+  OUTPUT_FLAG
+    "--workgroup-tables"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV)
 loom_cc_library(
   NAME
     lower
   HDRS
+    "collective_arithmetic.h"
     "lower.h"
     "matrix.h"
     "workgroup.h"
+    "workgroup_layout.h"
+    "workgroup_reduce.h"
   TEXTUAL_HDRS
     "${IREE_BINARY_DIR}/loom/src/loom/target/arch/spirv/contracts/tables.inl"
+    "collective_rows.inl"
+    "workgroup_reduce_rows.inl"
   SRCS
+    "collective_arithmetic.c"
     "matrix.c"
     "registry.c"
     "workgroup.c"
+    "workgroup_layout.c"
+    "workgroup_reduce.c"
   DEPS
     iree::base
     iree::base::internal
     loom::analysis::contract_vector
+    loom::analysis::source_storage_packing
+    loom::analysis::storage_interference
+    loom::analysis::storage_layout
     loom::codegen::low::descriptors
     loom::codegen::low::lower
     loom::codegen::low::source_memory_plan
@@ -35,6 +72,7 @@ loom_cc_library(
     loom::ir::facts
     loom::ops::atomic
     loom::ops::buffer
+    loom::ops::combining
     loom::ops::func
     loom::ops::kernel
     loom::ops::low
@@ -55,6 +93,80 @@ loom_cc_library(
     loom::target::registers
     loom::util::fact_table
   PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_SPIRV)
+loom_cc_library(
+  NAME
+    cooperative_initializer
+  HDRS
+    "cooperative_initializer.h"
+  SRCS
+    "cooperative_initializer.c"
+  DEPS
+    iree::base
+    loom::codegen::low::lower
+    loom::ir
+    loom::ir::facts
+    loom::ops::vector
+    loom::util::fact_table
+  PUBLIC
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV)
+loom_check_test_suite(
+  NAME
+    collective_arithmetic_tests
+  SRCS
+    "collective_arithmetic_test.loom-test"
+  LABELS
+    "hostonly"
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV)
+loom_check_test_suite(
+  NAME
+    workgroup_reduce_tests
+  SRCS
+    "workgroup_reduce_test.loom-test"
+  LABELS
+    "hostonly"
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV)
+loom_check_test_suite(
+  NAME
+    cooperative_initializer_tests
+  SRCS
+    "cooperative_initializer_test.loom-test"
+  LABELS
+    "hostonly"
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV)
+loom_check_test_suite(
+  NAME
+    cooperative_memory_tests
+  SRCS
+    "cooperative_memory_test.loom-test"
+  LABELS
+    "hostonly"
+)
+endif()
+
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_TARGET_ARCH_SPIRV)
+loom_check_test_suite(
+  NAME
+    matrix_tests
+  SRCS
+    "matrix_test.loom-test"
+  LABELS
+    "hostonly"
 )
 endif()
 

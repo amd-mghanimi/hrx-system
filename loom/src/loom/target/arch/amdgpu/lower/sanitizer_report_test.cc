@@ -94,9 +94,9 @@ class AmdgpuSanitizerReportTest : public ::testing::Test {
     IREE_CHECK_OK(loom_builder_intern_string(&builder_, name, &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_CHECK_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    return (loom_symbol_ref_t){
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+    return loom_symbol_ref_t{
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
   }
 
@@ -135,7 +135,8 @@ class AmdgpuSanitizerReportTest : public ::testing::Test {
     IREE_ASSERT_OK(loom_low_func_def_build(
         &builder_, LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_TARGET,
         /*visibility=*/0, /*retain=*/0, /*cc=*/0,
-        /*purity=*/0, /*inline_policy=*/0, /*allocation=*/0, /*schedule=*/0,
+        /*effect_contract=*/0, /*inline_policy=*/0, /*allocation=*/0,
+        /*schedule=*/0,
         /*descriptor_set=*/contract_set_key, target, /*abi=*/0,
         loom_make_named_attr_slice(NULL, 0),
         loom_make_named_attr_slice(NULL, 0),
@@ -186,15 +187,9 @@ class AmdgpuSanitizerReportTest : public ::testing::Test {
     if (descriptor == nullptr) {
       return 0;
     }
-    const uint32_t canonical_asm_form_ordinal =
-        loom_low_descriptor_set_descriptor_view(descriptor_set_, descriptor)
-            ->canonical_asm_form_ordinal;
-    EXPECT_LT(canonical_asm_form_ordinal, descriptor_set_->asm_form_count);
-    if (canonical_asm_form_ordinal >= descriptor_set_->asm_form_count) {
-      return 0;
-    }
-    return descriptor_set_->asm_forms[canonical_asm_form_ordinal]
-        .operand_index_count;
+    EXPECT_FALSE(loom_low_descriptor_has_variadic_operands(descriptor));
+    return loom_low_descriptor_layout(descriptor_set_, descriptor)
+        ->minimum_packet_operand_count;
   }
 
   bool LowOpHasDescriptorRef(
@@ -288,9 +283,9 @@ class AmdgpuSanitizerReportTest : public ::testing::Test {
     IREE_CHECK_OK(
         loom_builder_intern_string(&builder_, IREE_SV("imm32"), &imm32_id));
     loom_named_attr_t imm32_attr = {
-        /*.name_id=*/imm32_id,
-        /*.reserved=*/0,
-        /*.value=*/loom_attr_i64(value),
+        .name_id = imm32_id,
+        .reserved = 0,
+        .value = loom_attr_i64(value),
     };
     loom_op_t* const_op = nullptr;
     IREE_CHECK_OK(loom_low_build_resolved_descriptor_const(
@@ -356,8 +351,8 @@ class AmdgpuSanitizerReportTest : public ::testing::Test {
 
   void VerifyModuleOk() {
     loom_verify_options_t options = {
-        /*.sink=*/{loom_diagnostic_stderr_sink, NULL},
-        /*.max_errors=*/20,
+        .sink = {loom_diagnostic_stderr_sink, NULL},
+        .max_errors = 20,
     };
     loom_verify_result_t result = {};
     IREE_ASSERT_OK(loom_verify_module(module_, &options, &result));
@@ -365,10 +360,11 @@ class AmdgpuSanitizerReportTest : public ::testing::Test {
   }
 
   void VerifyLowModuleOk() {
-    loom_low_verify_options_t options = {};
-    options.descriptor_registry = &low_registry_.registry;
-    options.emitter = {EmitDiagnosticToStderr, NULL};
-    options.max_errors = 20;
+    loom_low_verify_options_t options = {
+        .descriptor_registry = &low_registry_.registry,
+        .emitter = {EmitDiagnosticToStderr, NULL},
+        .max_errors = 20,
+    };
     loom_low_verify_scratch_t scratch =
         loom_low_verify_scratch_for_module(module_);
     loom_low_verify_result_t result = {};
@@ -411,28 +407,28 @@ TEST_F(AmdgpuSanitizerReportTest, EmitsAccessReportPayloadStores) {
       BuildFeedbackValues(&config_values, &channel_values, &packet_address));
 
   loom_amdgpu_feedback_packet_header_t header = {
-      /*.record_length=*/(uint32_t)loom_amdgpu_feedback_packet_length(
+      .record_length = (uint32_t)loom_amdgpu_feedback_packet_length(
           LOOM_AMDGPU_ASAN_REPORT_BYTE_LENGTH),
-      /*.kind=*/LOOM_AMDGPU_FEEDBACK_PACKET_KIND_ASAN,
-      /*.flags=*/LOOM_AMDGPU_FEEDBACK_PACKET_FLAG_ASYNC,
-      /*.sequence=*/channel_values.ring_capacity,
-      /*.source_dispatch_ptr=*/config_values.notify_signal,
-      /*.source_workgroup_id_x=*/config_values.flags,
-      /*.source_workitem_id_x=*/channel_values.flags,
-      /*.source_context=*/config_values.source_context,
+      .kind = LOOM_AMDGPU_FEEDBACK_PACKET_KIND_ASAN,
+      .flags = LOOM_AMDGPU_FEEDBACK_PACKET_FLAG_ASYNC,
+      .sequence = channel_values.ring_capacity,
+      .source_dispatch_ptr = config_values.notify_signal,
+      .source_workgroup_id_x = config_values.flags,
+      .source_workitem_id_x = channel_values.flags,
+      .source_context = config_values.source_context,
   };
   IREE_ASSERT_OK(loom_amdgpu_build_feedback_packet_header(
       &builder_, descriptor_set_, &packet_address, &header,
       LOOM_LOCATION_UNKNOWN));
 
   const loom_amdgpu_sanitizer_access_report_t report = {
-      /*.access_kind=*/LOOM_AMDGPU_ASAN_ACCESS_KIND_WRITE,
-      /*.flags=*/LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
-      /*.fault_address=*/channel_values.ring_base,
-      /*.access_size=*/channel_values.ring_capacity,
-      /*.site_id=*/config_values.notify_signal,
-      /*.shadow_address=*/config_values.channel_base,
-      /*.shadow_value=*/config_values.address,
+      .access_kind = LOOM_AMDGPU_ASAN_ACCESS_KIND_WRITE,
+      .flags = LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
+      .fault_address = channel_values.ring_base,
+      .access_size = channel_values.ring_capacity,
+      .site_id = config_values.notify_signal,
+      .shadow_address = config_values.channel_base,
+      .shadow_value = config_values.address,
   };
   IREE_ASSERT_OK(loom_amdgpu_build_sanitizer_access_report_payload(
       &builder_, descriptor_set_, &packet_address, &report,
@@ -509,11 +505,11 @@ TEST_F(AmdgpuSanitizerReportTest, EmitsUbsanReportPayloadStores) {
       BuildFeedbackValues(&config_values, &channel_values, &packet_address));
 
   const loom_amdgpu_sanitizer_ubsan_report_t report = {
-      /*.check_kind=*/LOOM_AMDGPU_UBSAN_CHECK_KIND_ASSERTION,
-      /*.flags=*/LOOM_AMDGPU_UBSAN_REPORT_FLAG_NONE,
-      /*.site_id=*/config_values.notify_signal,
-      /*.operand0=*/config_values.channel_base,
-      /*.operand1=*/config_values.address,
+      .check_kind = LOOM_AMDGPU_UBSAN_CHECK_KIND_ASSERTION,
+      .flags = LOOM_AMDGPU_UBSAN_REPORT_FLAG_NONE,
+      .site_id = config_values.notify_signal,
+      .operand0 = config_values.channel_base,
+      .operand1 = config_values.address,
   };
   IREE_ASSERT_OK(loom_amdgpu_build_sanitizer_ubsan_report_payload(
       &builder_, descriptor_set_, &packet_address, &report,
@@ -580,18 +576,18 @@ TEST_F(AmdgpuSanitizerReportTest, EmitsFatalAccessReportProducerCfg) {
       &config_values));
 
   const loom_amdgpu_feedback_packet_source_t source = {
-      /*.dispatch_ptr=*/config_values.notify_signal,
-      /*.workgroup_id_x=*/config_values.flags,
-      /*.workitem_id_x=*/config_values.flags,
+      .dispatch_ptr = config_values.notify_signal,
+      .workgroup_id_x = config_values.flags,
+      .workitem_id_x = config_values.flags,
   };
   const loom_amdgpu_sanitizer_access_report_t report = {
-      /*.access_kind=*/LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
-      /*.flags=*/LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
-      /*.fault_address=*/config_values.notify_signal,
-      /*.access_size=*/config_values.notify_signal,
-      /*.site_id=*/config_values.notify_signal,
-      /*.shadow_address=*/config_values.notify_signal,
-      /*.shadow_value=*/config_values.notify_signal,
+      .access_kind = LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
+      .flags = LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
+      .fault_address = config_values.notify_signal,
+      .access_size = config_values.notify_signal,
+      .site_id = config_values.notify_signal,
+      .shadow_address = config_values.notify_signal,
+      .shadow_value = config_values.notify_signal,
   };
   IREE_ASSERT_OK(loom_amdgpu_build_sanitizer_access_report_terminate(
       &builder_, descriptor_set_, config_symbol, &source, &report,
@@ -715,18 +711,18 @@ TEST_F(AmdgpuSanitizerReportTest, BranchesColdSitesToSharedReportIsland) {
   auto build_site_branch = [&](loom_block_t* site_block) {
     loom_builder_set_block(&builder_, site_block);
     const loom_amdgpu_feedback_packet_source_t source = {
-        /*.dispatch_ptr=*/BuildVgprU64(1),
-        /*.workgroup_id_x=*/BuildVgprU32(2),
-        /*.workitem_id_x=*/BuildVgprU32(3),
+        .dispatch_ptr = BuildVgprU64(1),
+        .workgroup_id_x = BuildVgprU32(2),
+        .workitem_id_x = BuildVgprU32(3),
     };
     const loom_amdgpu_sanitizer_access_report_t report = {
-        /*.access_kind=*/LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
-        /*.flags=*/LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
-        /*.fault_address=*/BuildVgprU64(4),
-        /*.access_size=*/BuildVgprU64(5),
-        /*.site_id=*/BuildVgprU64(6),
-        /*.shadow_address=*/BuildVgprU64(7),
-        /*.shadow_value=*/BuildVgprU64(8),
+        .access_kind = LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
+        .flags = LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
+        .fault_address = BuildVgprU64(4),
+        .access_size = BuildVgprU64(5),
+        .site_id = BuildVgprU64(6),
+        .shadow_address = BuildVgprU64(7),
+        .shadow_value = BuildVgprU64(8),
     };
     IREE_ASSERT_OK(loom_amdgpu_build_sanitizer_access_report_branch(
         &builder_, descriptor_set_, &island, &source, &report,
@@ -813,16 +809,16 @@ TEST_F(AmdgpuSanitizerReportTest, BranchesUbsanSitesToSharedReportIsland) {
   auto build_site_branch = [&](loom_block_t* site_block) {
     loom_builder_set_block(&builder_, site_block);
     const loom_amdgpu_feedback_packet_source_t source = {
-        /*.dispatch_ptr=*/BuildVgprU64(1),
-        /*.workgroup_id_x=*/BuildVgprU32(2),
-        /*.workitem_id_x=*/BuildVgprU32(3),
+        .dispatch_ptr = BuildVgprU64(1),
+        .workgroup_id_x = BuildVgprU32(2),
+        .workitem_id_x = BuildVgprU32(3),
     };
     const loom_amdgpu_sanitizer_ubsan_report_t report = {
-        /*.check_kind=*/LOOM_AMDGPU_UBSAN_CHECK_KIND_ASSERTION,
-        /*.flags=*/LOOM_AMDGPU_UBSAN_REPORT_FLAG_NONE,
-        /*.site_id=*/BuildVgprU64(4),
-        /*.operand0=*/BuildVgprU64(5),
-        /*.operand1=*/BuildVgprU64(6),
+        .check_kind = LOOM_AMDGPU_UBSAN_CHECK_KIND_ASSERTION,
+        .flags = LOOM_AMDGPU_UBSAN_REPORT_FLAG_NONE,
+        .site_id = BuildVgprU64(4),
+        .operand0 = BuildVgprU64(5),
+        .operand1 = BuildVgprU64(6),
     };
     IREE_ASSERT_OK(loom_amdgpu_build_sanitizer_ubsan_report_branch(
         &builder_, descriptor_set_, &island, &source, &report,
@@ -894,18 +890,18 @@ TEST_F(AmdgpuSanitizerReportTest, SplitsHotFailurePredicateToColdSiteBlock) {
       &failure_scc));
 
   const loom_amdgpu_feedback_packet_source_t source = {
-      /*.dispatch_ptr=*/BuildVgprU64(1),
-      /*.workgroup_id_x=*/BuildVgprU32(2),
-      /*.workitem_id_x=*/BuildVgprU32(3),
+      .dispatch_ptr = BuildVgprU64(1),
+      .workgroup_id_x = BuildVgprU32(2),
+      .workitem_id_x = BuildVgprU32(3),
   };
   const loom_amdgpu_sanitizer_access_report_t report = {
-      /*.access_kind=*/LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
-      /*.flags=*/LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
-      /*.fault_address=*/BuildVgprU64(4),
-      /*.access_size=*/BuildVgprU64(5),
-      /*.site_id=*/BuildVgprU64(6),
-      /*.shadow_address=*/BuildVgprU64(7),
-      /*.shadow_value=*/BuildVgprU64(8),
+      .access_kind = LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
+      .flags = LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
+      .fault_address = BuildVgprU64(4),
+      .access_size = BuildVgprU64(5),
+      .site_id = BuildVgprU64(6),
+      .shadow_address = BuildVgprU64(7),
+      .shadow_value = BuildVgprU64(8),
   };
 
   loom_amdgpu_sanitizer_access_report_island_t island = {};
@@ -994,18 +990,18 @@ TEST_F(AmdgpuSanitizerReportTest, NarrowsExecForMaskedColdSiteBlock) {
   const loom_value_id_t failure_mask = channel_values.ring_capacity;
 
   const loom_amdgpu_feedback_packet_source_t source = {
-      /*.dispatch_ptr=*/BuildVgprU64(1),
-      /*.workgroup_id_x=*/BuildVgprU32(2),
-      /*.workitem_id_x=*/BuildVgprU32(3),
+      .dispatch_ptr = BuildVgprU64(1),
+      .workgroup_id_x = BuildVgprU32(2),
+      .workitem_id_x = BuildVgprU32(3),
   };
   const loom_amdgpu_sanitizer_access_report_t report = {
-      /*.access_kind=*/LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
-      /*.flags=*/LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
-      /*.fault_address=*/BuildVgprU64(4),
-      /*.access_size=*/BuildVgprU64(5),
-      /*.site_id=*/BuildVgprU64(6),
-      /*.shadow_address=*/BuildVgprU64(7),
-      /*.shadow_value=*/BuildVgprU64(8),
+      .access_kind = LOOM_AMDGPU_ASAN_ACCESS_KIND_READ,
+      .flags = LOOM_AMDGPU_ASAN_REPORT_FLAG_NONE,
+      .fault_address = BuildVgprU64(4),
+      .access_size = BuildVgprU64(5),
+      .site_id = BuildVgprU64(6),
+      .shadow_address = BuildVgprU64(7),
+      .shadow_value = BuildVgprU64(8),
   };
 
   loom_amdgpu_sanitizer_access_report_island_t island = {};

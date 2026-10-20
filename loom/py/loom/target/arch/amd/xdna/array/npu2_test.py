@@ -17,15 +17,11 @@ from loom.target.arch.amd.xdna.array.model import (
     StreamDirection,
     StreamPort,
     TileKind,
-    register_field_count,
+    maximum_encoded_dma_transfer_length,
+    tile_resource_totals,
     validate_array_family,
 )
-from loom.target.arch.amd.xdna.array.npu2 import (
-    AIE_RT_SOURCE_COMMIT,
-    MLIR_AIE_SOURCE_COMMIT,
-    NPU2_ARRAY_FAMILY,
-    REGISTER_DATABASE_VERSION,
-)
+from loom.target.arch.amd.xdna.array.npu2 import NPU2_ARRAY_FAMILY
 
 
 @pytest.mark.parametrize("tile_kind", tuple(TileKind))
@@ -80,12 +76,58 @@ def test_npu2_topology_and_resource_domains_are_complete() -> None:
         (TileKind.MEMORY, 1, 1),
         (TileKind.COMPUTE, 2, 4),
     )
+    # The three-bit arbiter encoding includes two unimplemented values.
+    assert tuple(
+        (tile.packet_arbiter_count, tile.packet_master_select_count)
+        for tile in family.tiles
+    ) == ((6, 4), (6, 4), (6, 4))
     assert {event.module: event.event_count for event in family.events} == {
         RegisterModule.CORE: 128,
         RegisterModule.COMPUTE_MEMORY: 128,
         RegisterModule.MEMORY_TILE: 161,
         RegisterModule.SHIM_PL: 128,
     }
+
+    assert tuple(
+        (
+            totals.physical_tile_count,
+            totals.lock_count,
+            totals.dma_channel_count_per_direction,
+            totals.dma_buffer_descriptor_count,
+        )
+        for totals in (tile_resource_totals(family, tile) for tile in family.tiles)
+    ) == (
+        (8, 128, 16, 128),
+        (8, 512, 48, 384),
+        (32, 512, 64, 512),
+    )
+
+
+def test_validator_rejects_physical_plan_carrier_overflow() -> None:
+    with pytest.raises(ValueError, match="physical-plan carrier overflows"):
+        validate_array_family(replace(NPU2_ARRAY_FAMILY, column_count=(1 << 16) - 1))
+
+
+@pytest.mark.parametrize("tile_kind", tuple(TileKind))
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("packet_arbiter_count", 0),
+        ("packet_arbiter_count", 9),
+        ("packet_master_select_count", 0),
+        ("packet_master_select_count", 5),
+    ],
+)
+def test_validator_rejects_unencodable_packet_resources(
+    tile_kind: TileKind, field: str, value: int
+) -> None:
+    family = NPU2_ARRAY_FAMILY
+    tiles = tuple(
+        replace(tile, **{field: value}) if tile.kind is tile_kind else tile
+        for tile in family.tiles
+    )
+    with pytest.raises(ValueError, match="invalid packet-switch resources"):
+        validate_array_family(replace(family, tiles=tiles))
 
 
 def test_npu2_memory_distinguishes_local_storage_from_load_apertures() -> None:
@@ -96,7 +138,11 @@ def test_npu2_memory_distinguishes_local_storage_from_load_apertures() -> None:
         tile for tile in NPU2_ARRAY_FAMILY.tiles if tile.kind is TileKind.MEMORY
     )
 
-    assert (compute.memory.local_base, compute.memory.local_capacity) == (0, 64 * 1024)
+    assert (
+        compute.memory.local_base,
+        compute.memory.local_capacity,
+        compute.memory.local_load_base,
+    ) == (0, 64 * 1024, 0x70000)
     assert (compute.memory.program_base, compute.memory.program_capacity) == (
         0,
         16 * 1024,
@@ -116,7 +162,198 @@ def test_npu2_memory_distinguishes_local_storage_from_load_apertures() -> None:
         "north": (0x60000, 64 * 1024, 32, 0, 1),
         "self": (0x70000, 64 * 1024, 48, 0, 0),
     }
-    assert (memory.memory.local_capacity, memory.memory.bank_count) == (512 * 1024, 8)
+    assert (
+        memory.memory.local_capacity,
+        memory.memory.local_load_base,
+        memory.memory.bank_count,
+    ) == (512 * 1024, 0x80000, 8)
+
+
+def test_validator_requires_complete_self_load_window() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    invalid_compute = replace(
+        compute,
+        memory=replace(
+            compute.memory,
+            load_windows=tuple(
+                window
+                for window in compute.memory.load_windows
+                if window.owner_column_delta != 0 or window.owner_row_delta != 0
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="no self load window covers local memory"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_requires_canonical_self_load_base() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    invalid_compute = replace(
+        compute,
+        memory=replace(compute.memory, local_load_base=0x30000),
+    )
+
+    with pytest.raises(ValueError, match="no self load window covers local memory"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_rejects_self_load_range_outside_tile_address() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    *other_windows, self_window = compute.memory.load_windows
+    overflowing_base = (1 << NPU2_ARRAY_FAMILY.row_shift) - 64 * 1024 + 1
+    invalid_compute = replace(
+        compute,
+        memory=replace(
+            compute.memory,
+            local_load_base=overflowing_base,
+            load_windows=(*other_windows, replace(self_window, base=overflowing_base)),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="local-memory native carrier overflows"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_rejects_load_window_displacement_outside_native_carrier() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    south, *remaining_windows = compute.memory.load_windows
+    invalid_compute = replace(
+        compute,
+        memory=replace(
+            compute.memory,
+            load_windows=(
+                replace(south, owner_row_delta=-(1 << 7) - 1),
+                *remaining_windows,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="load-window native carrier overflows"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_requires_unique_load_window_owner() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    south, west, north, self_window = compute.memory.load_windows
+    invalid_compute = replace(
+        compute,
+        memory=replace(
+            compute.memory,
+            load_windows=(
+                south,
+                west,
+                replace(
+                    north,
+                    owner_column_delta=south.owner_column_delta,
+                    owner_row_delta=south.owner_row_delta,
+                ),
+                self_window,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="duplicate load-window owner"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_requires_complete_visible_compute_window() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    south, *remaining_windows = compute.memory.load_windows
+    invalid_compute = replace(
+        compute,
+        memory=replace(
+            compute.memory,
+            load_windows=(
+                replace(south, capacity=compute.memory.local_capacity - 1),
+                *remaining_windows,
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not cover owner local memory"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_requires_vertical_neighbor_load_windows() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    south, west, _north, self_window = compute.memory.load_windows
+    invalid_compute = replace(
+        compute,
+        memory=replace(
+            compute.memory,
+            load_windows=(south, west, self_window),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="vertical neighbor load window"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"lock_count": 1 << 8}, "invalid lock count"),
+        ({"lock_value_minimum": -(1 << 7) - 1}, "native carrier overflows"),
+        ({"lock_value_maximum": 1 << 7}, "native carrier overflows"),
+        ({"lock_value_maximum": 0}, "invalid lock domain"),
+    ],
+)
+def test_validator_rejects_locks_outside_native_planning_domain(
+    changes: dict[str, int], message: str
+) -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    invalid_compute = replace(compute, **changes)
+
+    with pytest.raises(ValueError, match=message):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_npu2_compute_lock_domain_admits_ready_and_credit_values() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+
+    assert compute.kind is TileKind.COMPUTE
+    assert (compute.lock_value_minimum, compute.lock_value_maximum) == (-64, 63)
 
 
 def test_npu2_stream_ordinals_match_programmable_register_order() -> None:
@@ -139,6 +376,30 @@ def test_npu2_stream_ordinals_match_programmable_register_order() -> None:
     assert port_ranges[
         (TileKind.SHIM_NOC, StreamDirection.SLAVE, StreamPort.SOUTH)
     ] == (2, 8)
+
+
+@pytest.mark.parametrize(
+    ("tile_kind", "prefix"),
+    [
+        (TileKind.COMPUTE, "core"),
+        (TileKind.MEMORY, "memory_tile"),
+        (TileKind.SHIM_NOC, "shim_noc"),
+    ],
+)
+@pytest.mark.parametrize("direction", list(StreamDirection))
+def test_npu2_stream_ports_cover_configuration_registers(
+    tile_kind: TileKind, prefix: str, direction: StreamDirection
+) -> None:
+    patterns = {pattern.key: pattern for pattern in NPU2_ARRAY_FAMILY.registers}
+    configuration = patterns[f"{prefix}.stream.{direction.value}_config"]
+    port_count = sum(
+        port.count
+        for port in NPU2_ARRAY_FAMILY.stream_ports
+        if port.tile_kind is tile_kind and port.direction is direction
+    )
+    assert port_count == configuration.dimensions[0].count
+    if direction is StreamDirection.SLAVE:
+        assert port_count == patterns[f"{prefix}.stream.slave_slot"].dimensions[0].count
 
 
 def test_npu2_dma_encoding_and_stream_port_mappings_are_exact() -> None:
@@ -167,6 +428,186 @@ def test_npu2_dma_encoding_and_stream_port_mappings_are_exact() -> None:
         compute.stream_to_memory_port_base,
         compute.stream_to_memory_port_stride,
     ) == (2, 0, 1, 0, 1)
+
+    assert {
+        tile.kind: (
+            tile.dma.transfer_length_field.bit_width,
+            maximum_encoded_dma_transfer_length(tile),
+        )
+        for tile in NPU2_ARRAY_FAMILY.tiles
+        if tile.dma is not None
+    } == {
+        TileKind.SHIM_NOC: (
+            32,
+            0xFFFFFFFF,
+        ),
+        TileKind.MEMORY: (
+            17,
+            0x1FFFF,
+        ),
+        TileKind.COMPUTE: (
+            14,
+            0x3FFF,
+        ),
+    }
+
+
+def test_validator_rejects_dma_length_field_from_another_tile_kind() -> None:
+    shim = NPU2_ARRAY_FAMILY.tiles[0]
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    assert shim.dma is not None
+    assert compute.dma is not None
+    invalid_compute = replace(
+        compute,
+        dma=replace(
+            compute.dma,
+            transfer_length_field=shim.dma.transfer_length_field,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="unavailable register module"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_rejects_unregistered_dma_length_field() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    assert compute.dma is not None
+    invalid_compute = replace(
+        compute,
+        dma=replace(
+            compute.dma,
+            transfer_length_field=replace(compute.dma.transfer_length_field),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="unavailable canonical register field"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_rejects_signed_dma_length_field() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    assert compute.dma is not None
+    signed_field = next(
+        field
+        for pattern in NPU2_ARRAY_FAMILY.registers
+        if pattern.key == "compute_memory.dma.bd.word5"
+        for field in pattern.fields
+        if field.name == "lock_acquire_value"
+    )
+    invalid_compute = replace(
+        compute,
+        dma=replace(compute.dma, transfer_length_field=signed_field),
+    )
+
+    with pytest.raises(ValueError, match="DMA length field must be unsigned"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+def test_validator_rejects_dma_length_field_without_descriptor_coverage() -> None:
+    compute = NPU2_ARRAY_FAMILY.tiles[-1]
+    assert compute.dma is not None
+    invalid_compute = replace(
+        compute,
+        dma=replace(
+            compute.dma,
+            buffer_descriptor_count=compute.dma.buffer_descriptor_count + 1,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not cover buffer descriptors"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(*NPU2_ARRAY_FAMILY.tiles[:-1], invalid_compute),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("maximum_task_repeat_count", 1 << 16, "u16 resource limit overflows"),
+        ("address_dimension_count", 1 << 8, "u8 fact overflows"),
+        ("address_maximum", 1 << 64, "address range exceeds u64"),
+        ("step_size_bits", 32, "address dimension exceeds its u32 carrier"),
+    ],
+)
+def test_validator_rejects_dma_facts_outside_native_domains(
+    field_name: str, value: int, message: str
+) -> None:
+    shim = NPU2_ARRAY_FAMILY.tiles[0]
+    assert shim.dma is not None
+    invalid_shim = replace(
+        shim,
+        dma=replace(shim.dma, **{field_name: value}),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(invalid_shim, *NPU2_ARRAY_FAMILY.tiles[1:]),
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("address_dimension_count", 4, "step fields disagree"),
+        ("step_size_bits", 19, "step fields disagree"),
+        ("wrap_bits", 9, "wrap fields disagree"),
+    ],
+)
+def test_validator_rejects_dma_facts_disagreeing_with_descriptor_fields(
+    field_name: str, value: int, message: str
+) -> None:
+    shim = NPU2_ARRAY_FAMILY.tiles[0]
+    assert shim.dma is not None
+    invalid_shim = replace(
+        shim,
+        dma=replace(shim.dma, **{field_name: value}),
+    )
+
+    with pytest.raises(ValueError, match=message):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(invalid_shim, *NPU2_ARRAY_FAMILY.tiles[1:]),
+            )
+        )
+
+
+def test_validator_rejects_dma_repeat_fact_outside_queue_field() -> None:
+    shim = NPU2_ARRAY_FAMILY.tiles[0]
+    assert shim.dma is not None
+    invalid_shim = replace(
+        shim,
+        dma=replace(shim.dma, maximum_task_repeat_count=257),
+    )
+
+    with pytest.raises(ValueError, match="queue repeat field does not cover tasks"):
+        validate_array_family(
+            replace(
+                NPU2_ARRAY_FAMILY,
+                tiles=(invalid_shim, *NPU2_ARRAY_FAMILY.tiles[1:]),
+            )
+        )
 
 
 def test_npu2_direct_dma_loopback_pairs_match_the_stream_switch() -> None:
@@ -201,8 +642,6 @@ def test_validator_rejects_loopback_pairs_outside_dma_channels(
 def test_register_patterns_cover_complete_seed_resource_families() -> None:
     family = NPU2_ARRAY_FAMILY
 
-    assert len(family.registers) == 163
-    assert register_field_count(family) == 410
     assert all(
         pattern.provenance & (Provenance.AIE_RT | Provenance.REGISTER_DATABASE)
         == (Provenance.AIE_RT | Provenance.REGISTER_DATABASE)
@@ -266,10 +705,45 @@ def test_trace_and_timer_modules_preserve_hardware_differences(
         assert pattern.fields[0].access is RegisterAccess.READ_ONLY
 
 
-def test_npu2_source_revisions_are_explicit_oracle_identities() -> None:
-    assert AIE_RT_SOURCE_COMMIT == "8849e208bdcc533b20a0ed3f95c1ce961dee9c3a"
-    assert MLIR_AIE_SOURCE_COMMIT == "db06374df9bf83d9fc557001ca213368aed15788"
-    assert REGISTER_DATABASE_VERSION == "AM025-2024-11-13-1.1"
+@pytest.mark.parametrize(
+    ("key", "channel_count", "s2mm_base", "mm2s_base"),
+    [
+        ("compute_memory", 2, 0x1DF00, 0x1DF10),
+        ("memory_tile", 6, 0xA0660, 0xA0680),
+        ("shim_noc", 2, 0x1D220, 0x1D228),
+    ],
+)
+def test_dma_idle_status_covers_queued_running_and_stalled_tasks(
+    key: str, channel_count: int, s2mm_base: int, mm2s_base: int
+) -> None:
+    # XAIE2PGBL_*_MODULE_DMA_*_STATUS and _XAieMl_DmaWaitForDone agree
+    # on these fields. Idle is the simultaneous zero value of all six.
+    patterns = {pattern.key: pattern for pattern in NPU2_ARRAY_FAMILY.registers}
+    for direction, base in (("s2mm", s2mm_base), ("mm2s", mm2s_base)):
+        status = patterns[f"{key}.dma.channel.{direction}.status"]
+        assert status.base_offset == base
+        assert tuple(
+            (dimension.name, dimension.count, dimension.stride)
+            for dimension in status.dimensions
+        ) == (("channel", channel_count, 4),)
+        expected_masks = {
+            "task_queue_size": 0x00700000,
+            "channel_running": 0x00080000,
+            "stalled_lock_acquire": 0x00000004,
+            "stalled_lock_release": 0x00000008,
+        }
+        if direction == "s2mm":
+            expected_masks.update(
+                stalled_stream_starvation=0x00000010,
+                stalled_token_or_count_fifo=0x00000020,
+            )
+        else:
+            expected_masks.update(
+                stalled_stream_backpressure=0x00000010,
+                stalled_completion_token=0x00000020,
+            )
+        assert {field.name: field.mask for field in status.fields} == expected_masks
+        assert all(field.access is RegisterAccess.READ_ONLY for field in status.fields)
 
 
 def test_validator_rejects_register_provenance_claims_missing_an_oracle() -> None:
@@ -282,3 +756,132 @@ def test_validator_rejects_register_provenance_claims_missing_an_oracle() -> Non
 
     with pytest.raises(ValueError, match="register provenance is incomplete"):
         validate_array_family(invalid_family)
+
+
+def test_validator_rejects_register_offsets_outside_tile_aperture() -> None:
+    pattern = NPU2_ARRAY_FAMILY.registers[0]
+    invalid_pattern = replace(pattern, base_offset=1 << NPU2_ARRAY_FAMILY.row_shift)
+    invalid_family = replace(
+        NPU2_ARRAY_FAMILY,
+        registers=(invalid_pattern, *NPU2_ARRAY_FAMILY.registers[1:]),
+    )
+
+    with pytest.raises(ValueError, match="register offset exceeds tile aperture"):
+        validate_array_family(invalid_family)
+
+
+# Exact masks from the pinned aie-rt _XAieMl_*_StrmSwCheckPortValidity
+# functions, enumerated over each tile's complete slave/master port domains.
+@pytest.mark.parametrize(
+    ("tile_kind", "expected"),
+    [
+        (
+            TileKind.COMPUTE,
+            (
+                0x007FFFFE,
+                0x007FFFFB,
+                0x007FFFFD,
+                0x007FFFF1,
+                0x007FFFFF,
+                0x007FFE3F,
+                0x007FFE5F,
+                0x007FFE9F,
+                0x007FFF1F,
+                0x007FFE1F,
+                0x007FFE1F,
+                0x007FE3FF,
+                0x007FE5FF,
+                0x007FE9FF,
+                0x007FF1FF,
+                0x00783FFF,
+                0x00785FFF,
+                0x00789FFF,
+                0x00791FFF,
+                0x000FFFFF,
+                0x0017FFFF,
+                0x0027FFFF,
+                0x0047FFFF,
+                0x000001F2,
+                0x000001F2,
+            ),
+        ),
+        (
+            TileKind.MEMORY,
+            (
+                0x0001FFC1,
+                0x0001FFC2,
+                0x0001FFC4,
+                0x0001FFC8,
+                0x0001FFD0,
+                0x0001FFE0,
+                0x0001FFA0,
+                0x000008FF,
+                0x0000117F,
+                0x0000227F,
+                0x0000447F,
+                0x0000807F,
+                0x0001007F,
+                0x000008FF,
+                0x0000117F,
+                0x0000227F,
+                0x0000447F,
+                0x000007A0,
+            ),
+        ),
+        (
+            TileKind.SHIM_NOC,
+            (
+                0x003FFFFE,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FFFFF,
+                0x003FF1FF,
+                0x003FF2FF,
+                0x003FF4FF,
+                0x003FF8FF,
+                0x003C1FFF,
+                0x003C2FFF,
+                0x003C4FFF,
+                0x003C8FFF,
+                0x0007FFFF,
+                0x000BFFFF,
+                0x0013FFFF,
+                0x0023FFFF,
+                0x000401FE,
+            ),
+        ),
+    ],
+)
+def test_npu2_stream_connectivity_matches_aie_rt(
+    tile_kind: TileKind,
+    expected: tuple[int, ...],
+) -> None:
+    actual = tuple(
+        mask
+        for row in NPU2_ARRAY_FAMILY.stream_ports
+        if row.tile_kind is tile_kind and row.direction is StreamDirection.SLAVE
+        for mask in row.connections
+    )
+    assert actual == expected
+
+
+@pytest.mark.parametrize("change", ["missing", "overflow", "master"])
+def test_validator_rejects_invalid_connection_masks(change: str) -> None:
+    rows = list(NPU2_ARRAY_FAMILY.stream_ports)
+    index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.direction
+        is (StreamDirection.MASTER if change == "master" else StreamDirection.SLAVE)
+    )
+    row = rows[index]
+    connections = () if change == "missing" else ((1 << 32,) * row.count)
+    rows[index] = replace(row, connections=connections)
+    with pytest.raises(ValueError, match="invalid stream connection masks"):
+        validate_array_family(replace(NPU2_ARRAY_FAMILY, stream_ports=tuple(rows)))

@@ -4,13 +4,22 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-// Linearizes dense multi-dimensional view accesses into rank-1 source IR.
+// Linearizes dense and exact row-contiguous multi-dimensional view accesses
+// into rank-1 source IR.
 //
-// The pass rewrites scalar view.load/store operations that index static dense
-// views formed by buffer.view into equivalent accesses through a rank-1 view of
-// the same buffer and byte offset. The resulting index.madd expressions are
-// ordinary source SSA, so canonicalize and CSE can share address math before
-// source-to-low without target-specific emission knowledge.
+// The pass rewrites scalar and vector loads/stores through an equivalent static
+// dense rank-1 view of the same buffer and byte offset. Dense layouts preserve
+// their encoding. Explicit strided layouts require a physical trailing stride
+// of one, replace only their address layout, and retain any composed
+// physical-storage schema. Transposed and lane-strided layouts retain their
+// ranked form for direct source-memory lowering. Existing value facts must
+// prove exact physical strides and that the complete footprint fits every
+// original axis before flattening can discard those constraints. Unproved
+// accesses retain their ranked form for memory-footprint verification; the
+// pass does not infer bounds from a memory operation's use of an index. The
+// resulting index.madd expressions are ordinary source SSA, so canonicalize
+// and CSE can share address math before source-to-low without target-specific
+// emission knowledge.
 
 #ifndef LOOM_TRANSFORMS_LINEARIZE_VIEW_ACCESSES_H_
 #define LOOM_TRANSFORMS_LINEARIZE_VIEW_ACCESSES_H_

@@ -9,6 +9,14 @@
 
 iree_add_all_subdirs()
 
+set(_hal_platform_srcs "")
+if(IREE_ARCH STREQUAL "x86_32")
+  list(APPEND _hal_platform_srcs "memory_scope_host_x86.c")
+elseif(IREE_ARCH STREQUAL "x86_64")
+  list(APPEND _hal_platform_srcs "memory_scope_host_x86.c")
+else()
+  list(APPEND _hal_platform_srcs "memory_scope_host_generic.c")
+endif()
 iree_cc_library(
   NAME
     hal
@@ -17,6 +25,7 @@ iree_cc_library(
     "api.h"
     "atomic.h"
     "buffer.h"
+    "buffer_allocation.h"
     "buffer_view.h"
     "buffer_view_util.h"
     "channel.h"
@@ -31,8 +40,10 @@ iree_cc_library(
     "executable.h"
     "fence.h"
     "file.h"
+    "memory_backend.h"
+    "memory_scope.h"
     "pool.h"
-    "pool_set.h"
+    "pool_wait.h"
     "profile_metrics.h"
     "profile_options.h"
     "profile_schema.h"
@@ -40,9 +51,11 @@ iree_cc_library(
     "queue.h"
     "resource.h"
     "semaphore.h"
+    "slab_pool.h"
     "string_util.h"
     "topology.h"
     "topology_builder.h"
+    "virtual_buffer.h"
   TEXTUAL_HDRS
     "profile_metrics.inc"
   SRCS
@@ -50,8 +63,8 @@ iree_cc_library(
     "allocator_heap.c"
     "atomic.c"
     "buffer.c"
+    "buffer_allocation.c"
     "buffer_heap.c"
-    "buffer_heap_impl.h"
     "buffer_view.c"
     "buffer_view_util.c"
     "channel.c"
@@ -71,16 +84,21 @@ iree_cc_library(
     "executable.c"
     "fence.c"
     "file.c"
+    "memory_backend.c"
+    "memory_scope.c"
     "pool.c"
-    "pool_set.c"
+    "pool_wait.c"
     "profile_metrics.c"
     "profile_options.c"
     "profile_sink.c"
     "queue.c"
     "semaphore.c"
+    "slab_pool.c"
     "string_util.c"
     "topology.c"
     "topology_builder.c"
+    "virtual_buffer.c"
+    ${_hal_platform_srcs}
   DEPS
     iree::async
     iree::base
@@ -88,10 +106,33 @@ iree_cc_library(
     iree::base::internal
     iree::base::internal::path
     iree::base::threading
-    iree::hal::memory::asan
+    iree::hal::memory::asan_pool
     iree::hal::utils::platform_topology
     iree::io::file_handle
   PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    memory_scope_test
+  SRCS
+    "memory_scope_test.cc"
+  DEPS
+    ::hal
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_binary_benchmark(
+  NAME
+    memory_scope_benchmark
+  SRCS
+    "memory_scope_benchmark.cc"
+  DEPS
+    ::hal
+    iree::testing::benchmark_main
+    iree::third_party::google_benchmark
+  TESTONLY
 )
 
 iree_cc_test(
@@ -125,6 +166,21 @@ iree_cc_test(
     "buffer_test.cc"
   DEPS
     ::hal
+    iree::hal::testing::mapped_transfer_buffer
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    driver_registry_test
+  SRCS
+    "driver_registry_test.cc"
+  DEPS
+    ::hal
+    iree::async::util::proactor_pool
+    iree::base
+    iree::hal::testing::mock_device
     iree::testing::gtest
     iree::testing::gtest_main
 )
@@ -167,6 +223,18 @@ iree_cc_fuzz(
 
 iree_cc_test(
   NAME
+    file_test
+  SRCS
+    "file_test.cc"
+  DEPS
+    ::hal
+    iree::async
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
     profile_metrics_test
   SRCS
     "profile_metrics_test.cc"
@@ -187,6 +255,7 @@ iree_cc_test(
     iree::base
     iree::base::internal::fpu_state
     iree::base::internal::span
+    iree::hal::memory::heap_pool
     iree::testing::gtest
     iree::testing::gtest_main
 )
@@ -200,6 +269,25 @@ iree_cc_test(
     ::hal
     iree::async
     iree::async::platform
+    iree::async::util::proactor_thread
+    iree::base
+    iree::hal::memory::cpu_slab_provider
+    iree::hal::memory::fixed_block_pool
+    iree::hal::memory::passthrough_pool
+    iree::testing::gtest
+    iree::testing::gtest_main
+)
+
+iree_cc_test(
+  NAME
+    pool_wait_test
+  SRCS
+    "pool_wait_test.cc"
+  DEPS
+    ::hal
+    iree::async
+    iree::async::platform
+    iree::async::util::proactor_thread
     iree::base
     iree::testing::gtest
     iree::testing::gtest_main

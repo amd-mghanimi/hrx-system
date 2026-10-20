@@ -14,6 +14,10 @@ loom_check_test_suite(
     test
   SRCS
     "licm.loom-test"
+    "licm_arithmetic.loom-test"
+    "licm_memory.loom-test"
+    "licm_periodic.loom-test"
+    "licm_shift.loom-test"
     "licm_storage.loom-test"
     "loop_fusion.loom-test"
 )

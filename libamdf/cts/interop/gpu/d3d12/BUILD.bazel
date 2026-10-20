@@ -26,7 +26,8 @@ amdf_cts_test_suite(
     visibility = ["//visibility:public"],
     deps = [
         "//libamdf/cts/gpu:gpu_device_fixture",
-        "//libamdf/cts/gpu:pm4_commands",
+        "//libamdf/cts/gpu/pm4/encoding:commands",
+        "//libamdf/cts/util:wait",
         "//third_party:google_test",
     ],
 )

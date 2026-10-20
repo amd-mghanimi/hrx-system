@@ -12,17 +12,128 @@ iree_add_all_subdirs()
 if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
 loom_cc_library(
   NAME
+    vector_carrier
+  HDRS
+    "vector_carrier.h"
+  SRCS
+    "vector_carrier.c"
+  DEPS
+    iree::base
+    loom::ir
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+loom_cc_test(
+  NAME
+    vector_carrier_test
+  SRCS
+    "vector_carrier_test.cc"
+  DEPS
+    ::vector_carrier
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+  LABELS
+    "iree-build-requirement=loom.target.arch.wasm"
+    "iree-build-requirement=loom.emit.wasm"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+loom_cc_library(
+  NAME
+    vector_dynamic_slice
+  HDRS
+    "vector_dynamic_slice.h"
+  SRCS
+    "vector_dynamic_slice.c"
+  DEPS
+    ::vector_carrier
+    iree::base
+    loom::ir
+    loom::ops::vector
+    loom::util::fact_table
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+loom_cc_test(
+  NAME
+    vector_dynamic_slice_test
+  SRCS
+    "vector_dynamic_slice_test.cc"
+  DEPS
+    ::vector_dynamic_slice
+    iree::testing::gtest
+    iree::testing::gtest_main
+  LABELS
+    "iree-build-requirement=loom.target.arch.wasm"
+    "iree-build-requirement=loom.emit.wasm"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+loom_cc_library(
+  NAME
+    predicate_representation
+  HDRS
+    "predicate_representation.h"
+  SRCS
+    "predicate_representation.c"
+  DEPS
+    ::vector_carrier
+    ::vector_dynamic_slice
+    iree::base
+    loom::codegen::low::lower::representation_observer
+    loom::ir
+    loom::ops::vector
+  PUBLIC
+)
+endif()
+
+if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+loom_cc_test(
+  NAME
+    predicate_representation_test
+  SRCS
+    "predicate_representation_test.cc"
+  DEPS
+    ::predicate_representation
+    iree::testing::gtest
+    iree::testing::gtest_main
+    loom::ir
+  LABELS
+    "iree-build-requirement=loom.target.arch.wasm"
+    "iree-build-requirement=loom.emit.wasm"
+)
+endif()
+
+if(LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+loom_cc_library(
+  NAME
     lower
   HDRS
     "lower.h"
+    "vector_structural.h"
   TEXTUAL_HDRS
     "${IREE_BINARY_DIR}/loom/src/loom/target/emit/wasm/contracts/tables.inl"
   SRCS
     "registry.c"
+    "vector_structural.c"
   DEPS
+    ::predicate_representation
+    ::vector_carrier
+    ::vector_dynamic_slice
     iree::base
+    loom::codegen::low::diagnostics
     loom::codegen::low::lower
     loom::ir
+    loom::ops::low
+    loom::ops::op_defs
+    loom::ops::vector
     loom::target::arch::wasm::descriptors::descriptors_ids
     loom::target::emit::wasm::contracts
     loom::target::emit::wasm::error_defs

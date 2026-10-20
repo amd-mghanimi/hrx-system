@@ -1,5 +1,4 @@
-// TEMPLATE: loom/src/loom/test/corpus/source_low/packed_memory_alignment.loom-test
-// RUN: emit source-low target=x86:avx2 output=low
+// RUN: with-checks emit source-low target=x86:avx2 output=low
 
 // Packed byte accesses retain their byte alignment when split into words.
 kernel.def @byte_origin() {
@@ -18,11 +17,8 @@ kernel.def @byte_origin() {
 }
 
 // ----
-low.kernel.def target<x86.avx2.core> workgroup_size(1, 1, 1) workgroup_count(1, 1, 1) @byte_origin(%source: reg<x86.gpr64>, %destination: reg<x86.gpr64>) asm {
-  %value = vmovdqu32.load.ymm %source {disp32 = 1}
-  vmovdqu32.store.ymm %value, %destination {disp32 = 0}
-  return
-}
+CHECK: %value = vmovdqu32.load.ymm %source {disp32 = 1}
+CHECK: vmovdqu32.store.ymm %value, %destination {disp32 = 0}
 
 // ====
 
@@ -43,11 +39,8 @@ kernel.def @halfword_origin() {
 }
 
 // ----
-low.kernel.def target<x86.avx2.core> workgroup_size(1, 1, 1) workgroup_count(1, 1, 1) @halfword_origin(%source: reg<x86.gpr64>, %destination: reg<x86.gpr64>) asm {
-  %value = vmovdqu32.load.ymm %source {disp32 = 2}
-  vmovdqu32.store.ymm %value, %destination {disp32 = 0}
-  return
-}
+CHECK: %value = vmovdqu32.load.ymm %source {disp32 = 2}
+CHECK: vmovdqu32.store.ymm %value, %destination {disp32 = 0}
 
 // ====
 
@@ -68,8 +61,5 @@ kernel.def @word_origin() {
 }
 
 // ----
-low.kernel.def target<x86.avx2.core> workgroup_size(1, 1, 1) workgroup_count(1, 1, 1) @word_origin(%source: reg<x86.gpr64>, %destination: reg<x86.gpr64>) asm {
-  %value = vmovdqu32.load.ymm %source {disp32 = 4}
-  vmovdqu32.store.ymm %value, %destination {disp32 = 0}
-  return
-}
+CHECK: %value = vmovdqu32.load.ymm %source {disp32 = 4}
+CHECK: vmovdqu32.store.ymm %value, %destination {disp32 = 0}

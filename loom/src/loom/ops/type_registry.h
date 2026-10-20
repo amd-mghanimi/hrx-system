@@ -38,6 +38,65 @@ static inline bool loom_encoding_type_role_parse(iree_string_view_t name, loom_e
   return true;
 }
 
+extern const loom_parameterized_type_descriptor_t loom_channel_type_parameterized_descriptor;
+static inline bool loom_channel_type_isa(loom_type_t type) {
+  return loom_type_is_parameterized(type) && loom_type_parameterized_descriptor(type) == &loom_channel_type_parameterized_descriptor;
+}
+enum { LOOM_CHANNEL_TYPE_PAYLOAD_PARAMETER_INDEX = 0 };
+static inline loom_type_id_t loom_channel_type_payload(loom_type_t type) {
+  return loom_attr_as_type_id(loom_type_parameterized_parameters(type)[LOOM_CHANNEL_TYPE_PAYLOAD_PARAMETER_INDEX]);
+}
+iree_status_t loom_channel_type_make(
+    loom_module_t* module,
+    loom_type_id_t payload,
+    loom_type_t* out_type);
+
+// Permission on an owned consuming access; absence means immutable reading.
+typedef enum loom_read_type_mode_e {
+  LOOM_READ_TYPE_MODE_MUTABLE = 1,
+  LOOM_READ_TYPE_MODE_COUNT_ = 2,
+} loom_read_type_mode_t;
+
+extern const loom_parameterized_type_descriptor_t loom_read_type_parameterized_descriptor;
+enum loom_read_type_build_flag_bits_e {
+  LOOM_READ_TYPE_BUILD_FLAG_HAS_MODE = 1u << 0,
+};
+typedef uint32_t loom_read_type_build_flags_t;
+
+static inline bool loom_read_type_isa(loom_type_t type) {
+  return loom_type_is_parameterized(type) && loom_type_parameterized_descriptor(type) == &loom_read_type_parameterized_descriptor;
+}
+enum { LOOM_READ_TYPE_PAYLOAD_PARAMETER_INDEX = 0 };
+static inline loom_type_id_t loom_read_type_payload(loom_type_t type) {
+  return loom_attr_as_type_id(loom_type_parameterized_parameters(type)[LOOM_READ_TYPE_PAYLOAD_PARAMETER_INDEX]);
+}
+enum { LOOM_READ_TYPE_MODE_PARAMETER_INDEX = 1 };
+static inline bool loom_read_type_has_mode(loom_type_t type) {
+  return !loom_attr_is_absent(loom_type_parameterized_parameters(type)[LOOM_READ_TYPE_MODE_PARAMETER_INDEX]);
+}
+static inline loom_read_type_mode_t loom_read_type_mode(loom_type_t type) {
+  return (loom_read_type_mode_t)loom_attr_as_enum(loom_type_parameterized_parameters(type)[LOOM_READ_TYPE_MODE_PARAMETER_INDEX]);
+}
+iree_status_t loom_read_type_make(
+    loom_module_t* module,
+    loom_read_type_build_flags_t build_flags,
+    loom_type_id_t payload,
+    loom_read_type_mode_t mode,
+    loom_type_t* out_type);
+
+extern const loom_parameterized_type_descriptor_t loom_write_type_parameterized_descriptor;
+static inline bool loom_write_type_isa(loom_type_t type) {
+  return loom_type_is_parameterized(type) && loom_type_parameterized_descriptor(type) == &loom_write_type_parameterized_descriptor;
+}
+enum { LOOM_WRITE_TYPE_PAYLOAD_PARAMETER_INDEX = 0 };
+static inline loom_type_id_t loom_write_type_payload(loom_type_t type) {
+  return loom_attr_as_type_id(loom_type_parameterized_parameters(type)[LOOM_WRITE_TYPE_PAYLOAD_PARAMETER_INDEX]);
+}
+iree_status_t loom_write_type_make(
+    loom_module_t* module,
+    loom_type_id_t payload,
+    loom_type_t* out_type);
+
 extern const loom_parameterized_type_descriptor_t loom_low_storage_type_parameterized_descriptor;
 static inline iree_string_view_t loom_low_storage_type_space_name(loom_storage_space_t value) {
   loom_bstring_t name = loom_attr_descriptor_enum_case_name(
@@ -53,19 +112,6 @@ static inline bool loom_low_storage_type_space_parse(iree_string_view_t name, lo
   *out_value = (loom_storage_space_t)value;
   return true;
 }
-
-extern const loom_parameterized_type_descriptor_t loom_pipeline_flow_type_parameterized_descriptor;
-static inline bool loom_pipeline_flow_type_isa(loom_type_t type) {
-  return loom_type_is_parameterized(type) && loom_type_parameterized_descriptor(type) == &loom_pipeline_flow_type_parameterized_descriptor;
-}
-enum { LOOM_PIPELINE_FLOW_TYPE_ELEMENT_TYPE_PARAMETER_INDEX = 0 };
-static inline loom_type_id_t loom_pipeline_flow_type_element_type(loom_type_t type) {
-  return loom_attr_as_type_id(loom_type_parameterized_parameters(type)[LOOM_PIPELINE_FLOW_TYPE_ELEMENT_TYPE_PARAMETER_INDEX]);
-}
-iree_status_t loom_pipeline_flow_type_make(
-    loom_module_t* module,
-    loom_type_id_t element_type,
-    loom_type_t* out_type);
 
 // Returns the number of entries in the common type registry.
 iree_host_size_t loom_type_registry_count(void);

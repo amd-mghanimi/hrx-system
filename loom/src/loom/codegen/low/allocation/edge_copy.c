@@ -7,7 +7,6 @@
 #include "loom/codegen/low/allocation/edge_copy.h"
 
 #include "loom/codegen/low/allocation/storage.h"
-#include "loom/codegen/low/allocation/unit_location.h"
 #include "loom/ops/low/ops.h"
 
 typedef struct loom_low_allocation_edge_copy_builder_t {
@@ -111,13 +110,26 @@ static void loom_low_allocation_edge_copy_record_segment(
           unit_count)
           ? LOOM_LOW_ALLOCATION_COPY_COALESCED
           : LOOM_LOW_ALLOCATION_COPY_MATERIALIZED;
+  uint32_t next_coalesced_incoming_copy_index =
+      LOOM_LOW_ALLOCATION_EDGE_COPY_INDEX_NONE;
+  if (kind == LOOM_LOW_ALLOCATION_COPY_COALESCED &&
+      builder->plan.first_coalesced_incoming_copy_by_value_ordinal != NULL) {
+    IREE_ASSERT_LT(builder->plan.copy_count, UINT32_MAX);
+    next_coalesced_incoming_copy_index =
+        builder->plan.first_coalesced_incoming_copy_by_value_ordinal
+            [destination_ordinal];
+    builder->plan
+        .first_coalesced_incoming_copy_by_value_ordinal[destination_ordinal] =
+        (uint32_t)builder->plan.copy_count;
+  }
   builder->plan.copies[builder->plan.copy_count++] =
       (loom_low_allocation_edge_copy_t){
           .payload_index = payload_index,
           .kind = kind,
           .source_ordinal = source_ordinal,
           .destination_ordinal = destination_ordinal,
-          .source_assignment_index = source_assignment_index,
+          .next_coalesced_incoming_copy_index =
+              next_coalesced_incoming_copy_index,
           .destination_assignment_index = destination_assignment_index,
           .source_unit_offset = source_unit_offset,
           .destination_unit_offset = destination_unit_offset,
@@ -127,18 +139,10 @@ static void loom_low_allocation_edge_copy_record_segment(
   if (kind == LOOM_LOW_ALLOCATION_COPY_COALESCED) {
     return;
   }
-  loom_low_move_t* raw_moves =
-      loom_low_allocation_move_plan_raw_moves(context->move_plan);
-  for (uint32_t i = 0; i < unit_count; ++i) {
-    raw_moves[builder->raw_move_count++] = (loom_low_move_t){
-        .destination = loom_low_allocation_assignment_unit_location(
-            context->move_plan->context.descriptor_set, destination_assignment,
-            destination_unit_offset + i),
-        .source = loom_low_allocation_assignment_unit_location(
-            context->move_plan->context.descriptor_set, source_assignment,
-            source_unit_offset + i),
-    };
-  }
+  loom_low_allocation_move_plan_append_assignment(
+      context->move_plan, source_assignment, source_unit_offset,
+      destination_assignment, destination_unit_offset, unit_count,
+      &builder->raw_move_count);
 }
 
 static void loom_low_allocation_edge_copy_record_branch_payload_segments(
@@ -169,9 +173,11 @@ static void loom_low_allocation_edge_copy_record_branch_payload_segments(
     }
     const uint32_t branch_source_delta =
         relation->result_unit_offset - branch_relation->source_unit_offset;
+    const loom_low_placement_concat_source_t source =
+        loom_low_placement_concat_source(context->placement, range.start + i);
     loom_low_allocation_edge_copy_record_segment(
-        builder, payload_index, relation->source_ordinal,
-        branch_relation->result_ordinal, relation->source_unit_offset,
+        builder, payload_index, source.value_ordinal,
+        branch_relation->result_ordinal, source.unit_offset,
         branch_relation->result_unit_offset + branch_source_delta,
         relation->unit_count);
     covered_unit_count += relation->unit_count;
@@ -217,8 +223,9 @@ static iree_status_t loom_low_allocation_edge_copy_record_group(
 
   const loom_low_allocation_edge_copy_context_t* context = builder->context;
   return loom_low_allocation_move_plan_append_group(
-      context->move_plan, operation_point, builder->raw_move_count,
-      &group->move_group);
+      context->move_plan, operation_point->op, operation_point->start_point,
+      operation_point->end_point, builder->raw_move_count, &group->move_group,
+      /*out_input_flags=*/NULL);
 }
 
 static iree_status_t loom_low_allocation_edge_copy_record_region(
@@ -275,6 +282,21 @@ iree_status_t loom_low_allocation_edge_copy_plan_build(
   loom_low_allocation_edge_copy_builder_t builder = {
       .context = context,
   };
+  if (iree_any_bit_set(
+          context->flags,
+          LOOM_LOW_ALLOCATION_FLAG_RETAIN_COALESCED_INCOMING_INDEX)) {
+    const iree_host_size_t value_count =
+        context->move_plan->context.assignment_map.liveness->value_count;
+    IREE_RETURN_IF_ERROR(iree_arena_allocate_array(
+        arena, value_count,
+        sizeof(*builder.plan.first_coalesced_incoming_copy_by_value_ordinal),
+        (void**)&builder.plan.first_coalesced_incoming_copy_by_value_ordinal));
+    memset(
+        builder.plan.first_coalesced_incoming_copy_by_value_ordinal, 0xFF,
+        value_count *
+            sizeof(
+                *builder.plan.first_coalesced_incoming_copy_by_value_ordinal));
+  }
   IREE_RETURN_IF_ERROR(iree_arena_allocate_array(arena, copy_capacity,
                                                  sizeof(*builder.plan.copies),
                                                  (void**)&builder.plan.copies));

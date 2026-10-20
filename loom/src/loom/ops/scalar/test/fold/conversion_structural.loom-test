@@ -39,6 +39,25 @@ func.def @float_resize_roundtrip(%x: f16) -> (f16) {
 
 // ====
 
+// Subnormal permissions prevent exact resize-roundtrip cancellation.
+func.def @relaxed_float_resize_roundtrip(%x: f16) -> (f16, f16) {
+  %wide_input = scalar.extf<daz> %x : f16 to f32
+  %back_input = scalar.fptrunc %wide_input : f32 to f16
+  %wide_result = scalar.extf %x : f16 to f32
+  %back_result = scalar.fptrunc<ftz> %wide_result : f32 to f16
+  func.return %back_input, %back_result : f16, f16
+}
+// ----
+func.def @relaxed_float_resize_roundtrip(%x: f16) -> (f16, f16) {
+  %wide_input = scalar.extf<daz> %x : f16 to f32
+  %back_input = scalar.fptrunc %wide_input : f32 to f16
+  %wide_result = scalar.extf %x : f16 to f32
+  %back_result = scalar.fptrunc<ftz> %wide_result : f32 to f16
+  func.return %back_input, %back_result : f16, f16
+}
+
+// ====
+
 // Floating-point truncation chains must not collapse: double rounding can be
 // observably different from one direct truncation.
 func.def @float_truncation_chain_preserves_rounding(%x: f64) -> (f16) {

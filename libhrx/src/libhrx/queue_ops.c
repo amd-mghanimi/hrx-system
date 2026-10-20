@@ -106,6 +106,79 @@ static iree_status_t hrx_hal_semaphore_lists_initialize(
   return status;
 }
 
+hrx_status_t hrx_queue_map(hrx_device_t device, hrx_queue_affinity_t affinity,
+                           const hrx_semaphore_list_t* wait_semaphores,
+                           const hrx_semaphore_list_t* signal_semaphores,
+                           size_t mapping_count,
+                           const hrx_memory_mapping_t* mappings,
+                           hrx_queue_map_flags_t flags) {
+  HRX_TRACE_ZONE_BEGIN(z0, "hrx_queue_map");
+  if (!device || (mapping_count && !mappings)) {
+    HRX_RETURN_AND_END_ZONE(
+        z0, hrx_make_status(HRX_STATUS_INVALID_ARGUMENT,
+                            "mapping device or descriptor array is NULL"));
+  }
+  iree_hal_queue_t* queue = NULL;
+  iree_status_t status = hrx_hal_device_select_queue(
+      device->hal_device, affinity, IREE_HAL_QUEUE_FAMILY_ROLE_FLAG_TRANSFER,
+      NULL, &queue);
+  if (!iree_status_is_ok(status)) {
+    HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
+  }
+  hrx_hal_semaphore_lists_t semaphore_lists;
+  status = hrx_hal_semaphore_lists_initialize(
+      wait_semaphores, signal_semaphores, &semaphore_lists);
+  if (!iree_status_is_ok(status)) {
+    HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
+  }
+  // Small transactions translate on the stack; the native queue captures the
+  // whole vector before returning. There is no per-installed-mapping state.
+  iree_hal_memory_mapping_t inline_mappings[8];
+  iree_hal_memory_mapping_t* hal_mappings = inline_mappings;
+  if (mapping_count > IREE_ARRAYSIZE(inline_mappings)) {
+    status = iree_allocator_malloc_array(iree_allocator_system(), mapping_count,
+                                         sizeof(*hal_mappings),
+                                         (void**)&hal_mappings);
+  }
+  for (size_t i = 0; i < mapping_count && iree_status_is_ok(status); ++i) {
+    const hrx_memory_mapping_t* mapping = &mappings[i];
+    if (!mapping->target || !mapping->target->hal_buffer) {
+      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "mapping target is NULL or has no HAL storage");
+    } else if (mapping->source && !mapping->source->hal_buffer) {
+      status =
+          iree_make_status(IREE_STATUS_UNAVAILABLE,
+                           "mapping source has no prepared native storage");
+    } else {
+      const void* domain = mapping->scope.domain;
+      if (!domain && mapping->scope.id == IREE_HAL_MEMORY_SCOPE_ANY) {
+        const iree_hal_memory_contract_t* contract =
+            mapping->target->hal_buffer->memory.contract;
+        domain = contract ? contract->domain : NULL;
+      }
+      hal_mappings[i] = (iree_hal_memory_mapping_t){
+          .target = mapping->target->hal_buffer,
+          .scope = {domain, mapping->scope.id},
+          .target_range = {mapping->target_offset, mapping->byte_length},
+          .source = mapping->source ? mapping->source->hal_buffer : NULL,
+          .source_offset = mapping->source_offset,
+          .access = mapping->access,
+          .operation = (iree_hal_memory_mapping_operation_t)mapping->operation,
+      };
+    }
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_queue_map(
+        queue, semaphore_lists.wait.list, semaphore_lists.signal.list,
+        mapping_count, hal_mappings, (iree_hal_queue_map_flags_t)flags);
+  }
+  if (hal_mappings != inline_mappings) {
+    iree_allocator_free(iree_allocator_system(), hal_mappings);
+  }
+  hrx_hal_semaphore_lists_deinitialize(&semaphore_lists);
+  HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
+}
+
 typedef struct hrx_host_call_thunk_t {
   hrx_host_call_fn_t callback;
   void* user_data;
@@ -153,7 +226,8 @@ hrx_status_t hrx_queue_fill(hrx_device_t device, hrx_queue_affinity_t affinity,
   status = iree_hal_queue_fill(
       queue, semaphore_lists.wait.list, semaphore_lists.signal.list,
       buffer->hal_buffer, (iree_device_size_t)offset, (iree_device_size_t)size,
-      pattern, (iree_host_size_t)pattern_size, IREE_HAL_FILL_FLAG_NONE);
+      pattern, (iree_host_size_t)pattern_size, /*barriers=*/NULL,
+      IREE_HAL_FILL_FLAG_NONE);
   hrx_hal_semaphore_lists_deinitialize(&semaphore_lists);
   HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
 }
@@ -189,7 +263,7 @@ hrx_status_t hrx_queue_copy(hrx_device_t device, hrx_queue_affinity_t affinity,
       queue, semaphore_lists.wait.list, semaphore_lists.signal.list,
       src->hal_buffer, (iree_device_size_t)src_offset, dst->hal_buffer,
       (iree_device_size_t)dst_offset, (iree_device_size_t)size,
-      IREE_HAL_COPY_FLAG_NONE);
+      /*barriers=*/NULL, IREE_HAL_COPY_FLAG_NONE);
   hrx_hal_semaphore_lists_deinitialize(&semaphore_lists);
   HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
 }
@@ -219,9 +293,9 @@ hrx_status_t hrx_queue_barrier(hrx_device_t device,
     HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
   }
 
-  status = iree_hal_queue_barrier(queue, semaphore_lists.wait.list,
-                                  semaphore_lists.signal.list,
-                                  IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
+  status = iree_hal_queue_barrier(
+      queue, semaphore_lists.wait.list, semaphore_lists.signal.list,
+      /*barriers=*/NULL, IREE_HAL_QUEUE_BARRIER_FLAG_NONE);
   hrx_hal_semaphore_lists_deinitialize(&semaphore_lists);
   HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));
 }
@@ -320,7 +394,7 @@ hrx_status_t hrx_queue_dispatch(
       queue, semaphore_lists.wait.list, semaphore_lists.signal.list,
       executable->hal_executable,
       iree_hal_executable_function_from_index(export_ordinal), hal_config,
-      hal_constants, hal_binding_list, hal_flags);
+      hal_constants, hal_binding_list, /*barriers=*/NULL, hal_flags);
   free(hal_bindings);
   hrx_hal_semaphore_lists_deinitialize(&semaphore_lists);
   HRX_RETURN_AND_END_ZONE(z0, hrx_status_from_iree(status));

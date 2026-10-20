@@ -76,6 +76,7 @@ iree_py_binary(
     visibility = GENERATOR_VISIBILITY,
     deps = [
         ":c_tables",
+        "//loom/py/loom/dialect/index",
         "//loom/py/loom/dialect/scalar",
         "//loom/py/loom/dialect/vector",
     ],
@@ -198,6 +199,7 @@ iree_py_binary(
     visibility = GENERATOR_VISIBILITY,
     deps = C_TABLES_BASE_DEPS + [
         "//loom/py/loom/dialect/kernel",
+        "//loom/py/loom/dialect/pipeline",
         "//loom/py/loom/dialect/target",
     ],
 )
@@ -234,6 +236,13 @@ iree_py_binary(
     main_module = "loom.gen.ops.c_tables",
     visibility = GENERATOR_VISIBILITY,
     deps = C_TABLES_BASE_DEPS + ["//loom/py/loom/dialect/pool"],
+)
+
+iree_py_binary(
+    name = "c_tables_channel_generator",
+    main_module = "loom.gen.ops.c_tables",
+    visibility = GENERATOR_VISIBILITY,
+    deps = C_TABLES_BASE_DEPS + ["//loom/py/loom/dialect/channel"],
 )
 
 iree_py_binary(
@@ -449,6 +458,23 @@ iree_py_test(
     args = ["loom.gen.ops.c_traits_test"],
     main = "pytest_style_runner.py",
     deps = [":c_tables"],
+)
+
+iree_py_test(
+    name = "c_vector_scalarization_test",
+    srcs = [
+        "c_vector_scalarization.py",
+        "c_vector_scalarization_test.py",
+        "//loom/py/loom/tools:pytest_style_runner.py",
+    ],
+    args = ["loom.gen.ops.c_vector_scalarization_test"],
+    main = "pytest_style_runner.py",
+    deps = [
+        ":c_tables",
+        "//loom/py/loom/dialect/index",
+        "//loom/py/loom/dialect/scalar",
+        "//loom/py/loom/dialect/vector",
+    ],
 )
 
 iree_py_test(

@@ -6,6 +6,7 @@
 
 #include "loom/error/emitter.h"
 #include "loom/error/error_catalog.h"
+#include "loom/error/parameter.h"
 #include "loom/ir/context.h"
 #include "loom/ir/module.h"
 #include "loom/ops/atomic.h"
@@ -171,6 +172,36 @@ iree_status_t loom_view_refine_verify(const loom_module_t* module,
                                                    result_type);
 }
 
+iree_status_t loom_view_bitcast_verify(const loom_module_t* module,
+                                       const loom_op_t* op,
+                                       iree_diagnostic_emitter_t emitter) {
+  const loom_type_t types[] = {
+      loom_module_value_type(module, loom_view_bitcast_source(op)),
+      loom_module_value_type(module, loom_view_bitcast_result(op)),
+  };
+  const iree_string_view_t names[] = {IREE_SV("source"), IREE_SV("result")};
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(types); ++i) {
+    if (!loom_type_is_view(types[i])) {
+      continue;
+    }
+    int32_t bit_count =
+        loom_scalar_type_bitwidth(loom_type_element_type(types[i]));
+    if (loom_type_has_encoding(types[i]) || bit_count <= 0 ||
+        bit_count % 8 != 0) {
+      loom_diagnostic_param_t params[] = {
+          loom_param_string(names[i]),
+          loom_param_type(types[i]),
+          loom_param_string(IREE_SV(
+              "dense unencoded view with byte-addressable scalar elements")),
+      };
+      return loom_view_emit(emitter, op,
+                            i == 0 ? LOOM_ERR_TYPE_003 : LOOM_ERR_TYPE_004,
+                            params, IREE_ARRAYSIZE(params));
+    }
+  }
+  return iree_ok_status();
+}
+
 iree_status_t loom_view_load_verify(const loom_module_t* module,
                                     const loom_op_t* op,
                                     iree_diagnostic_emitter_t emitter) {
@@ -195,7 +226,9 @@ iree_status_t loom_view_store_verify(const loom_module_t* module,
                                   emitter);
 }
 
-loom_trait_flags_t loom_view_atomic_load_effective_traits(const loom_op_t* op) {
+loom_trait_flags_t loom_view_atomic_load_effective_traits(
+    const loom_module_t* module, const loom_op_t* op) {
+  (void)module;
   const loom_trait_flags_t traits = op->traits & ~LOOM_TRAIT_MEMORY_FENCE;
   return loom_view_atomic_load_ordering(op) == LOOM_ATOMIC_ORDERING_RELAXED
              ? traits
@@ -203,7 +236,8 @@ loom_trait_flags_t loom_view_atomic_load_effective_traits(const loom_op_t* op) {
 }
 
 loom_trait_flags_t loom_view_atomic_store_effective_traits(
-    const loom_op_t* op) {
+    const loom_module_t* module, const loom_op_t* op) {
+  (void)module;
   const loom_trait_flags_t traits = op->traits & ~LOOM_TRAIT_MEMORY_FENCE;
   return loom_view_atomic_store_ordering(op) == LOOM_ATOMIC_ORDERING_RELAXED
              ? traits

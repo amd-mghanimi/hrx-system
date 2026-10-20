@@ -27,7 +27,7 @@ _AMDGPU_EXECUTE_COPTS = iree_select({
 
 _AMDGPU_EXECUTE_DEPS = iree_select({
     "//loom/config/execute:amdgpu_hal": [
-        "//loom/src/loom/tooling/target/amdgpu:execution_provider",
+        "//loom/binding/c/target/amdgpu:iree_hal",
     ],
     "//conditions:default": [],
 })
@@ -41,18 +41,14 @@ _SPIRV_VULKAN_EXECUTE_COPTS = iree_select({
 
 _SPIRV_VULKAN_EXECUTE_DEPS = iree_select({
     "//loom/config/execute:spirv_vulkan_hal": [
-        "//loom/src/loom/tooling/target/spirv:execution_provider",
+        "//loom/binding/c/target/spirv:iree_hal",
     ],
     "//conditions:default": [],
 })
 
-_IREE_RUN_LOOM_EXECUTE_COPTS = (
-    _AMDGPU_EXECUTE_COPTS + _SPIRV_VULKAN_EXECUTE_COPTS
-)
+_IREE_RUN_LOOM_EXECUTE_COPTS = _AMDGPU_EXECUTE_COPTS + _SPIRV_VULKAN_EXECUTE_COPTS
 
-_IREE_RUN_LOOM_EXECUTE_DEPS = (
-    _AMDGPU_EXECUTE_DEPS + _SPIRV_VULKAN_EXECUTE_DEPS
-)
+_IREE_RUN_LOOM_EXECUTE_DEPS = _AMDGPU_EXECUTE_DEPS + _SPIRV_VULKAN_EXECUTE_DEPS
 
 loom_cc_library(
     name = "main",
@@ -63,20 +59,24 @@ loom_cc_library(
         "main.h",
     ],
     deps = [
-        "//loom/src/loom/ir",
+        "//loom/binding/c:loomc",
+        "//loom/binding/c/target/iree_hal",
+        "//loom/src/loom/config:text_binding",
         "//loom/src/loom/sanitizer:options",
         "//loom/src/loom/tooling/cli:help",
-        "//loom/src/loom/tooling/compile:options",
-        "//loom/src/loom/tooling/compile:report_capture",
-        "//loom/src/loom/tooling/context",
-        "//loom/src/loom/tooling/execution:execution_backend",
-        "//loom/src/loom/tooling/execution:one_shot",
-        "//loom/src/loom/tooling/execution:session",
+        "//loom/src/loom/tooling/cli:loomc_options",
+        "//loom/src/loom/tooling/cli:loomc_result",
+        "//loom/src/loom/tooling/config:input",
+        "//loom/src/loom/tooling/execution/hal:invocation",
+        "//loom/src/loom/tooling/execution/hal:runtime",
+        "//loom/src/loom/tooling/input",
         "//loom/src/loom/tooling/input:flags",
+        "//loom/src/loom/tooling/input:loomc",
         "//loom/src/loom/tooling/io:file",
         "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/base/tooling:flags",
-        "//runtime/src/iree/io:file_handle",
+        "//runtime/src/iree/tooling:device_profiling",
         "//runtime/src/iree/tooling:device_util",
         "//runtime/src/iree/tooling:value_io",
     ],
@@ -88,9 +88,9 @@ loom_cc_binary(
     copts = _IREE_RUN_LOOM_EXECUTE_COPTS,
     deps = [
         ":main",
-        "//loom/src/loom/tooling/execution:execution_provider",
+        "//loom/binding/c/target/configured",
         "//loom/src/loom/tooling/input:configured",
-        "//loom/src/loom/transforms/cleanup:configured",
+        "//loom/src/loom/tooling/input:loomc_configured",
         "//runtime/src/iree/base",
     ] + _IREE_RUN_LOOM_EXECUTE_DEPS,
 )

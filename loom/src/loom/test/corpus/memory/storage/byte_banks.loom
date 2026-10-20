@@ -1,0 +1,99 @@
+// A byte load preserves its unsigned byte value in an i32 result.
+kernel.def @aligned_byte_increment() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input: buffer, %output: buffer) {
+  func.call @compute_aligned_byte_increment(%input, %output) : (buffer, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_aligned_byte_increment(%input: buffer, %output: buffer) {
+  %aligned_input, %aligned_output = buffer.assume.alignment %input, %output {minimum_alignment = 4} : buffer, buffer
+  %source, %destination = buffer.assume.noalias %aligned_input, %aligned_output : buffer, buffer
+  %base = index.constant 0 : offset
+  %c1 = scalar.constant 1 : i32
+  %byte = buffer.load.i8.u %source[%base]
+  %next = scalar.addi %byte, %c1 : i32
+  %output_view = buffer.view %destination[%base] : buffer -> view<1xi32>
+  view.store %next, %output_view[0] : i32, view<1xi32>
+  func.return
+}
+
+func.def @aligned_byte_increment_oracle(%input: buffer, %output: buffer) {
+  func.call @compute_aligned_byte_increment(%input, %output) : (buffer, buffer)
+  func.return
+}
+
+check.scenario @aligned_byte_increment_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %input = check.generate.fill value(-1) : tensor<4xi8>
+    %output = check.generate.fill value(0) : tensor<1xi32>
+    check.compare<@aligned_byte_increment, @aligned_byte_increment_oracle>(%input, %output) : (tensor<4xi8>, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%input) expected(%input) : tensor<4xi8>
+      check.expect.bitwise actual(%output) expected(%output) : tensor<1xi32>
+    }
+  }
+  check.return
+}
+
+// An immutable byte input chooses the storage read on each iteration.
+kernel.def @byte_selected_storage() {
+  %unit = index.constant 1 : index
+  kernel.launch.config workgroups(%unit, %unit, %unit) workgroup_size(%unit, %unit, %unit) : index
+} launch(%input_a: buffer, %input_b: buffer, %control: buffer) {
+  func.call @compute_byte_selected_storage(%input_a, %input_b, %control) : (buffer, buffer, buffer)
+  kernel.return
+}
+
+func.def device inline @compute_byte_selected_storage(%input_a: buffer, %input_b: buffer, %control: buffer) {
+  %a = buffer.assume.alignment %input_a {minimum_alignment = 16} : buffer
+  %b = buffer.assume.alignment %input_b {minimum_alignment = 16} : buffer
+  %start = index.constant 0 : index
+  %end = index.constant 3 : index
+  %step = index.constant 1 : index
+  %base = index.constant 0 : offset
+  %c1 = scalar.constant 1 : i32
+  %control_unique = buffer.assume.noalias %control : buffer
+  scf.for %i = [%start to %end step %step] {
+    %choice = buffer.load.i8.u %control_unique[%base]
+    %middle = scalar.cmpi eq, %choice, %c1 : i32
+    %read_buffer = scf.select %middle, %b, %a : buffer
+    %write_buffer = scf.select %middle, %a, %b : buffer
+    %read_unique, %write_unique = buffer.assume.noalias %read_buffer, %write_buffer : buffer, buffer
+    %source = buffer.view %read_unique[%base] : buffer -> view<1xi32>
+    %dest = buffer.view %write_unique[%base] : buffer -> view<1xi32>
+    %value = view.load %source[0] : view<1xi32> -> i32
+    %next = scalar.addi %value, %c1 : i32
+    view.store %next, %dest[0] : i32, view<1xi32>
+  }
+  func.return
+}
+
+func.def @byte_selected_storage_oracle(%input_a: buffer, %input_b: buffer, %control: buffer) {
+  func.call @compute_byte_selected_storage(%input_a, %input_b, %control) : (buffer, buffer, buffer)
+  func.return
+}
+
+check.scenario @byte_selected_storage_values {
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %a = check.generate.fill value(1) : tensor<1xi32>
+    %b = check.generate.fill value(2) : tensor<1xi32>
+    %control = check.generate.fill value(0) : tensor<1xi32>
+    check.compare<@byte_selected_storage, @byte_selected_storage_oracle>(%a, %b, %control) : (tensor<1xi32>, tensor<1xi32>, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%a) expected(%a) : tensor<1xi32>
+      check.expect.bitwise actual(%b) expected(%b) : tensor<1xi32>
+      check.expect.bitwise actual(%control) expected(%control) : tensor<1xi32>
+    }
+  }
+  check.trial[1](%trial: index, %entropy: check.entropy) {
+    %a = check.generate.fill value(1) : tensor<1xi32>
+    %b = check.generate.fill value(2) : tensor<1xi32>
+    %control = check.generate.fill value(1) : tensor<1xi32>
+    check.compare<@byte_selected_storage, @byte_selected_storage_oracle>(%a, %b, %control) : (tensor<1xi32>, tensor<1xi32>, tensor<1xi32>) -> () {
+      check.expect.bitwise actual(%a) expected(%a) : tensor<1xi32>
+      check.expect.bitwise actual(%b) expected(%b) : tensor<1xi32>
+      check.expect.bitwise actual(%control) expected(%control) : tensor<1xi32>
+    }
+  }
+  check.return
+}

@@ -37,9 +37,9 @@
 //===----------------------------------------------------------------------===//
 // mimalloc allocator implementation
 //===----------------------------------------------------------------------===//
-// NOTE: currently we only use the default heap. Since the heap is just a void*
-// we could treat our allocator `self` param as the heap instead to allow the
-// user to specify a custom heap (via `iree_allocator_system_self`).
+// The shared allocator uses mimalloc's process/thread default heap. The public
+// allocation functions preserve that selection without depending on mimalloc
+// implementation-private heap accessors.
 
 static iree_status_t iree_allocator_mimalloc_malloc(
     const iree_allocator_alloc_params_t* params, void** inout_ptr) {
@@ -52,7 +52,7 @@ static iree_status_t iree_allocator_mimalloc_malloc(
   }
 
   IREE_TRACE_ZONE_BEGIN(z0);
-  void* new_ptr = mi_heap_malloc(mi_prim_get_default_heap(), byte_length);
+  void* new_ptr = mi_malloc(byte_length);
   iree_status_t status = iree_ok_status();
   if (new_ptr) {
     *inout_ptr = new_ptr;
@@ -80,8 +80,7 @@ static iree_status_t iree_allocator_mimalloc_realloc(
   void* existing_ptr = *inout_ptr;
   void* existing_ptr_value = iree_tracing_obscure_ptr(existing_ptr);
   (void)existing_ptr_value;
-  void* new_ptr =
-      mi_heap_realloc(mi_prim_get_default_heap(), existing_ptr, byte_length);
+  void* new_ptr = mi_realloc(existing_ptr, byte_length);
   iree_status_t status = iree_ok_status();
   if (new_ptr) {
     *inout_ptr = new_ptr;
@@ -105,7 +104,7 @@ static iree_status_t iree_allocator_mimalloc_calloc(
   }
 
   IREE_TRACE_ZONE_BEGIN(z0);
-  void* new_ptr = mi_heap_calloc(mi_prim_get_default_heap(), 1, byte_length);
+  void* new_ptr = mi_calloc(1, byte_length);
   iree_status_t status = iree_ok_status();
   if (new_ptr) {
     *inout_ptr = new_ptr;
@@ -123,7 +122,7 @@ static iree_status_t iree_allocator_mimalloc_free(void** inout_ptr) {
   void* ptr = *inout_ptr;
   if (IREE_LIKELY(ptr != NULL)) {
     IREE_TRACE_FREE(ptr);
-    mi_heap_free(mi_prim_get_default_heap(), ptr);
+    mi_free(ptr);
     *inout_ptr = NULL;
   }
   IREE_TRACE_ZONE_END(z0);

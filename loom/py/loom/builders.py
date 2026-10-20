@@ -28,6 +28,7 @@ from loom.dsl import (
     ATTR_TYPE_ENUM_ARRAY,
     ATTR_TYPE_PARAMETERIZED_ARRAY,
     ATTR_TYPE_SIGNED_ENUM_SET,
+    ATTR_TYPE_STRING_ARRAY,
     ATTR_TYPE_SYMBOL_ARRAY,
     ATTR_TYPE_SYMBOL_SET,
     AttrDef,
@@ -47,6 +48,7 @@ from loom.ir import (
     ParameterizedAttrArray,
     Region,
     SignedEnumSetAttr,
+    StringArrayAttr,
     SymbolName,
     SymbolNameArray,
     SymbolNameSet,
@@ -240,6 +242,13 @@ class OpCallable:
                             )
                         elif (
                             param.attr_def is not None
+                            and param.attr_def.attr_type == ATTR_TYPE_STRING_ARRAY
+                        ):
+                            value = _normalize_string_array_attr(
+                                op.name, param.attr_def, value
+                            )
+                        elif (
+                            param.attr_def is not None
                             and param.attr_def.attr_type
                             == ATTR_TYPE_PARAMETERIZED_ARRAY
                         ):
@@ -274,11 +283,26 @@ class OpCallable:
                             f"{op.name}: block-argument parameter "
                             f"'{param.name}' has no region field"
                         )
-                    block_args_by_region[region_field] = value or []
+                    region_args = block_args_by_region.setdefault(region_field, [])
+                    region_args.extend(value or [])
+                    if param.end_attr_field is not None:
+                        boundary_attr = op.attr(param.end_attr_field)
+                        if (
+                            region_args
+                            or boundary_attr is None
+                            or not boundary_attr.optional
+                        ):
+                            attributes[param.end_attr_field] = len(region_args)
                 case BuilderParamKind.FUNC_ARGS:
                     func_args.extend(value or [])
                     if param.end_attr_field is not None:
-                        attributes[param.end_attr_field] = len(func_args)
+                        boundary_attr = op.attr(param.end_attr_field)
+                        if (
+                            func_args
+                            or boundary_attr is None
+                            or not boundary_attr.optional
+                        ):
+                            attributes[param.end_attr_field] = len(func_args)
                 case BuilderParamKind.PREDICATE_LIST:
                     if value:
                         attributes[param.name] = value
@@ -677,6 +701,21 @@ def _normalize_symbol_collection_attr(
         raise ValueError(f"{op_name}: symbol set '{attr_def.name}' {exc}") from exc
 
 
+def _normalize_string_array_attr(
+    op_name: str, attr_def: AttrDef, value: Any
+) -> StringArrayAttr:
+    """Normalizes an ordered string array."""
+    values = value.values if isinstance(value, StringArrayAttr) else value
+    if isinstance(values, str | bytes | bytearray) or not isinstance(values, Iterable):
+        raise TypeError(
+            f"{op_name}: string array '{attr_def.name}' must be an iterable of strings"
+        )
+    try:
+        return StringArrayAttr(values)
+    except (TypeError, ValueError) as exc:
+        raise type(exc)(f"{op_name}: string array '{attr_def.name}' {exc}") from exc
+
+
 def _normalize_result_names(
     op: Op,
     results: Sequence[Type | TiedResultSpec],
@@ -690,6 +729,12 @@ def _normalize_result_names(
         raise TypeError(
             f"{op.name}: pass only one of 'name', 'names', or 'result_names'"
         )
+    if op.has_signature_only_results:
+        if supplied:
+            raise TypeError(
+                f"{op.name}: signature-only results cannot be named as SSA values"
+            )
+        return None
     if not op.results:
         if supplied:
             raise TypeError(f"{op.name}: result names were supplied for a void op")
@@ -798,6 +843,7 @@ def default_ops() -> tuple[Op, ...]:
     """Return every op in the default Loom Python dialect registry."""
     from loom.dialect.buffer import ALL_BUFFER_OPS
     from loom.dialect.cfg import ALL_CFG_OPS
+    from loom.dialect.channel import ALL_CHANNEL_OPS
     from loom.dialect.check import ALL_CHECK_OPS
     from loom.dialect.command import ALL_COMMAND_OPS
     from loom.dialect.encoding import ALL_ENCODING_OPS
@@ -821,6 +867,7 @@ def default_ops() -> tuple[Op, ...]:
     return (
         *ALL_BUFFER_OPS,
         *ALL_CFG_OPS,
+        *ALL_CHANNEL_OPS,
         *ALL_CHECK_OPS,
         *ALL_COMMAND_OPS,
         *ALL_ENCODING_OPS,
@@ -845,6 +892,7 @@ def default_ops() -> tuple[Op, ...]:
 
 def default_types() -> tuple[TypeDef, ...]:
     """Return every type in the default Loom Python type registry."""
+    from loom.dialect.check import ALL_CHECK_TYPES
     from loom.dialect.group import ALL_GROUP_TYPES
     from loom.dialect.hal import ALL_HAL_TYPES
     from loom.dialect.kernel import ALL_KERNEL_TYPES
@@ -852,6 +900,7 @@ def default_types() -> tuple[TypeDef, ...]:
 
     return (
         *ALL_BUILTIN_TYPES,
+        *ALL_CHECK_TYPES,
         *ALL_GROUP_TYPES,
         *ALL_HAL_TYPES,
         *ALL_KERNEL_TYPES,

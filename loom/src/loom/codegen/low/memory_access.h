@@ -16,6 +16,7 @@
 #include <stdint.h>
 
 #include "iree/base/api.h"
+#include "loom/analysis/symbolic_expr.h"
 #include "loom/codegen/low/descriptors.h"
 #include "loom/ir/facts.h"
 
@@ -77,6 +78,12 @@ typedef enum loom_low_memory_access_precision_bits_e {
 } loom_low_memory_access_precision_bits_t;
 typedef uint32_t loom_low_memory_access_precision_flags_t;
 
+typedef enum loom_low_memory_access_source_flag_bits_e {
+  // Source atomic load/store lowered through an ordinary target load/store.
+  LOOM_LOW_MEMORY_ACCESS_SOURCE_FLAG_ATOMIC_OBSERVATION = 1u << 0,
+} loom_low_memory_access_source_flag_bits_t;
+typedef uint8_t loom_low_memory_access_source_flags_t;
+
 // One non-wrapping byte interval repeated at a fixed positive stride relative
 // to an alias root. The interval is half-open within [0, stride_bytes).
 typedef struct loom_low_strided_byte_interval_t {
@@ -88,9 +95,41 @@ typedef struct loom_low_strided_byte_interval_t {
   uint64_t end_bytes;
 } loom_low_strided_byte_interval_t;
 
+// Conservative byte envelope [origin+lower, origin+upper) relative to one
+// storage value. The captured namespace owns symbolic variable identities;
+// they are not live IR value handles. Unequal storage values may still alias.
+typedef struct loom_low_memory_relative_interval_t {
+  // Identity of the producer's captured evaluation namespace.
+  const void* scope;
+  // Storage equality identity within scope; inequality proves nothing.
+  uint32_t storage_id;
+  // One-based disjoint-storage identity within scope, or zero when unknown.
+  // Unequal nonzero identities require a comparison mode that establishes one
+  // captured dynamic invocation without CFG re-entry.
+  uint32_t disjoint_storage_ordinal;
+  // Participant-uniform symbolic origin, with optional periodic guarantees.
+  loom_symbolic_expr_t origin;
+  // Inclusive lower displacement over all participants and packet elements.
+  int64_t lower;
+  // Exclusive upper displacement over all participants and packet elements.
+  int64_t upper;
+} loom_low_memory_relative_interval_t;
+
+typedef enum loom_low_memory_comparison_e {
+  // Values may come from different dynamic executions, including backedges.
+  LOOM_LOW_MEMORY_COMPARISON_INDEPENDENT,
+  // Both effects execute in the same block invocation and participant domain.
+  LOOM_LOW_MEMORY_COMPARISON_SAME_EVALUATION,
+  // Both effects execute in the same source-function invocation and participant
+  // domain, and control flow between them crosses no CFG re-entry/backedge.
+  LOOM_LOW_MEMORY_COMPARISON_SAME_ACYCLIC_INVOCATION,
+} loom_low_memory_comparison_t;
+
 typedef struct loom_low_memory_access_summary_t {
   // Normalized target-low memory space touched by this summary.
-  loom_low_memory_space_t memory_space;
+  uint8_t memory_space;
+  // Source operation semantics retained across target-low lowering.
+  loom_low_memory_access_source_flags_t source_flags;
   // Comparable alias root identifier, or NONE when unknown.
   uint32_t alias_root_id;
   // Comparable disjoint alias group identifier, or NONE when unknown.
@@ -101,68 +140,61 @@ typedef struct loom_low_memory_access_summary_t {
   loom_low_strided_byte_interval_t strided_interval;
   // Optional conservative byte interval touched by this access.
   const loom_low_byte_interval_t* byte_interval;
+  // Optional captured relative footprint, independent of numeric alias labels.
+  const loom_low_memory_relative_interval_t* relative_interval;
 } loom_low_memory_access_summary_t;
 
-typedef struct loom_low_memory_access_position_t {
-  // Region index of the low block when this row was recorded.
-  uint16_t block_index;
-  // Block-local ordinal of the low op when this row was recorded.
-  uint64_t block_ordinal;
-} loom_low_memory_access_position_t;
+static_assert(LOOM_LOW_MEMORY_SPACE_WASM_MEMORY <= UINT8_MAX,
+              "memory spaces must fit compact access summaries");
+static_assert(sizeof(loom_low_memory_access_summary_t) ==
+                  40 + 2 * sizeof(void*),
+              "memory access summaries must remain compact");
 
-// Compares two low op positions by function order. Returns <0 when |left|
-// comes before |right|, >0 when it comes after, and 0 for the same block-index
-// and block-ordinal key.
-static inline int loom_low_memory_access_position_compare_order(
-    const loom_low_memory_access_position_t* left,
-    const loom_low_memory_access_position_t* right) {
-  if (left->block_index < right->block_index) {
-    return -1;
-  }
-  if (left->block_index > right->block_index) {
-    return 1;
-  }
-  if (left->block_ordinal < right->block_ordinal) {
-    return -1;
-  }
-  if (left->block_ordinal > right->block_ordinal) {
-    return 1;
-  }
-  return 0;
-}
+// Compiler-owned packet/effect bindings. The arena and operations outlive the
+// map; it contains no IR attributes and never infers an address from Low IR.
+typedef struct loom_low_memory_access_map_t loom_low_memory_access_map_t;
 
-typedef struct loom_low_memory_access_record_t {
-  // Low function position whose descriptor memory effect is refined by
-  // |summary|.
-  loom_low_memory_access_position_t position;
-  // Low op whose descriptor memory effect is refined by |summary|.
-  const loom_op_t* op;
-  // Source-derived memory access summary for the recorded low op position.
-  // Optional payloads borrow the table's retained arena independently of this
-  // record, so copying records does not invalidate their summaries.
-  loom_low_memory_access_summary_t summary;
-} loom_low_memory_access_record_t;
+// Allocates an initially empty map in |arena|.
+iree_status_t loom_low_memory_access_map_allocate(
+    iree_arena_allocator_t* arena, loom_low_memory_access_map_t** out_map);
 
-typedef struct loom_low_memory_access_table_t {
-  // Low function that owns the recorded low operations.
-  const loom_op_t* function_op;
-  // Function-order memory access records, or NULL when empty.
-  const loom_low_memory_access_record_t* values;
-  // Number of rows in |values|.
-  iree_host_size_t count;
-} loom_low_memory_access_table_t;
+// Retains one concrete descriptor effect and deep-copies its proof payload.
+// The producer supplies the descriptor-local ordinal, never a memory-space
+// guess. Returned effect summaries have stable addresses for the map lifetime.
+iree_status_t loom_low_memory_access_map_insert(
+    loom_low_memory_access_map_t* map, const loom_op_t* op,
+    uint16_t effect_ordinal, const loom_low_memory_access_summary_t* summary);
 
-// Returns an empty low memory access table.
-static inline loom_low_memory_access_table_t loom_low_memory_access_table_empty(
-    void) {
-  return (loom_low_memory_access_table_t){0};
-}
+// Returns the binding for this exact effect, or NULL for an unrefined effect.
+const loom_low_memory_access_summary_t* loom_low_memory_access_map_lookup(
+    const loom_low_memory_access_map_t* map, const loom_op_t* op,
+    uint16_t effect_ordinal);
 
-// Returns true when |table| carries no memory access records.
-static inline bool loom_low_memory_access_table_is_empty(
-    loom_low_memory_access_table_t table) {
-  return table.count == 0;
-}
+// Transfers preserved effects at an instruction replacement boundary. The
+// replacement must preserve the meaning and ordinals of descriptor effects.
+iree_status_t loom_low_memory_access_map_replace(
+    loom_low_memory_access_map_t* map, const loom_op_t* old_op,
+    const loom_op_t* new_op);
+
+// Transfers bindings for operations moved within the same module. Both maps
+// use the module arena; immutable proof payloads retain their captured scopes.
+iree_status_t loom_low_memory_access_map_transfer(
+    const loom_low_memory_access_map_t* source,
+    loom_low_memory_access_map_t* target);
+
+// One invocation of a clone, with freshly mapped captured evaluation scopes.
+// The source map is immutable; target bindings own all copied payloads.
+typedef struct loom_low_memory_access_clone_t loom_low_memory_access_clone_t;
+
+iree_status_t loom_low_memory_access_clone_allocate(
+    const loom_low_memory_access_map_t* source,
+    loom_low_memory_access_map_t* target, iree_arena_allocator_t* scratch_arena,
+    loom_low_memory_access_clone_t** out_clone);
+
+// Matches the generic operation-clone observer signature.
+iree_status_t loom_low_memory_access_clone_op(void* clone,
+                                              const loom_op_t* source_op,
+                                              loom_op_t* target_op);
 
 // Returns the canonical dependency memory-space bucket for |memory_space|.
 loom_low_memory_space_t loom_low_memory_access_normalize_space(
@@ -183,12 +215,14 @@ loom_low_memory_access_summary_for_space(loom_low_memory_space_t memory_space);
 // touching the same memory.
 bool loom_low_memory_access_summaries_may_alias(
     const loom_low_memory_access_summary_t* left,
-    const loom_low_memory_access_summary_t* right);
+    const loom_low_memory_access_summary_t* right,
+    loom_low_memory_comparison_t comparison);
 
 // Returns true when the summaries have identical conservative alias facts.
-// This proves equivalent may-alias queries, not identical runtime addresses or
-// full overwrite. Retiring an access additionally requires an established
-// completion dependency through an intervening opposite-kind access.
+// Source flags do not participate. This proves equivalent may-alias queries,
+// not identical runtime addresses or full overwrite. Retiring an access
+// additionally requires an established completion dependency through an
+// intervening opposite-kind access.
 bool loom_low_memory_access_summaries_equal(
     const loom_low_memory_access_summary_t* left,
     const loom_low_memory_access_summary_t* right);

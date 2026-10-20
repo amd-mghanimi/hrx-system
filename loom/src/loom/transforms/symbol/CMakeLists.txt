@@ -20,6 +20,7 @@ loom_cc_library(
     iree::base
     loom::analysis::condition_fact_scope
     loom::analysis::condition_facts
+    loom::analysis::integer_relation
     loom::analysis::template_provider_catalog
     loom::decision::predicate
     loom::ir
@@ -109,6 +110,7 @@ loom_cc_library(
     loom::analysis::symbol_facts
     loom::error::emitter
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ops::func
     loom::ops::op_defs
@@ -149,6 +151,7 @@ loom_cc_library(
     loom::ops::scf
     loom::ops::target
     loom::ops::template
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::report
@@ -157,6 +160,7 @@ loom_cc_library(
     loom::rewrite::rewriter
     loom::target::condition
     loom::target::facts
+    loom::target::facts_builder
     loom::target::function_version
     loom::target::pass_environment
     loom::util::dominance
@@ -235,12 +239,17 @@ loom_cc_library(
     loom::analysis::availability
     loom::analysis::scc
     loom::analysis::symbol_references
+    loom::codegen::low::function
+    loom::codegen::low::loop_execution
+    loom::codegen::low::memory_access
     loom::error::error_defs
     loom::ir
     loom::ops::cfg
+    loom::ops::command
     loom::ops::func
     loom::ops::low
     loom::ops::op_defs
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::types
     loom::rewrite::callable
@@ -295,6 +304,7 @@ loom_cc_library(
     loom::analysis::scc
     loom::analysis::type_refinement
     loom::error::error_defs
+    loom::error::parameter
     loom::ir
     loom::ir::facts
     loom::ir::type_refinement
@@ -302,9 +312,11 @@ loom_cc_library(
     loom::ops::op_defs
     loom::ops::special_values
     loom::ops::type_registry
+    loom::pass::options
     loom::pass::pipeline
     loom::pass::registry
     loom::pass::types
+    loom::pass::value_facts
     loom::rewrite::materialize
     loom::rewrite::remap
     loom::transforms::cleanup::canonicalizer

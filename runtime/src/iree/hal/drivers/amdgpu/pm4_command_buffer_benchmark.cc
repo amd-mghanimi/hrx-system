@@ -20,6 +20,7 @@
 #include "iree/hal/api.h"
 #include "iree/hal/cts/util/registry.h"
 #include "iree/hal/drivers/amdgpu/abi/command_buffer.h"
+#include "iree/hal/drivers/amdgpu/allocator.h"
 #include "iree/hal/drivers/amdgpu/api.h"
 #include "iree/hal/drivers/amdgpu/aql_command_buffer.h"
 #include "iree/hal/drivers/amdgpu/aql_program_builder.h"
@@ -130,15 +131,19 @@ int64_t NextDispatchGroupSize(int64_t dispatch_index, int64_t operation_count,
 }
 
 iree_status_t EmitDispatchBarrier(iree_hal_command_buffer_t* command_buffer) {
-  return iree_hal_command_buffer_execution_barrier(
-      command_buffer,
-      IREE_HAL_EXECUTION_STAGE_DISPATCH |
-          IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
-      IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
-          IREE_HAL_EXECUTION_STAGE_DISPATCH,
-      IREE_HAL_EXECUTION_BARRIER_FLAG_NONE, /*memory_barrier_count=*/0,
-      /*memory_barriers=*/nullptr,
-      /*buffer_barrier_count=*/0, /*buffer_barriers=*/nullptr);
+  const iree_hal_barrier_t execution_barrier = {
+      .source_stage_mask = IREE_HAL_EXECUTION_STAGE_DISPATCH |
+                           IREE_HAL_EXECUTION_STAGE_COMMAND_RETIRE,
+      .target_stage_mask = IREE_HAL_EXECUTION_STAGE_COMMAND_ISSUE |
+                           IREE_HAL_EXECUTION_STAGE_DISPATCH,
+      .flags = IREE_HAL_BARRIER_FLAG_NONE,
+      .effects = {},
+      .memory_barrier_count = 0,
+      .memory_barriers = nullptr,
+      .buffer_barrier_count = 0,
+      .buffer_barriers = nullptr,
+  };
+  return iree_hal_command_buffer_barrier(command_buffer, &execution_barrier);
 }
 
 struct DeviceBundle {
@@ -424,14 +429,15 @@ class Pm4CommandBufferBenchmark : public benchmark::Fixture {
 
   static iree_status_t AllocateBuffers(DeviceBundle* bundle) {
     iree_hal_allocator_t* allocator = iree_hal_device_allocator(bundle->device);
-    iree_hal_buffer_params_t params = {0};
+    iree_hal_amdgpu_buffer_spec_t params = {0};
     params.type = IREE_HAL_MEMORY_TYPE_OPTIMAL_FOR_DEVICE;
     params.access = IREE_HAL_MEMORY_ACCESS_ALL;
     params.usage =
         IREE_HAL_BUFFER_USAGE_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
+    params.queue_family_affinity = IREE_HAL_QUEUE_FAMILY_AFFINITY_ANY;
     params.min_alignment = kPayloadBufferAlignment;
     for (iree_host_size_t i = 0; i < kMaximumBindingTableCount; ++i) {
-      IREE_RETURN_IF_ERROR(iree_hal_allocator_allocate_buffer(
+      IREE_RETURN_IF_ERROR(iree_hal_amdgpu_allocator_allocate_direct_buffer(
           allocator, params, kPayloadBufferLength, &bundle->buffers[i]));
       bundle->binding_table[i] = iree_hal_buffer_binding_t{
           /*buffer=*/bundle->buffers[i],

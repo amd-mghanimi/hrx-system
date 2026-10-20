@@ -1,0 +1,126 @@
+// Exercises scalar and vector bitfield extraction across source widths,
+// result widths, signedness, boundary fields, and predicate carriers.
+func.def @bitfield_observations(%bits: i64, %output: buffer) {
+  %base = index.constant 0 : offset
+  %results = buffer.view %output[%base] : buffer -> view<26xi64>
+  %byte = scalar.trunci %bits : i64 to i8
+  %half = scalar.trunci %bits : i64 to i16
+  %word = scalar.trunci %bits : i64 to i32
+
+  %full_byte = scalar.bitfield.extracts %byte {offset = 0, width = 8} : i8 -> i8
+  %full_word = scalar.bitfield.extractu %word {offset = 0, width = 32} : i32 -> i32
+  %full_wide = scalar.bitfield.extracts %bits {offset = 0, width = 64} : i64 -> i64
+  %full_byte_wide = scalar.extsi %full_byte : i8 to i64
+  %full_word_wide = scalar.extui %full_word : i32 to i64
+  view.store %full_byte_wide, %results[0] : i64, view<26xi64>
+  view.store %full_word_wide, %results[1] : i64, view<26xi64>
+  view.store %full_wide, %results[2] : i64, view<26xi64>
+
+  %low = scalar.bitfield.extractu %byte {offset = 0, width = 4} : i8 -> i32
+  %high = scalar.bitfield.extracts %byte {offset = 4, width = 4} : i8 -> i64
+  %middle = scalar.bitfield.extractu %half {offset = 3, width = 8} : i16 -> i16
+  %top = scalar.bitfield.extracts %half {offset = 8, width = 8} : i16 -> i64
+  %low_wide = scalar.extui %low : i32 to i64
+  %middle_wide = scalar.extui %middle : i16 to i64
+  view.store %low_wide, %results[3] : i64, view<26xi64>
+  view.store %high, %results[4] : i64, view<26xi64>
+  view.store %middle_wide, %results[5] : i64, view<26xi64>
+  view.store %top, %results[6] : i64, view<26xi64>
+
+  %narrow_byte = scalar.bitfield.extractu %bits {offset = 32, width = 8} : i64 -> i8
+  %narrow_half = scalar.bitfield.extracts %bits {offset = 40, width = 12} : i64 -> i16
+  %sign = scalar.bitfield.extracts %bits {offset = 63, width = 1} : i64 -> i64
+  %low63 = scalar.bitfield.extractu %bits {offset = 0, width = 63} : i64 -> i64
+  %narrow_byte_wide = scalar.extui %narrow_byte : i8 to i64
+  %narrow_half_wide = scalar.extsi %narrow_half : i16 to i64
+  view.store %narrow_byte_wide, %results[7] : i64, view<26xi64>
+  view.store %narrow_half_wide, %results[8] : i64, view<26xi64>
+  view.store %sign, %results[9] : i64, view<26xi64>
+  view.store %low63, %results[10] : i64, view<26xi64>
+
+  %c0 = scalar.constant 0 : i32
+  %c8 = scalar.constant 8 : i32
+  %condition = scalar.cmpi ne, %word, %c0 : i32
+  %identity = scalar.bitfield.extractu %condition {offset = 0, width = 1} : i1 -> i1
+  %unsigned = scalar.bitfield.extractu %condition {offset = 0, width = 1} : i1 -> i32
+  %signed = scalar.bitfield.extracts %condition {offset = 0, width = 1} : i1 -> i64
+  %word_top = scalar.bitfield.extractu %word {offset = 31, width = 1} : i32 -> i1
+  %identity_wide = scalar.extui %identity : i1 to i64
+  %unsigned_wide = scalar.extui %unsigned : i32 to i64
+  %word_top_wide = scalar.extui %word_top : i1 to i64
+  view.store %identity_wide, %results[11] : i64, view<26xi64>
+  view.store %unsigned_wide, %results[12] : i64, view<26xi64>
+  view.store %signed, %results[13] : i64, view<26xi64>
+  view.store %word_top_wide, %results[14] : i64, view<26xi64>
+
+  %second_word = scalar.shrui %word, %c8 : i32
+  %second = scalar.trunci %second_word : i32 to i8
+  %seed = vector.splat %byte : vector<2xi8>
+  %packed = vector.insert %second into %seed[1] : i8, vector<2xi8>
+  %vector_low = vector.bitfield.extractu %packed {offset = 0, width = 4} : vector<2xi8> -> vector<2xi32>
+  %vector_high = vector.bitfield.extracts %packed {offset = 4, width = 4} : vector<2xi8> -> vector<2xi32>
+  %low_a = vector.extract %vector_low[0] : vector<2xi32> -> i32
+  %low_b = vector.extract %vector_low[1] : vector<2xi32> -> i32
+  %high_a = vector.extract %vector_high[0] : vector<2xi32> -> i32
+  %high_b = vector.extract %vector_high[1] : vector<2xi32> -> i32
+  %low_a_wide = scalar.extsi %low_a : i32 to i64
+  %low_b_wide = scalar.extsi %low_b : i32 to i64
+  %high_a_wide = scalar.extsi %high_a : i32 to i64
+  %high_b_wide = scalar.extsi %high_b : i32 to i64
+  view.store %low_a_wide, %results[15] : i64, view<26xi64>
+  view.store %low_b_wide, %results[16] : i64, view<26xi64>
+  view.store %high_a_wide, %results[17] : i64, view<26xi64>
+  view.store %high_b_wide, %results[18] : i64, view<26xi64>
+
+  %third_word = scalar.xori %word, %second_word : i32
+  %fourth_word = scalar.addi %word, %second_word : i32
+  %values = vector.from_elements %word, %second_word, %third_word, %fourth_word : vector<4xi32>
+  %field_low = vector.bitfield.extractu %values {offset = 0, width = 4} : vector<4xi32> -> vector<4xi32>
+  %field_high = vector.bitfield.extractu %values {offset = 4, width = 2} : vector<4xi32> -> vector<4xi32>
+  %merged = vector.bitfield.insert %field_high into %field_low {offset = 4, width = 2} : vector<4xi32>, vector<4xi32>
+  %bias = vector.constant 32 : vector<4xi32>
+  %field_result = vector.subi %merged, %bias : vector<4xi32>
+  %length = index.constant 16 : offset
+  %storage = buffer.alloca<private> align(4) %length : buffer
+  %storage_view = buffer.view %storage[%base] : buffer -> view<4xi32>
+  vector.store %field_result, %storage_view[0] : vector<4xi32>, view<4xi32>
+  %field0 = view.load %storage_view[0] : view<4xi32> -> i32
+  %field1 = view.load %storage_view[1] : view<4xi32> -> i32
+  %field2 = view.load %storage_view[2] : view<4xi32> -> i32
+  %field3 = view.load %storage_view[3] : view<4xi32> -> i32
+  %fields = vector.splat %word : vector<1xi32>
+  %bases = vector.splat %second_word : vector<1xi32>
+  %full_insert = vector.bitfield.insert %fields into %bases {offset = 0, width = 32} : vector<1xi32>, vector<1xi32>
+  %full_insert_value = vector.extract %full_insert[0] : vector<1xi32> -> i32
+  %signed_values = vector.splat %word : vector<1xi32>
+  %signed_high = vector.bitfield.extracts %signed_values {offset = 28, width = 4} : vector<1xi32> -> vector<1xi32>
+  %signed_middle = vector.bitfield.extracts %signed_values {offset = 4, width = 4} : vector<1xi32> -> vector<1xi32>
+  %signed_high_value = vector.extract %signed_high[0] : vector<1xi32> -> i32
+  %signed_middle_value = vector.extract %signed_middle[0] : vector<1xi32> -> i32
+  %field0_wide = scalar.extsi %field0 : i32 to i64
+  %field1_wide = scalar.extsi %field1 : i32 to i64
+  %field2_wide = scalar.extsi %field2 : i32 to i64
+  %field3_wide = scalar.extsi %field3 : i32 to i64
+  %full_insert_wide = scalar.extsi %full_insert_value : i32 to i64
+  %signed_high_wide = scalar.extsi %signed_high_value : i32 to i64
+  %signed_middle_wide = scalar.extsi %signed_middle_value : i32 to i64
+  view.store %field0_wide, %results[19] : i64, view<26xi64>
+  view.store %field1_wide, %results[20] : i64, view<26xi64>
+  view.store %field2_wide, %results[21] : i64, view<26xi64>
+  view.store %field3_wide, %results[22] : i64, view<26xi64>
+  view.store %full_insert_wide, %results[23] : i64, view<26xi64>
+  view.store %signed_high_wide, %results[24] : i64, view<26xi64>
+  view.store %signed_middle_wide, %results[25] : i64, view<26xi64>
+  func.return
+}
+
+check.scenario @bitfield_values {
+  check.trial[256](%trial: index, %entropy: check.entropy) {
+    %bits = check.entropy.read %entropy[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<26xi64>
+    check.compare<@bitfield_observations>(%bits, %output) : (i64, tensor<26xi64>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<26xi64>
+    }
+  }
+  check.return
+}

@@ -1,0 +1,605 @@
+// RUN: emit aie2p-xdna input=source-low
+
+aie2p.target<array> @device
+
+// Physical resources cannot be selected before deployment specialization.
+// ERROR@+1: XDNA/051 {requirement="an exact deployment profile"}
+pipeline.def<kernel> public retain target(@device) @unresolved_device() run() {
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @overlapping_workers() run() {
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 8 : offset
+  %origin = index.constant 0 : offset
+  %slots = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %records = buffer.view %storage[%origin] : buffer -> view<2x1xi32>
+  %channel = channel.bind<fifo> %records, %slots : view<2x1xi32>, index -> channel<tile<1xi32>>
+  %other_storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %other_records = buffer.view %other_storage[%origin] : buffer -> view<2x1xi32>
+  %other_channel = channel.bind<fifo> %other_records, %slots : view<2x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %channel : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = scalar.constant 42 : i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+  // ERROR@+1: XDNA/051 {requirement="an independently assigned compute tile for each instruction-executing strand"}
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %other_channel : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = scalar.constant 42 : i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @unsplit_worker_extent() run() {
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 8 : offset
+  %origin = index.constant 0 : offset
+  %slots = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %records = buffer.view %storage[%origin] : buffer -> view<2x1xi32>
+  %channel = channel.bind<fifo> %records, %slots : view<2x1xi32>, index -> channel<tile<1xi32>>
+  // ERROR@+1: XDNA/051 {requirement="a single placed compute tile per strand"}
+  pipeline.strand workers([0, 2], [1, 2], [1, 1]) {
+    %write, %record = channel.reserve %channel : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = scalar.constant 42 : i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @external_channel_backing() run(%backing: buffer) {
+  %origin = index.constant 0 : offset
+  %slots = index.constant 1 : index
+  %records = buffer.view %backing[%origin] : buffer -> view<1x1xi32>
+  // ERROR@+1: XDNA/051 {requirement="invocation-owned on-chip channel storage"}
+  %channel = channel.bind<fifo> %records, %slots : view<1x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %channel : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = scalar.constant 42 : i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @unowned_local_core_buffer(%buffer: buffer) run() {
+  %local = buffer.assume.memory_space<workgroup> %buffer : buffer
+  %origin = index.constant 0 : offset
+  // ERROR@+1: XDNA/051 {requirement="an invocation-owned finite local allocation for each core buffer capture"}
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %view = buffer.view %local[%origin] : buffer -> view<16xi32>
+    %value = vector.constant 42 : vector<16xi32>
+    vector.store %value, %view[0] : vector<16xi32>, view<16xi32>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @credit_range() run() {
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 256 : offset
+  %origin = index.constant 0 : offset
+  %slots = index.constant 64 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %records = buffer.view %storage[%origin] : buffer -> view<64x1xi32>
+  // ERROR@+1: XDNA/051 {requirement="a hardware semaphore pair with enough slot credits"}
+  %channel = channel.bind<fifo> %records, %slots : view<64x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %channel : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+    %value = scalar.constant 42 : i32
+    view.store %value, %record[0] : i32, view<1xi32>
+    channel.publish %write : write<tile<1xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Interleaved slots still require their entire footprint to fit the allocation.
+pipeline.def<kernel> public retain target(@device) @short_interleaved_storage() run() {
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 24575 : offset
+  %origin = index.constant 0 : offset
+  %slots = index.constant 12 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  %records = buffer.view %storage[%origin] : buffer -> view<12x16x64xbf16, #encoding.layout.strided<strides=[64, 768, 1]>>
+  // ERROR@+1: XDNA/051 {requirement="specialized byte-addressable channel slot geometry"}
+  %channel = channel.bind<fifo> %records, %slots : view<12x16x64xbf16, #encoding.layout.strided<strides=[64, 768, 1]>>, index -> channel<tile<16x64xbf16>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %record = channel.reserve %channel : channel<tile<16x64xbf16>> -> (write<tile<16x64xbf16>>, view<16x64xbf16, #encoding.layout.strided<strides=[768, 1]>>)
+    channel.publish %write : write<tile<16x64xbf16>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// The third input can reuse the released second slot while the first is held.
+// An aggregate-prefix ring cannot preserve this progress contract: delaying
+// the second credit until the first release would block before that release.
+pipeline.def<kernel> public retain target(@device) @independent_slot_reuse() run() {
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %bytes = index.constant 8 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x1xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<2x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %begin = index.constant 0 : index
+    %count = index.constant 3 : index
+    %step = index.constant 1 : index
+    scf.for %record = [%begin to %count step %step] {
+      %write, %payload = channel.reserve %records : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %value = index.cast %record : index to i32
+      view.store %value, %payload[0] : i32, view<1xi32>
+      channel.publish %write : write<tile<1xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %first, %first_payload = channel.acquire %records : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+    %second, %second_payload = channel.acquire %records : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+    channel.release %second : read<tile<1xi32>>
+    // ERROR@+1: XDNA/051 {requirement="independent slot reuse across blocking channel admission"}
+    %third, %third_payload = channel.acquire %records : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+    channel.release %third : read<tile<1xi32>>
+    channel.release %first : read<tile<1xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Both branches preserve ownership, but select a different FIFO record for
+// the same final release. A constant credit delta cannot implement this join.
+pipeline.def<kernel> public retain target(@device) @selected_retirement_order() run() {
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %bytes = index.constant 8 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<2x1xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<2x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    scf.for %record = [%begin to %capacity step %step] {
+      %write, %payload = channel.reserve %records : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %value = index.cast %record : index to i32
+      view.store %value, %payload[0] : i32, view<1xi32>
+      channel.publish %write : write<tile<1xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %first, %first_payload = channel.acquire %records : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+    %second, %second_payload = channel.acquire %records : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+    %first_value = view.load %first_payload[0] : view<1xi32> -> i32
+    %second_value = view.load %second_payload[0] : view<1xi32> -> i32
+    %first_is_smaller = scalar.cmpi slt, %first_value, %second_value : i32
+    %remaining = scf.if %first_is_smaller -> (read<tile<1xi32>>) {
+      channel.release %first : read<tile<1xi32>>
+      scf.yield %second : read<tile<1xi32>>
+    } else {
+      channel.release %second : read<tile<1xi32>>
+      // ERROR@+1: XDNA/051 {requirement="compatible FIFO completion frontiers at control joins"}
+      scf.yield %first : read<tile<1xi32>>
+    }
+    channel.release %remaining : read<tile<1xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Separate DMA tasks cannot independently advance the same physical FIFO ring.
+pipeline.def<kernel> public retain target(@device) @shared_distribution_reader() run() {
+  %source_memory = pipeline.memory<workgroup>[0, 2] : pool
+  %left_memory = pipeline.memory<workgroup>[0, 3] : pool
+  %right_memory = pipeline.memory<workgroup>[0, 4] : pool
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %source_storage = buffer.alloca<workgroup> pool(%source_memory) align(64) %bytes : buffer
+  %source_slots = buffer.view %source_storage[%origin] : buffer -> view<2x16xi32>
+  %source = channel.bind<fifo> %source_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %left_storage = buffer.alloca<workgroup> pool(%left_memory) align(64) %bytes : buffer
+  %left_slots = buffer.view %left_storage[%origin] : buffer -> view<2x16xi32>
+  %left = channel.bind<fifo> %left_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %right_storage = buffer.alloca<workgroup> pool(%right_memory) align(64) %bytes : buffer
+  %right_slots = buffer.view %right_storage[%origin] : buffer -> view<2x16xi32>
+  %right = channel.bind<fifo> %right_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    %values = vector.constant 42 : vector<16xi32>
+    scf.for %record = [%begin to %capacity step %step] {
+      %write, %payload = channel.reserve %source : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+      vector.store %values, %payload[0] : vector<16xi32>, view<16xi32>
+      channel.publish %write : write<tile<16xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %first_read, %first_payload = channel.acquire %source : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %left_write, %left_payload = channel.reserve %left : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    channel.copy %first_read -> %left_write : read<tile<16xi32>>, write<tile<16xi32>>
+    // ERROR@+1: XDNA/051 {requirement="one static channel-copy site per FIFO read or write cursor"}
+    %second_read, %second_payload = channel.acquire %source : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %right_write, %right_payload = channel.reserve %right : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    channel.copy %second_read -> %right_write : read<tile<16xi32>>, write<tile<16xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Fanout obligations must not create separate cursors for one destination.
+pipeline.def<kernel> public retain target(@device) @shared_distribution_writer() run() {
+  %source_memory = pipeline.memory<workgroup>[0, 2] : pool
+  %destination_memory = pipeline.memory<workgroup>[0, 3] : pool
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %source_storage = buffer.alloca<workgroup> pool(%source_memory) align(64) %bytes : buffer
+  %source_slots = buffer.view %source_storage[%origin] : buffer -> view<2x16xi32>
+  %source = channel.bind<fifo> %source_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  %destination_storage = buffer.alloca<workgroup> pool(%destination_memory) align(64) %bytes : buffer
+  %destination_slots = buffer.view %destination_storage[%origin] : buffer -> view<2x16xi32>
+  %destination = channel.bind<fifo> %destination_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %begin = index.constant 0 : index
+    %step = index.constant 1 : index
+    %values = vector.constant 42 : vector<16xi32>
+    scf.for %record = [%begin to %capacity step %step] {
+      %write, %payload = channel.reserve %source : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+      vector.store %values, %payload[0] : vector<16xi32>, view<16xi32>
+      channel.publish %write : write<tile<16xi32>>
+    }
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %read, %payload = channel.acquire %source : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %first, %second = channel.fanout %read : read<tile<16xi32>> -> (read<tile<16xi32>>, read<tile<16xi32>>)
+    %first_write, %first_payload = channel.reserve %destination : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    // ERROR@+1: XDNA/051 {requirement="one static channel-copy site per FIFO read or write cursor"}
+    %second_write, %second_payload = channel.reserve %destination : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    channel.copy %first -> %first_write : read<tile<16xi32>>, write<tile<16xi32>>
+    channel.copy %second -> %second_write : read<tile<16xi32>>, write<tile<16xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// These slots have disjoint elements but overlapping byte envelopes. A linear
+// record DMA would cross into another slot's ownership.
+pipeline.def<kernel> public retain target(@device) @interleaved_distribution() run() {
+  %source_memory = pipeline.memory<workgroup>[0, 2] : pool
+  %destination_memory = pipeline.memory<workgroup>[0, 3] : pool
+  %bytes = index.constant 128 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %source_storage = buffer.alloca<workgroup> pool(%source_memory) align(64) %bytes : buffer
+  %source_slots = buffer.view %source_storage[%origin] : buffer -> view<2x16xi32, #encoding.layout.strided<strides=[1, 2]>>
+  %source = channel.bind<fifo> %source_slots, %capacity : view<2x16xi32, #encoding.layout.strided<strides=[1, 2]>>, index -> channel<tile<16xi32>>
+  %destination_storage = buffer.alloca<workgroup> pool(%destination_memory) align(64) %bytes : buffer
+  %destination_slots = buffer.view %destination_storage[%origin] : buffer -> view<2x16xi32>
+  %destination = channel.bind<fifo> %destination_slots, %capacity : view<2x16xi32>, index -> channel<tile<16xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %payload = channel.reserve %source : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32, #encoding.layout.strided<strides=[2]>>)
+    %values = vector.constant 42 : vector<16xi32>
+    vector.store %values, %payload[0] : vector<16xi32>, view<16xi32, #encoding.layout.strided<strides=[2]>>
+    channel.publish %write : write<tile<16xi32>>
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    // ERROR@+1: XDNA/051 {requirement="contiguous non-overlapping channel-copy records"}
+    %read, %payload = channel.acquire %source : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32, #encoding.layout.strided<strides=[2]>>)
+    %write, %destination_payload = channel.reserve %destination : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    channel.copy %read -> %write : read<tile<16xi32>>, write<tile<16xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// SRAM tiles have no horizontal stream-switch ports.
+pipeline.def<kernel> public retain target(@device) @cross_column_sram_distribution() run(%input_arg: buffer) {
+  %input = buffer.assume.alignment %input_arg {minimum_alignment = 64} : buffer
+  %source_memory = pipeline.memory<workgroup>[0, 1] : pool
+  %destination_memory = pipeline.memory<workgroup>[1, 2] : pool
+  %bytes = index.constant 64 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 1 : index
+  %source_storage = buffer.alloca<workgroup> pool(%source_memory) align(64) %bytes : buffer
+  %source_slots = buffer.view %source_storage[%origin] : buffer -> view<1x16xi32>
+  %source = channel.bind<fifo> %source_slots, %capacity : view<1x16xi32>, index -> channel<tile<16xi32>>
+  %destination_storage = buffer.alloca<workgroup> pool(%destination_memory) align(64) %bytes : buffer
+  %destination_slots = buffer.view %destination_storage[%origin] : buffer -> view<1x16xi32>
+  %destination = channel.bind<fifo> %destination_slots, %capacity : view<1x16xi32>, index -> channel<tile<16xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %external = buffer.view %input[%origin] : buffer -> view<16xi32>
+    %write, %payload = channel.reserve %source : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    %copy = kernel.async.copy %external to %payload {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<16xi32> to view<16xi32> -> kernel.async.token
+    %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+    kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+    channel.publish %write : write<tile<16xi32>>
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %read, %payload = channel.acquire %source : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %write, %destination_payload = channel.reserve %destination : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    // ERROR@+1: XDNA/051 {requirement="same-column channel-copy routes from SRAM storage"}
+    channel.copy %read -> %write : read<tile<16xi32>>, write<tile<16xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Ingress owns S2MM0; a local copy cannot connect MM2S0 to S2MM1.
+pipeline.def<kernel> public retain target(@device) @mismatched_distribution_loopback() run(%input_arg: buffer) {
+  %input = buffer.assume.alignment %input_arg {minimum_alignment = 64} : buffer
+  %source_memory = pipeline.memory<workgroup>[0, 2] : pool
+  %destination_memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 64 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 1 : index
+  %source_storage = buffer.alloca<workgroup> pool(%source_memory) align(64) %bytes : buffer
+  %source_slots = buffer.view %source_storage[%origin] : buffer -> view<1x16xi32>
+  %source = channel.bind<fifo> %source_slots, %capacity : view<1x16xi32>, index -> channel<tile<16xi32>>
+  %destination_storage = buffer.alloca<workgroup> pool(%destination_memory) align(64) %bytes : buffer
+  %destination_slots = buffer.view %destination_storage[%origin] : buffer -> view<1x16xi32>
+  %destination = channel.bind<fifo> %destination_slots, %capacity : view<1x16xi32>, index -> channel<tile<16xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %external = buffer.view %input[%origin] : buffer -> view<16xi32>
+    %write, %payload = channel.reserve %source : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    %copy = kernel.async.copy %external to %payload {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<16xi32> to view<16xi32> -> kernel.async.token
+    %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+    kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+    channel.publish %write : write<tile<16xi32>>
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %read, %payload = channel.acquire %source : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %write, %destination_payload = channel.reserve %destination : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    // ERROR@+1: XDNA/051 {requirement="matching DMA channel indices for same-tile channel copy"}
+    channel.copy %read -> %write : read<tile<16xi32>>, write<tile<16xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// SRAM storage belongs to DMA, not a compute tile's direct load/store windows.
+pipeline.def<kernel> public retain target(@device) @captured_sram_buffer() run() {
+  %memory = pipeline.memory<workgroup>[0, 1] : pool
+  %bytes = index.constant 64 : offset
+  %origin = index.constant 0 : offset
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  // ERROR@+1: XDNA/051 {requirement="DMA-owned SRAM storage with compute-memory handoffs"}
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %payload = buffer.view %storage[%origin] : buffer -> view<16xi32>
+    %values = vector.constant 42 : vector<16xi32>
+    vector.store %values, %payload[0] : vector<16xi32>, view<16xi32>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Compute tiles have no east-facing load window.
+pipeline.def<kernel> public retain target(@device) @captured_east_buffer() run() {
+  %memory = pipeline.memory<workgroup>[1, 2] : pool
+  %bytes = index.constant 64 : offset
+  %origin = index.constant 0 : offset
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  // ERROR@+1: XDNA/051 {requirement="captured storage directly visible from its consuming core"}
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %payload = buffer.view %storage[%origin] : buffer -> view<16xi32>
+    %values = vector.constant 42 : vector<16xi32>
+    vector.store %values, %payload[0] : vector<16xi32>, view<16xi32>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// A west-facing load window reaches only the immediate neighbor.
+pipeline.def<kernel> public retain target(@device) @captured_distant_buffer() run() {
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 64 : offset
+  %origin = index.constant 0 : offset
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  // ERROR@+1: XDNA/051 {requirement="captured storage directly visible from its consuming core"}
+  pipeline.strand workers([2, 2], [1, 1], [1, 1]) {
+    %payload = buffer.view %storage[%origin] : buffer -> view<16xi32>
+    %values = vector.constant 42 : vector<16xi32>
+    vector.store %values, %payload[0] : vector<16xi32>, view<16xi32>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+pipeline.def<kernel> public retain target(@device) @east_channel_storage() run() {
+  %memory = pipeline.memory<workgroup>[1, 2] : pool
+  %bytes = index.constant 64 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 1 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(64) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<1x16xi32>
+  %channel = channel.bind<fifo> %slots, %capacity : view<1x16xi32>, index -> channel<tile<16xi32>>
+  // ERROR@+1: XDNA/051 {requirement="channel storage directly visible from its consuming core"}
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %write, %payload = channel.reserve %channel : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    %values = vector.constant 42 : vector<16xi32>
+    vector.store %values, %payload[0] : vector<16xi32>, view<16xi32>
+    channel.publish %write : write<tile<16xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// SRAM DMA can reach this compute owner, but the final consumer cannot.
+pipeline.def<kernel> public retain target(@device) @inaccessible_sram_handoff() run(%input_arg: buffer) {
+  %input = buffer.assume.alignment %input_arg {minimum_alignment = 64} : buffer
+  %source_memory = pipeline.memory<workgroup>[0, 1] : pool
+  %handoff_memory = pipeline.memory<workgroup>[0, 4] : pool
+  %consumer_memory = pipeline.memory<workgroup>[2, 4] : pool
+  %bytes = index.constant 64 : offset
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 1 : index
+  %source_storage = buffer.alloca<workgroup> pool(%source_memory) align(64) %bytes : buffer
+  %source_slots = buffer.view %source_storage[%origin] : buffer -> view<1x16xi32>
+  %source = channel.bind<fifo> %source_slots, %capacity : view<1x16xi32>, index -> channel<tile<16xi32>>
+  %handoff_storage = buffer.alloca<workgroup> pool(%handoff_memory) align(64) %bytes : buffer
+  %handoff_slots = buffer.view %handoff_storage[%origin] : buffer -> view<1x16xi32>
+  %handoff = channel.bind<fifo> %handoff_slots, %capacity : view<1x16xi32>, index -> channel<tile<16xi32>>
+  %consumer_storage = buffer.alloca<workgroup> pool(%consumer_memory) align(64) %bytes : buffer
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %external = buffer.view %input[%origin] : buffer -> view<16xi32>
+    %write, %payload = channel.reserve %source : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    %copy = kernel.async.copy %external to %payload {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<16xi32> to view<16xi32> -> kernel.async.token
+    %group = kernel.async.group %copy : kernel.async.token -> kernel.async.group
+    kernel.async.wait %group {newer_groups = 0} : kernel.async.group
+    channel.publish %write : write<tile<16xi32>>
+  }
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %read, %payload = channel.acquire %source : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %write, %destination = channel.reserve %handoff : channel<tile<16xi32>> -> (write<tile<16xi32>>, view<16xi32>)
+    channel.copy %read -> %write : read<tile<16xi32>>, write<tile<16xi32>>
+  }
+  // ERROR@+1: XDNA/051 {requirement="channel storage directly visible from its consuming core"}
+  pipeline.strand workers([2, 4], [1, 1], [1, 1]) {
+    %read, %payload = channel.acquire %handoff : channel<tile<16xi32>> -> (read<tile<16xi32>>, view<16xi32>)
+    %values = vector.load %payload[0] : view<16xi32> -> vector<16xi32>
+    %output = buffer.view %consumer_storage[%origin] : buffer -> view<16xi32>
+    vector.store %values, %output[0] : vector<16xi32>, view<16xi32>
+    channel.release %read : read<tile<16xi32>>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// The selected aperture is valid; final pool admission owns its byte limit.
+// ERROR@+1: LOWERING/067 {required_bytes="65540", capacity_bytes="65536"}
+pipeline.def<kernel> public retain target(@device) @captured_buffer_capacity() run() {
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 65540 : offset
+  %origin = index.constant 0 : offset
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %payload = buffer.view %storage[%origin] : buffer -> view<1xi32>
+    %value = scalar.constant 42 : i32
+    view.store %value, %payload[0] : i32, view<1xi32>
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Authored storage exactly fills the tile. Dynamic input and output addresses
+// add two eight-byte reservations before the single final capacity admission.
+// ERROR@+1: LOWERING/067 {required_bytes="65552", capacity_bytes="65536"}
+pipeline.def<kernel> public retain target(@device) @transfer_scratch_capacity() run(%input: buffer, %output: buffer) {
+  %source, %destination = buffer.assume.alignment %input, %output {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 2] : pool
+  %bytes = index.constant 65536 : offset
+  %origin = index.constant 0 : offset
+  %slots = index.constant 1 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %records = buffer.view %storage[%origin] : buffer -> view<1x1xi32>
+  %channel = channel.bind<fifo> %records, %slots : view<1x1xi32>, index -> channel<tile<1xi32>>
+  pipeline.strand workers([0, 2], [1, 1], [1, 1]) {
+    %begin = index.constant 0 : index
+    %record_count = index.constant 3 : index
+    %step = index.constant 1 : index
+    %word_bytes = index.constant 4 : index
+    scf.for %record_index = [%begin to %record_count step %step] {
+      %byte_index = index.mul %record_index, %word_bytes : index
+      %offset = index.cast %byte_index : index to offset
+      %external_input = buffer.view %source[%offset] : buffer -> view<1xi32>
+      %write, %record = channel.reserve %channel : channel<tile<1xi32>> -> (write<tile<1xi32>>, view<1xi32>)
+      %ingress = kernel.async.copy %external_input to %record {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<1xi32> to view<1xi32> -> kernel.async.token
+      %incoming = kernel.async.group %ingress : kernel.async.token -> kernel.async.group
+      kernel.async.wait %incoming {newer_groups = 0} : kernel.async.group
+      channel.publish %write : write<tile<1xi32>>
+      %read, %ready = channel.acquire %channel : channel<tile<1xi32>> -> (read<tile<1xi32>>, view<1xi32>)
+      %external_output = buffer.view %destination[%offset] : buffer -> view<1xi32>
+      %egress = kernel.async.copy %ready to %external_output {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<1xi32> to view<1xi32> -> kernel.async.token
+      %outgoing = kernel.async.group %egress : kernel.async.token -> kernel.async.group
+      kernel.async.wait %outgoing {newer_groups = 0} : kernel.async.group
+      channel.release %read : read<tile<1xi32>>
+    }
+  }
+}
+
+// ====
+
+aie2p.target<array> @device {device_profile = "amd.xdna.strix.17f0_10"}
+
+// Singleton inner dimensions retain the compute DMA's eight-bit D1 wrap.
+pipeline.def<kernel> public retain target(@device) @dma_wrap_overflow() run(%input_arg: buffer, %output_arg: buffer) {
+  %input_unique, %output_unique = buffer.assume.noalias %input_arg, %output_arg : buffer, buffer
+  %input, %output = buffer.assume.alignment %input_unique, %output_unique {minimum_alignment = 4} : buffer, buffer
+  %memory = pipeline.memory<workgroup>[0, 3] : pool
+  %origin = index.constant 0 : offset
+  %bytes = index.constant 4224 : offset
+  %capacity = index.constant 1 : index
+  %storage = buffer.alloca<workgroup> pool(%memory) align(4) %bytes : buffer
+  %slots = buffer.view %storage[%origin] : buffer -> view<1x1056xi32>
+  %records = channel.bind<fifo> %slots, %capacity : view<1x1056xi32>, index -> channel<tile<1056xi32>>
+  pipeline.strand workers([0, 3], [1, 1], [1, 1]) {
+    %external_input = buffer.view %input[%origin] : buffer -> view<1056xi32>
+    %external_output = buffer.view %output[%origin] : buffer -> view<2x256x1xi32>
+    %write, %destination = channel.reserve %records : channel<tile<1056xi32>> -> (write<tile<1056xi32>>, view<1056xi32>)
+    %ingress = kernel.async.copy %external_input to %destination {cache_scope = workgroup, cache_temporal = regular, direction = global_to_workgroup} : view<1056xi32> to view<1056xi32> -> kernel.async.token
+    %incoming = kernel.async.group %ingress : kernel.async.token -> kernel.async.group
+    kernel.async.wait %incoming {newer_groups = 0} : kernel.async.group
+    channel.publish %write : write<tile<1056xi32>>
+    %read, %payload = channel.acquire %records : channel<tile<1056xi32>> -> (read<tile<1056xi32>>, view<1056xi32>)
+    %shaped = view.bitcast %payload : view<1056xi32> -> view<2x264x2xi32>
+    %strided = view.refine %shaped : view<2x264x2xi32> -> view<2x264x2xi32, #encoding.layout.strided<strides=[528, 2, 1]>>
+    %selected = view.subview %strided[0, 0, 0] : view<2x264x2xi32, #encoding.layout.strided<strides=[528, 2, 1]>> -> view<2x256x1xi32, #encoding.layout.strided<strides=[528, 2, 1]>>
+    // ERROR@+1: XDNA/051 {requirement="an address dimension exceeds the nonzero DMA wrap field"}
+    %egress = kernel.async.copy %selected to %external_output {cache_scope = workgroup, cache_temporal = regular, direction = workgroup_to_global} : view<2x256x1xi32, #encoding.layout.strided<strides=[528, 2, 1]>> to view<2x256x1xi32> -> kernel.async.token
+    %outgoing = kernel.async.group %egress : kernel.async.token -> kernel.async.group
+    kernel.async.wait %outgoing {newer_groups = 0} : kernel.async.group
+    channel.release %read : read<tile<1056xi32>>
+  }
+}

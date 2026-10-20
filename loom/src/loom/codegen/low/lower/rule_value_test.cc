@@ -7,6 +7,7 @@
 #include "loom/codegen/low/lower/rule_value.h"
 
 #include <cstdint>
+#include <limits>
 
 #include "iree/base/internal/arena.h"
 #include "iree/base/internal/math.h"
@@ -18,6 +19,7 @@
 #include "loom/ir/module.h"
 #include "loom/ops/func/ops.h"
 #include "loom/ops/scalar/ops.h"
+#include "loom/ops/vector/ops.h"
 
 namespace loom {
 namespace {
@@ -56,15 +58,42 @@ class LowLowerRuleValueTest : public ::testing::Test {
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
     const loom_symbol_ref_t symbol = {
-        /*.module_id=*/0,
-        /*.symbol_id=*/symbol_id,
+        .module_id = 0,
+        .symbol_id = symbol_id,
     };
     const loom_type_t i32_type = loom_type_scalar(LOOM_SCALAR_TYPE_I32);
-    const loom_type_t argument_types[] = {i32_type, i32_type};
+    const loom_type_t bf16_vector_type = loom_type_shaped_1d(
+        LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_BF16, loom_dim_pack_static(16), 0);
+    const loom_type_t f32_vector_type = loom_type_shaped_1d(
+        LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_F32, loom_dim_pack_static(16), 0);
+    const loom_type_t i32_vector_type = loom_type_shaped_1d(
+        LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_I32, loom_dim_pack_static(2), 0);
+    const loom_type_t i64_vector_type = loom_type_shaped_1d(
+        LOOM_TYPE_VECTOR, LOOM_SCALAR_TYPE_I64, loom_dim_pack_static(2), 0);
+    const loom_type_t argument_types[] = {
+        i32_type,
+        i32_type,
+        bf16_vector_type,
+        f32_vector_type,
+        loom_type_scalar(LOOM_SCALAR_TYPE_I8),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I16),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I32),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I64),
+        loom_type_scalar(LOOM_SCALAR_TYPE_F8E4M3),
+        loom_type_scalar(LOOM_SCALAR_TYPE_F8E5M2),
+        loom_type_scalar(LOOM_SCALAR_TYPE_F16),
+        loom_type_scalar(LOOM_SCALAR_TYPE_BF16),
+        loom_type_scalar(LOOM_SCALAR_TYPE_F32),
+        loom_type_scalar(LOOM_SCALAR_TYPE_F64),
+        loom_type_scalar(LOOM_SCALAR_TYPE_INDEX),
+        loom_type_scalar(LOOM_SCALAR_TYPE_I1),
+        i32_vector_type,
+    };
     loom_op_t* function_op = nullptr;
     IREE_ASSERT_OK(loom_func_def_build(
-        &module_builder, /*build_flags=*/0, /*visibility=*/0, /*retain=*/0,
-        /*cc=*/0, /*purity=*/0, /*temperature=*/0, /*inline_policy=*/0,
+        &module_builder, /*build_flags=*/0, /*visibility=*/0, /*linkage=*/0,
+        /*retain=*/0,
+        /*cc=*/0, /*effect_contract=*/0, /*temperature=*/0, /*inline_policy=*/0,
         loom_symbol_ref_null(), /*abi=*/0, loom_named_attr_slice_empty(),
         LOOM_STRING_ID_INVALID, loom_named_attr_slice_empty(), symbol,
         argument_types, IREE_ARRAYSIZE(argument_types), &i32_type, 1, nullptr,
@@ -73,7 +102,7 @@ class LowLowerRuleValueTest : public ::testing::Test {
 
     uint16_t argument_count = 0;
     arguments_ = loom_func_like_arg_ids(function_, &argument_count);
-    ASSERT_EQ(argument_count, 2u);
+    ASSERT_EQ(argument_count, 17u);
     loom_builder_t body_builder;
     loom_builder_initialize(
         module_, &module_->arena,
@@ -85,6 +114,26 @@ class LowLowerRuleValueTest : public ::testing::Test {
     IREE_ASSERT_OK(loom_scalar_muli_build(
         &body_builder, /*overflow_flags=*/0, loom_scalar_addi_result(addi_op_),
         arguments_[1], i32_type, LOOM_LOCATION_UNKNOWN, &muli_op_));
+    IREE_ASSERT_OK(loom_vector_extf_build(
+        &body_builder, /*instance_flags=*/0, arguments_[2], bf16_vector_type,
+        f32_vector_type, LOOM_LOCATION_UNKNOWN, &direct_extf_op_));
+    IREE_ASSERT_OK(loom_vector_fptrunc_build(
+        &body_builder, /*instance_flags=*/0, arguments_[3], f32_vector_type,
+        bf16_vector_type, LOOM_LOCATION_UNKNOWN, &fptrunc_op_));
+    IREE_ASSERT_OK(loom_vector_extf_build(
+        &body_builder, /*instance_flags=*/0,
+        loom_vector_fptrunc_result(fptrunc_op_), bf16_vector_type,
+        f32_vector_type, LOOM_LOCATION_UNKNOWN, &roundtrip_extf_op_));
+    IREE_ASSERT_OK(loom_vector_negf_build(
+        &body_builder, /*instance_flags=*/0,
+        loom_vector_extf_result(roundtrip_extf_op_), f32_vector_type,
+        LOOM_LOCATION_UNKNOWN, &vector_consumer_op_));
+    IREE_ASSERT_OK(loom_vector_extsi_build(
+        &body_builder, arguments_[16], i32_vector_type, i64_vector_type,
+        LOOM_LOCATION_UNKNOWN, &integer_extsi_op_));
+    IREE_ASSERT_OK(loom_vector_extui_build(
+        &body_builder, arguments_[16], i32_vector_type, i64_vector_type,
+        LOOM_LOCATION_UNKNOWN, &integer_extui_op_));
     const loom_type_t assume_result_types[] = {i32_type, i32_type};
     IREE_ASSERT_OK(loom_scalar_assume_build(
         &body_builder, arguments_, 2, /*predicates=*/nullptr,
@@ -115,6 +164,12 @@ class LowLowerRuleValueTest : public ::testing::Test {
   loom_op_t* variadic_result_op_ = nullptr;
   loom_op_t* integer_constant_op_ = nullptr;
   loom_op_t* float_constant_op_ = nullptr;
+  loom_op_t* direct_extf_op_ = nullptr;
+  loom_op_t* fptrunc_op_ = nullptr;
+  loom_op_t* roundtrip_extf_op_ = nullptr;
+  loom_op_t* vector_consumer_op_ = nullptr;
+  loom_op_t* integer_extsi_op_ = nullptr;
+  loom_op_t* integer_extui_op_ = nullptr;
   loom_value_fact_table_t fact_table_ = {};
 };
 
@@ -126,9 +181,10 @@ TEST_F(LowLowerRuleValueTest, ResolvesSourceValueReferencesAndFields) {
   value_refs[1].index = 1;
   value_refs[2].kind = LOOM_LOW_LOWER_VALUE_REF_RESULT;
   value_refs[2].index = 0;
-  loom_low_lower_rule_set_t rule_set = {};
-  rule_set.value_refs = value_refs;
-  rule_set.value_ref_count = IREE_ARRAYSIZE(value_refs);
+  loom_low_lower_rule_set_t rule_set = {
+      .value_refs = value_refs,
+      .value_ref_count = IREE_ARRAYSIZE(value_refs),
+  };
 
   EXPECT_EQ(loom_low_lower_rule_source_value(module_, &rule_set, addi_op_, 0),
             arguments_[0]);
@@ -155,9 +211,10 @@ TEST_F(LowLowerRuleValueTest, ResolvesVariadicResultElements) {
   value_refs[1].kind = LOOM_LOW_LOWER_VALUE_REF_RESULT;
   value_refs[1].index = 0;
   value_refs[1].element_index = 1;
-  loom_low_lower_rule_set_t rule_set = {};
-  rule_set.value_refs = value_refs;
-  rule_set.value_ref_count = IREE_ARRAYSIZE(value_refs);
+  loom_low_lower_rule_set_t rule_set = {
+      .value_refs = value_refs,
+      .value_ref_count = IREE_ARRAYSIZE(value_refs),
+  };
 
   const loom_value_slice_t results =
       loom_scalar_assume_results(variadic_result_op_);
@@ -180,24 +237,25 @@ TEST_F(LowLowerRuleValueTest, ResolvesVariadicResultElements) {
 TEST_F(LowLowerRuleValueTest, ResolvesValuesAcrossSourceGraphNodes) {
   const loom_low_lower_value_ref_t value_refs[] = {
       {
-          /*.kind=*/LOOM_LOW_LOWER_VALUE_REF_OPERAND,
-          /*.source_node_index=*/0,
-          /*.index=*/0,
+          .kind = LOOM_LOW_LOWER_VALUE_REF_OPERAND,
+          .source_node_index = 0,
+          .index = 0,
       },
       {
-          /*.kind=*/LOOM_LOW_LOWER_VALUE_REF_OPERAND,
-          /*.source_node_index=*/1,
-          /*.index=*/1,
+          .kind = LOOM_LOW_LOWER_VALUE_REF_OPERAND,
+          .source_node_index = 1,
+          .index = 1,
       },
       {
-          /*.kind=*/LOOM_LOW_LOWER_VALUE_REF_RESULT,
-          /*.source_node_index=*/1,
-          /*.index=*/0,
+          .kind = LOOM_LOW_LOWER_VALUE_REF_RESULT,
+          .source_node_index = 1,
+          .index = 0,
       },
   };
-  loom_low_lower_rule_set_t rule_set = {};
-  rule_set.value_refs = value_refs;
-  rule_set.value_ref_count = IREE_ARRAYSIZE(value_refs);
+  loom_low_lower_rule_set_t rule_set = {
+      .value_refs = value_refs,
+      .value_ref_count = IREE_ARRAYSIZE(value_refs),
+  };
   const loom_op_t* source_nodes[] = {addi_op_, muli_op_};
 
   EXPECT_EQ(loom_low_lower_rule_source_value_from_nodes(
@@ -219,6 +277,128 @@ TEST_F(LowLowerRuleValueTest, ResolvesValuesAcrossSourceGraphNodes) {
           IREE_ARRAYSIZE(source_nodes), 2);
   ASSERT_EQ(result_field.count, 1u);
   EXPECT_EQ(result_field.values[0], loom_scalar_muli_result(muli_op_));
+}
+
+TEST_F(LowLowerRuleValueTest,
+       ExactLaneOriginsStopAtLossyConversionsAndResolveWholeOperands) {
+  IREE_ASSERT_OK(
+      loom_value_fact_table_compute_op(&fact_table_, module_, direct_extf_op_));
+  loom_value_fact_exact_lane_origin_t direct_origin = {};
+  ASSERT_TRUE(loom_value_fact_table_query_exact_lane_origin(
+      &fact_table_, module_, loom_vector_extf_result(direct_extf_op_),
+      &direct_origin));
+  EXPECT_EQ(direct_origin.source_value_id, arguments_[2]);
+
+  IREE_ASSERT_OK(
+      loom_value_fact_table_compute_op(&fact_table_, module_, fptrunc_op_));
+  IREE_ASSERT_OK(loom_value_fact_table_compute_op(&fact_table_, module_,
+                                                  roundtrip_extf_op_));
+  const loom_value_id_t truncated = loom_vector_fptrunc_result(fptrunc_op_);
+  const loom_value_id_t extended = loom_vector_extf_result(roundtrip_extf_op_);
+  loom_value_fact_exact_lane_origin_t exact_origin = {};
+  EXPECT_FALSE(loom_value_fact_table_query_exact_lane_origin(
+      &fact_table_, module_, truncated, &exact_origin));
+  ASSERT_TRUE(loom_value_fact_table_query_exact_lane_origin(
+      &fact_table_, module_, extended, &exact_origin));
+  EXPECT_EQ(exact_origin.source_value_id, truncated);
+
+  loom_value_fact_static_lane_origin_t provenance_origin = {};
+  ASSERT_TRUE(loom_value_fact_table_query_static_lane_origin(
+      &fact_table_, module_, extended, &provenance_origin));
+  EXPECT_EQ(provenance_origin.source_value_id, arguments_[3]);
+
+  const loom_low_lower_value_ref_t value_ref = {
+      .kind = LOOM_LOW_LOWER_VALUE_REF_EXACT_LANE_ORIGIN_OPERAND,
+      .source_node_index = 0,
+      .index = 0,
+  };
+  loom_low_lower_rule_set_t rule_set = {
+      .value_refs = &value_ref,
+      .value_ref_count = 1,
+  };
+  loom_value_id_t resolved = LOOM_VALUE_ID_INVALID;
+  ASSERT_TRUE(loom_low_lower_rule_resolve_source_value_from_nodes(
+      module_, &fact_table_, (loom_target_contract_vector_lane_projection_t){0},
+      &rule_set, vector_consumer_op_,
+      /*source_nodes=*/nullptr, /*source_node_count=*/1,
+      /*value_ref_index=*/0, &resolved));
+  EXPECT_EQ(resolved, truncated);
+}
+
+TEST_F(LowLowerRuleValueTest, IntegerExtensionsRetainExactLaneOrigins) {
+  for (loom_op_t* extension_op : {integer_extsi_op_, integer_extui_op_}) {
+    IREE_ASSERT_OK(
+        loom_value_fact_table_compute_op(&fact_table_, module_, extension_op));
+    const loom_value_id_t result = loom_op_results(extension_op)[0];
+
+    loom_value_fact_static_lane_origin_t provenance_origin = {};
+    ASSERT_TRUE(loom_value_fact_table_query_static_lane_origin(
+        &fact_table_, module_, result, &provenance_origin));
+    EXPECT_EQ(provenance_origin.source_value_id, arguments_[16]);
+    EXPECT_EQ(provenance_origin.source_lane_offset, 0u);
+    EXPECT_EQ(provenance_origin.source_lane_stride, 1u);
+
+    loom_value_fact_exact_lane_origin_t exact_origin = {};
+    ASSERT_TRUE(loom_value_fact_table_query_exact_lane_origin(
+        &fact_table_, module_, result, &exact_origin));
+    EXPECT_EQ(exact_origin.source_value_id, arguments_[16]);
+    EXPECT_EQ(exact_origin.source_lane_offset, 0u);
+    EXPECT_EQ(exact_origin.source_lane_stride, 1u);
+  }
+}
+
+TEST_F(LowLowerRuleValueTest, ResolvesUniformElementOrigins) {
+  const loom_value_id_t aggregate = loom_vector_extf_result(roundtrip_extf_op_);
+  const loom_value_id_t scalar =
+      loom_scalar_constant_result(float_constant_op_);
+  IREE_ASSERT_OK(loom_value_fact_table_define_uniform_element_origin(
+      &fact_table_, aggregate, scalar, scalar));
+
+  for (auto kind :
+       {LOOM_LOW_LOWER_VALUE_REF_UNIFORM_ELEMENT_ORIGIN_OPERAND,
+        LOOM_LOW_LOWER_VALUE_REF_EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND}) {
+    const loom_low_lower_value_ref_t value_ref = {
+        .kind = static_cast<uint8_t>(kind),
+        .source_node_index = 0,
+        .index = 0,
+    };
+    loom_low_lower_rule_set_t rule_set = {
+        .value_refs = &value_ref,
+        .value_ref_count = 1,
+    };
+    loom_value_id_t resolved = LOOM_VALUE_ID_INVALID;
+    ASSERT_TRUE(loom_low_lower_rule_resolve_source_value_from_nodes(
+        module_, &fact_table_,
+        (loom_target_contract_vector_lane_projection_t){0}, &rule_set,
+        vector_consumer_op_,
+        /*source_nodes=*/nullptr, /*source_node_count=*/1,
+        /*value_ref_index=*/0, &resolved));
+    EXPECT_EQ(resolved, scalar);
+  }
+}
+
+TEST_F(LowLowerRuleValueTest, FactDerivedSourceRefsRequireFacts) {
+  for (auto kind :
+       {LOOM_LOW_LOWER_VALUE_REF_EXACT_LANE_ORIGIN_OPERAND,
+        LOOM_LOW_LOWER_VALUE_REF_EXACT_UNIFORM_ELEMENT_ORIGIN_OPERAND,
+        LOOM_LOW_LOWER_VALUE_REF_UNIFORM_ELEMENT_ORIGIN_OPERAND}) {
+    const loom_low_lower_value_ref_t value_ref = {
+        .kind = static_cast<uint8_t>(kind),
+        .source_node_index = 0,
+        .index = 0,
+    };
+    loom_low_lower_rule_set_t rule_set = {
+        .value_refs = &value_ref,
+        .value_ref_count = 1,
+    };
+    loom_value_id_t resolved = LOOM_VALUE_ID_INVALID;
+    EXPECT_FALSE(loom_low_lower_rule_resolve_source_value_from_nodes(
+        module_, /*fact_table=*/nullptr,
+        (loom_target_contract_vector_lane_projection_t){0}, &rule_set,
+        vector_consumer_op_, /*source_nodes=*/nullptr,
+        /*source_node_count=*/1, /*value_ref_index=*/0, &resolved));
+    EXPECT_EQ(resolved, LOOM_VALUE_ID_INVALID);
+  }
 }
 
 TEST_F(LowLowerRuleValueTest, ProjectsExactScalarFacts) {
@@ -247,6 +427,138 @@ TEST_F(LowLowerRuleValueTest, ProjectsExactScalarFacts) {
   EXPECT_DOUBLE_EQ(exact_float, 1.5);
 }
 
+TEST_F(LowLowerRuleValueTest, ProjectsExactDeclaredWidthScalarBits) {
+  const uint64_t expected_integer_bits[] = {
+      UINT64_C(0xFE),
+      UINT64_C(0xFFFE),
+      UINT64_C(0xFFFFFFFE),
+      UINT64_C(0xFFFFFFFFFFFFFFFE),
+  };
+  const uint32_t integer_bit_widths[] = {8, 16, 32, 64};
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(integer_bit_widths); ++i) {
+    const loom_value_id_t value_id = arguments_[4 + i];
+    IREE_ASSERT_OK(loom_value_fact_table_define(
+        &fact_table_, value_id, loom_value_facts_exact_i64(-2)));
+    uint64_t bits = 0;
+    ASSERT_TRUE(loom_low_lower_rule_value_exact_bits(
+        module_, &fact_table_, value_id, integer_bit_widths[i], &bits));
+    EXPECT_EQ(bits, expected_integer_bits[i]);
+  }
+
+  const uint64_t expected_float_bits[] = {
+      UINT64_C(0x3C),   UINT64_C(0x3E),       UINT64_C(0x3E00),
+      UINT64_C(0x3FC0), UINT64_C(0x3FC00000), UINT64_C(0x3FF8000000000000),
+  };
+  const loom_scalar_type_t float_types[] = {
+      LOOM_SCALAR_TYPE_F8E4M3, LOOM_SCALAR_TYPE_F8E5M2, LOOM_SCALAR_TYPE_F16,
+      LOOM_SCALAR_TYPE_BF16,   LOOM_SCALAR_TYPE_F32,    LOOM_SCALAR_TYPE_F64,
+  };
+  for (iree_host_size_t i = 0; i < IREE_ARRAYSIZE(float_types); ++i) {
+    const loom_value_id_t value_id = arguments_[8 + i];
+    IREE_ASSERT_OK(loom_value_fact_table_define(
+        &fact_table_, value_id,
+        loom_value_facts_exact_float(float_types[i], 1.5)));
+    uint64_t bits = 0;
+    ASSERT_TRUE(loom_low_lower_rule_value_exact_bits(
+        module_, &fact_table_, value_id,
+        loom_scalar_type_bitwidth(float_types[i]), &bits));
+    EXPECT_EQ(bits, expected_float_bits[i]);
+  }
+}
+
+TEST_F(LowLowerRuleValueTest, RejectsUnavailableOrNonPayloadScalarBits) {
+  uint64_t bits = 0;
+  EXPECT_FALSE(loom_low_lower_rule_value_exact_bits(
+      module_, /*fact_table=*/nullptr, arguments_[4], 8, &bits));
+
+  IREE_ASSERT_OK(loom_value_fact_table_define(&fact_table_, arguments_[4],
+                                              loom_value_facts_exact_i64(7)));
+  EXPECT_FALSE(loom_low_lower_rule_value_exact_bits(module_, &fact_table_,
+                                                    arguments_[4], 16, &bits));
+  EXPECT_FALSE(loom_low_lower_rule_value_exact_bits(module_, &fact_table_,
+                                                    arguments_[14], 64, &bits));
+  EXPECT_FALSE(loom_low_lower_rule_value_exact_bits(module_, &fact_table_,
+                                                    arguments_[15], 1, &bits));
+  EXPECT_FALSE(loom_low_lower_rule_value_exact_bits(module_, &fact_table_,
+                                                    arguments_[2], 16, &bits));
+
+  IREE_ASSERT_OK(loom_value_fact_table_define(
+      &fact_table_, arguments_[12],
+      loom_value_facts_exact_float(LOOM_SCALAR_TYPE_F32,
+                                   std::numeric_limits<double>::quiet_NaN())));
+  EXPECT_FALSE(loom_low_lower_rule_value_exact_bits(module_, &fact_table_,
+                                                    arguments_[12], 32, &bits));
+
+  IREE_ASSERT_OK(loom_value_fact_table_define(
+      &fact_table_, arguments_[12],
+      loom_value_facts_exact_float(LOOM_SCALAR_TYPE_F32, -0.0)));
+  ASSERT_TRUE(loom_low_lower_rule_value_exact_bits(module_, &fact_table_,
+                                                   arguments_[12], 32, &bits));
+  EXPECT_EQ(bits, UINT64_C(0x80000000));
+
+  IREE_ASSERT_OK(loom_value_fact_table_define(
+      &fact_table_, arguments_[13],
+      loom_value_facts_exact_float(LOOM_SCALAR_TYPE_F64,
+                                   std::numeric_limits<double>::infinity())));
+  ASSERT_TRUE(loom_low_lower_rule_value_exact_bits(module_, &fact_table_,
+                                                   arguments_[13], 64, &bits));
+  EXPECT_EQ(bits, UINT64_C(0x7FF0000000000000));
+}
+
+TEST_F(LowLowerRuleValueTest, ProjectsUnsignedNumeratorBounds) {
+  const loom_value_id_t numerator = arguments_[0];
+  for (uint32_t width : {32u, 64u}) {
+    const uint64_t mask = UINT64_MAX >> (64 - width);
+    EXPECT_EQ(
+        loom_low_lower_unsigned_numerator_maximum(nullptr, numerator, width),
+        mask);
+    const struct {
+      // Inclusive signed source range minimum.
+      int64_t lower;
+      // Inclusive signed source range maximum.
+      int64_t upper;
+      // Expected maximum after interpreting the source at the native width.
+      uint64_t maximum;
+    } cases[] = {
+        {INT64_MIN, INT64_MAX, mask},
+        {-1, 255, mask},
+        {0, INT64_MAX, width == 32 ? mask : uint64_t{INT64_MAX}},
+        {0, 0, 0},
+        {0, 255, 255},
+        {17, 65535, 65535},
+        {-128, -2, mask - 1},
+    };
+    for (const auto& test : cases) {
+      IREE_ASSERT_OK(loom_value_fact_table_define(
+          &fact_table_, numerator,
+          loom_value_facts_make(test.lower, test.upper, 1)));
+      EXPECT_EQ(loom_low_lower_unsigned_numerator_maximum(&fact_table_,
+                                                          numerator, width),
+                test.maximum);
+    }
+  }
+}
+
+TEST_F(LowLowerRuleValueTest, DerivesBoundedUnsignedDivisorRecipe) {
+  const loom_value_id_t divisor =
+      loom_scalar_constant_result(integer_constant_op_);
+  IREE_ASSERT_OK(loom_value_fact_table_define(&fact_table_, divisor,
+                                              loom_value_facts_exact_i64(7)));
+  for (int64_t maximum :
+       {int64_t{0}, int64_t{6}, int64_t{255}, int64_t{INT32_MAX}}) {
+    IREE_ASSERT_OK(loom_value_fact_table_define(
+        &fact_table_, arguments_[0], loom_value_facts_make(0, maximum, 1)));
+    loom_low_lower_unsigned_divisor_magic_info_t info = {};
+    ASSERT_TRUE(loom_low_lower_rule_value_facts_u32_divisor_magic_info(
+        module_, &fact_table_, arguments_[0], divisor, &info));
+    const auto expected =
+        loom_low_lower_unsigned_divisor_magic_info(7, 32, maximum);
+    EXPECT_EQ(info.multiplier, expected.multiplier);
+    EXPECT_EQ(info.post_shift, expected.post_shift);
+    EXPECT_FALSE(info.is_add);
+  }
+}
+
 TEST_F(LowLowerRuleValueTest, DerivesExactUnsignedDivisorRecipes) {
   const loom_value_id_t value_id =
       loom_scalar_constant_result(integer_constant_op_);
@@ -265,9 +577,9 @@ TEST_F(LowLowerRuleValueTest, DerivesExactUnsignedDivisorRecipes) {
   for (uint32_t divisor : divisors) {
     IREE_ASSERT_OK(loom_value_fact_table_define(
         &fact_table_, value_id, loom_value_facts_exact_i64(divisor)));
-    loom_low_lower_u32_divisor_magic_info_t info = {};
+    loom_low_lower_unsigned_divisor_magic_info_t info = {};
     ASSERT_TRUE(loom_low_lower_rule_value_facts_u32_divisor_magic_info(
-        module_, &fact_table_, value_id, &info));
+        module_, &fact_table_, arguments_[0], value_id, &info));
     const uint64_t high_multiplier =
         loom_low_lower_u32_divisor_reciprocal(divisor);
     auto check_quotient = [&](uint32_t numerator) {
@@ -327,6 +639,275 @@ TEST(U32DivisorReciprocalTest, PreservesQuotientAndRemainder) {
       iree_math_mul_u64_to_u128(low, divisor, &high, &low);
       ASSERT_EQ(high, numerator % divisor)
           << "numerator=" << numerator << " divisor=" << divisor;
+    }
+  }
+}
+
+static uint64_t ApplyUnsignedDivisionRecipe(
+    uint64_t numerator, uint32_t bit_width,
+    loom_low_lower_unsigned_divisor_magic_info_t info) {
+  uint64_t high = 0, low = 0;
+  iree_math_mul_u64_to_u128(numerator, info.multiplier, &high, &low);
+  uint64_t quotient =
+      bit_width == 64 ? high : (low >> bit_width) | (high << (64 - bit_width));
+  if (info.is_add) {
+    quotient = ((numerator - quotient) >> 1) + quotient;
+  }
+  return quotient >> info.post_shift;
+}
+
+TEST(UnsignedDivisorMagicTest, ExactAcrossWidthsAndUnsignedBoundaries) {
+  uint64_t random = UINT64_C(0x362b48f137159da3);
+  for (uint32_t bit_width = 2; bit_width <= 64; ++bit_width) {
+    const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+    const uint64_t half = UINT64_C(1) << (bit_width - 1);
+    auto check_divisor = [&](uint64_t divisor) {
+      const auto info =
+          loom_low_lower_unsigned_divisor_magic_info(divisor, bit_width, mask);
+      auto check_numerator = [&](uint64_t numerator) {
+        const uint64_t quotient =
+            ApplyUnsignedDivisionRecipe(numerator, bit_width, info);
+        ASSERT_EQ(quotient, numerator / divisor)
+            << "width=" << bit_width << " numerator=" << numerator
+            << " divisor=" << divisor;
+        ASSERT_EQ(numerator - quotient * divisor, numerator % divisor)
+            << "width=" << bit_width << " numerator=" << numerator
+            << " divisor=" << divisor;
+      };
+      if (bit_width <= 8) {
+        for (uint64_t numerator = 0; numerator <= mask; ++numerator) {
+          check_numerator(numerator);
+        }
+      } else {
+        const uint64_t multiple = (mask / divisor) * divisor;
+        for (uint64_t numerator :
+             {UINT64_C(0), UINT64_C(1), divisor - 1, divisor,
+              (divisor + 1) & mask, multiple - 1, multiple,
+              (multiple + 1) & mask, half - 1, half, half + 1, mask}) {
+          check_numerator(numerator);
+        }
+        for (uint32_t sample = 0; sample < 32; ++sample) {
+          random ^= random << 13;
+          random ^= random >> 7;
+          random ^= random << 17;
+          check_numerator(random & mask);
+        }
+      }
+    };
+    const uint64_t exhaustive_limit = bit_width <= 8 ? mask : 256;
+    for (uint64_t divisor = 2; divisor <= exhaustive_limit; ++divisor) {
+      check_divisor(divisor);
+    }
+    for (uint32_t sample = 0; sample < 256; ++sample) {
+      random ^= random << 13;
+      random ^= random >> 7;
+      random ^= random << 17;
+      check_divisor((random & mask) | 2);
+    }
+    for (uint64_t divisor : {half, half + 1, mask}) {
+      check_divisor(divisor);
+    }
+  }
+}
+
+TEST(UnsignedDivisorMagicTest, ExactForEverySmallNumeratorBound) {
+  for (uint32_t bit_width = 2; bit_width <= 7; ++bit_width) {
+    const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+    for (uint64_t divisor = 2; divisor <= mask; ++divisor) {
+      for (uint64_t maximum = 0; maximum <= mask; ++maximum) {
+        const auto info = loom_low_lower_unsigned_divisor_magic_info(
+            divisor, bit_width, maximum);
+        for (uint64_t numerator = 0; numerator <= maximum; ++numerator) {
+          const uint64_t quotient =
+              ApplyUnsignedDivisionRecipe(numerator, bit_width, info);
+          ASSERT_EQ(quotient, numerator / divisor)
+              << "width=" << bit_width << " divisor=" << divisor
+              << " maximum=" << maximum << " numerator=" << numerator;
+          ASSERT_EQ(numerator - quotient * divisor, numerator % divisor);
+        }
+      }
+    }
+  }
+}
+
+TEST(UnsignedDivisorMagicTest, ExactForWideNumeratorBounds) {
+  uint64_t random = UINT64_C(0x6351a39b72ce814d);
+  for (uint32_t bit_width = 8; bit_width <= 64; ++bit_width) {
+    const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+    const uint64_t half = UINT64_C(1) << (bit_width - 1);
+    for (uint32_t sample = 0; sample < 128; ++sample) {
+      random ^= random << 13;
+      random ^= random >> 7;
+      random ^= random << 17;
+      const uint64_t divisor = sample < 64 ? sample + 2 : (random & mask) | 2;
+      for (uint64_t maximum : {UINT64_C(0), UINT64_C(1), divisor - 1, divisor,
+                               half - 1, half, half + 1, mask, random & mask}) {
+        const auto info = loom_low_lower_unsigned_divisor_magic_info(
+            divisor, bit_width, maximum);
+        const uint64_t multiple = (maximum / divisor) * divisor;
+        auto check_numerator = [&](uint64_t numerator) {
+          if (numerator > maximum) {
+            return;
+          }
+          const uint64_t quotient =
+              ApplyUnsignedDivisionRecipe(numerator, bit_width, info);
+          ASSERT_EQ(quotient, numerator / divisor)
+              << "width=" << bit_width << " divisor=" << divisor
+              << " maximum=" << maximum << " numerator=" << numerator;
+          ASSERT_EQ(numerator - quotient * divisor, numerator % divisor);
+        };
+        for (uint64_t numerator :
+             {UINT64_C(0), UINT64_C(1), divisor - 1, divisor,
+              (divisor + 1) & mask, (multiple - 1) & mask, multiple,
+              (multiple + 1) & mask, maximum}) {
+          check_numerator(numerator);
+        }
+        for (uint32_t i = 0; i < 16; ++i) {
+          random ^= random << 13;
+          random ^= random >> 7;
+          random ^= random << 17;
+          check_numerator(random & maximum);
+        }
+      }
+    }
+  }
+}
+
+TEST(UnsignedDivisorMagicTest, NumeratorBoundRemovesAddAdjustment) {
+  for (uint32_t bit_width : {32u, 64u}) {
+    const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+    const auto unbounded =
+        loom_low_lower_unsigned_divisor_magic_info(7, bit_width, mask);
+    const auto bounded =
+        loom_low_lower_unsigned_divisor_magic_info(7, bit_width, mask >> 1);
+    EXPECT_TRUE(unbounded.is_add);
+    EXPECT_FALSE(bounded.is_add);
+  }
+}
+
+static int64_t SignedValueAtWidth(uint64_t bits, uint32_t bit_width) {
+  const uint64_t sign_bit = UINT64_C(1) << (bit_width - 1);
+  return static_cast<int64_t>((bits ^ sign_bit) - sign_bit);
+}
+
+static uint64_t SignedMultiplyHighAtWidth(uint64_t lhs, uint64_t rhs,
+                                          uint32_t bit_width) {
+  const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+  const uint64_t sign_bit = UINT64_C(1) << (bit_width - 1);
+  uint64_t high = 0, low = 0;
+  iree_math_mul_u64_to_u128(lhs, rhs, &high, &low);
+  uint64_t product_high =
+      bit_width == 64
+          ? high
+          : ((low >> bit_width) | (high << (64 - bit_width))) & mask;
+  if (lhs & sign_bit) {
+    product_high = (product_high - rhs) & mask;
+  }
+  if (rhs & sign_bit) {
+    product_high = (product_high - lhs) & mask;
+  }
+  return product_high;
+}
+
+static uint64_t ArithmeticShiftRightAtWidth(uint64_t value, uint32_t shift,
+                                            uint32_t bit_width) {
+  const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+  const uint64_t sign_bit = UINT64_C(1) << (bit_width - 1);
+  if (shift == 0) {
+    return value & mask;
+  }
+  const uint64_t sign_fill =
+      value & sign_bit ? mask ^ (mask >> shift) : UINT64_C(0);
+  return ((value >> shift) | sign_fill) & mask;
+}
+
+static int64_t ApplySignedDivisionRecipe(
+    int64_t numerator, uint32_t bit_width,
+    loom_low_lower_signed_divisor_magic_info_t info) {
+  const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+  const uint64_t numerator_bits = (uint64_t)numerator & mask;
+  uint64_t quotient =
+      SignedMultiplyHighAtWidth(numerator_bits, info.multiplier, bit_width);
+  if (info.numerator_factor > 0) {
+    quotient = (quotient + numerator_bits) & mask;
+  } else if (info.numerator_factor < 0) {
+    quotient = (quotient - numerator_bits) & mask;
+  }
+  quotient = ArithmeticShiftRightAtWidth(quotient, info.post_shift, bit_width);
+  quotient = (quotient + (quotient >> (bit_width - 1))) & mask;
+  return SignedValueAtWidth(quotient, bit_width);
+}
+
+TEST(SignedDivisorMagicTest, ExactAcrossWidthsAndSignedBoundaries) {
+  uint64_t random = UINT64_C(0x2c9277b5ac3d8f61);
+  for (uint32_t bit_width = 3; bit_width <= 64; ++bit_width) {
+    const uint64_t mask = UINT64_MAX >> (64 - bit_width);
+    const uint64_t sign_bit = UINT64_C(1) << (bit_width - 1);
+    auto check_divisor = [&](int64_t divisor) {
+      if (divisor >= -1 && divisor <= 1) {
+        return;
+      }
+      const auto info =
+          loom_low_lower_signed_divisor_magic_info(divisor, bit_width);
+      EXPECT_EQ(loom_low_lower_signed_divisor_magic_kind(info) & 1,
+                info.post_shift == 0 ? 0 : 1);
+      auto check_numerator = [&](int64_t numerator) {
+        const int64_t quotient =
+            ApplySignedDivisionRecipe(numerator, bit_width, info);
+        ASSERT_EQ(quotient, numerator / divisor)
+            << "width=" << bit_width << " numerator=" << numerator
+            << " divisor=" << divisor;
+        ASSERT_EQ(numerator - quotient * divisor, numerator % divisor)
+            << "width=" << bit_width << " numerator=" << numerator
+            << " divisor=" << divisor;
+      };
+      if (bit_width <= 8) {
+        for (uint64_t numerator_bits = 0; numerator_bits <= mask;
+             ++numerator_bits) {
+          check_numerator(SignedValueAtWidth(numerator_bits, bit_width));
+        }
+      } else {
+        const int64_t minimum = SignedValueAtWidth(sign_bit, bit_width);
+        const int64_t maximum = SignedValueAtWidth(sign_bit - 1, bit_width);
+        for (int64_t numerator :
+             {minimum, minimum + 1, divisor, INT64_C(-1), INT64_C(0),
+              INT64_C(1), maximum - 1, maximum}) {
+          if (numerator >= minimum && numerator <= maximum) {
+            check_numerator(numerator);
+          }
+        }
+        if (divisor < maximum) {
+          check_numerator(divisor + 1);
+        }
+        for (uint32_t sample = 0; sample < 64; ++sample) {
+          random ^= random << 13;
+          random ^= random >> 7;
+          random ^= random << 17;
+          check_numerator(SignedValueAtWidth(random & mask, bit_width));
+        }
+      }
+    };
+    if (bit_width <= 8) {
+      for (uint64_t divisor_bits = 0; divisor_bits <= mask; ++divisor_bits) {
+        check_divisor(SignedValueAtWidth(divisor_bits, bit_width));
+      }
+    } else {
+      const int64_t minimum = SignedValueAtWidth(sign_bit, bit_width);
+      const int64_t maximum = SignedValueAtWidth(sign_bit - 1, bit_width);
+      for (int64_t divisor :
+           {minimum, minimum + 1, INT64_C(-257), INT64_C(-20), INT64_C(-7),
+            INT64_C(-3), INT64_C(-2), INT64_C(2), INT64_C(3), INT64_C(7),
+            INT64_C(20), INT64_C(257), maximum - 1, maximum}) {
+        if (divisor >= minimum && divisor <= maximum) {
+          check_divisor(divisor);
+        }
+      }
+      for (uint32_t sample = 0; sample < 512; ++sample) {
+        random ^= random << 13;
+        random ^= random >> 7;
+        random ^= random << 17;
+        check_divisor(SignedValueAtWidth(random & mask, bit_width));
+      }
     }
   }
 }

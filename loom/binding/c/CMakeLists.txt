@@ -14,6 +14,27 @@ iree_add_all_subdirs()
 
 loom_cc_library(
   NAME
+    base
+  HDRS
+    "include/loomc/base.h"
+    "include/loomc/byte_sequence.h"
+    "include/loomc/iree.h"
+    "include/loomc/status.h"
+  SRCS
+    "src/base.c"
+    "src/base_system.c"
+    "src/byte_sequence.c"
+    "src/status.c"
+  DEPS
+    iree::base
+  INCLUDES
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>"
+  PUBLIC
+)
+
+loom_cc_library(
+  NAME
     loomc
   HDRS
     "include/loomc/artifact.h"
@@ -33,7 +54,9 @@ loom_cc_library(
     "include/loomc/link_index.h"
     "include/loomc/loomc.h"
     "include/loomc/module.h"
+    "include/loomc/module_config.h"
     "include/loomc/pass.h"
+    "include/loomc/pass_trace.h"
     "include/loomc/product.h"
     "include/loomc/result.h"
     "include/loomc/sanitizer.h"
@@ -45,12 +68,15 @@ loom_cc_library(
     "src/config.h"
     "src/context.h"
     "src/diagnostic.h"
+    "src/emit.h"
     "src/link_index.h"
     "src/link_materialization.h"
     "src/module.h"
     "src/module_bytecode.h"
     "src/option_chain.h"
     "src/pass_program.h"
+    "src/pass_run.h"
+    "src/pass_trace.h"
     "src/product.h"
     "src/request_index_overlay.h"
     "src/result.h"
@@ -59,11 +85,9 @@ loom_cc_library(
     "src/visibility.h"
     "src/workspace.h"
   SRCS
+    "include/loomc/interop.h"
     "src/artifact.c"
     "src/artifact_manifest.c"
-    "src/base.c"
-    "src/base_system.c"
-    "src/byte_sequence.c"
     "src/compile.c"
     "src/compile_report.c"
     "src/config.c"
@@ -71,6 +95,7 @@ loom_cc_library(
     "src/context.c"
     "src/diagnostic.c"
     "src/emit.c"
+    "src/interop.c"
     "src/launch_config.c"
     "src/link.c"
     "src/link_dependency.c"
@@ -78,27 +103,30 @@ loom_cc_library(
     "src/link_materialization.c"
     "src/module.c"
     "src/module_bytecode.c"
+    "src/module_config.c"
     "src/module_function.c"
     "src/module_global.c"
     "src/module_source.c"
     "src/module_text.c"
     "src/option_chain.c"
     "src/pass_program.c"
+    "src/pass_run.c"
+    "src/pass_trace.c"
     "src/product.c"
     "src/request_index_overlay.c"
     "src/result.c"
     "src/source.c"
-    "src/status.c"
     "src/target.c"
     "src/task.c"
     "src/workspace.c"
   DEPS
+    ::base
     iree::base
     iree::base::internal
     iree::base::internal::arena
     iree::io::file_handle
     iree::io::stream
-    loom::analysis::symbol_value_constraints
+    loom::analysis::kernel_launch_config
     loom::codegen::low::launch_config_program
     loom::codegen::low::pipeline::legalizer_registry
     loom::codegen::low::repr
@@ -106,9 +134,16 @@ loom_cc_library(
     loom::codegen::low::text_asm
     loom::codegen::low::verify
     loom::codegen::pass_environment
+    loom::compile::request
+    loom::config::application
+    loom::config::schema
+    loom::config::text
+    loom::config::text_binding
     loom::error::diagnostic
     loom::error::error_defs
+    loom::error::json_sink
     loom::error::renderer
+    loom::error::source
     loom::format::bytecode::format
     loom::format::bytecode::index
     loom::format::bytecode::reader
@@ -117,13 +152,12 @@ loom_cc_library(
     loom::format::text::parser
     loom::format::text::printer
     loom::ir
-    loom::ir::facts
     loom::link::dependency_analysis
     loom::link::dependency_report
     loom::link::index_materializer
-    loom::link::linker
     loom::link::materialization_environment
     loom::link::module_index
+    loom::link::plan_materializer
     loom::ops::func
     loom::ops::global
     loom::ops::kernel
@@ -131,12 +165,16 @@ loom_cc_library(
     loom::ops::op_defs
     loom::ops::op_registry
     loom::ops::pass
+    loom::ops::target
     loom::pass::builtin_registry
     loom::pass::environment
     loom::pass::interpreter
+    loom::pass::pipeline_snapshot
     loom::pass::program
     loom::pass::registry
+    loom::pass::report
     loom::pass::tooling
+    loom::pass::trace
     loom::pass::value_facts
     loom::sanitizer::options
     loom::target::function_version
@@ -149,10 +187,9 @@ loom_cc_library(
     loom::target::reporting::artifact_manifest
     loom::target::reporting::format
     loom::target::reporting::report
+    loom::target::selection
     loom::target::specialization
     loom::target::types
-    loom::tooling::compile::pipeline
-    loom::tooling::config
     loom::transforms::cleanup::configured
     loom::transforms::cleanup::patterns
     loom::util::json
@@ -166,6 +203,33 @@ loom_cc_library(
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/src>"
   PUBLIC
+)
+
+loom_cc_library(
+  NAME
+    interop
+  HDRS
+    "include/loomc/interop.h"
+  DEPS
+    ::interop_headers
+    ::loomc
+  INCLUDES
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include>"
+  PUBLIC
+)
+
+loomc_interop_headers(
+  NAME
+    interop_headers
+  DEPS
+    loom::error::source
+    loom::ir
+    loom::pass::registry
+    loom::pass::report
+    loom::target::pipeline
+    loom::target::provider
+    loom::target::reporting::report
 )
 
 if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
@@ -190,7 +254,9 @@ loom_cc_library(
     "include/loomc/link_index.h"
     "include/loomc/loomc.h"
     "include/loomc/module.h"
+    "include/loomc/module_config.h"
     "include/loomc/pass.h"
+    "include/loomc/pass_trace.h"
     "include/loomc/product.h"
     "include/loomc/result.h"
     "include/loomc/sanitizer.h"
@@ -264,6 +330,100 @@ loom_cc_library(
 
 endif()
 
+set(_loomc_shared_platform_components "")
+if(LOOM_IMPORT_CXX)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::import::cxx)
+endif()
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_AMDGPU AND LOOM_EMIT_AMDGPU)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::amdgpu)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::amdgpu::iree_hal)
+endif()
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_XDNA AND LOOM_EMIT_XDNA)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::amd::xdna)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::amd::xdna::iree_hal)
+endif()
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::spirv)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::spirv::vulkaninfo)
+endif()
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND IREE_HAL_DRIVER_VULKAN)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::spirv::iree_hal)
+endif()
+if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV AND LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::spirv::vulkan)
+endif()
+if(LOOM_TARGET_ARCH_VM)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::vm)
+endif()
+if(LOOM_BUILD AND LOOM_TARGET_ARCH_WASM AND LOOM_EMIT_WASM)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::wasm)
+endif()
+if(LOOM_TARGET_ARCH_X86)
+  list(APPEND _loomc_shared_platform_components loom::binding::c::target::x86)
+endif()
+loomc_shared_libraries(
+  NAME
+    loomc_shared
+  COMPONENTS
+    ::base
+    ::loomc
+    ::task_pool
+    ::task_queue
+    loom::binding::c::target::cmd
+    loom::binding::c::target::configured
+    loom::binding::c::target::configured::ir
+    loom::binding::c::target::configured::target
+    loom::binding::c::target::cpu::iree_hal
+    loom::binding::c::target::iree_hal
+    ${_loomc_shared_platform_components}
+  TOOL_COMPONENTS
+    loom::testing::target_environment
+  RUNTIME_DEPS
+    iree::async
+    iree::async::util::proactor_pool
+    iree::async::util::proactor_thread
+    iree::base
+    iree::base::core_headers
+    iree::base::cpu_data
+    iree::base::internal
+    iree::base::internal::arena
+    iree::base::internal::base64
+    iree::base::internal::fpu_state
+    iree::base::internal::json
+    iree::base::internal::path
+    iree::base::internal::unicode
+    iree::base::threading
+    iree::base::threading::thread
+    iree::base::tooling::flags
+    iree::hal
+    iree::hal::drivers::task::device_spec
+    iree::hal::drivers::task::executable::library::abi
+    iree::hal::drivers::task::executable::loader
+    iree::hal::memory::slab_cache
+    iree::hal::memory::tlsf_pool
+    iree::io::file_handle
+    iree::io::parameter_index
+    iree::io::parameter_index_provider
+    iree::io::parameter_provider
+    iree::io::stream
+    iree::math
+    iree::module::hal::types
+    iree::net::carrier
+    iree::net::carrier::stream
+    iree::schemas::xdna_executable
+    iree::task
+    iree::tokenizer
+    iree::tokenizer::format::huggingface::tokenizer_json
+    iree::tokenizer::vocab
+    iree::tooling::device_flags
+    iree::tooling::device_profiling
+    iree::tooling::device_util
+    iree::tooling::parameter_util
+    iree::vm
+    iree::vm::bytecode::module
+    iree::vm::bytecode::wire
+)
+
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###
 
 include(CMakePackageConfigHelpers)
@@ -282,6 +442,7 @@ set(_loomc_cmake_package_dir "${CMAKE_INSTALL_LIBDIR}/cmake/loomc")
 set(_loomc_build_package_dir "${CMAKE_CURRENT_BINARY_DIR}/cmake/loomc")
 
 function(_loomc_add_shared_component target_name)
+  _loomc_resolve(target_name "${target_name}")
   if(NOT TARGET "${target_name}")
     message(FATAL_ERROR
       "loomc shared package expected enabled binding target: ${target_name}")
@@ -291,8 +452,9 @@ function(_loomc_add_shared_component target_name)
     message(FATAL_ERROR
       "loomc shared package expected a compilation owner: ${target_name}")
   endif()
+  get_target_property(_objects "${target_name}" IREE_CC_OBJECTS)
   list(APPEND _loomc_component_targets "${target_name}")
-  list(APPEND _loomc_object_sources "$<TARGET_OBJECTS:${_object_target}>")
+  list(APPEND _loomc_object_sources ${_objects})
   list(APPEND _loomc_object_targets "${_object_target}")
   set(_loomc_component_targets "${_loomc_component_targets}" PARENT_SCOPE)
   set(_loomc_object_sources "${_loomc_object_sources}" PARENT_SCOPE)
@@ -300,27 +462,18 @@ function(_loomc_add_shared_component target_name)
 endfunction()
 
 function(_loomc_collect_shared_component_deps target_name)
-  get_target_property(_link_libraries "${target_name}" LINK_LIBRARIES)
-  get_target_property(
-    _interface_link_libraries "${target_name}" INTERFACE_LINK_LIBRARIES)
-  foreach(_dep IN LISTS _link_libraries _interface_link_libraries)
-    if(NOT _dep OR _dep MATCHES "^\\$<TARGET_OBJECTS:")
+  get_property(_deps TARGET "${target_name}" PROPERTY IREE_CC_DEPS)
+  get_property(_options TARGET "${target_name}" PROPERTY IREE_CC_LINKOPTS)
+  foreach(_dep IN LISTS _deps)
+    _loomc_resolve(_dep_target "${_dep}")
+    if(_dep_target IN_LIST _loomc_component_targets)
       continue()
-    endif()
-    if(TARGET "${_dep}")
-      get_target_property(_aliased_target "${_dep}" ALIASED_TARGET)
-      if(_aliased_target)
-        set(_dep_target "${_aliased_target}")
-      else()
-        set(_dep_target "${_dep}")
-      endif()
-      if(_dep_target IN_LIST _loomc_component_targets)
-        continue()
-      endif()
     endif()
     list(APPEND _loomc_direct_deps "${_dep}")
   endforeach()
+  list(APPEND _loomc_link_options ${_options})
   set(_loomc_direct_deps "${_loomc_direct_deps}" PARENT_SCOPE)
+  set(_loomc_link_options "${_loomc_link_options}" PARENT_SCOPE)
 endfunction()
 
 if(NOT TARGET loom_binding_c_loomc)
@@ -330,24 +483,9 @@ endif()
 set(_loomc_component_targets)
 set(_loomc_object_sources)
 set(_loomc_object_targets)
-_loomc_add_shared_component(loom_binding_c_loomc)
-_loomc_add_shared_component(loom_binding_c_target_iree_hal_iree_hal)
-if(LOOM_IMPORT_CXX)
-  _loomc_add_shared_component(loom_binding_c_import_cxx_cxx)
-endif()
-if(LOOM_TARGET_ARCH_SPIRV AND LOOM_EMIT_SPIRV)
-  _loomc_add_shared_component(loom_binding_c_target_spirv_spirv)
-  _loomc_add_shared_component(loom_binding_c_target_spirv_vulkaninfo_vulkaninfo)
-  if(IREE_HAL_DRIVER_VULKAN)
-    _loomc_add_shared_component(loom_binding_c_target_spirv_iree_hal_iree_hal)
-  endif()
-  if(LOOM_EXECUTE_IREE_HAL AND IREE_HAL_DRIVER_VULKAN)
-    _loomc_add_shared_component(loom_binding_c_target_spirv_vulkan_vulkan)
-  endif()
-endif()
-if(LOOM_TARGET_ARCH_AMDGPU AND LOOM_EMIT_AMDGPU)
-  _loomc_add_shared_component(loom_binding_c_target_amdgpu_amdgpu)
-endif()
+foreach(_loomc_component IN LISTS _LOOMC_COMPONENTS)
+  _loomc_add_shared_component("${_loomc_component}")
+endforeach()
 
 foreach(_loomc_object_target IN LISTS _loomc_object_targets)
   target_compile_definitions("${_loomc_object_target}" PRIVATE
@@ -358,6 +496,7 @@ endforeach()
 # Their immediate non-selected deps provide the ordinary link libraries; selected
 # components are skipped to avoid ALWAYSLINK interface deps re-adding objects.
 set(_loomc_direct_deps)
+set(_loomc_link_options)
 foreach(_loomc_component_target IN LISTS _loomc_component_targets)
   _loomc_collect_shared_component_deps("${_loomc_component_target}")
 endforeach()
@@ -367,6 +506,8 @@ endif()
 
 add_library(loomc_shared SHARED ${_loomc_object_sources})
 target_link_libraries(loomc_shared PRIVATE ${_loomc_direct_deps})
+target_link_options(loomc_shared PRIVATE
+  ${IREE_DEFAULT_LINKOPTS} ${_loomc_link_options})
 target_include_directories(loomc_shared PUBLIC
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   "$<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>")
@@ -420,6 +561,10 @@ elseif(UNIX)
     "-Wl,--version-script=${_loomc_export_file}")
   set_property(TARGET loomc_shared APPEND PROPERTY
     LINK_DEPENDS "${_loomc_export_file}")
+endif()
+
+if(LOOM_LINK_SHARED_TOOLS)
+  loomc_configure_shared_tools()
 endif()
 
 if(NOT TARGET loomc::loomc)

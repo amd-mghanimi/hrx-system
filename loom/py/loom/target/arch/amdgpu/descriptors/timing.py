@@ -4,7 +4,7 @@
 # See https://llvm.org/LICENSE.txt for license information.
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
-"""AMDGPU register dependency timing."""
+"""AMDGPU register dependency and execution resource timing."""
 
 from __future__ import annotations
 
@@ -13,15 +13,94 @@ from dataclasses import replace
 from loom.target.low_descriptors import (
     Descriptor,
     DescriptorSet,
+    EffectKind,
     EventSeparation,
+    IssueUse,
+    MemorySpace,
     ModelQuality,
     Operand,
     OperandFlag,
     OperandRole,
+    Resource,
+    ResourceKind,
+    ScheduleClass,
     TimingEvent,
 )
 
-from .common import _REG_SGPR, _SCHEDULE_VALU
+from .common import (
+    _REG_SGPR,
+    _SCHEDULE_LDS_ATOMIC,
+    _SCHEDULE_LDS_CROSSLANE,
+    _SCHEDULE_LDS_LOAD,
+    _SCHEDULE_LDS_STORE,
+    _SCHEDULE_VALU,
+)
+
+
+def _with_lds_service_timing(
+    descriptor_set: DescriptorSet, bits_per_lane_per_cycle: int
+) -> DescriptorSet:
+    # Independent addresses still contend for the LDS execution pipeline.
+    # Model the minimum service of one SIMD issue pass from packet width;
+    # bank conflicts, wave64 replay, and other waves can increase this cost.
+    # This bandwidth reservation is distinct from result availability and
+    # register-source leases. Keep their existing latency/hazard models.
+    service_resource = "amdgpu.lds.service"
+    parents = {
+        row.name: row
+        for row in descriptor_set.schedule_classes
+        if row.name
+        in (
+            _SCHEDULE_LDS_LOAD,
+            _SCHEDULE_LDS_STORE,
+            _SCHEDULE_LDS_ATOMIC,
+            _SCHEDULE_LDS_CROSSLANE,
+        )
+    }
+    variants: dict[tuple[str, int], ScheduleClass] = {}
+    descriptors: list[Descriptor] = []
+    for descriptor in descriptor_set.descriptors:
+        parent = parents.get(descriptor.schedule_class)
+        if parent is None:
+            descriptors.append(descriptor)
+            continue
+        # An atomic's read and write effects describe the same packet width.
+        # Cross-lane packets use the LDS pipeline without a memory footprint.
+        width_bits = max(
+            (
+                effect.width_bits
+                for effect in descriptor.effects
+                if effect.memory_space == MemorySpace.WORKGROUP
+                and effect.kind in (EffectKind.READ, EffectKind.WRITE)
+            ),
+            default=0,
+        )
+        cycles = max(
+            1,
+            (width_bits + bits_per_lane_per_cycle - 1) // bits_per_lane_per_cycle,
+        )
+        key = (parent.name, cycles)
+        if key not in variants:
+            variants[key] = replace(
+                parent,
+                name=f"{parent.name}.service{cycles}",
+                issue_uses=(
+                    *parent.issue_uses,
+                    IssueUse(service_resource, cycles=cycles, units=1),
+                ),
+            )
+        descriptors.append(replace(descriptor, schedule_class=variants[key].name))
+    return replace(
+        descriptor_set,
+        descriptors=tuple(descriptors),
+        resources=(
+            *descriptor_set.resources,
+            Resource(
+                service_resource, capacity_per_cycle=1, kind=ResourceKind.PIPELINE
+            ),
+        ),
+        schedule_classes=(*descriptor_set.schedule_classes, *variants.values()),
+    )
 
 
 def _with_valu_sgpr_timing(
@@ -87,5 +166,52 @@ def _with_valu_sgpr_timing(
             EventSeparation(
                 write_event, read_event, separation_cycles, ModelQuality.ESTIMATED
             ),
+        ),
+    )
+
+
+def _with_state_read_before_clobber_timing(
+    descriptor_set: DescriptorSet,
+) -> DescriptorSet:
+    """Models architectural state inputs as consumed when a packet issues.
+
+    The shared wave-issue resource keeps packets from the same wave in distinct
+    issue slots. A following packet may therefore overwrite architectural state
+    without waiting for the reader's unrelated result latency.
+    """
+    read_event = "amdgpu.state.read"
+    write_event = "amdgpu.state.write"
+    descriptors: list[Descriptor] = []
+    for descriptor in descriptor_set.descriptors:
+        operands = tuple(
+            replace(
+                operand,
+                read_event=(
+                    read_event
+                    if OperandFlag.STATE_READ in operand.flags
+                    and operand.read_event is None
+                    else operand.read_event
+                ),
+                write_event=(
+                    write_event
+                    if OperandFlag.STATE_WRITE in operand.flags
+                    and operand.write_event is None
+                    else operand.write_event
+                ),
+            )
+            for operand in descriptor.operands
+        )
+        descriptors.append(replace(descriptor, operands=operands))
+    return replace(
+        descriptor_set,
+        descriptors=tuple(descriptors),
+        timing_events=(
+            *descriptor_set.timing_events,
+            TimingEvent(read_event),
+            TimingEvent(write_event),
+        ),
+        event_separations=(
+            *descriptor_set.event_separations,
+            EventSeparation(read_event, write_event, 0, ModelQuality.EXACT),
         ),
     )

@@ -25,9 +25,9 @@ static Status Admit(const std::vector<uint8_t>& bytes) {
   auto source = MakeOwnedByteSequence(bytes);
   const auto target = MakeImageTarget();
   iree_hal_amd_xdna_image_t* image = nullptr;
-  Status status(iree_hal_amd_xdna_image_create(
+  Status status(iree_hal_amd_xdna_image_allocate(
       source.get(), &target, iree_allocator_system(), &image));
-  iree_hal_amd_xdna_image_destroy(image);
+  iree_hal_amd_xdna_image_free(image);
   return status;
 }
 
@@ -36,7 +36,7 @@ TEST(ImageTest, RetainsSourceAndIndexedRequirements) {
   auto source = MakeOwnedByteSequence(fixture.Build());
   const auto target = MakeImageTarget();
   iree_hal_amd_xdna_image_t* image = nullptr;
-  IREE_ASSERT_OK(iree_hal_amd_xdna_image_create(
+  IREE_ASSERT_OK(iree_hal_amd_xdna_image_allocate(
       source.get(), &target, iree_allocator_system(), &image));
   source.reset();
   const auto* tables = iree_hal_amd_xdna_image_tables(image);
@@ -63,7 +63,23 @@ TEST(ImageTest, RetainsSourceAndIndexedRequirements) {
       directory, load->file_range,
       iree_make_byte_span(bytes.data(), bytes.size())));
   EXPECT_EQ(bytes, fixture.payloads[2]);
-  iree_hal_amd_xdna_image_destroy(image);
+  iree_hal_amd_xdna_image_free(image);
+}
+
+TEST(ImageTest, AdmitsOnlyExactUnreferencedBindingSlots) {
+  ImageFixture fixture;
+  fixture.bindings.insert(fixture.bindings.begin(),
+                          iree_xdna_elf_binding_record_t{});
+  fixture.entries[0].binding_count = 2;
+  fixture.relocations[1].source_ordinal = 1;
+  IREE_EXPECT_OK(Admit(fixture.Build()));
+
+  fixture.relocations[1].source_ordinal = 0;
+  EXPECT_EQ(Admit(fixture.Build()).code(), StatusCode::kInvalidArgument);
+
+  fixture.relocations[1].source_ordinal = 1;
+  fixture.bindings[0].minimum_alignment = 1;
+  EXPECT_EQ(Admit(fixture.Build()).code(), StatusCode::kInvalidArgument);
 }
 
 TEST(ImageTest, RejectsIncompatibleExecutionContracts) {
@@ -188,9 +204,9 @@ TEST(ImageTest, DoesNotPublishImageOnAllocationFailure) {
   const auto target = MakeImageTarget();
   iree_hal_amd_xdna_image_t* image = nullptr;
   const iree_allocator_t allocator = {nullptr, RejectAllocation};
-  IREE_EXPECT_STATUS_IS(
-      StatusCode::kResourceExhausted,
-      iree_hal_amd_xdna_image_create(source.get(), &target, allocator, &image));
+  IREE_EXPECT_STATUS_IS(StatusCode::kResourceExhausted,
+                        iree_hal_amd_xdna_image_allocate(source.get(), &target,
+                                                         allocator, &image));
   EXPECT_EQ(image, nullptr);
 }
 

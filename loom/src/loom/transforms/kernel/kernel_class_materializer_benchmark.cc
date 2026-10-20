@@ -148,17 +148,17 @@ class KernelClassMaterializerBenchmarkFixture {
     site_facts_.entries[0] = loom_value_facts_exact_i64(64);
     site_facts_.entries[1] = loom_value_facts_exact_i64(256);
     sites_[0] = {
-        /*.facts=*/&site_facts_,
-        /*.argument_values=*/&site_argument_values_[0],
+        .facts = &site_facts_,
+        .argument_values = &site_argument_values_[0],
     };
     sites_[1] = {
-        /*.facts=*/&site_facts_,
-        /*.argument_values=*/&site_argument_values_[1],
+        .facts = &site_facts_,
+        .argument_values = &site_argument_values_[1],
     };
     const loom_kernel_class_collection_options_t collection_options =
         loom_kernel_class_collection_options_default();
     IREE_CHECK_OK(loom_kernel_class_classifier_collect(
-        &classifier_, sites_, std::size(sites_), &collection_options,
+        &classifier_, nullptr, sites_, std::size(sites_), &collection_options,
         &analysis_arena_, &collection_));
     IREE_ASSERT_EQ(collection_.accepted_decision_count, decision_count);
     IREE_ASSERT_EQ(collection_.class_count, decision_count == 0 ? 1u : 2u);

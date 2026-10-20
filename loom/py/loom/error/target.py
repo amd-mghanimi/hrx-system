@@ -830,14 +830,14 @@ ERR_TARGET_050 = ErrorDef(
     ),
 )
 
-# ERR_TARGET_051: Low workgroup storage use exceeds target limit.
+# ERR_TARGET_051: Function workgroup storage use exceeds target limit.
 ERR_TARGET_051 = ErrorDef(
     domain=ErrorDomain.TARGET,
     code=51,
     severity=Severity.ERROR,
-    summary="Low workgroup storage use exceeds target limit.",
+    summary="Function workgroup storage use exceeds target limit.",
     message=(
-        "low function '@{function_name}' target '@{target_name}' reserves "
+        "function '@{function_name}' target '@{target_name}' reserves "
         "{reserved_bytes} byte(s) of workgroup storage, exceeding target limit "
         "{limit_bytes}"
     ),
@@ -1290,16 +1290,16 @@ ERR_TARGET_071 = ErrorDef(
     ),
 )
 
-# ERR_TARGET_072: Low invocation cannot preserve the helper contract.
+# ERR_TARGET_072: Low invocation violates the target call policy.
 ERR_TARGET_072 = ErrorDef(
     domain=ErrorDomain.TARGET,
     code=72,
     severity=Severity.ERROR,
-    summary="Low invocation cannot preserve the helper contract.",
+    summary="Low invocation violates the target call policy.",
     message=(
         "target '{target_key}' export '{export_name}' config '{config_key}' "
         "rejected '{op_name}' in '@{function_name}': low helper "
-        "'@{callee_name}' cannot be inlined because {reason}"
+        "'@{callee_name}' does not satisfy the call policy because {reason}"
     ),
     params=(
         *_TARGET_CONTEXT_PARAMS,
@@ -1307,8 +1307,8 @@ ERR_TARGET_072 = ErrorDef(
         ErrorParam("reason", ParamKind.STRING),
     ),
     fix_hint=(
-        "Use a module-local, single-block low.func.def with virtual register "
-        "allocation and no function-entry resource imports"
+        "Use a compatible module-local low.func.def and inline it before "
+        "target emission when the selected target has no direct Low call ABI"
     ),
 )
 
@@ -1512,102 +1512,6 @@ ERR_TARGET_082 = ErrorDef(
     fix_hint="Select a device profile provided by this target family.",
 )
 
-# ERR_TARGET_083: Array worker fold has an empty record sequence.
-ERR_TARGET_083 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=83,
-    severity=Severity.ERROR,
-    summary="Array worker fold has an empty record sequence.",
-    message=("array worker fold requires a positive record count; got {record_count}"),
-    params=(ErrorParam("record_count", ParamKind.U32),),
-    fix_hint="Provide a non-empty record sequence for the worker fold.",
-)
-
-# ERR_TARGET_084: AIE2P worker requires a frame-completion phase.
-ERR_TARGET_084 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=84,
-    severity=Severity.ERROR,
-    summary="AIE2P worker requires a frame-completion phase.",
-    message=(
-        "AIE2P pipeline group {group} has frame-completion stages that "
-        "require a phased worker program"
-    ),
-    params=(ErrorParam("group", ParamKind.U32),),
-    fix_hint="Place completion stages in a separate group.",
-)
-
-# ERR_TARGET_085: AIE2P worker outputs require different firing phases.
-ERR_TARGET_085 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=85,
-    severity=Severity.ERROR,
-    summary="AIE2P worker outputs require different firing phases.",
-    message=(
-        "AIE2P pipeline group {group} requires compatible folds on every "
-        "boundary output; mixed cadences require a phased worker program"
-    ),
-    params=(ErrorParam("group", ParamKind.U32),),
-    fix_hint="Place recordwise and folded outputs in separate groups.",
-)
-
-# ERR_TARGET_086: AIE2P internal buffered flow requires a ring state machine.
-ERR_TARGET_086 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=86,
-    severity=Severity.ERROR,
-    summary="AIE2P internal buffered flow requires a ring state machine.",
-    message=(
-        "AIE2P pipeline group {group} flow {flow} has capacity {capacity}; "
-        "buffered same-group flow requires a composite ring state machine"
-    ),
-    params=(
-        ErrorParam("group", ParamKind.U32),
-        ErrorParam("flow", ParamKind.U32),
-        ErrorParam("capacity", ParamKind.U32),
-    ),
-    fix_hint="Place the buffered flow producer and consumer in separate groups.",
-)
-
-# ERR_TARGET_087: AIE2P worker channel cycle requires interleaved phases.
-ERR_TARGET_087 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=87,
-    severity=Severity.ERROR,
-    summary="AIE2P worker channel cycle requires interleaved phases.",
-    message=(
-        "AIE2P worker {worker} (group {group} lane {lane}) participates in a "
-        "channel cycle but waits for all inputs before publishing any output"
-    ),
-    params=(
-        ErrorParam("worker", ParamKind.U32),
-        ErrorParam("group", ParamKind.U32),
-        ErrorParam("lane", ParamKind.U32),
-    ),
-    fix_hint="Place the stages in groups whose worker dependencies are acyclic.",
-)
-
-# ERR_TARGET_088: AIE2P channel has no available compute endpoint.
-ERR_TARGET_088 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=88,
-    severity=Severity.ERROR,
-    summary="AIE2P channel has no available compute endpoint.",
-    message=(
-        "AIE2P channel {channel} needs {capacity} records of {record_bytes} bytes, "
-        "compatible DMA channels, descriptors and locks on a compute tile visible "
-        "to worker ({column}, {row}); no candidate has all requested resources"
-    ),
-    params=(
-        ErrorParam("channel", ParamKind.U32),
-        ErrorParam("column", ParamKind.U32),
-        ErrorParam("row", ParamKind.U32),
-        ErrorParam("capacity", ParamKind.U32),
-        ErrorParam("record_bytes", ParamKind.U32),
-    ),
-    fix_hint="Reduce the channel capacity or record size, or change worker placement.",
-)
-
 # ERR_TARGET_089: Target representation requires structured control flow.
 ERR_TARGET_089 = ErrorDef(
     domain=ErrorDomain.TARGET,
@@ -1668,168 +1572,68 @@ ERR_TARGET_091 = ErrorDef(
     fix_hint="Convert returning values to a representation supported on every path.",
 )
 
-# ERR_TARGET_092: An array stream cannot be routed within link capacity.
+# ERR_TARGET_092: Function storage cannot preserve live allocation instances.
 ERR_TARGET_092 = ErrorDef(
     domain=ErrorDomain.TARGET,
     code=92,
     severity=Severity.ERROR,
-    summary="Array stream link capacity is exhausted.",
+    summary="Function storage cannot preserve live allocation instances.",
     message=(
-        "AIE2P array channel {channel} cannot be routed because a stream link "
-        "has no free channels"
+        "target '{target_key}' export '{export_name}' config '{config_key}' "
+        "rejected '{op_name}' in '@{function_name}': cannot prove earlier "
+        "instances of allocation '{allocation_value}' are no longer accessible "
+        "when it executes again; the selected lowering requires one fixed slot"
     ),
-    params=(ErrorParam("channel", ParamKind.U32),),
-    fix_hint="Reduce independent streams crossing the link or change worker placement.",
+    params=(
+        *_TARGET_CONTEXT_PARAMS,
+        ErrorParam("allocation_value", ParamKind.STRING),
+    ),
+    fix_hint=(
+        "Complete every use, including asynchronous transfers, before the "
+        "allocation executes again, or use distinct roots for overlapping lifetimes. "
+        "Shared storage also requires a workgroup rendezvous before reuse."
+    ),
 )
 
-# ERR_TARGET_093: AIE2P array pipeline requires kernel materialization scope.
+# ERR_TARGET_093: Target execution profile cannot transport invocation results.
 ERR_TARGET_093 = ErrorDef(
     domain=ErrorDomain.TARGET,
     code=93,
     severity=Severity.ERROR,
-    summary="AIE2P array pipeline requires kernel materialization scope.",
+    summary="Target execution profile cannot transport invocation results.",
     message=(
-        "AIE2P array pipeline requires kernel materialization scope; got '{scope}'"
+        "target execution profile '{profile}' cannot transport "
+        "{result_count} result(s) from the scenario subject"
     ),
-    params=(ErrorParam("scope", ParamKind.STRING),),
-    fix_hint="Declare pipeline.def<kernel> for one resident array executable.",
+    params=(
+        ErrorParam("profile", ParamKind.STRING),
+        ErrorParam("result_count", ParamKind.U32),
+    ),
+    fix_hint=(
+        "Use a resultless subject with explicit output storage or implement "
+        "result transport for '{profile}'."
+    ),
 )
 
-# ERR_TARGET_094: AIE2P pipeline exceeds resident compute capacity.
+# ERR_TARGET_094: Ownership tie conflicts with a physical input/result tie.
 ERR_TARGET_094 = ErrorDef(
     domain=ErrorDomain.TARGET,
     code=94,
     severity=Severity.ERROR,
-    summary="AIE2P pipeline exceeds resident compute capacity.",
+    summary="Ownership tie conflicts with a physical input/result tie.",
     message=(
-        "AIE2P pipeline requires {instance_count} resident instances "
-        "but has {compute_tile_count} compute tiles"
+        "'{op_name}' result {result_index} is tied to operand {operand_index}, "
+        "but its physical input/result constraint requires operand "
+        "{required_operand_index}"
     ),
     params=(
-        ErrorParam("instance_count", ParamKind.U32),
-        ErrorParam("compute_tile_count", ParamKind.U32),
+        ErrorParam("op_name", ParamKind.STRING),
+        ErrorParam("result_index", ParamKind.U32),
+        ErrorParam("operand_index", ParamKind.U32),
+        ErrorParam("required_operand_index", ParamKind.U32),
     ),
-    fix_hint="Reduce the total resident group lane count.",
-)
-
-# ERR_TARGET_095: AIE2P composite stages have different core targets.
-ERR_TARGET_095 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=95,
-    severity=Severity.ERROR,
-    summary="AIE2P composite stages have different core targets.",
-    message=(
-        "AIE2P pipeline group {group} stage '@{entry}' uses target "
-        "'@{actual_target}', but its other stages use '@{expected_target}'"
-    ),
-    params=(
-        ErrorParam("group", ParamKind.U32),
-        ErrorParam("entry", ParamKind.STRING),
-        ErrorParam("actual_target", ParamKind.STRING),
-        ErrorParam("expected_target", ParamKind.STRING),
-    ),
-    fix_hint="Use one exact core target for all stages in a resident group.",
-)
-
-# ERR_TARGET_096: AIE2P composite flow has no representable private record.
-ERR_TARGET_096 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=96,
-    severity=Severity.ERROR,
-    summary="AIE2P composite flow has no representable private record.",
-    message=(
-        "AIE2P pipeline group {group} internal flow {flow} requires a "
-        "whole-byte tile whose bit count fits in 64 bits; got {tile_type}"
-    ),
-    params=(
-        ErrorParam("group", ParamKind.U32),
-        ErrorParam("flow", ParamKind.U32),
-        ErrorParam("tile_type", ParamKind.TYPE),
-    ),
-    fix_hint="Use byte-complete internal records with a representable total size.",
-)
-
-# ERR_TARGET_097: AIE2P composite worker exceeds callable ABI capacity.
-ERR_TARGET_097 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=97,
-    severity=Severity.ERROR,
-    summary="AIE2P composite worker exceeds callable ABI capacity.",
-    message=(
-        "AIE2P pipeline group {group} requires {port_count} composite buffer "
-        "arguments; the callable ABI supports at most {maximum}"
-    ),
-    params=(
-        ErrorParam("group", ParamKind.U32),
-        ErrorParam("port_count", ParamKind.U32),
-        ErrorParam("maximum", ParamKind.U32),
-    ),
-    fix_hint="Split the stages across groups or reduce distinct boundary flows.",
-)
-
-# ERR_TARGET_120: A worker coordinate lies outside the physical array.
-ERR_TARGET_120 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=120,
-    severity=Severity.ERROR,
-    summary="Array worker coordinate is outside the device.",
-    message=(
-        "AIE2P worker coordinate ({column}, {row}) is outside the "
-        "{column_count}-column, {row_count}-row array"
-    ),
-    params=(
-        ErrorParam("column", ParamKind.U32),
-        ErrorParam("row", ParamKind.U32),
-        ErrorParam("column_count", ParamKind.U32),
-        ErrorParam("row_count", ParamKind.U32),
-    ),
-    fix_hint="Place the worker on a compute tile within the physical array.",
-)
-
-# ERR_TARGET_123: AIE2P array body contains an operation outside its topology.
-ERR_TARGET_123 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=123,
-    severity=Severity.ERROR,
-    summary="AIE2P array body contains a non-topology operation.",
-    message=(
-        "AIE2P array programs contain topology packets and low.return; "
-        "'{op_name}' is not an array topology operation"
-    ),
-    params=(ErrorParam("op_name", ParamKind.STRING),),
-    fix_hint="Place executable computation in a resident core worker.",
-)
-
-# ERR_TARGET_124: AIE2P array packet result requires a tile payload.
-ERR_TARGET_124 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=124,
-    severity=Severity.ERROR,
-    summary="AIE2P array packet result requires a tile payload.",
-    message=(
-        "AIE2P array descriptor '{descriptor}' requires a tile-valued result "
-        "register; got {result_type}"
-    ),
-    params=(
-        ErrorParam("descriptor", ParamKind.STRING),
-        ErrorParam("result_type", ParamKind.TYPE),
-    ),
-    fix_hint="Specify the transported tile type in the result register.",
-)
-
-# ERR_TARGET_125: AIE2P resident worker materialization requires a definition.
-ERR_TARGET_125 = ErrorDef(
-    domain=ErrorDomain.TARGET,
-    code=125,
-    severity=Severity.ERROR,
-    summary="AIE2P resident worker materialization requires a definition.",
-    message=(
-        "AIE2P resident worker '@{entry}' requires a local core function "
-        "definition before array materialization"
-    ),
-    params=(ErrorParam("entry", ParamKind.STRING),),
     fix_hint=(
-        "Link the core worker definition into the module before emitting the array."
+        "Tie the result to its required input or give it an independent result type."
     ),
 )
 
@@ -1906,23 +1710,10 @@ ALL_TARGET_ERRORS = (
     ERR_TARGET_080,
     ERR_TARGET_081,
     ERR_TARGET_082,
-    ERR_TARGET_083,
-    ERR_TARGET_084,
-    ERR_TARGET_085,
-    ERR_TARGET_086,
-    ERR_TARGET_087,
-    ERR_TARGET_088,
     ERR_TARGET_089,
     ERR_TARGET_090,
     ERR_TARGET_091,
     ERR_TARGET_092,
     ERR_TARGET_093,
     ERR_TARGET_094,
-    ERR_TARGET_095,
-    ERR_TARGET_096,
-    ERR_TARGET_097,
-    ERR_TARGET_120,
-    ERR_TARGET_123,
-    ERR_TARGET_124,
-    ERR_TARGET_125,
 )

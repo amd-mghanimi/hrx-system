@@ -69,6 +69,9 @@ const loom_value_fact_domain_t* loom_type_registry_resolve_fact_domain(
     const loom_module_t* module, loom_type_t type) {
   (void)user_data;
   (void)context;
+  if (loom_type_is_parameterized(type)) {
+    return loom_type_parameterized_descriptor(type)->fact_domain;
+  }
   if (loom_type_is_dialect(type)) {
     const loom_string_id_t name_id = loom_type_dialect_name_id(type);
     if (module == NULL || name_id == LOOM_STRING_ID_INVALID ||

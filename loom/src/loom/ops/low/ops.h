@@ -52,7 +52,8 @@ enum {
   LOOM_OP_LOW_SCHEDULE_BEGIN = LOOM_OP_KIND(LOOM_DIALECT_LOW, 28),
   LOOM_OP_LOW_SCHEDULE_PHASE = LOOM_OP_KIND(LOOM_DIALECT_LOW, 29),
   LOOM_OP_LOW_SCHEDULE_END = LOOM_OP_KIND(LOOM_DIALECT_LOW, 30),
-  LOOM_OP_LOW_COUNT_ = 31,
+  LOOM_OP_LOW_OP_COND_BR = LOOM_OP_KIND(LOOM_DIALECT_LOW, 31),
+  LOOM_OP_LOW_COUNT_ = 32,
 };
 
 // Function visibility. Absent (0) means private (module-internal).
@@ -69,12 +70,6 @@ typedef enum loom_low_cc_e {
   LOOM_LOW_CC_DEINITIALIZER = 4,
   LOOM_LOW_CC_COUNT_ = 5,
 } loom_low_cc_t;
-
-// Function purity. Absent (0) means unspecified (conservative).
-typedef enum loom_low_purity_e {
-  LOOM_LOW_PURITY_PURE = 1,
-  LOOM_LOW_PURITY_COUNT_ = 2,
-} loom_low_purity_t;
 
 // Register allocation exactness mode for a low function. Absent means virtual.
 typedef enum loom_low_allocation_e {
@@ -145,7 +140,7 @@ LOOM_DEFINE_ATTR_STRING(loom_low_func_def_export_symbol, 6)
 LOOM_DEFINE_ATTR_DICT(loom_low_func_def_export_attrs, 7)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_def_visibility, 8, loom_low_visibility_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_def_cc, 9, loom_low_cc_t)
-LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_def_purity, 10, loom_low_purity_t)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_def_effect_contract, 10, loom_callable_effect_contract_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_def_inline_policy, 11, loom_inline_policy_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_def_allocation, 12, loom_low_allocation_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_def_schedule, 13, loom_low_schedule_t)
@@ -156,7 +151,7 @@ enum loom_low_func_def_build_flag_bits_e {
   LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_VISIBILITY = 1u << 0,
   LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_RETAIN = 1u << 1,
   LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_CC = 1u << 2,
-  LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_PURITY = 1u << 3,
+  LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_EFFECT_CONTRACT = 1u << 3,
   LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_INLINE_POLICY = 1u << 4,
   LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_ALLOCATION = 1u << 5,
   LOOM_LOW_FUNC_DEF_BUILD_FLAG_HAS_SCHEDULE = 1u << 6,
@@ -175,7 +170,7 @@ iree_status_t loom_low_func_def_build(
     loom_optional uint8_t visibility,
     loom_optional uint8_t retain,
     loom_optional uint8_t cc,
-    loom_optional uint8_t purity,
+    loom_optional uint8_t effect_contract,
     loom_optional uint8_t inline_policy,
     loom_optional uint8_t allocation,
     loom_optional uint8_t schedule,
@@ -292,7 +287,7 @@ LOOM_DEFINE_ATTR_STRING(loom_low_func_decl_export_symbol, 6)
 LOOM_DEFINE_ATTR_DICT(loom_low_func_decl_export_attrs, 7)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_decl_visibility, 8, loom_low_visibility_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_decl_cc, 9, loom_low_cc_t)
-LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_decl_purity, 10, loom_low_purity_t)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_decl_effect_contract, 10, loom_callable_effect_contract_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_decl_inline_policy, 11, loom_inline_policy_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_decl_allocation, 12, loom_low_allocation_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_decl_schedule, 13, loom_low_schedule_t)
@@ -305,7 +300,7 @@ enum loom_low_func_decl_build_flag_bits_e {
   LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_VISIBILITY = 1u << 0,
   LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_RETAIN = 1u << 1,
   LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_CC = 1u << 2,
-  LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_PURITY = 1u << 3,
+  LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_EFFECT_CONTRACT = 1u << 3,
   LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_INLINE_POLICY = 1u << 4,
   LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_ALLOCATION = 1u << 5,
   LOOM_LOW_FUNC_DECL_BUILD_FLAG_HAS_SCHEDULE = 1u << 6,
@@ -327,7 +322,7 @@ iree_status_t loom_low_func_decl_build(
     loom_optional uint8_t visibility,
     loom_optional uint8_t retain,
     loom_optional uint8_t cc,
-    loom_optional uint8_t purity,
+    loom_optional uint8_t effect_contract,
     loom_optional uint8_t inline_policy,
     loom_optional uint8_t allocation,
     loom_optional uint8_t schedule,
@@ -373,17 +368,17 @@ LOOM_DEFINE_ISA(loom_low_func_call_isa, LOOM_OP_LOW_FUNC_CALL)
 LOOM_DEFINE_VARIADIC_OPERANDS(loom_low_func_call_operands, 0)
 LOOM_DEFINE_VARIADIC_RESULTS(loom_low_func_call_results, 0)
 LOOM_DEFINE_ATTR_SYMBOL(loom_low_func_call_callee, 0)
-LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_call_purity, 1, loom_low_purity_t)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_call_effect_contract, 1, loom_callable_effect_contract_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_func_call_inline_policy, 2, loom_inline_policy_t)
 enum loom_low_func_call_build_flag_bits_e {
-  LOOM_LOW_FUNC_CALL_BUILD_FLAG_HAS_PURITY = 1u << 0,
+  LOOM_LOW_FUNC_CALL_BUILD_FLAG_HAS_EFFECT_CONTRACT = 1u << 0,
   LOOM_LOW_FUNC_CALL_BUILD_FLAG_HAS_INLINE_POLICY = 1u << 1,
 };
 typedef uint32_t loom_low_func_call_build_flags_t;
 iree_status_t loom_low_func_call_build(
     loom_builder_t* builder,
     loom_low_func_call_build_flags_t build_flags,
-    loom_optional uint8_t purity,
+    loom_optional uint8_t effect_contract,
     loom_optional uint8_t inline_policy,
     loom_symbol_ref_t callee,
     loom_may_consume const loom_value_id_t* operands,
@@ -394,7 +389,9 @@ iree_status_t loom_low_func_call_build(
     iree_host_size_t tied_result_count,
     loom_location_id_t location,
     loom_op_t** out_op);
-loom_trait_flags_t loom_low_func_call_effective_traits(const loom_op_t* op);
+iree_status_t loom_low_func_call_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
+loom_trait_flags_t loom_low_func_call_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_low_func_call_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
@@ -407,7 +404,8 @@ LOOM_DEFINE_VARIADIC_RESULTS(loom_low_op_results, 0)
 LOOM_DEFINE_ATTR_SCOPED_ENUM(loom_low_op_descriptor, 0)
 LOOM_DEFINE_INSTANCE_FLAGS(loom_low_op_memory_flags)
 LOOM_DEFINE_ATTR_DICT(loom_low_op_attrs, 1)
-loom_trait_flags_t loom_low_op_effective_traits(const loom_op_t* op);
+loom_trait_flags_t loom_low_op_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 
 // LOOM_OP_LOW_CONST: Descriptor-backed constant or immediate materialization into a register.
 // %c0 = low.const<amdgpu.s_mov_b32> {imm = 0} : reg<amdgpu.sgpr x1>
@@ -509,23 +507,23 @@ iree_status_t loom_low_concat_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_LOW_INVOKE: Source-typed call edge to an explicitly selected target-Low function. Source-to-Low lowering maps the source operands and results to the helper register signature, proves the helper argument predicates, and normalizes the edge to low.func.call. Authored inline policy has the same meaning as on low.func.call; targets without a Low call ABI may require the normalized edge to inline before emission.
+// LOOM_OP_LOW_INVOKE: Source-typed call edge to an explicitly selected target-Low function. Source-to-Low lowering maps the source operands and results to the helper register signature, proves the helper argument predicates, and normalizes the edge to low.func.call. Each source value maps to one register-typed value. Views require storage and layout information beyond that carrier and are not accepted as operands or results; use a source helper taking views or pass buffers and offsets explicitly. Authored inline policy has the same meaning as on low.func.call; targets without a Low call ABI may require the normalized edge to inline before emission.
 // %result = low.invoke @extern_add(%lhs, %rhs) : (i32, i32) -> (i32)
 LOOM_DEFINE_ISA(loom_low_invoke_isa, LOOM_OP_LOW_INVOKE)
 LOOM_DEFINE_VARIADIC_OPERANDS(loom_low_invoke_operands, 0)
 LOOM_DEFINE_VARIADIC_RESULTS(loom_low_invoke_results, 0)
 LOOM_DEFINE_ATTR_SYMBOL(loom_low_invoke_callee, 0)
-LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_invoke_purity, 1, loom_low_purity_t)
+LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_invoke_effect_contract, 1, loom_callable_effect_contract_t)
 LOOM_DEFINE_ATTR_ENUM_TYPED(loom_low_invoke_inline_policy, 2, loom_inline_policy_t)
 enum loom_low_invoke_build_flag_bits_e {
-  LOOM_LOW_INVOKE_BUILD_FLAG_HAS_PURITY = 1u << 0,
+  LOOM_LOW_INVOKE_BUILD_FLAG_HAS_EFFECT_CONTRACT = 1u << 0,
   LOOM_LOW_INVOKE_BUILD_FLAG_HAS_INLINE_POLICY = 1u << 1,
 };
 typedef uint32_t loom_low_invoke_build_flags_t;
 iree_status_t loom_low_invoke_build(
     loom_builder_t* builder,
     loom_low_invoke_build_flags_t build_flags,
-    loom_optional uint8_t purity,
+    loom_optional uint8_t effect_contract,
     loom_optional uint8_t inline_policy,
     loom_symbol_ref_t callee,
     loom_may_consume const loom_value_id_t* operands,
@@ -536,12 +534,14 @@ iree_status_t loom_low_invoke_build(
     iree_host_size_t tied_result_count,
     loom_location_id_t location,
     loom_op_t** out_op);
-loom_trait_flags_t loom_low_invoke_effective_traits(const loom_op_t* op);
+iree_status_t loom_low_invoke_canonicalize(loom_op_t* op, loom_rewriter_t* rewriter);
+loom_trait_flags_t loom_low_invoke_effective_traits(
+    const loom_module_t* module, const loom_op_t* op);
 iree_status_t loom_low_invoke_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_LOW_STORAGE_RESERVE: Reserve target-low function-local storage and preserve its segment footprint.
+// LOOM_OP_LOW_STORAGE_RESERVE: Reserve target-low function-local storage and preserve its segment footprint. The result borrows storage owned by the execution frame and requires no explicit release.
 // %slot = low.storage.reserve {byte_alignment = 4, byte_length = 16} : low.storage<private>
 LOOM_DEFINE_ISA(loom_low_storage_reserve_isa, LOOM_OP_LOW_STORAGE_RESERVE)
 LOOM_DEFINE_RESULT(loom_low_storage_reserve_storage, 0)
@@ -820,7 +820,7 @@ iree_status_t loom_low_scf_for_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 
-// LOOM_OP_LOW_SCF_WHILE: Condition-controlled target-low loop with explicit condition and body regions and loop-carried register state.
+// LOOM_OP_LOW_SCF_WHILE: Condition-controlled target-low loop with explicit condition and body regions. Initial registers and low.scf.yield define the condition-region header tuple. low.scf.condition defines an independent body/result tuple: its forwarded registers enter the body on the true edge and become loop results on the false edge. The tuples may differ in count and register type, and either tuple may be empty.
 // low.scf.while {
 //   low.scf.condition %condition : reg<spirv.id : i1>
 // } do {
@@ -831,15 +831,13 @@ LOOM_DEFINE_VARIADIC_OPERANDS(loom_low_scf_while_iter_args, 0)
 LOOM_DEFINE_VARIADIC_RESULTS(loom_low_scf_while_results, 0)
 LOOM_DEFINE_REGION(loom_low_scf_while_before, 0)
 LOOM_DEFINE_REGION(loom_low_scf_while_after, 1)
-// result_types has iter_args_count entries, or is NULL to preserve
-// the initial operand types. Explicit types define the recurring tuple;
-// reserve result IDs first when types refer to sibling results. Region
-// entry types instantiate that tuple with their own argument identities.
 iree_status_t loom_low_scf_while_build(
     loom_builder_t* builder,
     loom_may_consume const loom_value_id_t* iter_args,
     iree_host_size_t iter_args_count,
+    const loom_type_t* iter_args_types,
     const loom_type_t* result_types,
+    iree_host_size_t result_count,
     const loom_tied_result_t* tied_results,
     iree_host_size_t tied_result_count,
     loom_location_id_t location,
@@ -908,6 +906,18 @@ iree_status_t loom_low_schedule_end_build(
     loom_location_id_t location,
     loom_op_t** out_op);
 iree_status_t loom_low_schedule_control_verify(
+    const loom_module_t* module, const loom_op_t* op,
+    iree_diagnostic_emitter_t emitter);
+
+// LOOM_OP_LOW_OP_COND_BR: Descriptor-backed target conditional branch over virtual-register operands and two semantic CFG successors.
+// low.op.cond_br<test.native.cond_br.i32>(%lhs, %rhs) {predicate = slt}, ^equal, ^unequal : (reg<test.i32>, reg<test.i32>)
+LOOM_DEFINE_ISA(loom_low_op_cond_br_isa, LOOM_OP_LOW_OP_COND_BR)
+LOOM_DEFINE_VARIADIC_OPERANDS(loom_low_op_cond_br_operands, 0)
+LOOM_DEFINE_SUCCESSOR(loom_low_op_cond_br_true_dest, 0)
+LOOM_DEFINE_SUCCESSOR(loom_low_op_cond_br_false_dest, 1)
+LOOM_DEFINE_ATTR_SCOPED_ENUM(loom_low_op_cond_br_descriptor, 0)
+LOOM_DEFINE_ATTR_DICT(loom_low_op_cond_br_attrs, 1)
+iree_status_t loom_low_op_cond_br_verify(
     const loom_module_t* module, const loom_op_t* op,
     iree_diagnostic_emitter_t emitter);
 

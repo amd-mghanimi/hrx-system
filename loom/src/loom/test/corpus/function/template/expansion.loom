@@ -1,0 +1,111 @@
+// Exact calls prove both the family and provider contracts. A runtime branch
+// supplies the provider relation while the function signature supplies the range.
+template.decl @bounded(%width: i32, %value: i32) -> (i32) where [range(%width, 0, 8)]
+
+template.def<@bounded> @seven_times(%width: i32, %value: i32) -> (i32) where [eq(%width, 7)] {
+  %result = scalar.muli %width, %value : i32
+  template.return %result : i32
+}
+
+func.def @conditional_exact(%width: i32, %value: i32) -> (i32) where [range(%width, 0, 8)] {
+  %specialized_width = scalar.constant 7 : i32
+  %condition = scalar.cmpi eq, %width, %specialized_width : i32
+  %result = scf.if %condition -> (i32) {
+    %scaled = template.call @seven_times(%width, %value) : (i32, i32) -> (i32)
+    scf.yield %scaled : i32
+  } else {
+    scf.yield %value : i32
+  }
+  func.return %result : i32
+}
+
+// Explicit CFG conditions establish the same provider contract as scf.if.
+func.def @conditional_cfg_exact(%width: i32, %value: i32) -> (i32) where [range(%width, 0, 8)] {
+  %specialized_width = scalar.constant 7 : i32
+  %condition = scalar.cmpi eq, %width, %specialized_width : i32
+  cfg.cond_br %condition, ^specialized, ^ordinary
+^specialized:
+  %scaled = template.call @seven_times(%width, %value) : (i32, i32) -> (i32)
+  func.return %scaled : i32
+^ordinary:
+  func.return %value : i32
+}
+
+// A runtime value cannot establish the specialized provider's
+// compile-time requirement. Final selection expands the general provider.
+template.decl @classify(%value: i32) -> (i32)
+
+template.def<@classify> priority(10) @specialized(%value: i32) -> (i32) where [eq(%value, 7)] {
+  %result = scalar.constant 107 : i32
+  template.return %result : i32
+}
+
+template.def<@classify> priority(1) @general(%value: i32) -> (i32) {
+  %result = scalar.constant 207 : i32
+  template.return %result : i32
+}
+
+func.def @runtime_choice(%value: i32) -> (i32) {
+  %result = template.apply<@classify>(%value) : (i32) -> (i32)
+  func.return %result : i32
+}
+
+// An available caller constant still selects the specialized provider early.
+func.def @constant_choice() -> (i32) {
+  %value = scalar.constant 7 : i32
+  %result = template.apply<@classify>(%value) : (i32) -> (i32)
+  func.return %result : i32
+}
+
+func.def @template_expansion_observations(%entropy: i64, %output: buffer) {
+  %value = scalar.trunci %entropy : i64 to i32
+  %specialized_width = scalar.constant 7 : i32
+  %ordinary_width = scalar.constant 8 : i32
+  %exact0 = func.call @conditional_exact(%specialized_width, %value) : (i32, i32) -> (i32)
+  %exact1 = func.call @conditional_exact(%ordinary_width, %value) : (i32, i32) -> (i32)
+  %runtime0 = func.call @runtime_choice(%value) : (i32) -> (i32)
+  %runtime1 = func.call @runtime_choice(%specialized_width) : (i32) -> (i32)
+  %constant = func.call @constant_choice() : () -> (i32)
+  %values = vector.from_elements %exact0, %exact1, %runtime0, %runtime1, %constant : vector<5xi32>
+  %origin = index.constant 0 : offset
+  %results = buffer.view %output[%origin] : buffer -> view<5xi32>
+  vector.store %values, %results[0] : vector<5xi32>, view<5xi32>
+  func.return
+}
+
+func.def @template_cfg_expansion_observations(%entropy: i64, %output: buffer) {
+  %value = scalar.trunci %entropy : i64 to i32
+  %specialized_width = scalar.constant 7 : i32
+  %ordinary_width = scalar.constant 8 : i32
+  %cfg0 = func.call @conditional_cfg_exact(%specialized_width, %value) : (i32, i32) -> (i32)
+  %cfg1 = func.call @conditional_cfg_exact(%ordinary_width, %value) : (i32, i32) -> (i32)
+  %values = vector.from_elements %cfg0, %cfg1 : vector<2xi32>
+  %origin = index.constant 0 : offset
+  %results = buffer.view %output[%origin] : buffer -> view<2xi32>
+  vector.store %values, %results[0] : vector<2xi32>, view<2xi32>
+  func.return
+}
+
+check.scenario @template_expansion_values {
+  check.trial[128](%trial: index, %entropy: check.entropy) {
+    %value_source = check.entropy.fork %entropy name("value") : check.entropy
+    %value = check.entropy.read %value_source[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<5xi32>
+    check.compare<@template_expansion_observations>(%value, %output) : (i64, tensor<5xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<5xi32>
+    }
+  }
+  check.return
+}
+
+check.scenario @template_cfg_expansion_values {
+  check.trial[128](%trial: index, %entropy: check.entropy) {
+    %value_source = check.entropy.fork %entropy name("value") : check.entropy
+    %value = check.entropy.read %value_source[%trial] : check.entropy -> i64
+    %output = check.generate.fill value(0) : tensor<2xi32>
+    check.compare<@template_cfg_expansion_observations>(%value, %output) : (i64, tensor<2xi32>) -> () {
+      check.expect.bitwise actual(%output) expected(%output) : tensor<2xi32>
+    }
+  }
+  check.return
+}

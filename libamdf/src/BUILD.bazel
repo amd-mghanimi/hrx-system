@@ -14,6 +14,17 @@ package(
 )
 
 amdf_cc_library(
+    name = "observation",
+    srcs = ["observation.c"],
+    hdrs = ["observation.h"],
+    visibility = ["//libamdf/src/provider:__pkg__"],
+    deps = [
+        "//libamdf/src/platform:native_observation",
+        "//libamdf/src/platform:observation",
+    ],
+)
+
+amdf_cc_library(
     name = "atomics",
     hdrs = ["atomics.h"],
     visibility = ["//libamdf/src:__subpackages__"],
@@ -150,12 +161,15 @@ amdf_cc_library(
         ":allocator",
         ":device",
         ":endpoint",
+        ":host_memory",
         ":instance",
         ":memory_pair",
         ":memory_profile",
         ":memory_scope_state",
         ":structure",
         "//libamdf/src/platform",
+        "//libamdf/src/platform:host_memory",
+        "//libamdf/src/platform:native_host_memory",
         "//libamdf/src/platform:native_instance",
     ],
 )
@@ -181,7 +195,9 @@ amdf_cc_library(
         ":host_mapping",
         ":memory_profile",
         ":memory_resource",
+        "//libamdf/src/platform:host_export",
         "//libamdf/src/platform:host_memory",
+        "//libamdf/src/platform:native_host_export",
         "//libamdf/src/platform:native_host_memory",
     ],
 )
@@ -204,6 +220,31 @@ amdf_cc_library(
         ":memory_scope",
         ":memory_scope_state",
         ":structure",
+        "//libamdf/src/platform",
+    ],
+)
+
+amdf_cc_library(
+    name = "memory_reservation",
+    srcs = [
+        "host_reservation.c",
+        "memory_reservation.c",
+    ],
+    hdrs = [
+        "host_reservation.h",
+        "memory_reservation.h",
+    ],
+    visibility = ["//libamdf/src:__subpackages__"],
+    deps = [
+        ":allocator",
+        ":device",
+        ":host_memory",
+        ":instance",
+        ":kernel_queue",
+        ":memory_resource",
+        ":structure",
+        "//libamdf/src/platform:host_reservation",
+        "//libamdf/src/platform:native_host_reservation",
     ],
 )
 
@@ -218,6 +259,7 @@ amdf_cc_test(
     name = "memory_test",
     srcs = [
         "memory_construction_test.cc",
+        "memory_reservation_test.cc",
         "memory_test.cc",
         "memory_test_fixture.cc",
         "memory_test_fixture.h",
@@ -229,8 +271,12 @@ amdf_cc_test(
         ":host_mapping",
         ":instance",
         ":memory",
+        ":memory_reservation",
         ":memory_scope",
         ":memory_scope_state",
+        "//libamdf/src/platform",
+        "//libamdf/src/platform:host_memory",
+        "//libamdf/src/platform:native_host_memory",
         "//third_party:google_test",
         "//third_party:google_test_main",
     ] + select({
@@ -324,6 +370,7 @@ amdf_cc_library(
         ":instance",
         ":kernel_queue",
         ":memory",
+        ":memory_reservation",
         ":pci",
         ":structure",
         ":user_queue",

@@ -67,12 +67,26 @@ class Aie2pCompileReportSuggestionProvider:
             pipeline_plan = _report_object(pipeline_plan_value, plan_path)
             root_name = _report_string(pipeline_plan.get("root"), f"{plan_path}.root")
             workers = _optional_indexed_rows(pipeline_plan, plan_path, "workers")
+            memories = _optional_indexed_rows(pipeline_plan, plan_path, "memories")
             if workers:
                 for position, worker in enumerate(workers):
                     path_prefix = f"{plan_path}.workers.rows[{position}]"
-                    suggestions.extend(_suggest_worker_pressure(worker, path_prefix))
+                    suggestions.extend(
+                        _suggest_worker_pressure(
+                            worker, path_prefix, include_bank_pressure=not memories
+                        )
+                    )
             else:
-                suggestions.extend(_suggest_summary_pressure(pipeline_plan, plan_path))
+                suggestions.extend(
+                    _suggest_summary_pressure(
+                        pipeline_plan, plan_path, include_bank_pressure=not memories
+                    )
+                )
+            for position, memory in enumerate(memories):
+                path_prefix = f"{plan_path}.memories.rows[{position}]"
+                suggestions.extend(
+                    _suggest_memory_pressure(memory, root_name, path_prefix)
+                )
             channels = _optional_indexed_rows(pipeline_plan, plan_path, "channels")
             for position, channel in enumerate(channels):
                 path_prefix = f"{plan_path}.channels.rows[{position}]"
@@ -188,6 +202,8 @@ def _suggest_vliw_coissue_density(
 def _suggest_summary_pressure(
     pipeline_plan: dict[str, object],
     path_prefix: str,
+    *,
+    include_bank_pressure: bool = True,
 ) -> tuple[CompileReportSuggestion, ...]:
     entry_name = _report_string(pipeline_plan.get("root"), f"{path_prefix}.root")
     suggestions = []
@@ -221,39 +237,15 @@ def _suggest_summary_pressure(
     if code_suggestion is not None:
         suggestions.append(code_suggestion)
 
-    bank_storage = _report_integer(
-        pipeline_plan.get("maximum_bank_storage_byte_count"),
-        f"{path_prefix}.maximum_bank_storage_byte_count",
-    )
-    bank_capacity = _report_integer(
-        pipeline_plan.get("bank_storage_capacity_byte_count"),
-        f"{path_prefix}.bank_storage_capacity_byte_count",
-    )
-    bank_suggestion = _capacity_pressure_suggestion(
-        suggestion_id="aie2p.bank_pressure",
-        entry_name=entry_name,
-        action=_BANK_PRESSURE_ACTION,
-        usage=bank_storage,
-        capacity=bank_capacity,
-        evidence=(
-            CompileReportSuggestionEvidence(
-                path=f"{path_prefix}.maximum_bank_storage_byte_count",
-                value=bank_storage,
-            ),
-            CompileReportSuggestionEvidence(
-                path=f"{path_prefix}.bank_storage_capacity_byte_count",
-                value=bank_capacity,
-            ),
-        ),
-        usage_path=f"{path_prefix}.maximum_bank_storage_byte_count",
-    )
-    if bank_suggestion is not None:
-        suggestions.append(bank_suggestion)
+    if include_bank_pressure:
+        bank_suggestion = _suggest_bank_pressure(pipeline_plan, entry_name, path_prefix)
+        if bank_suggestion is not None:
+            suggestions.append(bank_suggestion)
     return tuple(suggestions)
 
 
 def _suggest_worker_pressure(
-    worker: dict[str, object], path_prefix: str
+    worker: dict[str, object], path_prefix: str, *, include_bank_pressure: bool = True
 ) -> tuple[CompileReportSuggestion, ...]:
     entry_name = _report_string(worker.get("entry"), f"{path_prefix}.entry")
     suggestions = []
@@ -286,12 +278,22 @@ def _suggest_worker_pressure(
     if code_suggestion is not None:
         suggestions.append(code_suggestion)
 
+    if include_bank_pressure:
+        bank_suggestion = _suggest_bank_pressure(worker, entry_name, path_prefix)
+        if bank_suggestion is not None:
+            suggestions.append(bank_suggestion)
+    return tuple(suggestions)
+
+
+def _suggest_bank_pressure(
+    owner: dict[str, object], entry_name: str, path_prefix: str
+) -> CompileReportSuggestion | None:
     bank_storage = _report_integer(
-        worker.get("maximum_bank_storage_byte_count"),
+        owner.get("maximum_bank_storage_byte_count"),
         f"{path_prefix}.maximum_bank_storage_byte_count",
     )
     bank_capacity = _report_integer(
-        worker.get("bank_storage_capacity_byte_count"),
+        owner.get("bank_storage_capacity_byte_count"),
         f"{path_prefix}.bank_storage_capacity_byte_count",
     )
     bank_suggestion = _capacity_pressure_suggestion(
@@ -312,8 +314,48 @@ def _suggest_worker_pressure(
         ),
         usage_path=f"{path_prefix}.maximum_bank_storage_byte_count",
     )
+    return bank_suggestion
+
+
+def _suggest_memory_pressure(
+    memory: dict[str, object], root_name: str, path_prefix: str
+) -> tuple[CompileReportSuggestion, ...]:
+    placement = _report_object(memory.get("placement"), f"{path_prefix}.placement")
+    column = _report_integer(placement.get("x"), f"{path_prefix}.placement.x")
+    row = _report_integer(placement.get("y"), f"{path_prefix}.placement.y")
+    entry_name = f"{root_name}:tile[{column},{row}]"
+    suggestions = []
+    bank_suggestion = _suggest_bank_pressure(memory, entry_name, path_prefix)
     if bank_suggestion is not None:
         suggestions.append(bank_suggestion)
+    extent = _report_integer(
+        memory.get("high_water_byte_count"), f"{path_prefix}.high_water_byte_count"
+    )
+    capacity = _report_integer(
+        memory.get("capacity_byte_count"), f"{path_prefix}.capacity_byte_count"
+    )
+    local_suggestion = _capacity_pressure_suggestion(
+        suggestion_id="aie2p.local_memory_pressure",
+        entry_name=entry_name,
+        action=(
+            "Repack resident allocations, shorten overlapping lifetimes, or move "
+            "retained records to an adjacent memory owner. Require more local "
+            "headroom without adding off-chip transfers or serializing workers."
+        ),
+        usage=extent,
+        capacity=capacity,
+        evidence=(
+            CompileReportSuggestionEvidence(
+                path=f"{path_prefix}.high_water_byte_count", value=extent
+            ),
+            CompileReportSuggestionEvidence(
+                path=f"{path_prefix}.capacity_byte_count", value=capacity
+            ),
+        ),
+        usage_path=f"{path_prefix}.high_water_byte_count",
+    )
+    if local_suggestion is not None:
+        suggestions.append(local_suggestion)
     return tuple(suggestions)
 
 
@@ -442,7 +484,11 @@ def _optional_indexed_rows(
             f"{collection_path}.count: expected {len(rows_value)}, got {count}"
         )
     rows = []
-    index_name = "worker_index" if collection_name == "workers" else "channel_index"
+    index_name = {
+        "workers": "worker_index",
+        "channels": "channel_index",
+        "memories": "memory_index",
+    }[collection_name]
     for position, row_value in enumerate(rows_value):
         row_path = f"{collection_path}.rows[{position}]"
         row = _report_object(row_value, row_path)

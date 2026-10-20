@@ -1,0 +1,213 @@
+// RUN: pass canonicalize
+
+// Positive coordinate wrap re-enables lane one after the signed comparison.
+func.def @positive_wrap() -> (i1, i1) {
+  %lower = scalar.constant 120 : i8
+  %upper = scalar.constant 100 : i8
+  %step = scalar.constant 16 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<2xi1>
+  %first = vector.extract %mask[0] : vector<2xi1> -> i1
+  %wrapped = vector.extract %mask[1] : vector<2xi1> -> i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ----
+func.def @positive_wrap() -> (i1, i1) {
+  %first = scalar.constant false : i1
+  %wrapped = scalar.constant true : i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ====
+
+// Negative coordinate wrap disables the second lane rather than staying below
+// the exclusive bound indefinitely.
+func.def @negative_wrap() -> (i1, i1) {
+  %lower = scalar.constant -120 : i8
+  %upper = scalar.constant -100 : i8
+  %step = scalar.constant -16 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<2xi1>
+  %first = vector.extract %mask[0] : vector<2xi1> -> i1
+  %wrapped = vector.extract %mask[1] : vector<2xi1> -> i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ----
+func.def @negative_wrap() -> (i1, i1) {
+  %first = scalar.constant true : i1
+  %wrapped = scalar.constant false : i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ====
+
+func.def @halfword_wrap() -> (i1, i1) {
+  %lower = scalar.constant 32767 : i16
+  %upper = scalar.constant 0 : i16
+  %step = scalar.constant 1 : i16
+  %mask = vector.mask.range [%lower to %upper step %step] : i16 -> vector<2xi1>
+  %first = vector.extract %mask[0] : vector<2xi1> -> i1
+  %wrapped = vector.extract %mask[1] : vector<2xi1> -> i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ----
+func.def @halfword_wrap() -> (i1, i1) {
+  %first = scalar.constant false : i1
+  %wrapped = scalar.constant true : i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ====
+
+func.def @word_wrap() -> (i1, i1) {
+  %lower = scalar.constant 2147483647 : i32
+  %upper = scalar.constant 0 : i32
+  %step = scalar.constant 1 : i32
+  %mask = vector.mask.range [%lower to %upper step %step] : i32 -> vector<2xi1>
+  %first = vector.extract %mask[0] : vector<2xi1> -> i1
+  %wrapped = vector.extract %mask[1] : vector<2xi1> -> i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ----
+func.def @word_wrap() -> (i1, i1) {
+  %first = scalar.constant false : i1
+  %wrapped = scalar.constant true : i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ====
+
+func.def @doubleword_wrap() -> (i1, i1) {
+  %lower = scalar.constant 9223372036854775807 : i64
+  %upper = scalar.constant 0 : i64
+  %step = scalar.constant 1 : i64
+  %mask = vector.mask.range [%lower to %upper step %step] : i64 -> vector<2xi1>
+  %first = vector.extract %mask[0] : vector<2xi1> -> i1
+  %wrapped = vector.extract %mask[1] : vector<2xi1> -> i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ----
+func.def @doubleword_wrap() -> (i1, i1) {
+  %first = scalar.constant false : i1
+  %wrapped = scalar.constant true : i1
+  func.return %first, %wrapped : i1, i1
+}
+
+// ====
+
+// Equal wrapped endpoint predicates do not prove uniform interior lanes.
+func.def @full_cycle() -> (i1, i1, i1) {
+  %lower = scalar.constant 0 : i8
+  %upper = scalar.constant -1 : i8
+  %step = scalar.constant -128 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<3xi1>
+  %first = vector.extract %mask[0] : vector<3xi1> -> i1
+  %middle = vector.extract %mask[1] : vector<3xi1> -> i1
+  %last = vector.extract %mask[2] : vector<3xi1> -> i1
+  func.return %first, %middle, %last : i1, i1, i1
+}
+
+// ----
+func.def @full_cycle() -> (i1, i1, i1) {
+  %first = scalar.constant false : i1
+  %middle = scalar.constant true : i1
+  %last = scalar.constant false : i1
+  func.return %first, %middle, %last : i1, i1, i1
+}
+
+// ====
+
+func.def @bounded_positive_wrap(%lower_input: i8) -> (vector<16xi1>) {
+  %lower = scalar.assume %lower_input [range(%lower_input, 120, 125)] : i8
+  %upper = scalar.constant 100 : i8
+  %step = scalar.constant 1 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<16xi1>
+  func.return %mask : vector<16xi1>
+}
+
+// ====
+
+func.def @bounded_negative_wrap(%lower_input: i8) -> (vector<16xi1>) {
+  %lower = scalar.assume %lower_input [range(%lower_input, -125, -120)] : i8
+  %upper = scalar.constant -100 : i8
+  %step = scalar.constant -1 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<16xi1>
+  func.return %mask : vector<16xi1>
+}
+
+// ====
+
+// A dynamic lane count does not make a nonzero fixed-width step monotonic.
+func.def @unbounded_lane_count(%count: index) -> (vector<[%count]xi1>) {
+  %lower = scalar.constant 120 : i8
+  %upper = scalar.constant 100 : i8
+  %step = scalar.constant 16 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<[%count]xi1>
+  func.return %mask : vector<[%count]xi1>
+}
+
+// ====
+
+// An exact zero step is safe even without a bound on the number of lanes.
+func.def @zero_step(%count: index) -> (vector<[%count]xi1>) {
+  %lower = scalar.constant 120 : i8
+  %upper = scalar.constant 121 : i8
+  %step = scalar.constant 0 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<[%count]xi1>
+  func.return %mask : vector<[%count]xi1>
+}
+
+// ----
+func.def @zero_step(%count: index) -> (vector<[%count]xi1>) {
+  %mask = vector.constant true : vector<[%count]xi1>
+  func.return %mask : vector<[%count]xi1>
+}
+
+// ====
+
+// Dynamic extents are bounded through their indexed facts, including all axes.
+func.def @bounded_shape(%rows_input: index, %lower_input: i8) {
+  %rows = index.assume %rows_input [range(%rows_input, 1, 2)] : index
+  %lower = scalar.assume %lower_input [range(%lower_input, 120, 123)] : i8
+  %upper = scalar.constant 127 : i8
+  %step = scalar.constant 1 : i8
+  %mask = vector.mask.range [%lower to %upper step %step] : i8 -> vector<[%rows]x2xi1>
+  test.use %mask : vector<[%rows]x2xi1>
+  func.return
+}
+
+// ----
+func.def @bounded_shape(%rows_input: index, %lower_input: i8) {
+  %rows = index.assume %rows_input [range(%rows_input, 1, 2)] : index
+  %mask = vector.constant true : vector<[%rows]x2xi1>
+  test.use %mask : vector<[%rows]x2xi1>
+  func.return
+}
+
+// ====
+// RUN: pass vector-to-scalar,canonicalize
+
+// Independent scalarization of the same positive/negative cases agrees.
+func.def @scalarized_wraps() -> (i1, i1) {
+  %positive_lower = scalar.constant 120 : i8
+  %positive_upper = scalar.constant 100 : i8
+  %positive_step = scalar.constant 16 : i8
+  %positive = vector.mask.range [%positive_lower to %positive_upper step %positive_step] : i8 -> vector<2xi1>
+  %negative_lower = scalar.constant -120 : i8
+  %negative_upper = scalar.constant -100 : i8
+  %negative_step = scalar.constant -16 : i8
+  %negative = vector.mask.range [%negative_lower to %negative_upper step %negative_step] : i8 -> vector<2xi1>
+  %positive_wrapped = vector.extract %positive[1] : vector<2xi1> -> i1
+  %negative_wrapped = vector.extract %negative[1] : vector<2xi1> -> i1
+  func.return %positive_wrapped, %negative_wrapped : i1, i1
+}
+
+// ----
+func.def @scalarized_wraps() -> (i1, i1) {
+  %positive_wrapped = scalar.constant true : i1
+  %negative_wrapped = scalar.constant false : i1
+  func.return %positive_wrapped, %negative_wrapped : i1, i1
+}

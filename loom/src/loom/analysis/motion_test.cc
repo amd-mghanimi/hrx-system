@@ -57,7 +57,7 @@ class MotionTest : public ::testing::Test {
                                               IREE_SV("test_fn"), &name_id));
     uint16_t symbol_id = LOOM_SYMBOL_ID_INVALID;
     IREE_ASSERT_OK(loom_module_add_symbol(module_, name_id, &symbol_id));
-    loom_symbol_ref_t callee = {/*.module_id=*/0, /*.symbol_id=*/symbol_id};
+    loom_symbol_ref_t callee = {.module_id = 0, .symbol_id = symbol_id};
     IREE_ASSERT_OK(loom_test_func_build(
         &module_builder, 0, 0, 0, callee, nullptr, 0, nullptr, 0, nullptr, 0,
         nullptr, 0, LOOM_LOCATION_UNKNOWN, &function_op_));
@@ -152,6 +152,11 @@ TEST_F(MotionTest, LocalClassificationSeparatesEraseRelocateAndSpeculate) {
                                       LOOM_LOCATION_UNKNOWN, &add_op));
   loom_value_id_t add_result = loom_test_addi_result(add_op);
 
+  loom_op_t* callable_op = nullptr;
+  IREE_ASSERT_OK(loom_test_addi_build(&builder_, lhs, rhs, i32_type,
+                                      LOOM_LOCATION_UNKNOWN, &callable_op));
+  callable_op->traits |= LOOM_TRAIT_CALLABLE_BOUNDARY;
+
   loom_op_t* use_op = nullptr;
   IREE_ASSERT_OK(loom_test_use_build(&builder_, &add_result, 1,
                                      LOOM_LOCATION_UNKNOWN, &use_op));
@@ -166,10 +171,9 @@ TEST_F(MotionTest, LocalClassificationSeparatesEraseRelocateAndSpeculate) {
                                           index_type, LOOM_LOCATION_UNKNOWN,
                                           &size_op));
   loom_op_t* alloc_op = nullptr;
-  IREE_ASSERT_OK(
-      loom_test_alloc_build(&builder_, loom_test_constant_result(size_op),
-                            loom_type_pool(loom_dim_pack_static(4096)),
-                            LOOM_LOCATION_UNKNOWN, &alloc_op));
+  IREE_ASSERT_OK(loom_test_alloc_build(
+      &builder_, loom_test_constant_result(size_op), loom_type_pool(),
+      LOOM_LOCATION_UNKNOWN, &alloc_op));
 
   loom_op_t* source_op = nullptr;
   IREE_ASSERT_OK(loom_test_constant_build(&builder_, loom_attr_i64(1),
@@ -211,11 +215,17 @@ TEST_F(MotionTest, LocalClassificationSeparatesEraseRelocateAndSpeculate) {
   EXPECT_FALSE(loom_motion_op_can_relocate_effect_free(module_, update_op));
   EXPECT_TRUE(loom_motion_op_can_rematerialize_effect_free(module_, add_op));
   EXPECT_FALSE(
+      loom_motion_op_can_rematerialize_effect_free(module_, callable_op));
+  EXPECT_FALSE(
       loom_motion_op_can_rematerialize_effect_free(module_, convergent_op));
   EXPECT_FALSE(loom_motion_op_can_rematerialize_effect_free(module_, alloc_op));
-  EXPECT_FALSE(loom_motion_op_can_speculate(module_, add_op));
-  EXPECT_FALSE(loom_motion_op_can_speculate(module_, convergent_op));
-  EXPECT_TRUE(loom_motion_op_can_speculate(module_, select_op));
+  EXPECT_FALSE(loom_motion_op_can_speculate_with_traits(
+      module_, add_op, loom_op_effective_traits(module_, add_op)));
+  EXPECT_FALSE(loom_motion_op_can_speculate_with_traits(
+      module_, convergent_op,
+      loom_op_effective_traits(module_, convergent_op)));
+  EXPECT_TRUE(loom_motion_op_can_speculate_with_traits(
+      module_, select_op, loom_op_effective_traits(module_, select_op)));
   EXPECT_TRUE(loom_motion_read_can_cross_op(module_, add_op));
   EXPECT_FALSE(loom_motion_read_can_cross_op(module_, use_op));
   EXPECT_FALSE(loom_motion_read_can_cross_op(module_, convergent_op));
@@ -255,7 +265,7 @@ TEST_F(MotionTest, ReadBarrierTableIndexesStrictIntervals) {
 
   loom_motion_read_barrier_table_t* table = nullptr;
   IREE_ASSERT_OK(
-      loom_motion_read_barrier_table_create(module_, &motion_arena_, &table));
+      loom_motion_read_barrier_table_allocate(module_, &motion_arena_, &table));
   EXPECT_TRUE(loom_motion_read_can_cross_op(module_, pure_gap_op));
 
   bool can_cross = false;
@@ -506,11 +516,11 @@ TEST_F(MotionTest, SubtreeRejectsUnavailablePredicateAttrReference) {
   loom_value_id_t late = loom_test_constant_result(late_op);
 
   loom_predicate_t predicate = {
-      /*.kind=*/LOOM_PREDICATE_EQ,
-      /*.arg_count=*/2,
-      /*.arg_tags=*/{LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST},
-      /*.reserved=*/{},
-      /*.args=*/{(int64_t)late, 2},
+      .kind = LOOM_PREDICATE_EQ,
+      .arg_count = 2,
+      .arg_tags = {LOOM_PRED_ARG_VALUE, LOOM_PRED_ARG_CONST},
+      .reserved = {},
+      .args = {(int64_t)late, 2},
   };
   loom_op_t* assume_op = nullptr;
   IREE_ASSERT_OK(loom_test_assume_build(&builder_, &input, 1, &predicate, 1,

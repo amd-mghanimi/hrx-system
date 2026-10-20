@@ -105,6 +105,8 @@ typedef struct loom_xdna_tile_memory_facts_t {
   uint32_t local_base;
   // Addressable bytes in the tile's local allocation space.
   uint32_t local_capacity;
+  // Tile-relative base used to load the tile's own local allocation space.
+  uint32_t local_load_base;
   // Core startup address in program memory.
   uint32_t program_base;
   // Addressable program-memory bytes.
@@ -118,6 +120,12 @@ typedef struct loom_xdna_tile_memory_facts_t {
   // Number of independently addressable local-memory banks.
   uint8_t bank_count;
 } loom_xdna_tile_memory_facts_t;
+
+// DMA transfer direction relative to local memory.
+typedef enum loom_xdna_dma_direction_e {
+  LOOM_XDNA_DMA_DIRECTION_MEMORY_TO_STREAM = 1,
+  LOOM_XDNA_DMA_DIRECTION_STREAM_TO_MEMORY = 2,
+} loom_xdna_dma_direction_t;
 
 // DMA feature bits shared by each tile engine.
 typedef enum loom_xdna_dma_feature_bit_e {
@@ -133,6 +141,8 @@ typedef uint8_t loom_xdna_dma_feature_bits_t;
 typedef struct loom_xdna_dma_facts_t {
   // Exclusive maximum byte address accepted by the DMA engine.
   uint64_t address_maximum;
+  // Largest value accepted by the encoded transfer-length register field.
+  uint32_t maximum_encoded_transfer_length;
   // Number of buffer descriptors.
   uint16_t buffer_descriptor_count;
   // Maximum actual execution count for one queued DMA task.
@@ -173,6 +183,18 @@ typedef struct loom_xdna_dma_facts_t {
   loom_xdna_dma_feature_bits_t feature_bits;
 } loom_xdna_dma_facts_t;
 
+// Aggregate resources across all physical tiles of one kind.
+typedef struct loom_xdna_tile_resource_totals_t {
+  // Number of physical tiles of this kind in the complete array.
+  uint32_t physical_tile_count;
+  // Total number of hardware locks across the tiles.
+  uint32_t lock_count;
+  // Total DMA channels in each transfer direction across the tiles.
+  uint32_t dma_channel_count_per_direction;
+  // Total DMA buffer descriptors across the tiles.
+  uint32_t dma_buffer_descriptor_count;
+} loom_xdna_tile_resource_totals_t;
+
 // All physical resources shared by tiles of one kind.
 typedef struct loom_xdna_tile_facts_t {
   // Physical tile role.
@@ -187,8 +209,14 @@ typedef struct loom_xdna_tile_facts_t {
   int8_t lock_value_minimum;
   // Maximum signed lock value.
   int8_t lock_value_maximum;
+  // Implemented packet arbiters; the register encoding can name more.
+  uint8_t packet_arbiter_count;
+  // Independent destination selections within each packet arbiter.
+  uint8_t packet_master_select_count;
   // Bit set of configuration-register modules present on the tile.
   uint8_t register_module_bits;
+  // Aggregate resources across all physical tiles of this kind.
+  loom_xdna_tile_resource_totals_t array_resources;
   // Local and program memory geometry.
   loom_xdna_tile_memory_facts_t memory;
   // DMA engine resources and limits.
@@ -217,6 +245,9 @@ typedef struct loom_xdna_stream_port_range_t {
   uint8_t ordinal;
   // Number of port channels.
   uint8_t count;
+  // First channel's master-ordinal mask in the family's stream_connections.
+  // Only slave ranges have connection masks; master ranges store zero here.
+  uint16_t connection_offset;
 } loom_xdna_stream_port_range_t;
 
 // Complete materialized physical-array facts shared by device profiles.
@@ -255,6 +286,8 @@ typedef struct loom_xdna_array_family_t {
   const loom_xdna_stream_port_range_t* stream_ports;
   // Number of stream-port range rows.
   uint8_t stream_port_count;
+  // Legal master-ordinal masks indexed by each slave range and channel.
+  const uint32_t* stream_connections;
   // Pinned aie-rt source revision.
   const char* aie_rt_source_commit;
   // Pinned MLIR-AIE target-model source revision.
@@ -284,12 +317,23 @@ const loom_xdna_tile_facts_t* loom_xdna_array_tile_facts(
     const loom_xdna_array_family_t* family,
     loom_xdna_tile_coordinate_t coordinate);
 
+// Returns the unique generated facts for an admitted physical tile kind.
+const loom_xdna_tile_facts_t* loom_xdna_array_tile_kind_facts(
+    const loom_xdna_array_family_t* family, loom_xdna_tile_kind_t tile_kind);
+
 // Returns the programmable ordinal range for an architectural stream port
 // present in the generated family. Routing and register emission use only
 // generated port kinds for the selected tile and direction.
 const loom_xdna_stream_port_range_t* loom_xdna_array_stream_port_range(
     const loom_xdna_array_family_t* family, loom_xdna_tile_kind_t tile_kind,
     loom_xdna_stream_direction_t direction, loom_xdna_stream_port_t port);
+
+// Returns legal destination channels for an admitted source channel. Both
+// ranges belong to the same tile kind, with slave and master directions.
+uint32_t loom_xdna_array_stream_destination_channels(
+    const loom_xdna_array_family_t* family,
+    const loom_xdna_stream_port_range_t* source, uint8_t source_channel,
+    const loom_xdna_stream_port_range_t* destination);
 
 // Forms one absolute tile register address after validating the module.
 iree_status_t loom_xdna_array_register_address(
@@ -314,26 +358,14 @@ iree_status_t loom_xdna_array_resolve_load_memory(
     uint32_t address, uint32_t byte_length,
     loom_xdna_memory_placement_t* out_placement);
 
-// Forms a tile-relative load address for canonical physical storage.
-//
-// |owner_offset| is relative to the owner's program or local-data allocation,
-// matching loom_xdna_memory_placement_t. The owner must be visible through one
-// of the accessor's architectural load windows.
-iree_status_t loom_xdna_array_form_load_address(
+// Returns the immutable data-memory aperture mapping |owner| into |accessor|,
+// or NULL when the owner is not directly visible. Coordinates are already
+// admitted by the selecting owner. The result carries both load-address and
+// lock-selector bases; consumers retain it instead of selecting the same
+// relationship again. Storage extent and capacity are admitted separately.
+const loom_xdna_address_window_t* loom_xdna_array_load_window(
     const loom_xdna_array_family_t* family,
-    loom_xdna_tile_coordinate_t accessor, loom_xdna_memory_space_t memory_space,
-    loom_xdna_tile_coordinate_t owner, uint32_t owner_offset,
-    uint32_t byte_length, uint32_t* out_address);
-
-// Forms an accessor-relative lock selector for a physical owner lock.
-//
-// The owner lock ordinal is relative to its physical tile. The returned
-// selector is relative to the accessor's architectural lock namespace and can
-// be encoded directly in an accessor core instruction.
-iree_status_t loom_xdna_array_form_lock_selector(
-    const loom_xdna_array_family_t* family,
-    loom_xdna_tile_coordinate_t accessor, loom_xdna_tile_coordinate_t owner,
-    uint16_t owner_lock_ordinal, uint16_t* out_selector);
+    loom_xdna_tile_coordinate_t accessor, loom_xdna_tile_coordinate_t owner);
 
 #ifdef __cplusplus
 }  // extern "C"

@@ -162,8 +162,9 @@ iree_status_t CreateManagedUdpSender(iree_async_proactor_t* proactor,
                             "receiver socket creation failed");
   }
 
-  sockaddr_in receiver_address = {};
-  receiver_address.sin_family = AF_INET;
+  sockaddr_in receiver_address = {
+      .sin_family = AF_INET,
+  };
   receiver_address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   receiver_address.sin_port = 0;
   if (bind(receiver_fd.get(),
@@ -414,7 +415,10 @@ TEST_F(PosixProactorSubmitTest, CancellationSurvivesInlineCallbackMapGrowth) {
       bool unregistered = false;
       iree_async_proactor_unregister_event_source(
           proactor_, source,
-          {+[](void* context) { *static_cast<bool*>(context) = true; },
+          {+[](void* context, iree_status_t status) {
+             IREE_EXPECT_OK(status);
+             *static_cast<bool*>(context) = true;
+           },
            &unregistered});
       EXPECT_TRUE(unregistered);
     }

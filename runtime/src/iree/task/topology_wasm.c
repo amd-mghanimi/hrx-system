@@ -24,6 +24,11 @@ iree_task_topology_node_id_t iree_task_topology_query_current_node(void) {
   return 0;
 }
 
+iree_numa_node_id_t iree_task_topology_query_numa_node(
+    const iree_task_topology_t* topology) {
+  return IREE_NUMA_NODE_ANY;
+}
+
 iree_status_t iree_task_topology_fixup_constructive_sharing_masks(
     iree_task_topology_t* topology) {
   // No-op.
@@ -97,7 +102,6 @@ iree_status_t iree_task_topology_initialize_from_physical_cores(
     group_count /= 2;
   }
   iree_task_topology_initialize_from_group_count(group_count, out_topology);
-  out_topology->node_id = node_id;
 
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();

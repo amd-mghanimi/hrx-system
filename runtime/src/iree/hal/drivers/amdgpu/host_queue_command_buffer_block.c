@@ -569,8 +569,6 @@ static uint64_t iree_hal_amdgpu_host_queue_finish_command_buffer_block(
     iree_hal_amdgpu_host_queue_publish_profile_host_writes(queue);
   }
   iree_hal_amdgpu_host_queue_publish_submission_kernargs(queue, submission);
-  iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
-                                                  submission_epoch);
   if (queue_device_event) {
     const uint64_t start_packet_id =
         submission->first_packet_id + resolution->barrier_count;
@@ -658,6 +656,8 @@ static uint64_t iree_hal_amdgpu_host_queue_finish_command_buffer_block(
             &queue->notification_ring),
         &queue_device_event->end_tick);
   }
+  iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
+                                                  submission_epoch);
   iree_hal_amdgpu_aql_ring_doorbell(
       &queue->aql_ring,
       submission->first_packet_id + submission->packet_count - 1);
@@ -862,8 +862,8 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer_block(
               &queue->transfer_context->kernels
                    ->iree_hal_amdgpu_device_timestamp_harvest_dispatch_records,
               profile_events.event_count, &profile_harvest_packet->dispatch,
-              submission.kernargs.blocks[kernarg_block_count].data);
-      profile_harvest_setup = profile_harvest_packet->dispatch.setup;
+              submission.kernargs.blocks[kernarg_block_count].data,
+              &profile_harvest_setup);
     }
     uint16_t* packet_headers = NULL;
     uint16_t* packet_setups = NULL;

@@ -17,13 +17,29 @@ amdf_cc_library(
     name = "xdna_device_fixture",
     testonly = True,
     hdrs = ["xdna_device_fixture.h"],
-    visibility = [
-        "//experimental/xdna/cts:__pkg__",
-        "//libamdf/cts/xdna:__subpackages__",
-    ],
+    visibility = ["//libamdf/cts/xdna:__subpackages__"],
     deps = [
         "//libamdf/cts/util:device_cache",
         "//libamdf/cts/util:provider_headers",
+        "//third_party:google_test",
+    ],
+)
+
+amdf_cts_test_suite(
+    name = "native_lifetime",
+    srcs = ["native_lifetime_test.cc"],
+    native_lifetimes = [
+        "process",
+        "instance",
+    ],
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "@platforms//os:windows": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":xdna_device_fixture",
         "//third_party:google_test",
     ],
 )
@@ -41,6 +57,7 @@ amdf_cc_library(
         ":xdna_device_fixture",
         "//libamdf/cts/util:device_cache",
         "//libamdf/cts/util:provider_headers",
+        "//libamdf/cts/util:wait",
         "//third_party:google_test",
     ] + ([
         "//libamdf/cts/util:native_event",
@@ -57,8 +74,11 @@ test_suite(
     tests = [
         ":kernel_queue",
         ":memory",
+        ":native_lifetime",
         ":xdna_extension",
         "//libamdf/cts/xdna/linux:memory",
+        "//libamdf/cts/xdna/linux/file_channel",
+        "//libamdf/cts/xdna/recipes:execution",
     ],
     visibility = ["//visibility:public"],
 )

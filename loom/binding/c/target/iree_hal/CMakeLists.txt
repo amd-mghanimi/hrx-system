@@ -19,6 +19,7 @@ loom_cc_library(
   DEPS
     iree::hal
     loom::binding::c::loomc
+    loom::sanitizer::runtime_requirements
   ALWAYSLINK
   PUBLIC
 )

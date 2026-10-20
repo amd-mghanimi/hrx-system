@@ -1,0 +1,129 @@
+// RUN: pass @prepare
+
+// Schedule while channel views retain their lexical storage facts. The load
+// for the next iteration precedes the current store; the lease spans startup,
+// main loop and drain. Ordinary functions are outside this preparation scope.
+pass.pipeline<module> @prepare pipeline {
+  for func {
+    where op(name = "pipeline.def") {
+      canonicalize
+      pipeline-scf-for
+      unroll-scf-for
+      scf-to-cfg
+      cfg-simplify
+      canonicalize
+    }
+  }
+  outline-pipeline-strands
+}
+
+pipeline.def<kernel> public @read_ahead(%external: pool) run() {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %input_bytes = index.constant 2048 : offset
+  %input_buffer = buffer.alloca<global> pool(%external) align(64) %input_bytes : buffer
+  %input_slots = buffer.view %input_buffer[%origin] : buffer -> view<2x256xi32>
+  %inputs = channel.bind<fifo> %input_slots, %capacity : view<2x256xi32>, index -> channel<tile<256xi32>>
+  %local = pipeline.memory<workgroup>[0] : pool
+  %output_bytes = index.constant 512 : offset
+  %output_buffer = buffer.alloca<workgroup> pool(%local) align(64) %output_bytes : buffer
+  %output_slots = buffer.view %output_buffer[%origin] : buffer -> view<2x64xi32>
+  %outputs = channel.bind<fifo> %output_slots, %capacity : view<2x64xi32>, index -> channel<tile<64xi32>>
+  pipeline.strand workers([0], [1], [1]) {
+    %input_read, %source = channel.acquire %inputs : channel<tile<256xi32>> -> (read<tile<256xi32>>, view<256xi32>)
+    %output_write, %destination = channel.reserve %outputs : channel<tile<64xi32>> -> (write<tile<64xi32>>, view<64xi32>)
+    %begin = index.constant 0 : index
+    %end = index.constant 4 : index
+    %step = index.constant 1 : index
+    %depth = index.constant 2 : index
+    %width = index.constant 64 : index
+    %identity = scalar.constant 0 : i32
+    %sum = scf.for %row = [%begin to %end step %step](%accumulator = %identity : i32) -> (i32) pipeline(%depth) {
+      %address = index.mul %row, %width : index
+      %value = view.load %source[%address] : view<256xi32> -> i32
+      view.store %value, %destination[0] : i32, view<64xi32>
+      %next = scalar.addi %accumulator, %value : i32
+      scf.yield %next : i32
+    }
+    view.store %sum, %destination[1] : i32, view<64xi32>
+    channel.publish %output_write : write<tile<64xi32>>
+    channel.release %input_read : read<tile<256xi32>>
+  }
+}
+
+func.def @ordinary(%value: i32) -> (i32) {
+  %identity = scalar.constant 0 : i32
+  %result = scalar.addi %value, %identity : i32
+  func.return %result : i32
+}
+
+// ----
+pass.pipeline<module> @prepare pipeline {
+  for func {
+    where op(name = "pipeline.def") {
+      canonicalize
+      pipeline-scf-for
+      unroll-scf-for
+      scf-to-cfg
+      cfg-simplify
+      canonicalize
+    }
+  }
+  outline-pipeline-strands
+}
+
+pipeline.def<kernel> public @read_ahead(%external: pool) run() {
+  %origin = index.constant 0 : offset
+  %capacity = index.constant 2 : index
+  %input_bytes = index.constant 2048 : offset
+  %input_buffer = buffer.alloca<global> pool(%external) align(64) %input_bytes : buffer
+  %input_slots = buffer.view %input_buffer[%origin] : buffer -> view<2x256xi32>
+  %inputs = channel.bind<fifo> %input_slots, %capacity : view<2x256xi32>, index -> channel<tile<256xi32>>
+  %local = pipeline.memory<workgroup>[0] : pool
+  %output_bytes = index.constant 512 : offset
+  %output_buffer = buffer.alloca<workgroup> pool(%local) align(64) %output_bytes : buffer
+  %output_slots = buffer.view %output_buffer[%origin] : buffer -> view<2x64xi32>
+  %outputs = channel.bind<fifo> %output_slots, %capacity : view<2x64xi32>, index -> channel<tile<64xi32>>
+  pipeline.strand workers([0], [1], [1]) {
+    func.call @__pipeline_strand_0(%outputs, %inputs) : (channel<tile<64xi32>>, channel<tile<256xi32>>)
+  }
+}
+
+func.def @ordinary(%value: i32) -> (i32) {
+  %identity = scalar.constant 0 : i32
+  %result = scalar.addi %value, %identity : i32
+  func.return %result : i32
+}
+
+func.def inline @__pipeline_strand_0(%outputs: channel<tile<64xi32>>, %inputs: channel<tile<256xi32>>) {
+  cfg.br ^_bb1
+^_bb1:
+  %input_read, %source = channel.acquire %inputs : channel<tile<256xi32>> -> (read<tile<256xi32>>, view<256xi32>)
+  %output_write, %destination = channel.reserve %outputs : channel<tile<64xi32>> -> (write<tile<64xi32>>, view<64xi32>)
+  %end = index.constant 4 : index
+  %step = index.constant 1 : index
+  %width = index.constant 64 : index
+  %identity = scalar.constant 0 : i32
+  %32 = index.constant 1 : index
+  %address$67 = index.constant 0 : index
+  %value$36 = view.load %source[%address$67] : view<256xi32> -> i32
+  cfg.br ^_bb2(%32: index, %identity: i32, %value$36: i32)
+^_bb2(%61: index, %62: i32, %63: i32):
+  %65 = index.cmp slt, %61, %end : index
+  cfg.cond_br %65, ^_bb3, ^_bb4
+^_bb3:
+  %64 = index.assume %61 [range(%61, 1, 3)] : index
+  %address$42 = index.mul %64, %width : index
+  %value$43 = view.load %source[%address$42] : view<256xi32> -> i32
+  view.store %63, %destination[0] : i32, view<64xi32>
+  %next$44 = scalar.addi %62, %63 : i32
+  %66 = index.add %64, %step : index
+  cfg.br ^_bb2(%66: index, %next$44: i32, %value$43: i32)
+^_bb4:
+  view.store %63, %destination[0] : i32, view<64xi32>
+  %next$45 = scalar.addi %62, %63 : i32
+  view.store %next$45, %destination[1] : i32, view<64xi32>
+  channel.publish %output_write : write<tile<64xi32>>
+  channel.release %input_read : read<tile<256xi32>>
+  func.return
+}

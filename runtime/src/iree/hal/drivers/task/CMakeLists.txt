@@ -11,6 +11,23 @@ iree_add_all_subdirs()
 
 iree_cc_library(
   NAME
+    allocation_queue
+  HDRS
+    "allocation_queue.h"
+  SRCS
+    "allocation_queue.c"
+  DEPS
+    iree::async::util::proactor_pool
+    iree::base
+    iree::base::threading
+    iree::hal
+    iree::hal::memory::slab_provider
+    iree::task
+  PUBLIC
+)
+
+iree_cc_library(
+  NAME
     atomic
   HDRS
     "atomic.h"
@@ -114,20 +131,6 @@ iree_cc_library(
 
 iree_cc_library(
   NAME
-    semaphore
-  HDRS
-    "semaphore.h"
-  SRCS
-    "semaphore.c"
-  DEPS
-    iree::async
-    iree::base
-    iree::hal
-  PUBLIC
-)
-
-iree_cc_library(
-  NAME
     profile
   HDRS
     "profile.h"
@@ -164,10 +167,10 @@ iree_cc_library(
   SRCS
     "device.c"
   DEPS
+    ::allocation_queue
     ::atomic
     ::device_spec_builder
     ::profile
-    ::semaphore
     ::transient_buffer
     iree::async
     iree::async::util::proactor_pool
@@ -182,9 +185,9 @@ iree_cc_library(
     iree::hal::drivers::task::executable::loader
     iree::hal::drivers::task::queue
     iree::hal::memory::cpu_slab_provider
-    iree::hal::memory::passthrough_pool
-    iree::hal::memory::tlsf_pool
+    iree::hal::memory::host_memory_backend
     iree::hal::utils::files
+    iree::hal::utils::host_semaphore
     iree::task
   PUBLIC
 )
@@ -204,6 +207,24 @@ iree_cc_library(
     iree::hal::drivers::task::executable::loader
     iree::task
   PUBLIC
+)
+
+iree_cc_test(
+  NAME
+    device_test
+  SRCS
+    "device_test.cc"
+  DEPS
+    ::device
+    iree::async
+    iree::async::util::proactor_pool
+    iree::base
+    iree::base::threading
+    iree::hal
+    iree::hal::drivers::task::queue
+    iree::task
+    iree::testing::gtest
+    iree::testing::gtest_main
 )
 
 ### BAZEL_TO_CMAKE_PRESERVES_ALL_CONTENT_BELOW_THIS_LINE ###

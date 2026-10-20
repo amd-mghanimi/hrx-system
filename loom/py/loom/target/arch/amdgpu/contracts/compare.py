@@ -16,9 +16,11 @@ from loom.dialect.vector import ALL_VECTOR_OPS
 from loom.dialect.vector import defs as vector
 from loom.dsl import Op
 from loom.target.arch.amdgpu.contracts.materializers import (
-    ADDRESS_VGPR_MATERIALIZER,
+    ADDRESS_REGISTER_MATERIALIZER,
+    ADDRESS_SGPR_MATERIALIZER,
     F32_VGPR_MATERIALIZER,
     I32_VGPR_MATERIALIZER,
+    REGISTERS_VGPR_MATERIALIZER,
 )
 from loom.target.arch.amdgpu.descriptors import (
     AMDGPU_SOURCE_INLINE_F32_VALUES,
@@ -26,6 +28,7 @@ from loom.target.arch.amdgpu.descriptors import (
 )
 from loom.target.contracts import (
     ContractFragment,
+    DescriptorOperandMaterialization,
     DescriptorRule,
     EmitDescriptorOp,
     Guard,
@@ -33,6 +36,7 @@ from loom.target.contracts import (
     RecipeRule,
     Scalar,
     TypePattern,
+    ValueMaterializer,
     ValueProject,
     ValueRef,
     Vector,
@@ -94,10 +98,31 @@ _FLOAT_COMPARE_MASK_DESCRIPTOR_KEYS = tuple(
     descriptor_key
     for predicate in _CMP_FLOAT_SCALAR_PREDICATES
     for descriptor_key in (
+        f"amdgpu.v_cmp_{predicate}_f16",
         f"amdgpu.v_cmp_{predicate}_f32",
+        f"amdgpu.v_cmp_{predicate}_f64",
         f"amdgpu.v_cmp_{predicate}_f32.src0_inline",
         f"amdgpu.v_cmp_{predicate}_f32.src1_inline",
     )
+)
+_FLOAT_CLASSIFICATION_CASES = (
+    (scalar.scalar_isnanf, 0x003),
+    (scalar.scalar_isinff, 0x204),
+    (scalar.scalar_isfinitef, 0x1F8),
+)
+_FLOAT_CLASSIFICATION_DESCRIPTOR_KEYS = (
+    *(
+        descriptor_key
+        for bit_width in (16, 32, 64)
+        for descriptor_key in (
+            f"amdgpu.v_cmp_class_f{bit_width}",
+            f"amdgpu.v_cmp_class_f{bit_width}.classes_inline",
+            f"amdgpu.v_cmp_class_f{bit_width}.classes_lit",
+        )
+    ),
+    "amdgpu.v_cmp_class_f16.input_high",
+    "amdgpu.v_cmp_class_f16.input_high.classes_inline",
+    "amdgpu.v_cmp_class_f16.input_high.classes_lit",
 )
 _DESCRIPTOR_KEYS = (
     "amdgpu.s_mov_b32",
@@ -105,6 +130,7 @@ _DESCRIPTOR_KEYS = (
     *_COMPARE_DESCRIPTOR_KEYS,
     *_FLOAT_COMPARE_DESCRIPTOR_KEYS,
     *_FLOAT_COMPARE_MASK_DESCRIPTOR_KEYS,
+    *_FLOAT_CLASSIFICATION_DESCRIPTOR_KEYS,
     *(descriptor_key for _, descriptor_key in _CMP_I64_SCALAR_CASES),
 )
 
@@ -117,15 +143,14 @@ _I64 = Scalar("i64")
 _I32 = Scalar("i32")
 _F16 = Scalar("f16")
 _F32 = Scalar("f32")
+_F64 = Scalar("f64")
 _INDEX = Scalar("index")
 _OFFSET = Scalar("offset")
 _I1 = Scalar("i1")
-_I32_VGPR_LHS = ValueRef.operand("lhs", materializer=I32_VGPR_MATERIALIZER.name)
-_I32_VGPR_RHS = ValueRef.operand("rhs", materializer=I32_VGPR_MATERIALIZER.name)
-_F32_VGPR_LHS = ValueRef.operand("lhs", materializer=F32_VGPR_MATERIALIZER.name)
-_F32_VGPR_RHS = ValueRef.operand("rhs", materializer=F32_VGPR_MATERIALIZER.name)
-_ADDRESS_VGPR_LHS = ValueRef.operand("lhs", materializer=ADDRESS_VGPR_MATERIALIZER.name)
-_ADDRESS_VGPR_RHS = ValueRef.operand("rhs", materializer=ADDRESS_VGPR_MATERIALIZER.name)
+_REGISTER_LHS = ValueRef.operand("lhs")
+_REGISTER_RHS = ValueRef.operand("rhs")
+_ADDRESS_LHS = ValueRef.operand("lhs", materializer=ADDRESS_REGISTER_MATERIALIZER.name)
+_ADDRESS_RHS = ValueRef.operand("rhs", materializer=ADDRESS_REGISTER_MATERIALIZER.name)
 _SOURCE_INLINE_DIAGNOSTIC = GuardDiagnostic(
     subject_role="literal",
     subject_name="source-inline-u32",
@@ -147,7 +172,24 @@ def _scc_rule(
     type_pattern: TypePattern,
     predicate: str,
     descriptor: Descriptor,
+    *,
+    operand_materializer: ValueMaterializer | None = None,
 ) -> DescriptorRule:
+    operand_guards = tuple(
+        Guard.value_materializable(field, operand_materializer.name)
+        if operand_materializer is not None
+        else Guard.low_value_register_class(field, "amdgpu.sgpr")
+        for field in ("lhs", "rhs")
+    )
+    operands = {
+        field: ValueRef.operand(
+            field,
+            materializer=(
+                operand_materializer.name if operand_materializer is not None else None
+            ),
+        )
+        for field in ("lhs", "rhs")
+    }
     return DescriptorRule(
         source_op=source_op,
         descriptor=descriptor,
@@ -156,18 +198,14 @@ def _scc_rule(
             Guard.value_type("lhs", type_pattern),
             Guard.value_type("rhs", type_pattern),
             Guard.value_type("result", _I1),
-            Guard.low_value_register_class("lhs", "amdgpu.sgpr"),
-            Guard.low_value_register_class("rhs", "amdgpu.sgpr"),
+            *operand_guards,
             Guard.low_value_register_class("result", "amdgpu.scc"),
             Guard.descriptor_available(descriptor),
         ),
         emit=(
             EmitDescriptorOp(
                 descriptor=descriptor,
-                operands={
-                    "lhs": ValueRef.operand("lhs"),
-                    "rhs": ValueRef.operand("rhs"),
-                },
+                operands=operands,
                 results={"scc": ValueRef.result("result")},
             ),
         ),
@@ -179,9 +217,34 @@ def _sgpr_bool_rule(
     type_pattern: TypePattern,
     predicate: str,
     compare_descriptor: Descriptor,
+    *,
+    operand_materializer: ValueMaterializer | None = None,
 ) -> DescriptorRule:
     move_descriptor = _descriptor("amdgpu.s_mov_b32")
     select_descriptor = _descriptor("amdgpu.s_cselect_b32")
+    operand_guards = tuple(
+        Guard.value_materializable(field, operand_materializer.name)
+        if operand_materializer is not None
+        else Guard.low_value_register_class(field, "amdgpu.sgpr")
+        for field in ("lhs", "rhs")
+    )
+    operand_shape_guards = (
+        (Guard.low_value_register_unit_count("result", 1),)
+        if operand_materializer is not None
+        else (
+            Guard.low_value_register_unit_count_eq("result", "lhs"),
+            Guard.low_value_register_unit_count_eq("result", "rhs"),
+        )
+    )
+    operands = {
+        field: ValueRef.operand(
+            field,
+            materializer=(
+                operand_materializer.name if operand_materializer is not None else None
+            ),
+        )
+        for field in ("lhs", "rhs")
+    }
     return DescriptorRule(
         source_op=source_op,
         descriptor=select_descriptor,
@@ -190,11 +253,9 @@ def _sgpr_bool_rule(
             Guard.value_type("lhs", type_pattern),
             Guard.value_type("rhs", type_pattern),
             Guard.value_type("result", _I1),
-            Guard.low_value_register_class("lhs", "amdgpu.sgpr"),
-            Guard.low_value_register_class("rhs", "amdgpu.sgpr"),
+            *operand_guards,
             Guard.low_value_register_class("result", "amdgpu.sgpr"),
-            Guard.low_value_register_unit_count_eq("result", "lhs"),
-            Guard.low_value_register_unit_count_eq("result", "rhs"),
+            *operand_shape_guards,
             Guard.descriptor_available(compare_descriptor),
             Guard.descriptor_available(move_descriptor),
             Guard.descriptor_available(select_descriptor),
@@ -202,10 +263,7 @@ def _sgpr_bool_rule(
         emit=(
             EmitDescriptorOp(
                 descriptor=compare_descriptor,
-                operands={
-                    "lhs": ValueRef.operand("lhs"),
-                    "rhs": ValueRef.operand("rhs"),
-                },
+                operands=operands,
                 results={"scc": ValueRef.temporary("condition")},
                 result_types={"scc": _I1},
             ),
@@ -394,6 +452,7 @@ def _mask_rule(
                     "rhs": rhs,
                 },
                 results={"mask": ValueRef.result("result")},
+                operand_materialization=DescriptorOperandMaterialization.TARGET,
             ),
         ),
     )
@@ -408,8 +467,8 @@ def _float_mask_inline_rule(
     descriptor: Descriptor,
 ) -> DescriptorRule:
     source_refs = {
-        "lhs": _F32_VGPR_LHS,
-        "rhs": _F32_VGPR_RHS,
+        "lhs": _REGISTER_LHS,
+        "rhs": _REGISTER_RHS,
     }
     return DescriptorRule(
         source_op=scalar.scalar_cmpf,
@@ -473,15 +532,171 @@ def _float_mask_rules() -> tuple[DescriptorRule, ...]:
         _mask_rule(
             scalar.scalar_cmpf,
             _F32,
-            _F32_VGPR_LHS,
-            _F32_VGPR_RHS,
+            _REGISTER_LHS,
+            _REGISTER_RHS,
             F32_VGPR_MATERIALIZER.name,
             predicate,
             _descriptor(f"amdgpu.v_cmp_{predicate}_f32"),
         )
         for predicate in _CMP_FLOAT_SCALAR_PREDICATES
     )
-    return inline_rules + register_rules
+    other_register_rules = tuple(
+        _mask_rule(
+            scalar.scalar_cmpf,
+            type_pattern,
+            _REGISTER_LHS,
+            _REGISTER_RHS,
+            REGISTERS_VGPR_MATERIALIZER.name,
+            predicate,
+            _descriptor(f"amdgpu.v_cmp_{predicate}_f{bit_width}"),
+        )
+        for type_pattern, bit_width in ((_F16, 16), (_F64, 64))
+        for predicate in _CMP_FLOAT_SCALAR_PREDICATES
+    )
+    return inline_rules + register_rules + other_register_rules
+
+
+def _float_classification_immediate_rule(
+    source_op: Op,
+    type_pattern: TypePattern,
+    bit_width: int,
+    class_mask: int,
+    descriptor_suffix: str,
+    immediate_name: str,
+) -> DescriptorRule:
+    descriptor = _descriptor(f"amdgpu.v_cmp_class_f{bit_width}.{descriptor_suffix}")
+    return DescriptorRule(
+        source_op=source_op,
+        descriptor=descriptor,
+        guards=(
+            Guard.value_type("input", type_pattern),
+            Guard.value_type("result", _I1),
+            Guard.low_value_register_class("result", "amdgpu.sgpr"),
+            Guard.low_value_register_unit_count("result", 2),
+            Guard.value_materializable("input", REGISTERS_VGPR_MATERIALIZER.name),
+            Guard.descriptor_available(descriptor),
+        ),
+        emit=(
+            EmitDescriptorOp(
+                descriptor=descriptor,
+                operands={
+                    "input": ValueRef.operand(
+                        "input", materializer=REGISTERS_VGPR_MATERIALIZER.name
+                    ),
+                },
+                results={"mask": ValueRef.result("result")},
+                immediates={immediate_name: class_mask},
+            ),
+        ),
+    )
+
+
+def _float_classification_register_rule(
+    source_op: Op,
+    type_pattern: TypePattern,
+    bit_width: int,
+    class_mask: int,
+) -> DescriptorRule:
+    move_descriptor = _descriptor("amdgpu.s_mov_b32")
+    descriptor = _descriptor(f"amdgpu.v_cmp_class_f{bit_width}")
+    return DescriptorRule(
+        source_op=source_op,
+        descriptor=descriptor,
+        guards=(
+            Guard.value_type("input", type_pattern),
+            Guard.value_type("result", _I1),
+            Guard.low_value_register_class("result", "amdgpu.sgpr"),
+            Guard.low_value_register_unit_count("result", 2),
+            Guard.value_materializable("input", REGISTERS_VGPR_MATERIALIZER.name),
+            Guard.descriptor_available(move_descriptor),
+            Guard.descriptor_available(descriptor),
+        ),
+        emit=(
+            EmitDescriptorOp(
+                descriptor=move_descriptor,
+                results={"dst": ValueRef.temporary("classes")},
+                result_types={"dst": _I32},
+                immediates={"imm32": class_mask},
+            ),
+            EmitDescriptorOp(
+                descriptor=descriptor,
+                operands={
+                    "input": ValueRef.operand(
+                        "input", materializer=REGISTERS_VGPR_MATERIALIZER.name
+                    ),
+                    "classes": ValueRef.temporary("classes"),
+                },
+                results={"mask": ValueRef.result("result")},
+            ),
+        ),
+    )
+
+
+def _float_classification_scalar_rules() -> tuple[DescriptorRule, ...]:
+    rules: list[DescriptorRule] = []
+    for source_op, class_mask in _FLOAT_CLASSIFICATION_CASES:
+        for type_pattern, bit_width in ((_F16, 16), (_F32, 32), (_F64, 64)):
+            if class_mask <= 64:
+                rules.append(
+                    _float_classification_immediate_rule(
+                        source_op,
+                        type_pattern,
+                        bit_width,
+                        class_mask,
+                        "classes_inline",
+                        "classes",
+                    )
+                )
+            else:
+                rules.append(
+                    _float_classification_immediate_rule(
+                        source_op,
+                        type_pattern,
+                        bit_width,
+                        class_mask,
+                        "classes_lit",
+                        "imm32",
+                    )
+                )
+                rules.append(
+                    _float_classification_register_rule(
+                        source_op, type_pattern, bit_width, class_mask
+                    )
+                )
+    return tuple(rules)
+
+
+def _float_classification_vector_rules() -> tuple[RecipeRule, ...]:
+    type_rows = (
+        ("f16", 16, "LOOM_AMDGPU_MAX_SCALARIZED_32BIT_LANES"),
+        ("f32", 32, "LOOM_AMDGPU_MAX_SCALARIZED_32BIT_LANES"),
+        ("f64", 64, "LOOM_AMDGPU_MAX_SCALARIZED_32BIT_LANES / 2u"),
+    )
+    vector_ops = (
+        vector.vector_isnanf,
+        vector.vector_isinff,
+        vector.vector_isfinitef,
+    )
+    return tuple(
+        RecipeRule(
+            source_op=source_op,
+            guards=(
+                Guard.value_type(
+                    "input",
+                    Vector(
+                        element,
+                        minimum_lanes=1,
+                        maximum_lanes=maximum_lanes,
+                    ),
+                ),
+                Guard.descriptor_available(
+                    _descriptor(f"amdgpu.v_cmp_class_f{bit_width}")
+                ),
+            ),
+        )
+        for source_op in vector_ops
+        for element, bit_width, maximum_lanes in type_rows
+    )
 
 
 def _mask_inline_rule(
@@ -540,13 +755,21 @@ def _typed_rules(
     lhs: ValueRef,
     rhs: ValueRef,
     materializer_name: str,
+    *,
+    scalar_materializer: ValueMaterializer | None = None,
 ) -> tuple[DescriptorRule, ...]:
     source_refs = {
         "lhs": lhs,
         "rhs": rhs,
     }
     scalar_rules = tuple(
-        _scc_rule(source_op, type_pattern, predicate, _descriptor(descriptor_key))
+        _scc_rule(
+            source_op,
+            type_pattern,
+            predicate,
+            _descriptor(descriptor_key),
+            operand_materializer=scalar_materializer,
+        )
         for predicate, descriptor_key, _ in _CMP_I32_CASES
     )
     sgpr_bool_rules = tuple(
@@ -555,6 +778,7 @@ def _typed_rules(
             type_pattern,
             predicate,
             _descriptor(descriptor_key),
+            operand_materializer=scalar_materializer,
         )
         for predicate, descriptor_key, _ in _CMP_I32_CASES
     )
@@ -641,6 +865,8 @@ def _vector_rules() -> tuple[RecipeRule, ...]:
 def _rules() -> tuple[DescriptorRule | RecipeRule, ...]:
     return (
         *_vector_rules(),
+        *_float_classification_vector_rules(),
+        *_float_classification_scalar_rules(),
         *_float_scalar_rules(scalar.scalar_cmpf, _F16, 16),
         *_float_scalar_rules(scalar.scalar_cmpf, _F32, 32),
         *_float_mask_rules(),
@@ -648,23 +874,25 @@ def _rules() -> tuple[DescriptorRule | RecipeRule, ...]:
         *_typed_rules(
             scalar.scalar_cmpi,
             _I32,
-            _I32_VGPR_LHS,
-            _I32_VGPR_RHS,
+            _REGISTER_LHS,
+            _REGISTER_RHS,
             I32_VGPR_MATERIALIZER.name,
         ),
         *_typed_rules(
             index.index_cmp,
             _INDEX,
-            _ADDRESS_VGPR_LHS,
-            _ADDRESS_VGPR_RHS,
-            ADDRESS_VGPR_MATERIALIZER.name,
+            _ADDRESS_LHS,
+            _ADDRESS_RHS,
+            ADDRESS_REGISTER_MATERIALIZER.name,
+            scalar_materializer=ADDRESS_SGPR_MATERIALIZER,
         ),
         *_typed_rules(
             index.index_cmp,
             _OFFSET,
-            _ADDRESS_VGPR_LHS,
-            _ADDRESS_VGPR_RHS,
-            ADDRESS_VGPR_MATERIALIZER.name,
+            _ADDRESS_LHS,
+            _ADDRESS_RHS,
+            ADDRESS_REGISTER_MATERIALIZER.name,
+            scalar_materializer=ADDRESS_SGPR_MATERIALIZER,
         ),
     )
 
@@ -680,9 +908,11 @@ AMDGPU_COMPARE_CONTRACT_FRAGMENT = ContractFragment(
     descriptor_set=_DESCRIPTOR_SET,
     public_header="loom/target/arch/amdgpu/contracts/compare.h",
     materializers=(
+        ADDRESS_SGPR_MATERIALIZER,
         I32_VGPR_MATERIALIZER,
+        REGISTERS_VGPR_MATERIALIZER,
         F32_VGPR_MATERIALIZER,
-        ADDRESS_VGPR_MATERIALIZER,
+        ADDRESS_REGISTER_MATERIALIZER,
     ),
     cases=_rules(),
 )

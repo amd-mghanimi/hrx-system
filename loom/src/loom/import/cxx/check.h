@@ -15,10 +15,20 @@ namespace loom::cxx_import {
 // Projects an admitted check case into existing check sources, direct function
 // invocations, and terminal expectations. The caller has entered the case body.
 // All collaborators and source AST remain live until translation returns.
-void translate_check_body(cxx::TranslationUnit& unit, Diagnostics& diagnostics,
-                          Functions& functions, Intrinsics& intrinsics,
-                          Types& types, Scalars& scalars, Locations& locations,
-                          loom_builder_t& builder, const FunctionBody& body);
+void translate_check_case_body(cxx::TranslationUnit& unit,
+                               Diagnostics& diagnostics, Functions& functions,
+                               Intrinsics& intrinsics, Types& types,
+                               Scalars& scalars, Locations& locations,
+                               loom_builder_t& builder,
+                               const FunctionBody& body);
+
+// Projects an admitted scenario into finite trial recipes and their terminal
+// target-only or differential actions. The caller has entered the scenario
+// body, whose optional configuration arguments are already reserved.
+void translate_check_scenario_body(
+    cxx::TranslationUnit& unit, Diagnostics& diagnostics, Functions& functions,
+    Intrinsics& intrinsics, Types& types, Scalars& scalars,
+    Locations& locations, loom_builder_t& builder, const FunctionBody& body);
 
 }  // namespace loom::cxx_import
 

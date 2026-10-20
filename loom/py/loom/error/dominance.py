@@ -211,14 +211,14 @@ ERR_DOMINANCE_013 = ErrorDef(
     ),
 )
 
-# ERR_DOMINANCE_014: Owned resource reaches function exit.
+# ERR_DOMINANCE_014: Owned resource is lost before retirement.
 ERR_DOMINANCE_014 = ErrorDef(
     domain=ErrorDomain.DOMINANCE,
     code=14,
     severity=Severity.ERROR,
-    summary="Owned resource reaches function exit.",
+    summary="Owned resource is lost before retirement.",
     message=(
-        "{phase_name} resource '%{value_name}' reaches function exit "
+        "{phase_name} resource '%{value_name}' is lost "
         "without consume, release, discard, or escape"
     ),
     params=(
@@ -226,8 +226,8 @@ ERR_DOMINANCE_014 = ErrorDef(
         ErrorParam("value_name", ParamKind.STRING),
     ),
     fix_hint=(
-        "Consume, release, discard, escape, or return the resource through an "
-        "owned result summary."
+        "Consume, release, discard, escape, or transfer the resource through "
+        "a block argument or owned result before replacing or leaving it."
     ),
 )
 
@@ -294,6 +294,26 @@ ERR_DOMINANCE_017 = ErrorDef(
     ),
 )
 
+# ERR_DOMINANCE_018: Owned-resource analysis requires flattened control flow.
+ERR_DOMINANCE_018 = ErrorDef(
+    domain=ErrorDomain.DOMINANCE,
+    code=18,
+    severity=Severity.ERROR,
+    summary="Owned-resource analysis requires flattened control flow.",
+    message=(
+        "{phase_name} requires CFG control flow in a function with owned "
+        "resources; '{op_name}' still contains nested execution regions"
+    ),
+    params=(
+        ErrorParam("phase_name", ParamKind.STRING),
+        ErrorParam("op_name", ParamKind.STRING),
+    ),
+    fix_hint=(
+        "Lower the function's structured control flow before ownership "
+        "analysis or cleanup; SCF operations use scf-to-cfg."
+    ),
+)
+
 ALL_DOMINANCE_ERRORS: tuple[ErrorDef, ...] = (
     ERR_DOMINANCE_001,
     ERR_DOMINANCE_002,
@@ -312,4 +332,5 @@ ALL_DOMINANCE_ERRORS: tuple[ErrorDef, ...] = (
     ERR_DOMINANCE_015,
     ERR_DOMINANCE_016,
     ERR_DOMINANCE_017,
+    ERR_DOMINANCE_018,
 )

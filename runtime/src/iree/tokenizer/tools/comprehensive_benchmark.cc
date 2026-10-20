@@ -134,7 +134,7 @@ R"seed(static iree_status_t hash_table_insert(hash_table_t* table, const char* k
   for (size_t probe = 0; probe < table->capacity; ++probe) {
     entry_t* entry = &table->entries[index];
     if (entry->key == NULL) {
-      *entry = (entry_t){
+      *entry = entry_t{
           .key = key, .key_length = key_length,
           .hash = hash, .value = value,
       };
@@ -440,7 +440,8 @@ iree_host_size_t DoEncodeStreaming(iree_string_view_t text,
       iree_make_byte_span(g_state.transform_buffer.data(),
                           g_state.transform_buffer.size()),
       iree_tokenizer_offset_run_list_empty(),
-      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &encode_state));
+      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+      &encode_state));
 
   iree_string_view_t remaining = text;
   iree_host_size_t total_tokens = 0;
@@ -463,6 +464,11 @@ iree_host_size_t DoEncodeStreaming(iree_string_view_t text,
       iree_tokenizer_make_token_output(tokens.data() + total_tokens, NULL, NULL,
                                        tokens.size() - total_tokens),
       &final_tokens));
+  IREE_CHECK_OK(
+      iree_tokenizer_encode_state_has_pending(encode_state)
+          ? iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                             "benchmark token output capacity exhausted")
+          : iree_ok_status());
   iree_tokenizer_encode_state_deinitialize(encode_state);
   return total_tokens + final_tokens;
 }
@@ -740,7 +746,8 @@ iree_host_size_t DoEncodeStreamingWithBuffer(iree_string_view_t text,
                           g_state.state_storage.size()),
       iree_make_byte_span(local_buffer.data(), local_buffer.size()),
       iree_tokenizer_offset_run_list_empty(),
-      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &encode_state));
+      IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+      &encode_state));
 
   iree_string_view_t remaining = text;
   iree_host_size_t total_tokens = 0;
@@ -763,6 +770,11 @@ iree_host_size_t DoEncodeStreamingWithBuffer(iree_string_view_t text,
       iree_tokenizer_make_token_output(tokens.data() + total_tokens, NULL, NULL,
                                        tokens.size() - total_tokens),
       &final_tokens));
+  IREE_CHECK_OK(
+      iree_tokenizer_encode_state_has_pending(encode_state)
+          ? iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                             "benchmark token output capacity exhausted")
+          : iree_ok_status());
   iree_tokenizer_encode_state_deinitialize(encode_state);
   return total_tokens + final_tokens;
 }
@@ -1250,7 +1262,8 @@ void BM_StateInitDeinit(benchmark::State& state) {
         iree_make_byte_span(g_state.transform_buffer.data(),
                             g_state.transform_buffer.size()),
         iree_tokenizer_offset_run_list_empty(),
-        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, &encode_state));
+        IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START, iree_allocator_system(),
+        &encode_state));
     iree_tokenizer_encode_state_deinitialize(encode_state);
   }
 }

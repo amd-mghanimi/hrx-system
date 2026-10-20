@@ -16,15 +16,38 @@ package(
     licenses = ["notice"],  # Apache 2.0
 )
 
+exports_files(["testdata/requirements.loom"])
+
 loom_cc_library(
-    name = "testbench",
-    srcs = ["testbench.c"],
+    name = "api",
     hdrs = ["testbench.h"],
     deps = [
         "//loom/src/loom/ir",
-        "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/check",
+        "//runtime/src/iree/base",
+        "//runtime/src/iree/base/internal:arena",
+    ],
+)
+
+loom_cc_library(
+    name = "operation_plan",
+    srcs = ["operation_plan.c"],
+    deps = [
+        ":api",
+        "//loom/src/loom/ir",
+    ],
+)
+
+loom_cc_library(
+    name = "testbench",
+    srcs = ["testbench.c"],
+    deps = [
+        ":api",
+        ":operation_plan",
+        "//loom/src/loom/ir",
+        "//loom/src/loom/ops:op_defs",
         "//loom/src/loom/ops/kernel",
+        "//loom/src/loom/tooling/testbench/scenario:plan",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
     ],
@@ -46,6 +69,7 @@ loom_cc_library(
     srcs = ["issue_report.c"],
     hdrs = ["issue_report.h"],
     deps = [
+        ":api",
         ":source_report",
         ":testbench",
         "//loom/src/loom/ir",
@@ -60,8 +84,10 @@ loom_cc_library(
     srcs = ["value_materializer.c"],
     hdrs = ["value_materializer.h"],
     deps = [
+        ":api",
         ":testbench",
         "//loom/src/loom/ir",
+        "//loom/src/loom/tooling/testbench/scenario:entropy",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:prng",
@@ -77,6 +103,8 @@ loom_cc_library(
     srcs = ["device_event.c"],
     hdrs = ["device_event.h"],
     deps = [
+        "//loom/src/loom/util:json",
+        "//loom/src/loom/util:stream",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/threading",
         "//runtime/src/iree/hal",
@@ -98,6 +126,16 @@ loom_cc_library(
 )
 
 loom_cc_library(
+    name = "compiled_provider",
+    hdrs = ["compiled_provider.h"],
+    deps = [
+        ":invocation",
+        "//loom/binding/c:loomc",
+        "//runtime/src/iree/base",
+    ],
+)
+
+loom_cc_library(
     name = "expectation",
     srcs = ["expectation.c"],
     hdrs = ["expectation.h"],
@@ -106,12 +144,12 @@ loom_cc_library(
         ":source_report",
         ":testbench",
         ":value_materializer",
+        "//loom/src/loom/error:error_defs",
         "//loom/src/loom/ir",
         "//loom/src/loom/util:json",
         "//loom/src/loom/util:stream",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal",
-        "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/hal",
         "//runtime/src/iree/tooling:buffer_view_matchers",
     ],
@@ -140,6 +178,7 @@ loom_cc_library(
     srcs = ["requirements.c"],
     hdrs = ["requirements.h"],
     deps = [
+        ":api",
         ":testbench",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/check",
@@ -163,11 +202,14 @@ loom_cc_test(
     name = "testbench_test",
     srcs = ["testbench_test.cc"],
     deps = [
+        ":api",
         ":testbench",
         "//loom/src/loom/format/text:parser",
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/check",
+        "//loom/src/loom/ops/command",
         "//loom/src/loom/ops/kernel",
+        "//loom/src/loom/ops/pipeline",
         "//loom/src/loom/ops/test",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
@@ -205,6 +247,7 @@ loom_cc_test(
         "//loom/src/loom/ir",
         "//loom/src/loom/ops/check",
         "//loom/src/loom/ops/index",
+        "//loom/src/loom/ops/test",
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/base/internal:json",
@@ -228,6 +271,8 @@ loom_cc_test(
         "//runtime/src/iree/base",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/memory:heap_pool",
+        "//runtime/src/iree/hal/testing:mapped_transfer_buffer",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -261,6 +306,8 @@ loom_cc_test(
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/memory:heap_pool",
+        "//runtime/src/iree/hal/testing:mapped_transfer_buffer",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",
     ],
@@ -296,6 +343,7 @@ loom_cc_test(
         "//runtime/src/iree/base/internal",
         "//runtime/src/iree/base/internal:arena",
         "//runtime/src/iree/hal",
+        "//runtime/src/iree/hal/memory:heap_pool",
         "//runtime/src/iree/io:stream",
         "//runtime/src/iree/testing:gtest",
         "//runtime/src/iree/testing:gtest_main",

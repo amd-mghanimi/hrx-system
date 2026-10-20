@@ -42,8 +42,15 @@ typedef struct loom_greedy_rewrite_options_t {
   // Optional constant materialization hook installed on the active rewriter.
   loom_materialize_constant_fn_t materialize_constant;
 
+  // Optional consumer for relations retained before an exact fold.
+  loom_rewriter_pending_exact_relations_callback_t
+      pending_exact_relations_callback;
+
   // Borrowed function-scoped target math policy used for optional rewrites.
   const struct loom_target_math_policy_t* math_policy;
+
+  // Resolved target bundle paired with |math_policy|.
+  const struct loom_target_bundle_t* math_target_bundle;
 } loom_greedy_rewrite_options_t;
 
 // Summary of one greedy rewrite run.

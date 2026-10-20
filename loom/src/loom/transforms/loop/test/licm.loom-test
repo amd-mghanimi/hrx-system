@@ -52,6 +52,70 @@ func.def @hoists_constant_like_ops(%n: index) {
 
 // ====
 
+// Total numeric operations can execute before a potentially zero-trip loop.
+// This covers scalar conversion, index bitwise, vector conversion, comparison,
+// and selection paths while the registry test covers every family member.
+func.def @hoists_total_numeric_families(%n: index, %value: i32, %integers: vector<4xi32>, %integer_limits: vector<4xi32>, %floats: vector<4xf32>, %fallback: vector<4xf16>) {
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  scf.for %iv = [%loop_begin to %n step %loop_step] {
+    %converted = scalar.uitofp %value : i32 to f32
+    %bit_count = index.ctpopi %n : index
+    %narrowed = vector.fptrunc %floats : vector<4xf32> to vector<4xf16>
+    %less = vector.cmpi slt, %integers, %integer_limits : vector<4xi32> -> vector<4xi1>
+    %selected = vector.select %less, %narrowed, %fallback : vector<4xf16>
+    test.use %converted : f32
+    test.use %bit_count : index
+    test.use %selected : vector<4xf16>
+  }
+  func.return
+}
+
+// ----
+func.def @hoists_total_numeric_families(%n: index, %value: i32, %integers: vector<4xi32>, %integer_limits: vector<4xi32>, %floats: vector<4xf32>, %fallback: vector<4xf16>) {
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  %converted = scalar.uitofp %value : i32 to f32
+  %bit_count = index.ctpopi %n : index
+  %narrowed = vector.fptrunc %floats : vector<4xf32> to vector<4xf16>
+  %less = vector.cmpi slt, %integers, %integer_limits : vector<4xi32> -> vector<4xi1>
+  %selected = vector.select %less, %narrowed, %fallback : vector<4xf16>
+  scf.for %iv = [%loop_begin to %n step %loop_step] {
+    test.use %converted : f32
+    test.use %bit_count : index
+    test.use %selected : vector<4xf16>
+  }
+  func.return
+}
+
+// ====
+
+// LICM consumes execution safety independently of the eager branch policy.
+// A nonlinear activation can hoist out of a possibly zero-trip loop even
+// though generic if-conversion keeps it guarded.
+func.def @hoists_total_nonlinear_activation(%n: index, %input: f32) {
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  scf.for %iv = [%loop_begin to %n step %loop_step] {
+    %activated = scalar.siluf %input : f32
+    test.use %activated : f32
+  }
+  func.return
+}
+
+// ----
+func.def @hoists_total_nonlinear_activation(%n: index, %input: f32) {
+  %loop_begin = index.constant 0 : index
+  %loop_step = index.constant 1 : index
+  %activated = scalar.siluf %input : f32
+  scf.for %iv = [%loop_begin to %n step %loop_step] {
+    test.use %activated : f32
+  }
+  func.return
+}
+
+// ====
+
 // PURE does not imply that an op can execute on a path where the loop body did
 // not run. test.addi intentionally lacks SAFE_TO_SPECULATE and stays inside a
 // loop whose trip count may be zero.
@@ -651,4 +715,45 @@ kernel.def @keeps_workgroup_load_after_matching_barrier() {
   }
   view.store %result, %output_view[0] : i32, view<1xi32>
   kernel.return
+}
+
+// ====
+
+// The inner while's condition region is distinct from its LoopLike body.
+// Pure condition work can still leave the enclosing counted loop.
+func.def @hoists_nested_while_condition(%count: index, %initial: i32, %limit: i32) -> (i32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %result = scf.for %outer = [%begin to %count step %step](%carry = %initial : i32) -> (i32) {
+    %inner_result = scf.while(%before = %carry : i32) -> (i32) {
+      %invariant = test.cmp lt, %initial, %limit : i32
+      %bound = scf.select %invariant, %before, %limit : i32
+      %condition = test.cmp lt, %before, %bound : i32
+      scf.condition %condition, %before : i1, i32
+    } do(%body: i32) {
+      %next = test.addi %body, %initial : i32
+      scf.yield %next : i32
+    }
+    scf.yield %inner_result : i32
+  }
+  func.return %result : i32
+}
+
+// ----
+func.def @hoists_nested_while_condition(%count: index, %initial: i32, %limit: i32) -> (i32) {
+  %begin = index.constant 0 : index
+  %step = index.constant 1 : index
+  %invariant = test.cmp lt, %initial, %limit : i32
+  %result = scf.for %outer = [%begin to %count step %step](%carry = %initial : i32) -> (i32) {
+    %inner_result = scf.while(%before = %carry : i32) -> (i32) {
+      %bound = scf.select %invariant, %before, %limit : i32
+      %condition = test.cmp lt, %before, %bound : i32
+      scf.condition %condition, %before : i1, i32
+    } do(%body: i32) {
+      %next = test.addi %body, %initial : i32
+      scf.yield %next : i32
+    }
+    scf.yield %inner_result : i32
+  }
+  func.return %result : i32
 }

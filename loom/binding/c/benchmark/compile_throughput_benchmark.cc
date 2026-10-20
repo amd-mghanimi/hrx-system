@@ -59,15 +59,15 @@ static iree_status_t CreateTextSourceFromViews(loomc_string_view_t identifier,
                                                SourcePtr* out_source) {
   out_source->reset();
   loomc_source_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.format=*/LOOMC_SOURCE_FORMAT_TEXT,
-      /*.identifier=*/identifier,
-      /*.contents=*/contents,
-      /*.storage=*/LOOMC_SOURCE_STORAGE_COPY,
-      /*.release=*/nullptr,
-      /*.release_user_data=*/nullptr,
+      .type = LOOMC_STRUCTURE_TYPE_SOURCE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .format = LOOMC_SOURCE_FORMAT_TEXT,
+      .identifier = identifier,
+      .contents = contents,
+      .storage = LOOMC_SOURCE_STORAGE_COPY,
+      .release = nullptr,
+      .release_user_data = nullptr,
   };
   loomc_source_t* source = nullptr;
   IREE_RETURN_IF_ERROR(
@@ -154,12 +154,12 @@ iree_status_t ReadArtifactPrefix(const loomc_artifact_t* artifact,
     return iree_ok_status();
   }
   ArtifactPrefixCopy copy = {
-      /*.prefix=*/prefix,
-      /*.offset=*/0,
+      .prefix = prefix,
+      .offset = 0,
   };
   const loomc_byte_sequence_callback_t callback = {
-      /*.fn=*/CopyArtifactPrefixSegment,
-      /*.user_data=*/&copy,
+      .fn = CopyArtifactPrefixSegment,
+      .user_data = &copy,
   };
   IREE_RETURN_IF_ERROR(to_iree_status(
       loomc_byte_sequence_enumerate(artifact->contents, callback)));
@@ -192,10 +192,10 @@ iree_status_t CreateWorkspace(iree_host_size_t block_size,
                               WorkspacePtr* out_workspace) {
   out_workspace->reset();
   const loomc_workspace_options_t options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_WORKSPACE_OPTIONS,
-      /*.structure_size=*/sizeof(options),
-      /*.next=*/nullptr,
-      /*.block_size=*/block_size,
+      .type = LOOMC_STRUCTURE_TYPE_WORKSPACE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .block_size = block_size,
   };
   loomc_workspace_t* workspace = nullptr;
   IREE_RETURN_IF_ERROR(to_iree_status(
@@ -247,9 +247,9 @@ iree_status_t AddSourceToIndex(loomc_link_index_builder_t* builder,
                                const std::string& provider_name,
                                loomc_link_provider_role_t role) {
   loomc_link_index_source_options_t options = {
-      /*.provider_name=*/
-      loomc_make_string_view(provider_name.data(), provider_name.size()),
-      /*.role=*/role,
+      .provider_name =
+          loomc_make_string_view(provider_name.data(), provider_name.size()),
+      .role = role,
   };
   return to_iree_status(loomc_link_index_builder_add_source(
       builder, source, &options, /*out_slot=*/nullptr));
@@ -271,6 +271,35 @@ iree_status_t PreparePassProgram(loomc_context_t* context,
   IREE_RETURN_IF_ERROR(
       RequireSucceededResult(result.get(), "pass program preparation"));
   out_pass_program->reset(pass_program_ptr.release());
+  return iree_ok_status();
+}
+
+static iree_status_t PrepareTargetPassProgram(
+    loomc_context_t* context, loomc_target_pipeline_kind_t kind,
+    loomc_string_view_t identifier,
+    loomc_target_control_flow_lowering_t control_flow_lowering,
+    PassProgramPtr* out_pass_program) {
+  out_pass_program->reset();
+  const loomc_target_pipeline_options_t options = {
+      .type = LOOMC_STRUCTURE_TYPE_TARGET_PIPELINE_OPTIONS,
+      .structure_size = sizeof(options),
+      .next = nullptr,
+      .identifier = identifier,
+      .kind = kind,
+      .control_flow_lowering = control_flow_lowering,
+      .source_to_low_max_errors = 20,
+  };
+  loomc_pass_program_t* raw_pass_program = nullptr;
+  loomc_result_t* raw_result = nullptr;
+  iree_status_t status =
+      to_iree_status(loomc_pass_program_create_from_target_pipeline(
+          context, &options, loom_allocator(), &raw_pass_program, &raw_result));
+  PassProgramPtr pass_program(raw_pass_program);
+  ResultPtr result(raw_result);
+  IREE_RETURN_IF_ERROR(status);
+  IREE_RETURN_IF_ERROR(
+      RequireSucceededResult(result.get(), "target pipeline preparation"));
+  out_pass_program->reset(pass_program.release());
   return iree_ok_status();
 }
 
@@ -401,21 +430,22 @@ TargetCompileScenario::TargetCompileScenario(
 
 iree_status_t TargetCompileScenario::SetUpTarget(
     iree_host_size_t worker_count, TargetEnvironmentPtr target_environment,
-    TargetProfilePtr target_profile, loomc_string_view_t pipeline_identifier,
+    TargetProfilePtr target_profile, loomc_target_pipeline_kind_t pipeline_kind,
+    loomc_string_view_t pipeline_identifier,
     loomc_target_control_flow_lowering_t control_flow_lowering) {
   target_environment_ = std::move(target_environment);
   target_profile_ = std::move(target_profile);
 
   loomc_context_target_options_t target_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_CONTEXT_TARGET_OPTIONS,
-      /*.structure_size=*/sizeof(target_options),
-      /*.next=*/nullptr,
-      /*.target_environment=*/target_environment_.get(),
+      .type = LOOMC_STRUCTURE_TYPE_CONTEXT_TARGET_OPTIONS,
+      .structure_size = sizeof(target_options),
+      .next = nullptr,
+      .target_environment = target_environment_.get(),
   };
   loomc_context_options_t context_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_CONTEXT_OPTIONS,
-      /*.structure_size=*/sizeof(context_options),
-      /*.next=*/&target_options,
+      .type = LOOMC_STRUCTURE_TYPE_CONTEXT_OPTIONS,
+      .structure_size = sizeof(context_options),
+      .next = &target_options,
   };
   loomc_context_t* raw_context = nullptr;
   IREE_RETURN_IF_ERROR(to_iree_status(
@@ -427,55 +457,37 @@ iree_status_t TargetCompileScenario::SetUpTarget(
       context_.get(), /*options=*/nullptr, loom_allocator(), &raw_compiler)));
   compiler_.reset(raw_compiler);
 
-  loomc_target_pipeline_options_t pipeline_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_TARGET_PIPELINE_OPTIONS,
-      /*.structure_size=*/sizeof(pipeline_options),
-      /*.next=*/nullptr,
-      /*.identifier=*/pipeline_identifier,
-      /*.kind=*/LOOMC_TARGET_PIPELINE_KIND_PREPARED_LOW,
-      /*.control_flow_lowering=*/control_flow_lowering,
-      /*.source_to_low_max_errors=*/20,
-  };
-  loomc_pass_program_t* raw_pass_program = nullptr;
-  loomc_result_t* raw_result = nullptr;
-  iree_status_t status =
-      to_iree_status(loomc_pass_program_create_from_target_pipeline(
-          context_.get(), &pipeline_options, loom_allocator(),
-          &raw_pass_program, &raw_result));
-  PassProgramPtr pass_program(raw_pass_program);
-  ResultPtr result(raw_result);
-  IREE_RETURN_IF_ERROR(status);
-  IREE_RETURN_IF_ERROR(
-      RequireSucceededResult(result.get(), "target pipeline preparation"));
-  pass_program_.reset(pass_program.release());
+  IREE_RETURN_IF_ERROR(PrepareTargetPassProgram(
+      context_.get(), pipeline_kind, pipeline_identifier, control_flow_lowering,
+      &pass_program_));
 
   return SetUpWorkerSlots(worker_count);
 }
 
-iree_status_t TargetCompileScenario::CompileModuleToPreparedLow(
+iree_status_t TargetCompileScenario::CompileModuleToTargetBoundary(
     WorkspacePtr& workspace, ModulePtr& module,
     loomc_string_view_t function_symbol, loomc_string_view_t module_name,
     const loomc_module_t* config_module,
     loomc_config_policy_flags_t config_flags) {
   const loomc_target_specialization_t specialization = {
-      /*.function_symbol=*/function_symbol,
-      /*.target_profile=*/target_profile_.get(),
+      .function_symbol = function_symbol,
+      .target_profile = target_profile_.get(),
   };
   loomc_target_specialization_options_t target_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
-      /*.structure_size=*/sizeof(target_options),
-      /*.next=*/nullptr,
-      /*.specializations=*/&specialization,
-      /*.specialization_count=*/1,
+      .type = LOOMC_STRUCTURE_TYPE_TARGET_SPECIALIZATION_OPTIONS,
+      .structure_size = sizeof(target_options),
+      .next = nullptr,
+      .specializations = &specialization,
+      .specialization_count = 1,
   };
   loomc_compile_options_t compile_options = {
-      /*.type=*/LOOMC_STRUCTURE_TYPE_COMPILE_OPTIONS,
-      /*.structure_size=*/sizeof(compile_options),
-      /*.next=*/&target_options,
-      /*.module_name=*/module_name,
-      /*.artifact_flags=*/0,
-      /*.config_flags=*/config_flags,
-      /*.config_module=*/config_module,
+      .type = LOOMC_STRUCTURE_TYPE_COMPILE_OPTIONS,
+      .structure_size = sizeof(compile_options),
+      .next = &target_options,
+      .module_name = module_name,
+      .artifact_flags = 0,
+      .config_flags = config_flags,
+      .config_module = config_module,
   };
 
   loomc_result_t* raw_result = nullptr;
