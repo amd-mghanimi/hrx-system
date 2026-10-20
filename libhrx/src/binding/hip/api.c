@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #ifdef __linux__
+#include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #endif
@@ -11391,11 +11392,268 @@ HIPAPI hipError_t hipGetChannelDesc(hipChannelFormatDesc* desc,
 }
 
 //===----------------------------------------------------------------------===//
-// IPC Memory Operations (not supported)
+// IPC Memory Operations
 //===----------------------------------------------------------------------===//
+//
+// Minimal ROCr-backed IPC memory: the exporter shares the whole ROCr
+// allocation containing the pointer's HIP allocation, and the importer
+// attaches it for every visible GPU agent and returns that HIP allocation's
+// base inside the mapping (as CUDA and CLR do). ROCr is
+// already loaded by the AMDGPU HAL driver; its IPC entry points are resolved
+// from that instance. Imported pointers are raw device addresses: kernels can
+// use them, but they are not HAL buffers. Event IPC stays unsupported.
+//
+// Handle layout (native ROCm): bytes 0-31 ROCr token, 32-39 allocation size,
+// 40-47 offset of the HIP allocation, 48-51 exporter pid, 52-55 exporter
+// device ordinal, 56-63 zero.
 
-// Gets an IPC memory handle for a device allocation.
-// Not supported - returns hipErrorNotSupported.
+#if defined(__linux__)
+
+typedef struct {
+  uint32_t handle[8];
+} iree_hip_hsa_ipc_token_t;
+typedef struct {
+  uint64_t handle;
+} iree_hip_hsa_agent_t;
+typedef struct {
+  uint32_t size;
+  uint32_t type;
+  void* agent_base_address;
+  void* host_base_address;
+  size_t size_in_bytes;
+  void* user_data;
+  iree_hip_hsa_agent_t agent_owner;
+  uint32_t global_flags;
+  bool registered;
+} iree_hip_hsa_pointer_info_t;
+
+enum {
+  IREE_HIP_HSA_STATUS_SUCCESS = 0,
+  IREE_HIP_HSA_AGENT_INFO_DEVICE = 17,
+  IREE_HIP_HSA_DEVICE_TYPE_GPU = 1,
+  IREE_HIP_HSA_EXT_POINTER_TYPE_HSA = 1,
+  IREE_HIP_IPC_MAX_AGENTS = 64,
+};
+
+typedef struct {
+  int (*pointer_info)(const void*, iree_hip_hsa_pointer_info_t*,
+                      void* (*)(size_t), uint32_t*, iree_hip_hsa_agent_t**);
+  int (*ipc_create)(void*, size_t, iree_hip_hsa_ipc_token_t*);
+  int (*ipc_attach)(const iree_hip_hsa_ipc_token_t*, size_t, uint32_t,
+                    const iree_hip_hsa_agent_t*, void**);
+  int (*ipc_detach)(void*);
+  int (*iterate_agents)(int (*)(iree_hip_hsa_agent_t, void*), void*);
+  int (*agent_get_info)(iree_hip_hsa_agent_t, int, void*);
+  uint32_t gpu_agent_count;
+  iree_hip_hsa_agent_t gpu_agents[IREE_HIP_IPC_MAX_AGENTS];
+  bool loaded;
+} iree_hip_ipc_rocr_t;
+
+typedef struct {
+  iree_hip_hsa_ipc_token_t token;
+  uint64_t allocation_size;
+  uint64_t offset;
+  uint32_t pid;
+  int32_t device;
+  uint64_t reserved;
+} iree_hip_ipc_mem_wire_t;
+_Static_assert(sizeof(iree_hip_ipc_mem_wire_t) == 64,
+               "IPC wire layout must fill hipIpcMemHandle_t");
+
+// hipIpcMemLazyEnablePeerAccess; the binding header does not define it.
+#define IREE_HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS 0x1u
+
+typedef struct {
+  void* user_ptr;
+  void* mapped_base;
+} iree_hip_ipc_import_t;
+
+static iree_hip_ipc_rocr_t iree_hip_ipc_rocr;
+static pthread_once_t iree_hip_ipc_rocr_once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t iree_hip_ipc_imports_mutex = PTHREAD_MUTEX_INITIALIZER;
+static iree_hip_ipc_import_t* iree_hip_ipc_imports = NULL;
+static size_t iree_hip_ipc_import_count = 0;
+static size_t iree_hip_ipc_import_capacity = 0;
+
+static int iree_hip_ipc_collect_gpu_agent(iree_hip_hsa_agent_t agent,
+                                          void* user_data) {
+  iree_hip_ipc_rocr_t* rocr = (iree_hip_ipc_rocr_t*)user_data;
+  int device_type = 0;
+  if (rocr->agent_get_info(agent, IREE_HIP_HSA_AGENT_INFO_DEVICE,
+                           &device_type) == IREE_HIP_HSA_STATUS_SUCCESS &&
+      device_type == IREE_HIP_HSA_DEVICE_TYPE_GPU &&
+      rocr->gpu_agent_count < IREE_HIP_IPC_MAX_AGENTS) {
+    rocr->gpu_agents[rocr->gpu_agent_count++] = agent;
+  }
+  return IREE_HIP_HSA_STATUS_SUCCESS;
+}
+
+static void iree_hip_ipc_rocr_load(void) {
+  void* library = dlopen("libhsa-runtime64.so.1", RTLD_NOW | RTLD_NOLOAD);
+  if (!library) return;
+  iree_hip_ipc_rocr_t* rocr = &iree_hip_ipc_rocr;
+  *(void**)&rocr->pointer_info = dlsym(library, "hsa_amd_pointer_info");
+  *(void**)&rocr->ipc_create = dlsym(library, "hsa_amd_ipc_memory_create");
+  *(void**)&rocr->ipc_attach = dlsym(library, "hsa_amd_ipc_memory_attach");
+  *(void**)&rocr->ipc_detach = dlsym(library, "hsa_amd_ipc_memory_detach");
+  *(void**)&rocr->iterate_agents = dlsym(library, "hsa_iterate_agents");
+  *(void**)&rocr->agent_get_info = dlsym(library, "hsa_agent_get_info");
+  if (!rocr->pointer_info || !rocr->ipc_create || !rocr->ipc_attach ||
+      !rocr->ipc_detach || !rocr->iterate_agents || !rocr->agent_get_info) {
+    return;
+  }
+  rocr->iterate_agents(iree_hip_ipc_collect_gpu_agent, rocr);
+  rocr->loaded = rocr->gpu_agent_count > 0;
+}
+
+// Initializes the runtime (which loads ROCr) and resolves the IPC entry points.
+static hipError_t iree_hip_ipc_rocr_get(const iree_hip_ipc_rocr_t** out_rocr) {
+  iree_hal_streaming_context_t* context = NULL;
+  hipError_t result = iree_hip_ensure_context(&context);
+  if (result != hipSuccess) return result;
+  pthread_once(&iree_hip_ipc_rocr_once, iree_hip_ipc_rocr_load);
+  if (!iree_hip_ipc_rocr.loaded) return hipErrorNotSupported;
+  *out_rocr = &iree_hip_ipc_rocr;
+  return hipSuccess;
+}
+
+// Gets an IPC memory handle for the device allocation containing devPtr.
+HIPAPI hipError_t hipIpcGetMemHandle(hipIpcMemHandle_t* handle, void* devPtr) {
+  HIP_API_BEGIN();
+  if (!handle || !devPtr) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  const iree_hip_ipc_rocr_t* rocr = NULL;
+  hipError_t result = iree_hip_ipc_rocr_get(&rocr);
+  if (result != hipSuccess) {
+    HIP_RETURN_ERROR(result);
+  }
+  iree_hip_hsa_pointer_info_t info;
+  memset(&info, 0, sizeof(info));
+  info.size = sizeof(info);
+  if (rocr->pointer_info(devPtr, &info, NULL, NULL, NULL) !=
+          IREE_HIP_HSA_STATUS_SUCCESS ||
+      info.type != IREE_HIP_HSA_EXT_POINTER_TYPE_HSA ||
+      !info.agent_base_address || info.size_in_bytes == 0) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  // As on CUDA and CLR the handle names the HIP allocation containing devPtr,
+  // and the importer gets that allocation's base. HIP allocations can be
+  // suballocated from a larger ROCr allocation, hence the separate offset.
+  void* allocation_base = devPtr;
+  size_t allocation_size = 0;
+  if (hipMemGetAddressRange(&allocation_base, &allocation_size, devPtr) !=
+      hipSuccess) {
+    (void)hipGetLastError();
+    allocation_base = devPtr;
+  }
+  const uintptr_t base = (uintptr_t)info.agent_base_address;
+  const uintptr_t ptr = (uintptr_t)allocation_base;
+  if (ptr < base || ptr - base >= info.size_in_bytes) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  iree_hip_ipc_mem_wire_t wire;
+  memset(&wire, 0, sizeof(wire));
+  if (rocr->ipc_create(info.agent_base_address, info.size_in_bytes,
+                       &wire.token) != IREE_HIP_HSA_STATUS_SUCCESS) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  wire.allocation_size = info.size_in_bytes;
+  wire.offset = ptr - base;
+  wire.pid = (uint32_t)getpid();
+  int device = 0;
+  (void)hipGetDevice(&device);
+  wire.device = device;
+  memcpy(handle, &wire, sizeof(wire));
+  HIP_RETURN_ERROR(hipSuccess);
+}
+
+// Opens an IPC memory handle exported from another process.
+HIPAPI hipError_t hipIpcOpenMemHandle(void** devPtr, hipIpcMemHandle_t handle,
+                                      unsigned int flags) {
+  HIP_API_BEGIN();
+  if (!devPtr || (flags & ~IREE_HIP_IPC_MEM_LAZY_ENABLE_PEER_ACCESS) != 0) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  *devPtr = NULL;
+  const iree_hip_ipc_rocr_t* rocr = NULL;
+  hipError_t result = iree_hip_ipc_rocr_get(&rocr);
+  if (result != hipSuccess) {
+    HIP_RETURN_ERROR(result);
+  }
+  iree_hip_ipc_mem_wire_t wire;
+  memcpy(&wire, &handle, sizeof(wire));
+  if (wire.allocation_size == 0 || wire.offset >= wire.allocation_size) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  if (wire.pid == (uint32_t)getpid()) {
+    HIP_RETURN_ERROR(hipErrorInvalidContext);
+  }
+  void* mapped = NULL;
+  if (rocr->ipc_attach(&wire.token, (size_t)wire.allocation_size,
+                       rocr->gpu_agent_count, rocr->gpu_agents,
+                       &mapped) != IREE_HIP_HSA_STATUS_SUCCESS ||
+      !mapped) {
+    HIP_RETURN_ERROR(hipErrorInvalidHandle);
+  }
+  void* user_ptr = (uint8_t*)mapped + wire.offset;
+  pthread_mutex_lock(&iree_hip_ipc_imports_mutex);
+  if (iree_hip_ipc_import_count == iree_hip_ipc_import_capacity) {
+    size_t capacity =
+        iree_hip_ipc_import_capacity ? iree_hip_ipc_import_capacity * 2 : 16;
+    iree_hip_ipc_import_t* grown = (iree_hip_ipc_import_t*)realloc(
+        iree_hip_ipc_imports, capacity * sizeof(*grown));
+    if (!grown) {
+      pthread_mutex_unlock(&iree_hip_ipc_imports_mutex);
+      rocr->ipc_detach(mapped);
+      HIP_RETURN_ERROR(hipErrorOutOfMemory);
+    }
+    iree_hip_ipc_imports = grown;
+    iree_hip_ipc_import_capacity = capacity;
+  }
+  iree_hip_ipc_imports[iree_hip_ipc_import_count++] =
+      (iree_hip_ipc_import_t){user_ptr, mapped};
+  pthread_mutex_unlock(&iree_hip_ipc_imports_mutex);
+  *devPtr = user_ptr;
+  HIP_RETURN_ERROR(hipSuccess);
+}
+
+// Closes an IPC memory handle opened by hipIpcOpenMemHandle.
+HIPAPI hipError_t hipIpcCloseMemHandle(void* devPtr) {
+  HIP_API_BEGIN();
+  if (!devPtr) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  const iree_hip_ipc_rocr_t* rocr = NULL;
+  hipError_t result = iree_hip_ipc_rocr_get(&rocr);
+  if (result != hipSuccess) {
+    HIP_RETURN_ERROR(result);
+  }
+  void* mapped = NULL;
+  pthread_mutex_lock(&iree_hip_ipc_imports_mutex);
+  for (size_t i = 0; i < iree_hip_ipc_import_count; ++i) {
+    if (iree_hip_ipc_imports[i].user_ptr == devPtr) {
+      mapped = iree_hip_ipc_imports[i].mapped_base;
+      iree_hip_ipc_imports[i] =
+          iree_hip_ipc_imports[--iree_hip_ipc_import_count];
+      break;
+    }
+  }
+  pthread_mutex_unlock(&iree_hip_ipc_imports_mutex);
+  if (!mapped) {
+    HIP_RETURN_ERROR(hipErrorInvalidValue);
+  }
+  // Work that reads the mapping may still be in flight.
+  result = hipDeviceSynchronize();
+  if (rocr->ipc_detach(mapped) != IREE_HIP_HSA_STATUS_SUCCESS &&
+      result == hipSuccess) {
+    result = hipErrorInvalidValue;
+  }
+  HIP_RETURN_ERROR(result);
+}
+
+#else
+
 HIPAPI hipError_t hipIpcGetMemHandle(hipIpcMemHandle_t* handle, void* devPtr) {
   HIP_API_BEGIN();
   (void)handle;
@@ -11403,8 +11661,6 @@ HIPAPI hipError_t hipIpcGetMemHandle(hipIpcMemHandle_t* handle, void* devPtr) {
   HIP_RETURN_ERROR(hipErrorNotSupported);
 }
 
-// Opens an IPC memory handle exported from another process.
-// Not supported - returns hipErrorNotSupported.
 HIPAPI hipError_t hipIpcOpenMemHandle(void** devPtr, hipIpcMemHandle_t handle,
                                       unsigned int flags) {
   HIP_API_BEGIN();
@@ -11414,13 +11670,13 @@ HIPAPI hipError_t hipIpcOpenMemHandle(void** devPtr, hipIpcMemHandle_t handle,
   HIP_RETURN_ERROR(hipErrorNotSupported);
 }
 
-// Closes an IPC memory handle.
-// Not supported - returns hipErrorNotSupported.
 HIPAPI hipError_t hipIpcCloseMemHandle(void* devPtr) {
   HIP_API_BEGIN();
   (void)devPtr;
   HIP_RETURN_ERROR(hipErrorNotSupported);
 }
+
+#endif  // __linux__
 
 // Gets an IPC event handle for an event.
 // Not supported - returns hipErrorNotSupported.
