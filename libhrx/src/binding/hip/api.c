@@ -8097,6 +8097,38 @@ HIPAPI hipError_t hipMemcpy2DAsync(void* dst, size_t dpitch, const void* src,
       kind == hipMemcpyDeviceToHost &&
       iree_hip_memcpy_destination_is_pageable(context, dst, dst_span);
 
+  // Equal pitches of `width` make the rectangle one contiguous span. One
+  // linear copy is the same bytes as the row loop, without a blit per row.
+  if (dpitch == width && spitch == width &&
+      (kind == hipMemcpyHostToDevice || kind == hipMemcpyDeviceToHost ||
+       kind == hipMemcpyDeviceToDevice)) {
+    iree_status_t linear_status = iree_ok_status();
+    switch (kind) {
+      case hipMemcpyHostToDevice:
+        linear_status = iree_hal_streaming_memcpy_host_to_device(
+            context, (iree_hal_streaming_deviceptr_t)dst, src, dst_span,
+            stream_obj);
+        break;
+      case hipMemcpyDeviceToHost:
+        linear_status = iree_hal_streaming_memcpy_device_to_host(
+            context, dst, (iree_hal_streaming_deviceptr_t)src, dst_span,
+            stream_obj);
+        break;
+      default:
+        linear_status = iree_hal_streaming_memcpy_device_to_device(
+            context, (iree_hal_streaming_deviceptr_t)dst,
+            (iree_hal_streaming_deviceptr_t)src, dst_span, stream_obj);
+        break;
+    }
+    if (iree_status_is_ok(linear_status) && pageable_d2h) {
+      linear_status = iree_hal_streaming_stream_synchronize(stream_obj);
+    }
+    hipError_t result = iree_status_to_hip_result(linear_status);
+    iree_hip_resolved_stream_release(&resolved_stream);
+    IREE_TRACE_ZONE_END(z0);
+    HIP_RETURN_ERROR(result);
+  }
+
   if (kind == hipMemcpyDeviceToHost) {
     iree_status_t packed_status = iree_hal_streaming_memcpy_device_to_host_2d(
         context, dst, dpitch, (iree_hal_streaming_deviceptr_t)src, spitch,
