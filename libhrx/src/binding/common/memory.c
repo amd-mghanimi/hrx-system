@@ -2766,6 +2766,9 @@ iree_status_t iree_hal_streaming_memory_memset(
   if (iree_status_is_ok(status)) {
     status = iree_hal_streaming_command_buffer_barrier(stream->command_buffer);
   }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_streaming_stream_flush_recorded_locked(stream);
+  }
   iree_slim_mutex_unlock(&stream->mutex);
   iree_hal_streaming_context_release(owner_context);
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, status);
@@ -2823,6 +2826,9 @@ iree_status_t iree_hal_streaming_memory_memcpy(
   if (iree_status_is_ok(status)) {
     status = iree_hal_streaming_command_buffer_barrier(stream->command_buffer);
   }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_streaming_stream_flush_recorded_locked(stream);
+  }
   iree_slim_mutex_unlock(&stream->mutex);
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, status);
 
@@ -2879,6 +2885,9 @@ iree_status_t iree_hal_streaming_memcpy_peer(
   }
   if (iree_status_is_ok(status)) {
     status = iree_hal_streaming_command_buffer_barrier(stream->command_buffer);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_streaming_stream_flush_recorded_locked(stream);
   }
   iree_slim_mutex_unlock(&stream->mutex);
   IREE_RETURN_AND_END_ZONE_IF_ERROR(z0, status);
@@ -3233,6 +3242,9 @@ iree_status_t iree_hal_streaming_memcpy_host_to_device_2d(
       status =
           iree_hal_streaming_command_buffer_barrier(stream->command_buffer);
     }
+    if (iree_status_is_ok(status)) {
+      status = iree_hal_streaming_stream_flush_recorded_locked(stream);
+    }
     iree_slim_mutex_unlock(&stream->mutex);
   }
 
@@ -3342,6 +3354,9 @@ iree_status_t iree_hal_streaming_memcpy_host_to_device(
       }
       iree_status_t queue_status = iree_hal_streaming_enqueue_buffer_copy(
           stream, src_ref, dst_ref, size);
+      if (iree_status_is_ok(queue_status)) {
+        queue_status = iree_hal_streaming_stream_flush_recorded(stream);
+      }
       IREE_TRACE_ZONE_END(z0);
       return queue_status;
     }
@@ -3349,6 +3364,9 @@ iree_status_t iree_hal_streaming_memcpy_host_to_device(
     if (size <= staging_threshold) {
       iree_status_t queue_status =
           iree_hal_streaming_enqueue_host_update(stream, src, dst_ref, size);
+      if (iree_status_is_ok(queue_status)) {
+        queue_status = iree_hal_streaming_stream_flush_recorded(stream);
+      }
       IREE_TRACE_ZONE_END(z0);
       return queue_status;
     }
@@ -3483,6 +3501,9 @@ iree_status_t iree_hal_streaming_memcpy_device_to_host(
       if (iree_status_is_ok(status)) {
         status = iree_hal_streaming_enqueue_buffer_copy(stream, src_ref,
                                                         dst_ref, size);
+      }
+      if (iree_status_is_ok(status)) {
+        status = iree_hal_streaming_stream_flush_recorded(stream);
       }
       IREE_TRACE_ZONE_END(z0);
       return status;
@@ -3775,6 +3796,9 @@ iree_status_t iree_hal_streaming_memcpy_device_to_device_2d(
     if (iree_status_is_ok(status)) {
       status =
           iree_hal_streaming_command_buffer_barrier(stream->command_buffer);
+    }
+    if (iree_status_is_ok(status)) {
+      status = iree_hal_streaming_stream_flush_recorded_locked(stream);
     }
     iree_slim_mutex_unlock(&stream->mutex);
   }

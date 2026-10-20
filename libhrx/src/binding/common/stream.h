@@ -22,6 +22,7 @@ typedef struct iree_hal_streaming_graph_node_t iree_hal_streaming_graph_node_t;
 typedef struct iree_hal_streaming_symbol_t iree_hal_streaming_symbol_t;
 typedef struct iree_hal_streaming_value_flush_timer_t
     iree_hal_streaming_value_flush_timer_t;
+typedef struct iree_hal_streaming_idle_flush_t iree_hal_streaming_idle_flush_t;
 
 typedef enum iree_hal_streaming_stream_flag_bits_e {
   IREE_HAL_STREAMING_STREAM_FLAG_NONE = 0ull,
@@ -92,7 +93,14 @@ typedef struct iree_hal_streaming_stream_t {
   // Protected by |mutex|. The timer owns a stream reference until its callback
   // clears this field, so stream destruction cannot race the callback.
   iree_hal_streaming_value_flush_timer_t* value_flush_timer;
-  // Number of kernel launches recorded in |command_buffer|.
+  // Outstanding flush of work recorded while earlier submissions were still
+  // executing, or NULL. It fires when the timeline reaches the last accepted
+  // submission so recorded work does not wait for a synchronization point
+  // after the device runs out of work. Protected by |mutex|. It does not keep
+  // the stream alive; stream destruction detaches it.
+  iree_hal_streaming_idle_flush_t* idle_flush;
+  // Number of kernel launches and stream-ordered memory operations recorded in
+  // |command_buffer|.
   uint32_t pending_launch_count;
 
   // Semaphore chain for synchronization.
@@ -288,6 +296,28 @@ iree_hal_streaming_stream_select_cooperative_queue_locked(
 // Synchronization: caller must hold |stream->mutex|.
 IREE_MUST_USE_RESULT iree_status_t
 iree_hal_streaming_stream_flush_locked(iree_hal_streaming_stream_t* stream);
+
+// Counts one operation just appended to the stream's command buffer and returns
+// true when the command buffer should be submitted now instead of waiting for
+// the next synchronization point: when every earlier submission has completed
+// (the device would otherwise idle), or when HRX_FLUSH_INTERVAL operations are
+// pending. Otherwise arranges for the recorded work to be submitted once the
+// earlier submissions complete.
+// Synchronization: caller must hold |stream->mutex|.
+bool iree_hal_streaming_stream_should_flush_recorded_locked(
+    iree_hal_streaming_stream_t* stream);
+
+// Submits the stream's pending command buffer when
+// iree_hal_streaming_stream_should_flush_recorded_locked says so.
+// Synchronization: caller must hold |stream->mutex|.
+IREE_MUST_USE_RESULT iree_status_t
+iree_hal_streaming_stream_flush_recorded_locked(
+    iree_hal_streaming_stream_t* stream);
+
+// Locking variant of iree_hal_streaming_stream_flush_recorded_locked.
+// Synchronization: acquires |stream->mutex|.
+IREE_MUST_USE_RESULT iree_status_t
+iree_hal_streaming_stream_flush_recorded(iree_hal_streaming_stream_t* stream);
 
 // Retains the stream's context for one operation. Returns false after context
 // teardown has detached the stream. The caller releases |*out_context|.
