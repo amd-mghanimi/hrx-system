@@ -12,6 +12,7 @@
 #include <cstring>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "common/context.h"
 #include "common/device.h"
@@ -118,14 +119,41 @@ TEST(GraphTest, AddedDependenciesConstrainDetectedWorkstreams) {
   iree_arena_block_pool_deinitialize(&block_pool);
 }
 
+// Appends edges that chain nodes [|first|, |last|] in order.
+template <size_t NodeCount>
+void AppendChain(const std::array<GraphNodeStorage, NodeCount>& nodes,
+                 size_t first, size_t last,
+                 std::vector<iree_hal_streaming_graph_edge_t>* edges) {
+  for (size_t i = first; i < last; ++i) {
+    edges->push_back({nullptr, nodes[i].get(), nodes[i + 1].get()});
+  }
+}
+
+// Links |edges| into the list the scheduler takes and returns its head.
+iree_hal_streaming_graph_edge_t* LinkEdges(
+    std::vector<iree_hal_streaming_graph_edge_t>* edges) {
+  for (size_t i = 0; i + 1 < edges->size(); ++i) {
+    (*edges)[i].next = &(*edges)[i + 1];
+  }
+  return edges->empty() ? nullptr : edges->data();
+}
+
 TEST(GraphTest, FinalMultiStreamPartitionGetsJoinBarrier) {
-  constexpr size_t kNodeCount = 64;
+  // Four independent chains, each long enough to keep its own workstream.
+  constexpr size_t kChainLength = 16;
+  constexpr size_t kChainCount = 4;
+  constexpr size_t kNodeCount = kChainLength * kChainCount;
   std::array<GraphNodeStorage, kNodeCount> node_storage;
   GraphNodeBlockStorage<kNodeCount> node_block(node_storage);
   for (uint32_t i = 0; i < kNodeCount; ++i) {
     iree_hal_streaming_graph_node_t* node = node_storage[i].get();
     node->node_index = i;
     node->type = IREE_HAL_STREAMING_GRAPH_NODE_TYPE_KERNEL;
+  }
+  std::vector<iree_hal_streaming_graph_edge_t> edges;
+  for (size_t c = 0; c < kChainCount; ++c) {
+    AppendChain(node_storage, c * kChainLength, (c + 1) * kChainLength - 1,
+                &edges);
   }
 
   iree_arena_block_pool_t block_pool;
@@ -135,15 +163,14 @@ TEST(GraphTest, FinalMultiStreamPartitionGetsJoinBarrier) {
   iree_hal_streaming_graph_schedule_t schedule = {};
   IREE_ASSERT_OK(iree_hal_streaming_graph_schedule_nodes(
       node_block.get(), kNodeCount, /*disabled_nodes=*/nullptr,
-      /*disabled_node_count=*/0, /*additional_edges=*/nullptr, &arena,
-      &schedule));
+      /*disabled_node_count=*/0, LinkEdges(&edges), &arena, &schedule));
 
-  // Independent nodes spread over several streams; only the last block of a
-  // launch signals its external semaphores, so a node-less barrier joins them.
+  // Only the last block of a launch signals its external semaphores, so a
+  // node-less barrier joins the workstreams.
   ASSERT_EQ(schedule.partition_count, 2u);
   const iree_hal_streaming_graph_partition_t& work = schedule.partitions[0];
   EXPECT_EQ(work.type, IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_RECORDABLE);
-  EXPECT_GT(work.stream_count, 1u);
+  EXPECT_EQ(work.stream_count, kChainCount);
   const iree_hal_streaming_graph_partition_t& join = schedule.partitions[1];
   EXPECT_EQ(join.type, IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_EMPTY);
   EXPECT_EQ(join.count, 0u);
@@ -156,7 +183,71 @@ TEST(GraphTest, FinalMultiStreamPartitionGetsJoinBarrier) {
 }
 
 TEST(GraphTest, ForkAndJoinSplitPartitionsIntoWorkstreams) {
-  // Capture order of a fork after K2 and a join before K7:
+  // A side stream forks after K2 and joins before K7, with branches long
+  // enough to keep their own workstreams:
+  //   K1 -> K2 -> K[0..15] -> K7 -> K8
+  //          \-> S[0..15] -/
+  constexpr size_t kBranch = 16;
+  enum : size_t { K1, K2, kSideFirst };
+  constexpr size_t kMainFirst = kSideFirst + kBranch;
+  constexpr size_t K7 = kMainFirst + kBranch;
+  constexpr size_t K8 = K7 + 1;
+  constexpr size_t kNodeCount = K8 + 1;
+  std::array<GraphNodeStorage, kNodeCount> node_storage;
+  GraphNodeBlockStorage<kNodeCount> node_block(node_storage);
+  for (uint32_t i = 0; i < kNodeCount; ++i) {
+    iree_hal_streaming_graph_node_t* node = node_storage[i].get();
+    node->node_index = i;
+    node->type = IREE_HAL_STREAMING_GRAPH_NODE_TYPE_KERNEL;
+  }
+  std::vector<iree_hal_streaming_graph_edge_t> edges;
+  AppendChain(node_storage, K1, K2, &edges);
+  edges.push_back({nullptr, node_storage[K2].get(),
+                   node_storage[kSideFirst].get()});
+  AppendChain(node_storage, kSideFirst, kSideFirst + kBranch - 1, &edges);
+  edges.push_back({nullptr, node_storage[K2].get(),
+                   node_storage[kMainFirst].get()});
+  AppendChain(node_storage, kMainFirst, kMainFirst + kBranch - 1, &edges);
+  edges.push_back({nullptr, node_storage[kSideFirst + kBranch - 1].get(),
+                   node_storage[K7].get()});
+  edges.push_back({nullptr, node_storage[kMainFirst + kBranch - 1].get(),
+                   node_storage[K7].get()});
+  AppendChain(node_storage, K7, K8, &edges);
+
+  iree_arena_block_pool_t block_pool;
+  iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
+  iree_arena_allocator_t arena;
+  iree_arena_initialize(&block_pool, &arena);
+  iree_hal_streaming_graph_schedule_t schedule = {};
+  IREE_ASSERT_OK(iree_hal_streaming_graph_schedule_nodes(
+      node_block.get(), kNodeCount, /*disabled_nodes=*/nullptr,
+      /*disabled_node_count=*/0, LinkEdges(&edges), &arena, &schedule));
+
+  ASSERT_EQ(schedule.partition_count, 3u);
+  EXPECT_EQ(schedule.partitions[0].count, 2u);
+  EXPECT_EQ(schedule.partitions[0].stream_count, 1u);
+  EXPECT_EQ(schedule.partitions[1].count, 2 * kBranch);
+  EXPECT_EQ(schedule.partitions[1].stream_count, 2u);
+  EXPECT_EQ(schedule.partitions[2].count, 2u);
+  EXPECT_EQ(schedule.partitions[2].stream_count, 1u);
+  EXPECT_EQ(schedule.block_count, 4u);
+
+  auto stream_of = [&](size_t node) {
+    return schedule.sorted_nodes[schedule.node_index_map[node]].stream_id;
+  };
+  for (size_t b = 1; b < kBranch; ++b) {
+    EXPECT_EQ(stream_of(kSideFirst + b), stream_of(kSideFirst));
+    EXPECT_EQ(stream_of(kMainFirst + b), stream_of(kMainFirst));
+  }
+  EXPECT_NE(stream_of(kSideFirst), stream_of(kMainFirst));
+
+  iree_arena_deinitialize(&arena);
+  iree_arena_block_pool_deinitialize(&block_pool);
+}
+
+TEST(GraphTest, SmallForkStaysOnOneStream) {
+  // A short side branch costs more in partition boundaries than it can
+  // overlap, so the whole graph records as one single-stream partition:
   //   K1 -> K2 -> K3 -> K4 -> K7 -> K8
   //          \-> S1 -> S2 -> S3 -/
   enum { K1, K2, S1, S2, S3, K3, K4, K7, K8, kNodeCount };
@@ -167,23 +258,17 @@ TEST(GraphTest, ForkAndJoinSplitPartitionsIntoWorkstreams) {
     node->node_index = i;
     node->type = IREE_HAL_STREAMING_GRAPH_NODE_TYPE_KERNEL;
   }
-  const std::array<std::pair<int, int>, 9> dependencies = {{
-      {K1, K2},
-      {K2, S1},
-      {S1, S2},
-      {S2, S3},
-      {K2, K3},
-      {K3, K4},
-      {S3, K7},
-      {K4, K7},
-      {K7, K8},
-  }};
-  std::array<iree_hal_streaming_graph_edge_t, dependencies.size()> edges = {};
-  for (size_t i = 0; i < edges.size(); ++i) {
-    edges[i].from = node_storage[dependencies[i].first].get();
-    edges[i].to = node_storage[dependencies[i].second].get();
-    edges[i].next = i + 1 < edges.size() ? &edges[i + 1] : nullptr;
-  }
+  std::vector<iree_hal_streaming_graph_edge_t> edges = {
+      {nullptr, node_storage[K1].get(), node_storage[K2].get()},
+      {nullptr, node_storage[K2].get(), node_storage[S1].get()},
+      {nullptr, node_storage[S1].get(), node_storage[S2].get()},
+      {nullptr, node_storage[S2].get(), node_storage[S3].get()},
+      {nullptr, node_storage[K2].get(), node_storage[K3].get()},
+      {nullptr, node_storage[K3].get(), node_storage[K4].get()},
+      {nullptr, node_storage[S3].get(), node_storage[K7].get()},
+      {nullptr, node_storage[K4].get(), node_storage[K7].get()},
+      {nullptr, node_storage[K7].get(), node_storage[K8].get()},
+  };
 
   iree_arena_block_pool_t block_pool;
   iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
@@ -192,33 +277,27 @@ TEST(GraphTest, ForkAndJoinSplitPartitionsIntoWorkstreams) {
   iree_hal_streaming_graph_schedule_t schedule = {};
   IREE_ASSERT_OK(iree_hal_streaming_graph_schedule_nodes(
       node_block.get(), kNodeCount, /*disabled_nodes=*/nullptr,
-      /*disabled_node_count=*/0, edges.data(), &arena, &schedule));
+      /*disabled_node_count=*/0, LinkEdges(&edges), &arena, &schedule));
 
-  ASSERT_EQ(schedule.partition_count, 3u);
-  EXPECT_EQ(schedule.partitions[0].count, 2u);
+  ASSERT_EQ(schedule.partition_count, 1u);
+  EXPECT_EQ(schedule.partitions[0].count, (uint32_t)kNodeCount);
   EXPECT_EQ(schedule.partitions[0].stream_count, 1u);
-  EXPECT_EQ(schedule.partitions[1].count, 5u);
-  EXPECT_EQ(schedule.partitions[1].stream_count, 2u);
-  EXPECT_EQ(schedule.partitions[2].count, 2u);
-  EXPECT_EQ(schedule.partitions[2].stream_count, 1u);
-  EXPECT_EQ(schedule.block_count, 4u);
-
-  auto stream_of = [&](int node) {
-    return schedule.sorted_nodes[schedule.node_index_map[node]].stream_id;
-  };
-  // The larger branch stays on stream 0, the launch stream's queue.
-  EXPECT_EQ(stream_of(S1), 0u);
-  EXPECT_EQ(stream_of(S2), 0u);
-  EXPECT_EQ(stream_of(S3), 0u);
-  EXPECT_EQ(stream_of(K3), 1u);
-  EXPECT_EQ(stream_of(K4), 1u);
+  EXPECT_EQ(schedule.block_count, 1u);
+  for (uint32_t i = 0; i < kNodeCount; ++i) {
+    EXPECT_EQ(schedule.sorted_nodes[i].stream_id, 0u);
+    EXPECT_EQ(schedule.sorted_nodes[i].partition_id, 0u);
+  }
 
   iree_arena_deinitialize(&arena);
   iree_arena_block_pool_deinitialize(&block_pool);
 }
 
 TEST(GraphTest, ReorderedAddedDependencyUsesFinalWorkstreamIndex) {
-  constexpr size_t kNodeCount = 64;
+  // Three chains created as Z = [0, 16), X = [16, 32), Y = [32, 80). An added
+  // edge from X's tail to Z's head sorts Z after X, so X and Z form one
+  // workstream; Y is the largest and takes stream 0.
+  constexpr size_t kNodeCount = 80;
+  constexpr size_t kZ = 0, kX = 16, kY = 32;
   std::array<GraphNodeStorage, kNodeCount> node_storage;
   GraphNodeBlockStorage<kNodeCount> node_block(node_storage);
   for (uint32_t i = 0; i < kNodeCount; ++i) {
@@ -226,14 +305,11 @@ TEST(GraphTest, ReorderedAddedDependencyUsesFinalWorkstreamIndex) {
     node->node_index = i;
     node->type = IREE_HAL_STREAMING_GRAPH_NODE_TYPE_KERNEL;
   }
-
-  // Only the first MAX_WORKSTREAMS independent nodes start workstreams, so the
-  // source must be one of them for its workstream index to be nonzero.
-  iree_hal_streaming_graph_edge_t edge = {
-      .next = nullptr,
-      .from = node_storage[3].get(),
-      .to = node_storage[0].get(),
-  };
+  std::vector<iree_hal_streaming_graph_edge_t> edges;
+  AppendChain(node_storage, kZ, kX - 1, &edges);
+  AppendChain(node_storage, kX, kY - 1, &edges);
+  AppendChain(node_storage, kY, kNodeCount - 1, &edges);
+  edges.push_back({nullptr, node_storage[kY - 1].get(), node_storage[kZ].get()});
 
   iree_arena_block_pool_t block_pool;
   iree_arena_block_pool_initialize(4096, iree_allocator_system(), &block_pool);
@@ -242,13 +318,14 @@ TEST(GraphTest, ReorderedAddedDependencyUsesFinalWorkstreamIndex) {
   iree_hal_streaming_graph_schedule_t schedule = {};
   IREE_ASSERT_OK(iree_hal_streaming_graph_schedule_nodes(
       node_block.get(), kNodeCount, /*disabled_nodes=*/nullptr,
-      /*disabled_node_count=*/0, &edge, &arena, &schedule));
+      /*disabled_node_count=*/0, LinkEdges(&edges), &arena, &schedule));
 
-  const uint32_t source_index = schedule.node_index_map[3];
-  const uint32_t target_index = schedule.node_index_map[0];
+  const uint32_t source_index = schedule.node_index_map[kY - 1];
+  const uint32_t target_index = schedule.node_index_map[kZ];
   ASSERT_LT(source_index, target_index);
-  EXPECT_EQ(schedule.sorted_nodes[source_index].node, node_storage[3].get());
-  EXPECT_EQ(schedule.sorted_nodes[target_index].node, node_storage[0].get());
+  EXPECT_EQ(schedule.sorted_nodes[source_index].node,
+            node_storage[kY - 1].get());
+  EXPECT_EQ(schedule.sorted_nodes[target_index].node, node_storage[kZ].get());
   ASSERT_NE(schedule.sorted_nodes[source_index].stream_id, 0u);
   EXPECT_EQ(schedule.sorted_nodes[source_index].stream_id,
             schedule.sorted_nodes[target_index].stream_id);
