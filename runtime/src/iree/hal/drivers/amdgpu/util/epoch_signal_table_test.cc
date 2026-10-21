@@ -99,4 +99,41 @@ TEST(EpochSignalTable, DeregisterRemovesQueue) {
       iree_hal_amdgpu_epoch_signal_table_lookup(table.get(), axis, &signal));
 }
 
+TEST(EpochSignalTable, DeviceWaitSignalsStayWithinPhysicalDevice) {
+  EpochSignalTable table(/*session_epoch=*/1, /*machine_index=*/0,
+                         /*device_index=*/4, /*queue_count=*/4);
+  iree_hal_amdgpu_epoch_signal_table_set_device_wait_group(table.get(), 2);
+  for (uint8_t queue = 0; queue < 4; ++queue) {
+    iree_hal_amdgpu_epoch_signal_table_register(table.get(), queue,
+                                                MakeSignal(100 + queue));
+  }
+  iree_hal_amdgpu_epoch_signal_table_register_device_wait(table.get(), 0,
+                                                          MakeSignal(200));
+  iree_hal_amdgpu_epoch_signal_table_register_device_wait(table.get(), 2,
+                                                          MakeSignal(202));
+
+  hsa_signal_t signal;
+  const iree_async_axis_t axis0 = iree_async_axis_make_queue(1, 0, 4, 0, 0);
+  ASSERT_TRUE(iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+      table.get(), axis0, /*waiter_queue_index=*/1, &signal));
+  EXPECT_EQ(signal.handle, 200u);
+  ASSERT_TRUE(iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+      table.get(), axis0, /*waiter_queue_index=*/2, &signal));
+  EXPECT_EQ(signal.handle, 100u);
+  ASSERT_TRUE(
+      iree_hal_amdgpu_epoch_signal_table_lookup(table.get(), axis0, &signal));
+  EXPECT_EQ(signal.handle, 100u);
+
+  const iree_async_axis_t axis1 = iree_async_axis_make_queue(1, 0, 4, 1, 0);
+  ASSERT_TRUE(iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+      table.get(), axis1, /*waiter_queue_index=*/0, &signal));
+  EXPECT_EQ(signal.handle, 101u);
+
+  iree_hal_amdgpu_epoch_signal_table_deregister(table.get(), 0);
+  iree_hal_amdgpu_epoch_signal_table_register(table.get(), 0, MakeSignal(300));
+  ASSERT_TRUE(iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+      table.get(), axis0, /*waiter_queue_index=*/1, &signal));
+  EXPECT_EQ(signal.handle, 300u);
+}
+
 }  // namespace

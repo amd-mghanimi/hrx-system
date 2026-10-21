@@ -275,8 +275,8 @@ iree_hal_amdgpu_command_buffer_replay_submit_completion_packet(
     }
     iree_hal_amdgpu_notification_ring_publish_epoch(
         &replay->queue->notification_ring, submission_id);
-    iree_hal_amdgpu_aql_ring_doorbell(
-        &replay->queue->aql_ring,
+    iree_hal_amdgpu_host_queue_ring_doorbell(
+        replay->queue,
         submission.first_packet_id + submission.packet_count - 1);
     profile_event_info.submission_id = submission_id;
     iree_hal_amdgpu_host_queue_record_profile_queue_event(

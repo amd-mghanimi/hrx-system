@@ -225,6 +225,7 @@ iree_status_t iree_hal_amdgpu_notification_ring_initialize(
   out_ring->reclaim_entries =
       (iree_hal_amdgpu_reclaim_entry_t*)(base + reclaim_offset);
   out_ring->capacity = capacity;
+  out_ring->epoch.device_signal.handle = 0;
   iree_atomic_store(&out_ring->epoch.last_drained, 0,
                     iree_memory_order_release);
   iree_atomic_store(&out_ring->epoch.last_published, 0,
@@ -277,6 +278,12 @@ void iree_hal_amdgpu_notification_ring_deinitialize(
 }
 
 hsa_signal_t iree_hal_amdgpu_notification_ring_epoch_signal(
+    const iree_hal_amdgpu_notification_ring_t* ring) {
+  return ring->epoch.device_signal.handle ? ring->epoch.device_signal
+                                          : ring->epoch.signal;
+}
+
+hsa_signal_t iree_hal_amdgpu_notification_ring_host_epoch_signal(
     const iree_hal_amdgpu_notification_ring_t* ring) {
   return ring->epoch.signal;
 }

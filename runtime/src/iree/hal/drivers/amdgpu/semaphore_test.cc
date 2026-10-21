@@ -85,7 +85,7 @@ class SemaphoreTest : public ::testing::Test {
       const iree_async_frontier_t* frontier = nullptr) {
     alignas(iree_hal_amdgpu_epoch_signal_table_t)
         uint8_t table_storage[sizeof(iree_hal_amdgpu_epoch_signal_table_t) +
-                              3 * sizeof(hsa_signal_t)];
+                              2 * 3 * sizeof(hsa_signal_t)];
     auto* table =
         reinterpret_cast<iree_hal_amdgpu_epoch_signal_table_t*>(table_storage);
     iree_hal_amdgpu_epoch_signal_table_initialize(table, 1, 0, 0, 3);

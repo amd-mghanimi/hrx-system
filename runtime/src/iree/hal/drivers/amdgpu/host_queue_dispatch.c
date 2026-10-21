@@ -1109,9 +1109,8 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_dispatch_packets(
       submission.first_packet_id + submission.packet_count - 1);
   iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                   submission_epoch);
-  iree_hal_amdgpu_aql_ring_doorbell(
-      &queue->aql_ring,
-      submission.first_packet_id + submission.packet_count - 1);
+  iree_hal_amdgpu_host_queue_ring_doorbell(
+      queue, submission.first_packet_id + submission.packet_count - 1);
   iree_hal_amdgpu_host_queue_record_profile_queue_event(
       queue, resolution, signal_semaphore_list, &profile_queue_event_info);
   return iree_ok_status();

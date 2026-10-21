@@ -6,6 +6,9 @@
 
 #include "iree/hal/drivers/amdgpu/logical_device.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 #include "iree/async/frontier.h"
 #include "iree/async/frontier_tracker.h"
 #include "iree/async/util/proactor_pool.h"
@@ -2700,6 +2703,19 @@ static iree_status_t iree_hal_amdgpu_logical_device_assign_topology_info(
         iree_async_axis_machine(topology_info->frontier.base_axis),
         iree_async_axis_device_index(topology_info->frontier.base_axis),
         (uint16_t)logical_queue_count);
+    // Device-side cross-queue waits poll device-memory epoch signals. Waits
+    // parked polling host-memory signals slow dispatch on every other queue.
+    const iree_host_size_t queue_count_per_physical_device =
+        system->topology.gpu_agent_queue_count;
+    const char* device_epoch_waits = getenv("HRX_AMDGPU_DEVICE_EPOCH_WAITS");
+    const bool device_epoch_waits_enabled =
+        !device_epoch_waits || strcmp(device_epoch_waits, "0") != 0;
+    if (device_epoch_waits_enabled && queue_count_per_physical_device > 1 &&
+        queue_count_per_physical_device <= UINT8_MAX) {
+      iree_hal_amdgpu_epoch_signal_table_set_device_wait_group(
+          logical_device->host_queue_epoch_table,
+          (uint8_t)queue_count_per_physical_device);
+    }
   }
 
   for (iree_host_size_t device_ordinal = 0;

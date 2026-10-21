@@ -61,19 +61,25 @@ typedef struct iree_hal_amdgpu_epoch_signal_table_t {
   uint8_t reserved0;
   // Number of flattened logical queues addressable by |signals|.
   uint16_t queue_count;
+  // Number of consecutive flattened queues sharing one physical device. Device
+  // wait signals are only returned to waiters in the same group because they
+  // live in device-local memory. Zero disables device wait signals.
+  uint8_t device_wait_group_size;
   // Reserved for future table flags.
-  uint8_t reserved[2];
+  uint8_t reserved[1];
   // Epoch signals indexed by flattened logical queue index. Unregistered slots
   // have handle == 0 (null signal). Registered slots contain the epoch signal
-  // from the queue's notification ring.
+  // from the queue's notification ring. The first |queue_count| entries are the
+  // host epoch signals; the next |queue_count| entries are optional device
+  // epoch signals with the same epoch sequence.
   hsa_signal_t signals[];
 } iree_hal_amdgpu_epoch_signal_table_t;
 
-// Returns the total allocation size in bytes for |queue_count| signals.
+// Returns the total allocation size in bytes for |queue_count| queues.
 static inline iree_host_size_t iree_hal_amdgpu_epoch_signal_table_size(
     uint16_t queue_count) {
   return sizeof(iree_hal_amdgpu_epoch_signal_table_t) +
-         (iree_host_size_t)queue_count * sizeof(hsa_signal_t);
+         2 * (iree_host_size_t)queue_count * sizeof(hsa_signal_t);
 }
 
 // Initializes an epoch signal table in caller-provided memory. The caller
@@ -87,9 +93,23 @@ static inline void iree_hal_amdgpu_epoch_signal_table_initialize(
   table->device_index = device_index;
   table->reserved0 = 0;
   table->queue_count = queue_count;
+  table->device_wait_group_size = 0;
   memset(table->reserved, 0, sizeof(table->reserved));
   memset(table->signals, 0,
-         (iree_host_size_t)queue_count * sizeof(hsa_signal_t));
+         2 * (iree_host_size_t)queue_count * sizeof(hsa_signal_t));
+}
+
+// Enables device wait signals for waiters within groups of |group_size|
+// consecutive flattened queues (one group per physical device).
+static inline void iree_hal_amdgpu_epoch_signal_table_set_device_wait_group(
+    iree_hal_amdgpu_epoch_signal_table_t* table, uint8_t group_size) {
+  table->device_wait_group_size = group_size;
+}
+
+// Returns true if device wait signals may be registered in |table|.
+static inline bool iree_hal_amdgpu_epoch_signal_table_has_device_waits(
+    const iree_hal_amdgpu_epoch_signal_table_t* table) {
+  return table->device_wait_group_size != 0;
 }
 
 // Registers a queue's epoch signal in the table. Called during queue init
@@ -115,6 +135,21 @@ static inline void iree_hal_amdgpu_epoch_signal_table_deregister(
   IREE_ASSERT(table->signals[queue_index].handle != 0,
               "epoch signal slot not registered");
   table->signals[queue_index].handle = 0;
+  table->signals[table->queue_count + queue_index].handle = 0;
+}
+
+// Registers a queue's device epoch signal. The host epoch signal must already
+// be registered and is cleared together with it by deregister().
+static inline void iree_hal_amdgpu_epoch_signal_table_register_device_wait(
+    iree_hal_amdgpu_epoch_signal_table_t* table, uint8_t queue_index,
+    hsa_signal_t device_signal) {
+  IREE_ASSERT(queue_index < table->queue_count, "queue_index out of range");
+  IREE_ASSERT(table->device_wait_group_size != 0,
+              "device wait signals are disabled");
+  IREE_ASSERT(table->signals[queue_index].handle != 0,
+              "host epoch signal must be registered first");
+  IREE_ASSERT(device_signal.handle != 0, "cannot register null epoch signal");
+  table->signals[table->queue_count + queue_index] = device_signal;
 }
 
 // Looks up the epoch signal for the queue identified by |axis|. Returns true
@@ -148,6 +183,29 @@ static inline bool iree_hal_amdgpu_epoch_signal_table_lookup(
     return false;  // Slot not registered.
   }
   *out_signal = signal;
+  return true;
+}
+
+// Looks up the signal a device-side wait packet on |waiter_queue_index| should
+// poll for the queue identified by |axis|. Prefers the producer's device epoch
+// signal when the waiter is on the same physical device and falls back to the
+// host epoch signal otherwise. Returns false under the same conditions as
+// iree_hal_amdgpu_epoch_signal_table_lookup().
+static inline bool iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+    const iree_hal_amdgpu_epoch_signal_table_t* table, iree_async_axis_t axis,
+    uint8_t waiter_queue_index, hsa_signal_t* out_signal) {
+  if (!iree_hal_amdgpu_epoch_signal_table_lookup(table, axis, out_signal)) {
+    return false;
+  }
+  const uint8_t group_size = table->device_wait_group_size;
+  if (group_size == 0) return true;
+  const uint8_t queue_index = iree_async_axis_queue_index(axis);
+  if (queue_index / group_size != waiter_queue_index / group_size) {
+    return true;
+  }
+  const hsa_signal_t device_signal =
+      table->signals[table->queue_count + queue_index];
+  if (device_signal.handle != 0) *out_signal = device_signal;
   return true;
 }
 

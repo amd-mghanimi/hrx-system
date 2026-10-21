@@ -1135,6 +1135,16 @@ static void iree_hal_amdgpu_physical_device_initialize_host_queue_construction(
     profiling_memory.event_access_agent_count = 1;
   }
 
+  // Device epoch signals are retired by the command processor and polled by
+  // peer hardware queues, so they need device fine memory and native AQL.
+  hsa_amd_memory_pool_t device_epoch_signal_pool = {0};
+  if (physical_device->fine_block_pools.small.is_initialized &&
+      physical_device->aql_queue_execution_mode !=
+          IREE_HAL_AMDGPU_AQL_QUEUE_EXECUTION_MODE_PM4_EMULATED) {
+    device_epoch_signal_pool =
+        physical_device->fine_block_pools.small.memory_pool;
+  }
+
   construction->params = (iree_hal_amdgpu_host_queue_params_t){
       .identity =
           {
@@ -1172,6 +1182,7 @@ static void iree_hal_amdgpu_physical_device_initialize_host_queue_construction(
           {
               .kernarg = kernarg_memory,
               .pm4_ib_pool = host_memory_pools->fine_pool,
+              .device_epoch_signal_pool = device_epoch_signal_pool,
               .block_pool = &physical_device->fine_host_block_pool,
               .profiling = profiling_memory,
               .transfer_context = &physical_device->buffer_transfer_context,
