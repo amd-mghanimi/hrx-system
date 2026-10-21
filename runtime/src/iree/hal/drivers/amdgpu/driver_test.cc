@@ -55,6 +55,22 @@ class DriverTest : public ::testing::Test {
     }
   }
 
+  // Waits on queue 1 for a barrier submitted to queue 0.
+  void CheckCrossQueueWait() {
+    auto* producer = iree_hal_device_queue(device_, 0, 0);
+    auto* consumer = iree_hal_device_queue(device_, 0, 1);
+    iree::hal::cts::SemaphoreList produced(device_, {0}, {1});
+    iree::hal::cts::SemaphoreList consumed(device_, {0}, {1});
+    IREE_ASSERT_OK(iree_hal_queue_barrier(
+        producer, iree_hal_semaphore_list_empty(), produced, nullptr,
+        IREE_HAL_QUEUE_BARRIER_FLAG_NONE));
+    IREE_ASSERT_OK(iree_hal_queue_barrier(consumer, produced, consumed,
+                                          nullptr,
+                                          IREE_HAL_QUEUE_BARRIER_FLAG_NONE));
+    IREE_ASSERT_OK(iree_hal_semaphore_list_wait(
+        consumed, iree_infinite_timeout(), IREE_ASYNC_WAIT_FLAG_NONE));
+  }
+
   // Async services and frontier namespace outliving every created device.
   iree::hal::cts::DeviceCreateContext context_;
   // Driver shared by the test's construction calls.
@@ -108,6 +124,31 @@ TEST_F(DriverTest, InvalidCountsLeaveNoDevice) {
             iree_allocator_system(), &device_));
     EXPECT_EQ(device_, nullptr);
   }
+}
+
+TEST_F(DriverTest, DeferredWaitBarrierResolvesCrossQueueWait) {
+  IREE_ASSERT_OK(iree_hal_driver_create_device_by_uri(
+      driver_, IREE_SV("amdgpu://0?queue_count=2&wait_barrier=defer"),
+      context_.params(), iree_allocator_system(), &device_));
+  ASSERT_NO_FATAL_FAILURE(CheckQueues(2));
+  ASSERT_NO_FATAL_FAILURE(CheckCrossQueueWait());
+}
+
+TEST_F(DriverTest, DeviceWaitBarrierResolvesCrossQueueWait) {
+  IREE_ASSERT_OK(iree_hal_driver_create_device_by_uri(
+      driver_, IREE_SV("amdgpu://0?queue_count=2&wait_barrier=device"),
+      context_.params(), iree_allocator_system(), &device_));
+  ASSERT_NO_FATAL_FAILURE(CheckQueues(2));
+  ASSERT_NO_FATAL_FAILURE(CheckCrossQueueWait());
+}
+
+TEST_F(DriverTest, InvalidWaitBarrierLeavesNoDevice) {
+  IREE_EXPECT_STATUS_IS(
+      IREE_STATUS_INVALID_ARGUMENT,
+      iree_hal_driver_create_device_by_uri(
+          driver_, IREE_SV("amdgpu://0?wait_barrier=pm4"), context_.params(),
+          iree_allocator_system(), &device_));
+  EXPECT_EQ(device_, nullptr);
 }
 
 TEST_F(DriverTest, QueueCountDoesNotHideUnknownParameters) {
