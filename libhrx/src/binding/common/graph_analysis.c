@@ -4,6 +4,8 @@
 // See https://llvm.org/LICENSE.txt for license information.
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 
+#include <stdlib.h>
+
 #include "common/graph.h"
 #include "iree/base/internal/math.h"
 
@@ -18,6 +20,12 @@
 // Maximum number of concurrent workstreams to detect within a partition.
 // Hardware typically has limited concurrent execution contexts.
 #define IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS 8
+
+// Minimum nodes a side workstream needs to keep its own queue. Each fork and
+// join costs a partition boundary, which is several microseconds of host
+// submission and cross-queue wait latency, so small branches run inline on
+// stream 0 instead.
+#define IREE_HAL_STREAMING_GRAPH_MIN_WORKSTREAM_NODES 16
 
 // Threshold for "small" graphs that use simplified algorithms.
 #define IREE_HAL_STREAMING_GRAPH_SMALL_GRAPH_THRESHOLD 32
@@ -90,7 +98,9 @@
 // +-------------------------------------+
 //
 // The larger workstream takes stream 0, which runs on the launch stream's
-// queue; the other runs on a separate hardware queue.
+// queue; the other runs on a separate hardware queue. This split only stands
+// when each branch has at least MIN_WORKSTREAM_NODES nodes; with branches this
+// short, all three partitions merge back into one single-stream partition.
 //
 // Efficiency: O(N + E) where N=9 nodes, E=9 edges
 // Memory: 9 * 24 bytes (sort nodes) + 3 * 16 bytes (partitions) = 264 bytes
@@ -532,6 +542,72 @@ static void iree_hal_streaming_graph_count_successors(
   }
 }
 
+static uint32_t iree_hal_streaming_graph_min_workstream_nodes(void) {
+  static int value = -1;
+  if (value < 0) {
+    const char* env = getenv("HRX_GRAPH_MIN_WORKSTREAM_NODES");
+    value = env && env[0] ? atoi(env)
+                          : IREE_HAL_STREAMING_GRAPH_MIN_WORKSTREAM_NODES;
+    if (value < 0) value = 0;
+  }
+  return (uint32_t)value;
+}
+
+// Folds side workstreams smaller than MIN_WORKSTREAM_NODES into stream 0 and
+// merges runs of single-stream recordable partitions. Partitions are
+// contiguous in |nodes| and recording orders nodes within a stream by their
+// dependencies, so a merged partition keeps every edge. Returns the new
+// partition count and updates |out_block_count|.
+static uint32_t iree_hal_streaming_graph_coalesce_partitions(
+    iree_hal_streaming_graph_sort_node_t* nodes,
+    iree_hal_streaming_graph_partition_t* partitions, uint32_t partition_count,
+    uint32_t* out_block_count) {
+  const uint32_t min_nodes = iree_hal_streaming_graph_min_workstream_nodes();
+  uint32_t out_count = 0;
+  uint32_t block_count = 0;
+  for (uint32_t p = 0; p < partition_count; ++p) {
+    iree_hal_streaming_graph_partition_t partition = partitions[p];
+    const uint32_t end = partition.start_index + partition.count;
+    if (partition.type == IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_RECORDABLE &&
+        partition.stream_count > 1) {
+      uint32_t sizes[IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS] = {0};
+      for (uint32_t k = partition.start_index; k < end; ++k) {
+        ++sizes[nodes[k].stream_id];
+      }
+      // Stream 0 always stays; renumber the side streams that are kept.
+      uint8_t remap[IREE_HAL_STREAMING_GRAPH_MAX_WORKSTREAMS] = {0};
+      uint8_t kept = 1;
+      for (uint32_t s = 1; s < partition.stream_count; ++s) {
+        remap[s] = sizes[s] >= min_nodes ? kept++ : 0;
+      }
+      if (kept != partition.stream_count) {
+        for (uint32_t k = partition.start_index; k < end; ++k) {
+          nodes[k].stream_id = remap[nodes[k].stream_id];
+        }
+        partition.stream_count = kept;
+      }
+    }
+    iree_hal_streaming_graph_partition_t* previous =
+        out_count > 0 ? &partitions[out_count - 1] : NULL;
+    if (previous &&
+        previous->type == IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_RECORDABLE &&
+        partition.type == IREE_HAL_STREAMING_GRAPH_PARTITION_TYPE_RECORDABLE &&
+        previous->stream_count == 1 && partition.stream_count == 1 &&
+        previous->count + partition.count <=
+            IREE_HAL_STREAMING_GRAPH_MAX_PARTITION_SIZE) {
+      previous->count += partition.count;
+    } else {
+      partitions[out_count++] = partition;
+      block_count += partition.stream_count;
+    }
+    for (uint32_t k = partition.start_index; k < end; ++k) {
+      nodes[k].partition_id = out_count - 1;
+    }
+  }
+  *out_block_count = block_count;
+  return out_count;
+}
+
 // Partitions sorted nodes into executable blocks and detects independent
 // workstreams within recordable partitions.
 //
@@ -545,11 +621,15 @@ static void iree_hal_streaming_graph_count_successors(
 //    then have no dependencies in the next partition and each start their own
 //    workstream, while every block of a partition waits on all blocks of the
 //    previous partition.
+// 4. Side workstreams with fewer than MIN_WORKSTREAM_NODES nodes fold into
+//    stream 0, and adjacent single-stream recordable partitions merge.
 //
 // Tuning heuristics:
 // - Partitions limited to MAX_PARTITION_SIZE (~2048) nodes
 // - Maximum MAX_WORKSTREAMS (~8) concurrent streams per partition; further
 //   independent nodes share stream 0
+// - Side workstreams need MIN_WORKSTREAM_NODES (~16) nodes;
+//   HRX_GRAPH_MIN_WORKSTREAM_NODES overrides it (0 keeps every workstream)
 //
 // Complexity: O(N + E) with up to MAX_WORKSTREAMS workstreams per partition
 //
@@ -716,6 +796,9 @@ static iree_uint32x2_t iree_hal_streaming_graph_partition_with_streams(
       block_count += stream_count;
     }
   }
+
+  partition_count = iree_hal_streaming_graph_coalesce_partitions(
+      nodes, partitions, partition_count, &block_count);
 
   // Only the last block of a launch signals its external semaphores, so a
   // final multi-stream partition joins its streams in a node-less barrier.
