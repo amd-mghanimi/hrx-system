@@ -499,6 +499,17 @@ static iree_status_t iree_hal_amdgpu_driver_parse_device_params(
     if (iree_string_view_equal(param->key, IREE_SV("queue_count"))) {
       status = iree_hal_amdgpu_driver_parse_queue_count(param->value,
                                                         out_queue_count);
+    } else if (iree_string_view_equal(param->key, IREE_SV("wait_barrier"))) {
+      if (iree_string_view_equal(param->value, IREE_SV("defer"))) {
+        options->force_wait_barrier_defer = 1;
+      } else if (iree_string_view_equal(param->value, IREE_SV("device"))) {
+        options->force_wait_barrier_defer = 0;
+      } else {
+        status = iree_make_status(
+            IREE_STATUS_INVALID_ARGUMENT,
+            "wait_barrier must be 'defer' or 'device', got '%.*s'",
+            (int)param->value.size, param->value.data);
+      }
     } else {
       status = iree_hal_amdgpu_logical_device_options_parse(
           options, (iree_string_pair_list_t){.count = 1, .pairs = param});

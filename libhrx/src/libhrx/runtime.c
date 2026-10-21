@@ -567,6 +567,18 @@ static iree_string_view_t hrx_get_gpu_queue_count(void) {
                                     : HRX_DEFAULT_GPU_QUEUE_COUNT);
 }
 
+// A device-side wait parked on one hardware queue slows dispatch on the queue
+// it waits for by ~1 us per kernel while the wait is pending (also under the
+// HIP runtime). vLLM's copy stream waits on the decode graph every step, so
+// device waits cost more than the host round trip of deferring them.
+#define HRX_DEFAULT_WAIT_BARRIER "defer"
+
+static iree_string_view_t hrx_get_wait_barrier(void) {
+  const char* value = getenv("HRX_WAIT_BARRIER");
+  return iree_make_cstring_view((value && value[0]) ? value
+                                                    : HRX_DEFAULT_WAIT_BARRIER);
+}
+
 static bool hrx_getenv_enabled(const char* name) {
   const char* value = getenv(name);
   return value && value[0] && strcmp(value, "0") != 0;
@@ -1030,6 +1042,7 @@ hrx_status_t hrx_gpu_initialize_with_device_extensions(
   int created_device_count = 0;
   const iree_string_pair_t device_params[] = {
       {.key = IREE_SV("queue_count"), .value = hrx_get_gpu_queue_count()},
+      {.key = IREE_SV("wait_barrier"), .value = hrx_get_wait_barrier()},
   };
   for (iree_host_size_t info_index = 0;
        info_index < device_info_count && iree_status_is_ok(iree_status);
