@@ -147,6 +147,52 @@ void iree_hal_amdgpu_host_queue_commit_signal_barrier(
   iree_hal_amdgpu_aql_ring_commit(packet, header, /*setup=*/0);
 }
 
+// Returns the number of trailing AQL slots each submission reserves for the
+// device epoch signal handoff.
+static uint32_t iree_hal_amdgpu_host_queue_device_epoch_packet_count(
+    const iree_hal_amdgpu_host_queue_t* queue) {
+  return queue->device_epoch.signal ? 1u : 0u;
+}
+
+// Records the trailing device epoch slot reserved at |trailing_packet_id|.
+static void iree_hal_amdgpu_host_queue_begin_device_epoch_slot(
+    iree_hal_amdgpu_host_queue_t* queue, uint64_t trailing_packet_id) {
+  if (!queue->device_epoch.signal) return;
+  IREE_ASSERT(!queue->device_epoch.is_pending,
+              "device epoch slot already pending");
+  queue->device_epoch.is_pending = true;
+  queue->device_epoch.pending_packet_id = trailing_packet_id;
+  queue->device_epoch.pending_epoch =
+      queue->notification_ring.epoch.next_submission;
+}
+
+void iree_hal_amdgpu_host_queue_ring_doorbell(
+    iree_hal_amdgpu_host_queue_t* queue, uint64_t last_packet_id) {
+  if (queue->device_epoch.is_pending) {
+    IREE_ASSERT(queue->device_epoch.pending_packet_id == last_packet_id + 1,
+                "doorbell must follow the reserved submission range");
+    const uint64_t epoch_count =
+        queue->notification_ring.epoch.next_submission -
+        queue->device_epoch.pending_epoch;
+    IREE_ASSERT(epoch_count <= 1, "submission advanced multiple epochs");
+    // The barrier bit orders this after the final packet's device signal
+    // decrement so host epoch waiters observe both signals retired.
+    iree_hal_amdgpu_aql_packet_t* packet = iree_hal_amdgpu_aql_ring_packet(
+        &queue->aql_ring, queue->device_epoch.pending_packet_id);
+    const uint16_t header = iree_hal_amdgpu_aql_emit_nop(
+        &packet->barrier_and,
+        iree_hal_amdgpu_aql_packet_control_barrier(IREE_HSA_FENCE_SCOPE_NONE,
+                                                   IREE_HSA_FENCE_SCOPE_NONE),
+        epoch_count ? iree_hal_amdgpu_notification_ring_host_epoch_signal(
+                          &queue->notification_ring)
+                    : iree_hsa_signal_null());
+    iree_hal_amdgpu_aql_ring_commit(packet, header, /*setup=*/0);
+    last_packet_id = queue->device_epoch.pending_packet_id;
+    queue->device_epoch.is_pending = false;
+  }
+  iree_hal_amdgpu_aql_ring_doorbell(&queue->aql_ring, last_packet_id);
+}
+
 // Emits |packet_count| no-op barrier packets and rings the doorbell. Used only
 // to plug already-reserved AQL slots on an internal failure path so the CP
 // never stalls on an INVALID header.
@@ -156,8 +202,8 @@ static void iree_hal_amdgpu_host_queue_emit_noop_packets(
   IREE_ASSERT(packet_count > 0, "must plug at least one reserved AQL packet");
   iree_hal_amdgpu_host_queue_fill_noop_packets(queue, first_packet_id,
                                                packet_count);
-  iree_hal_amdgpu_aql_ring_doorbell(&queue->aql_ring,
-                                    first_packet_id + packet_count - 1);
+  iree_hal_amdgpu_host_queue_ring_doorbell(queue,
+                                           first_packet_id + packet_count - 1);
 }
 
 // Publishes an internal completion epoch for a failed submission that already
@@ -188,8 +234,8 @@ static void iree_hal_amdgpu_host_queue_emit_reclaim_noop_packets(
   }
   iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                   epoch);
-  iree_hal_amdgpu_aql_ring_doorbell(&queue->aql_ring,
-                                    first_packet_id + packet_count - 1);
+  iree_hal_amdgpu_host_queue_ring_doorbell(queue,
+                                           first_packet_id + packet_count - 1);
 }
 
 static void iree_hal_amdgpu_host_queue_emit_payload_boundary(
@@ -532,7 +578,10 @@ iree_status_t iree_hal_amdgpu_host_queue_try_begin_kernel_submission(
   const uint64_t packet_count =
       (uint64_t)resolution->barrier_count + payload_packet_count;
   const uint64_t aql_queue_capacity = (uint64_t)queue->aql_ring.mask + 1;
-  if (IREE_UNLIKELY(packet_count > aql_queue_capacity ||
+  if (IREE_UNLIKELY(packet_count +
+                            iree_hal_amdgpu_host_queue_device_epoch_packet_count(
+                                queue) >
+                        aql_queue_capacity ||
                     packet_count > UINT32_MAX)) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
@@ -577,9 +626,14 @@ iree_status_t iree_hal_amdgpu_host_queue_try_begin_kernel_submission(
 
   uint64_t first_packet_id = 0;
   if (!iree_hal_amdgpu_aql_ring_try_reserve(
-          &queue->aql_ring, (uint32_t)packet_count, &first_packet_id)) {
+          &queue->aql_ring,
+          (uint32_t)packet_count +
+              iree_hal_amdgpu_host_queue_device_epoch_packet_count(queue),
+          &first_packet_id)) {
     return iree_ok_status();
   }
+  iree_hal_amdgpu_host_queue_begin_device_epoch_slot(
+      queue, first_packet_id + packet_count);
 
   out_submission->reclaim_entry =
       iree_hal_amdgpu_notification_ring_reclaim_entry(
@@ -656,7 +710,10 @@ iree_status_t iree_hal_amdgpu_host_queue_try_begin_barrier_submission(
   const uint64_t packet_count = iree_hal_amdgpu_host_queue_barrier_packet_count(
       resolution, profile_queue_device_event);
   const uint64_t aql_queue_capacity = (uint64_t)queue->aql_ring.mask + 1;
-  if (IREE_UNLIKELY(packet_count > aql_queue_capacity ||
+  if (IREE_UNLIKELY(packet_count +
+                            iree_hal_amdgpu_host_queue_device_epoch_packet_count(
+                                queue) >
+                        aql_queue_capacity ||
                     packet_count > UINT32_MAX)) {
     return iree_make_status(
         IREE_STATUS_OUT_OF_RANGE,
@@ -698,12 +755,17 @@ iree_status_t iree_hal_amdgpu_host_queue_try_begin_barrier_submission(
 
   uint64_t first_packet_id = 0;
   if (!iree_hal_amdgpu_aql_ring_try_reserve(
-          &queue->aql_ring, (uint32_t)packet_count, &first_packet_id)) {
+          &queue->aql_ring,
+          (uint32_t)packet_count +
+              iree_hal_amdgpu_host_queue_device_epoch_packet_count(queue),
+          &first_packet_id)) {
     iree_hal_amdgpu_host_queue_cancel_profile_queue_device_events(
         queue, out_submission->profile_queue_device_events);
     memset(out_submission, 0, sizeof(*out_submission));
     return iree_ok_status();
   }
+  iree_hal_amdgpu_host_queue_begin_device_epoch_slot(
+      queue, first_packet_id + packet_count);
 
   out_submission->reclaim_entry =
       iree_hal_amdgpu_notification_ring_reclaim_entry(
@@ -1266,8 +1328,8 @@ uint64_t iree_hal_amdgpu_host_queue_finish_dispatch_submission(
       submission->kernel.first_packet_id + submission->kernel.packet_count - 1);
   iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                   submission_epoch);
-  iree_hal_amdgpu_aql_ring_doorbell(
-      &queue->aql_ring,
+  iree_hal_amdgpu_host_queue_ring_doorbell(
+      queue,
       submission->kernel.first_packet_id + submission->kernel.packet_count - 1);
   memset(submission, 0, sizeof(*submission));
   return submission_epoch;
@@ -1364,8 +1426,8 @@ iree_status_t iree_hal_amdgpu_host_queue_finish_pm4_ib_submission(
       submission->kernel.first_packet_id + submission->kernel.packet_count - 1);
   iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                   submission_epoch);
-  iree_hal_amdgpu_aql_ring_doorbell(
-      &queue->aql_ring,
+  iree_hal_amdgpu_host_queue_ring_doorbell(
+      queue,
       submission->kernel.first_packet_id + submission->kernel.packet_count - 1);
   memset(submission, 0, sizeof(*submission));
   if (out_submission_epoch) {
@@ -1757,9 +1819,8 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_pm4_ib_with_binding_table_fixup(
     }
     iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                     submission_epoch);
-    iree_hal_amdgpu_aql_ring_doorbell(
-        &queue->aql_ring,
-        submission.first_packet_id + submission.packet_count - 1);
+    iree_hal_amdgpu_host_queue_ring_doorbell(
+        queue, submission.first_packet_id + submission.packet_count - 1);
     memset(&submission, 0, sizeof(submission));
     if (out_submission_id) {
       *out_submission_id = submission_epoch;
@@ -1918,8 +1979,8 @@ uint64_t iree_hal_amdgpu_host_queue_finish_barrier_submission(
                                   completion_setup);
   iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                   submission_epoch);
-  iree_hal_amdgpu_aql_ring_doorbell(&queue->aql_ring,
-                                    first_packet_id + aql_packet_count - 1);
+  iree_hal_amdgpu_host_queue_ring_doorbell(queue,
+                                           first_packet_id + aql_packet_count - 1);
   memset(submission, 0, sizeof(*submission));
   return submission_epoch;
 }

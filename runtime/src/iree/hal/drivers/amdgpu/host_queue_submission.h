@@ -186,6 +186,13 @@ iree_status_t iree_hal_amdgpu_host_queue_count_reclaim_resources(
     iree_host_size_t operation_resource_count,
     uint16_t* out_reclaim_resource_count);
 
+// Commits the reserved trailing device epoch slot, if any, and rings the AQL
+// doorbell. |last_packet_id| is the last packet of the submission begun by
+// try_begin_*_submission. Every such submission must ring through here so the
+// trailing slot is never left INVALID. Caller must hold submission_mutex.
+void iree_hal_amdgpu_host_queue_ring_doorbell(
+    iree_hal_amdgpu_host_queue_t* queue, uint64_t last_packet_id);
+
 // Attempts to begin one kernel-shaped packet submission without waiting for
 // ring capacity. If temporary AQL/notification capacity is unavailable then
 // |out_ready| is set to false, no queue state is mutated, and OK is returned.

@@ -188,8 +188,9 @@ static bool iree_hal_amdgpu_host_queue_resolve_wait(
       return true;
     }
     hsa_signal_t peer_signal;
-    if (!iree_hal_amdgpu_epoch_signal_table_lookup(queue->epoch_table,
-                                                   signal_axis, &peer_signal)) {
+    if (!iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+            queue->epoch_table, signal_axis,
+            iree_async_axis_queue_index(queue->axis), &peer_signal)) {
       return false;
     }
     return iree_hal_amdgpu_host_queue_append_wait_barrier(
@@ -235,8 +236,9 @@ static bool iree_hal_amdgpu_host_queue_resolve_wait(
   // If any axis is not a local queue (remote, collective, host), defer.
   for (uint8_t i = 0; i < undominated_count; ++i) {
     hsa_signal_t peer_signal;
-    if (!iree_hal_amdgpu_epoch_signal_table_lookup(
-            queue->epoch_table, undominated[i].axis, &peer_signal)) {
+    if (!iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+            queue->epoch_table, undominated[i].axis,
+            iree_async_axis_queue_index(queue->axis), &peer_signal)) {
       return false;
     }
     if (!iree_hal_amdgpu_host_queue_append_wait_barrier(
@@ -409,8 +411,9 @@ bool iree_hal_amdgpu_host_queue_append_pool_wait_frontier_barriers(
       continue;
     }
     hsa_signal_t peer_signal;
-    if (!iree_hal_amdgpu_epoch_signal_table_lookup(queue->epoch_table,
-                                                   entry->axis, &peer_signal)) {
+    if (!iree_hal_amdgpu_epoch_signal_table_lookup_device_wait(
+            queue->epoch_table, entry->axis,
+            iree_async_axis_queue_index(queue->axis), &peer_signal)) {
       return false;
     }
     if (!iree_hal_amdgpu_host_queue_append_wait_barrier(

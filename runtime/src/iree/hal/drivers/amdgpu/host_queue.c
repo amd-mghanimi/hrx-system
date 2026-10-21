@@ -97,8 +97,8 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_tsan_shadow_initialize(
     iree_hal_amdgpu_aql_ring_commit(packet, header, setup);
     iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                     submission_epoch);
-    iree_hal_amdgpu_aql_ring_doorbell(&queue->aql_ring,
-                                      submission.first_packet_id);
+    iree_hal_amdgpu_host_queue_ring_doorbell(queue,
+                                             submission.first_packet_id);
   }
   iree_slim_mutex_unlock(&queue->locks.submission_mutex);
   if (iree_status_is_ok(status)) {
@@ -142,6 +142,43 @@ static iree_status_t iree_hal_amdgpu_host_queue_allocate_pm4_ib_slots(
   } else {
     status = iree_status_join(status, iree_hsa_amd_memory_pool_free(
                                           IREE_LIBHSA(libhsa), pm4_ib_slots));
+  }
+  IREE_TRACE_ZONE_END(z0);
+  return status;
+}
+
+static iree_status_t iree_hal_amdgpu_host_queue_allocate_device_epoch_signal(
+    const iree_hal_amdgpu_libhsa_t* libhsa, hsa_amd_memory_pool_t memory_pool,
+    iree_hal_amdgpu_host_queue_t* out_queue) {
+  IREE_TRACE_ZONE_BEGIN(z0);
+  iree_amd_signal_t* signal = NULL;
+  IREE_RETURN_AND_END_ZONE_IF_ERROR(
+      z0, iree_hsa_amd_memory_pool_allocate(
+              IREE_LIBHSA(libhsa), memory_pool, sizeof(*signal),
+              HSA_AMD_MEMORY_POOL_STANDARD_FLAG, (void**)&signal));
+  iree_status_t status = iree_ok_status();
+  if (IREE_UNLIKELY((uintptr_t)signal % iree_alignof(iree_amd_signal_t) !=
+                    0)) {
+    status = iree_make_status(
+        IREE_STATUS_FAILED_PRECONDITION,
+        "device epoch signal is not aligned to %" PRIhsz " bytes",
+        (iree_host_size_t)iree_alignof(iree_amd_signal_t));
+  }
+  if (iree_status_is_ok(status)) {
+    iree_amd_signal_t initial_signal;
+    memset(&initial_signal, 0, sizeof(initial_signal));
+    initial_signal.kind = IREE_AMD_SIGNAL_KIND_USER;
+    initial_signal.value = IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE;
+    status = iree_hsa_memory_copy(IREE_LIBHSA(libhsa), signal, &initial_signal,
+                                  sizeof(initial_signal));
+  }
+  if (iree_status_is_ok(status)) {
+    out_queue->device_epoch.signal = signal;
+    out_queue->notification_ring.epoch.device_signal.handle =
+        (uint64_t)(uintptr_t)signal;
+  } else {
+    status = iree_status_join(
+        status, iree_hsa_amd_memory_pool_free(IREE_LIBHSA(libhsa), signal));
   }
   IREE_TRACE_ZONE_END(z0);
   return status;
@@ -550,7 +587,8 @@ iree_status_t iree_hal_amdgpu_host_queue_wait_for_setup_epoch(
   }
 
   hsa_signal_t epoch_signal =
-      iree_hal_amdgpu_notification_ring_epoch_signal(&queue->notification_ring);
+      iree_hal_amdgpu_notification_ring_host_epoch_signal(
+          &queue->notification_ring);
   hsa_signal_t stop_signal = queue->completion.stop_signal;
   const hsa_signal_value_t target_signal_value =
       (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - epoch);
@@ -624,7 +662,8 @@ void iree_hal_amdgpu_host_queue_wait_idle_before_deinitialize(
   }
 
   hsa_signal_t epoch_signal =
-      iree_hal_amdgpu_notification_ring_epoch_signal(&queue->notification_ring);
+      iree_hal_amdgpu_notification_ring_host_epoch_signal(
+          &queue->notification_ring);
   hsa_signal_t stop_signal = queue->completion.stop_signal;
   const hsa_signal_value_t idle_epoch_signal_value =
       (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
@@ -686,7 +725,8 @@ static int iree_hal_amdgpu_host_queue_completion_thread_main(void* entry_arg) {
   };
 
   hsa_signal_t epoch_signal =
-      iree_hal_amdgpu_notification_ring_epoch_signal(&queue->notification_ring);
+      iree_hal_amdgpu_notification_ring_host_epoch_signal(
+          &queue->notification_ring);
   hsa_signal_t stop_signal = queue->completion.stop_signal;
   // No callbacks have been serviced, even if a waiter already retired epochs.
   hsa_signal_value_t last_epoch_value = IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE;
@@ -1081,10 +1121,28 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
     iree_hal_amdgpu_epoch_signal_table_register(
         params->coordination.epoch_registration_table,
         iree_async_axis_queue_index(params->identity.axis),
-        iree_hal_amdgpu_notification_ring_epoch_signal(
+        iree_hal_amdgpu_notification_ring_host_epoch_signal(
             &out_queue->notification_ring));
     out_queue->epoch_registration_table =
         params->coordination.epoch_registration_table;
+  }
+
+  // Only published queues have device-side waiters. The device epoch signal is
+  // attached before any submission so every epoch retires both signals.
+  if (iree_status_is_ok(status) && out_queue->epoch_registration_table &&
+      iree_hal_amdgpu_epoch_signal_table_has_device_waits(
+          out_queue->epoch_registration_table) &&
+      params->memory.device_epoch_signal_pool.handle) {
+    status = iree_hal_amdgpu_host_queue_allocate_device_epoch_signal(
+        params->hardware.libhsa, params->memory.device_epoch_signal_pool,
+        out_queue);
+    if (iree_status_is_ok(status)) {
+      iree_hal_amdgpu_epoch_signal_table_register_device_wait(
+          out_queue->epoch_registration_table,
+          iree_async_axis_queue_index(params->identity.axis),
+          iree_hal_amdgpu_notification_ring_epoch_signal(
+              &out_queue->notification_ring));
+    }
   }
 
   if (iree_status_is_ok(status)) {
@@ -1260,6 +1318,15 @@ void iree_hal_amdgpu_host_queue_finish_deinitialize(
   }
 
   iree_hal_amdgpu_notification_ring_deinitialize(&queue->notification_ring);
+
+  // Host epoch waits retire after the device epoch signal, so no queue packet
+  // still references it once the queue is idle.
+  if (queue->device_epoch.signal) {
+    iree_hal_amdgpu_hsa_cleanup_assert_success(
+        iree_hsa_amd_memory_pool_free_raw(queue->libhsa,
+                                          queue->device_epoch.signal));
+    queue->device_epoch.signal = NULL;
+  }
 
   if (queue->queue_upload_ring.base) {
     iree_hal_amdgpu_queue_upload_ring_deinitialize(queue->libhsa,

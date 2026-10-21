@@ -658,9 +658,8 @@ static uint64_t iree_hal_amdgpu_host_queue_finish_command_buffer_block(
   }
   iree_hal_amdgpu_notification_ring_publish_epoch(&queue->notification_ring,
                                                   submission_epoch);
-  iree_hal_amdgpu_aql_ring_doorbell(
-      &queue->aql_ring,
-      submission->first_packet_id + submission->packet_count - 1);
+  iree_hal_amdgpu_host_queue_ring_doorbell(
+      queue, submission->first_packet_id + submission->packet_count - 1);
   profile->queue_event_info.submission_id = submission_epoch;
   memset(submission, 0, sizeof(*submission));
   return submission_epoch;

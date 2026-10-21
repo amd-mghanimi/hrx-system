@@ -287,6 +287,12 @@ typedef struct iree_hal_amdgpu_notification_ring_t {
     // completion_signal on the last AQL packet of each submission; the CP
     // decrements it by 1 on completion.
     hsa_signal_t signal;
+    // Optional raw user signal in device memory, borrowed from the owning
+    // queue. When set, final submission packets decrement this signal instead
+    // and the queue retires |signal| with one trailing packet per epoch so host
+    // waits still observe the same epoch sequence. Peer queues wait on this
+    // signal: CP waits polling host memory slow dispatch on other queues.
+    hsa_signal_t device_signal;
     // Next epoch to assign. Incremented by 1 per submission.
     uint64_t next_submission;
     // Last epoch observed by drain. The consumer stores with release after
@@ -363,8 +369,13 @@ iree_status_t iree_hal_amdgpu_notification_ring_initialize(
 void iree_hal_amdgpu_notification_ring_deinitialize(
     iree_hal_amdgpu_notification_ring_t* ring);
 
-// Returns the epoch signal for use as completion_signal on AQL packets.
+// Returns the epoch signal for use as completion_signal on final AQL packets.
+// This is the device epoch signal when one is attached.
 hsa_signal_t iree_hal_amdgpu_notification_ring_epoch_signal(
+    const iree_hal_amdgpu_notification_ring_t* ring);
+
+// Returns the ROCR-created epoch signal used by host waits and interrupts.
+hsa_signal_t iree_hal_amdgpu_notification_ring_host_epoch_signal(
     const iree_hal_amdgpu_notification_ring_t* ring);
 
 // Acquires the hardware completion and host publication epochs.

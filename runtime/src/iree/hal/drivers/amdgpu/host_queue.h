@@ -259,6 +259,9 @@ typedef struct iree_hal_amdgpu_host_queue_params_t {
     iree_hal_amdgpu_kernarg_ring_memory_t kernarg;
     // HSA executable memory pool used for optional PM4 IB slots.
     hsa_amd_memory_pool_t pm4_ib_pool;
+    // Device fine memory pool used for the optional device epoch signal. A
+    // null handle disables device epoch signals.
+    hsa_amd_memory_pool_t device_epoch_signal_pool;
     // Arena block pool used for deferred operations and notification storage.
     iree_arena_block_pool_t* block_pool;
     // Memory policy used for queue-local profiling records.
@@ -379,6 +382,22 @@ typedef struct iree_hal_amdgpu_host_queue_t {
   // Epoch-driven notification ring mapping submission completions to
   // semaphore signals. Serialized completion drain consumes this ring.
   iree_hal_amdgpu_notification_ring_t notification_ring;
+
+  // Optional device-memory epoch signal attached to |notification_ring|.
+  // Final submission packets decrement |signal| and one trailing barrier-bit
+  // NOP per submission decrements the host epoch signal after it. Each
+  // try_begin_*_submission reserves the trailing slot and
+  // iree_hal_amdgpu_host_queue_ring_doorbell() commits it.
+  struct {
+    // Raw user signal in device fine memory or NULL when disabled.
+    iree_amd_signal_t* signal;
+    // True while a reserved trailing slot has not been committed.
+    bool is_pending;
+    // AQL packet id of the reserved trailing slot.
+    uint64_t pending_packet_id;
+    // notification_ring.epoch.next_submission when the slot was reserved.
+    uint64_t pending_epoch;
+  } device_epoch;
 
   // Completion-thread state for queue epoch drain and teardown/error wakeups.
   struct {
