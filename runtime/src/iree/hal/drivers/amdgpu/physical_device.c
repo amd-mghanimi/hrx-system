@@ -839,15 +839,17 @@ iree_hal_amdgpu_physical_device_initialize_queue_execution_strategy(
     pm4_timestamp_strategy =
         iree_hal_amdgpu_select_pm4_timestamp_strategy(gfxip_version);
   }
-  iree_hal_amdgpu_wait_barrier_strategy_t wait_barrier_strategy =
-      IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_DEFER;
-  if (!options->force_wait_barrier_defer) {
-    wait_barrier_strategy = iree_hal_amdgpu_select_wait_barrier_strategy(
-        vendor_packet_capabilities);
-  }
+  const iree_hal_amdgpu_wait_barrier_strategy_t device_wait_barrier_strategy =
+      iree_hal_amdgpu_select_wait_barrier_strategy(vendor_packet_capabilities);
+  const iree_hal_amdgpu_wait_barrier_strategy_t wait_barrier_strategy =
+      options->force_wait_barrier_defer
+          ? IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_DEFER
+          : device_wait_barrier_strategy;
   out_physical_device->aql_queue_execution_mode = aql_queue_execution_mode;
   out_physical_device->vendor_packet_capabilities = vendor_packet_capabilities;
   out_physical_device->wait_barrier_strategy = wait_barrier_strategy;
+  out_physical_device->device_wait_barrier_strategy =
+      device_wait_barrier_strategy;
   out_physical_device->pm4_timestamp_strategy = pm4_timestamp_strategy;
   out_physical_device->grid_sync_strategy =
       iree_hal_amdgpu_select_grid_sync_strategy(gfxip_version);
@@ -1164,6 +1166,8 @@ static void iree_hal_amdgpu_physical_device_initialize_host_queue_construction(
                       physical_device),
               .aql_execution_mode = physical_device->aql_queue_execution_mode,
               .wait_barrier_strategy = physical_device->wait_barrier_strategy,
+              .device_wait_barrier_strategy =
+                  physical_device->device_wait_barrier_strategy,
               .grid_sync_strategy = physical_device->grid_sync_strategy,
               .vendor_packet_capabilities =
                   physical_device->vendor_packet_capabilities,

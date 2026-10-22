@@ -954,6 +954,8 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
   out_queue->profiling.memory = params->memory.profiling;
   out_queue->axis = params->identity.axis;
   out_queue->wait_barrier_strategy = params->hardware.wait_barrier_strategy;
+  out_queue->device_wait_barrier_strategy =
+      params->hardware.device_wait_barrier_strategy;
   out_queue->grid_sync_strategy = params->hardware.grid_sync_strategy;
   out_queue->vendor_packet_capabilities =
       params->hardware.vendor_packet_capabilities;
@@ -1422,9 +1424,10 @@ typedef struct iree_hal_amdgpu_host_queue_op_submission_t {
 
 // Begins one direct/deferred queue operation attempt. The caller must pair this
 // with iree_hal_amdgpu_host_queue_op_submission_end exactly once.
-static inline void iree_hal_amdgpu_host_queue_op_submission_begin(
+static inline void iree_hal_amdgpu_host_queue_op_submission_begin_with_waits(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_semaphore_list_t wait_semaphore_list,
+    bool prefer_device_waits,
     iree_hal_amdgpu_host_queue_op_submission_t* out_submission) {
   out_submission->queue = queue;
   out_submission->deferred_op = NULL;
@@ -1434,7 +1437,19 @@ static inline void iree_hal_amdgpu_host_queue_op_submission_begin(
 
   iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_hal_amdgpu_host_queue_resolve_waits(queue, wait_semaphore_list,
+                                           prefer_device_waits,
                                            &out_submission->resolution);
+}
+
+// Begins one direct/deferred queue operation attempt using the queue's default
+// wait strategy.
+static inline void iree_hal_amdgpu_host_queue_op_submission_begin(
+    iree_hal_amdgpu_host_queue_t* queue,
+    const iree_hal_semaphore_list_t wait_semaphore_list,
+    iree_hal_amdgpu_host_queue_op_submission_t* out_submission) {
+  iree_hal_amdgpu_host_queue_op_submission_begin_with_waits(
+      queue, wait_semaphore_list, /*prefer_device_waits=*/false,
+      out_submission);
 }
 
 // Marks a captured pending op as retrying after notification-ring drain because
@@ -1598,8 +1613,10 @@ static iree_status_t iree_hal_amdgpu_host_queue_enqueue_execute(
   }
 
   iree_hal_amdgpu_host_queue_op_submission_t submission;
-  iree_hal_amdgpu_host_queue_op_submission_begin(queue, wait_semaphore_list,
-                                                 &submission);
+  iree_hal_amdgpu_host_queue_op_submission_begin_with_waits(
+      queue, wait_semaphore_list,
+      iree_any_bit_set(flags, IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS),
+      &submission);
   submission.resolution.payload_barriers = barriers;
   bool needs_staging = false;
   iree_status_t status = iree_hal_amdgpu_host_queue_validate_buffer_state(
