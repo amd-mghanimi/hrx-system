@@ -907,6 +907,7 @@ iree_cc_test(
     iree::async::platform
     iree::base
     iree::base::internal::arena
+    iree::hal::drivers::amdgpu::abi
     iree::testing::gtest
     iree::testing::gtest_main
   LABELS

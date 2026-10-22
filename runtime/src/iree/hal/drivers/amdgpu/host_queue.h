@@ -224,6 +224,10 @@ typedef struct iree_hal_amdgpu_host_queue_params_t {
     iree_hal_amdgpu_aql_queue_execution_mode_t aql_execution_mode;
     // Device-side strategy used to resolve cross-queue epoch waits.
     iree_hal_amdgpu_wait_barrier_strategy_t wait_barrier_strategy;
+    // Device-side strategy used for waits whose submission prefers device
+    // waits. May differ from |wait_barrier_strategy| when host deferral is
+    // forced for ordinary waits.
+    iree_hal_amdgpu_wait_barrier_strategy_t device_wait_barrier_strategy;
     // Device-side strategy used to synchronize cooperative grids.
     iree_hal_amdgpu_grid_sync_strategy_t grid_sync_strategy;
     // Vendor-packet capabilities available to this queue.
@@ -262,6 +266,12 @@ typedef struct iree_hal_amdgpu_host_queue_params_t {
     // Device fine memory pool used for the optional device epoch signal. A
     // null handle disables device epoch signals.
     hsa_amd_memory_pool_t device_epoch_signal_pool;
+    // Host agents granted access to the device epoch signal so host waiters
+    // can observe epochs whose host notification was deferred. Deferral is
+    // disabled when empty or when granting access fails.
+    const hsa_agent_t* device_epoch_signal_host_agents;
+    // Number of entries in |device_epoch_signal_host_agents|.
+    iree_host_size_t device_epoch_signal_host_agent_count;
     // Arena block pool used for deferred operations and notification storage.
     iree_arena_block_pool_t* block_pool;
     // Memory policy used for queue-local profiling records.
@@ -397,6 +407,20 @@ typedef struct iree_hal_amdgpu_host_queue_t {
     uint64_t pending_packet_id;
     // notification_ring.epoch.next_submission when the slot was reserved.
     uint64_t pending_epoch;
+    // True when submissions may skip the trailing slot. Requires PM4-IB slots
+    // to catch the host epoch signal up later, host-readable |signal| so host
+    // waiters can observe skipped epochs, and an epoch table without
+    // cross-device waiters that poll the host epoch signal.
+    bool can_defer_host_notification;
+    // Set by the submitter, under the submission mutex, for the duration of a
+    // submission that skips the trailing slot.
+    bool defer_host_notification;
+    // Last epoch whose host epoch signal decrement has been submitted.
+    uint64_t host_notified_epoch;
+    // HSA wait timeout, in system timestamp ticks, bounding how long host
+    // waits block on the host epoch signal before reading |signal| when
+    // deferral is enabled.
+    uint64_t poll_timeout_hint;
   } device_epoch;
 
   // Completion-thread state for queue epoch drain and teardown/error wakeups.
@@ -628,6 +652,10 @@ typedef struct iree_hal_amdgpu_host_queue_t {
 
   // Device-side wait strategy selected once from the GPU ISA at initialization.
   iree_hal_amdgpu_wait_barrier_strategy_t wait_barrier_strategy;
+
+  // Device-side wait strategy used for submissions with
+  // IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS.
+  iree_hal_amdgpu_wait_barrier_strategy_t device_wait_barrier_strategy;
 
   // Cooperative grid synchronization strategy selected from the GPU ISA.
   iree_hal_amdgpu_grid_sync_strategy_t grid_sync_strategy;

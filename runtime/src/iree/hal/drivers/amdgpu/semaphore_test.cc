@@ -82,7 +82,10 @@ class SemaphoreTest : public ::testing::Test {
 
   iree_hal_amdgpu_wait_resolution_t ResolveWait(
       uint8_t queue_index, uint64_t value,
-      const iree_async_frontier_t* frontier = nullptr) {
+      const iree_async_frontier_t* frontier = nullptr,
+      iree_hal_amdgpu_wait_barrier_strategy_t wait_barrier_strategy =
+          IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_AQL_BARRIER_VALUE,
+      bool prefer_device_waits = false) {
     alignas(iree_hal_amdgpu_epoch_signal_table_t)
         uint8_t table_storage[sizeof(iree_hal_amdgpu_epoch_signal_table_t) +
                               2 * 3 * sizeof(hsa_signal_t)];
@@ -100,7 +103,8 @@ class SemaphoreTest : public ::testing::Test {
         .axis = test_queue_axis(queue_index),
         .epoch_table = table,
     };
-    queue.wait_barrier_strategy =
+    queue.wait_barrier_strategy = wait_barrier_strategy;
+    queue.device_wait_barrier_strategy =
         IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_AQL_BARRIER_VALUE;
     iree_slim_mutex_initialize(&queue.locks.submission_mutex);
     auto* queue_frontier = iree_hal_amdgpu_host_queue_frontier(&queue);
@@ -112,7 +116,8 @@ class SemaphoreTest : public ::testing::Test {
     iree_hal_amdgpu_wait_resolution_t resolution = {};
     iree_slim_mutex_lock(&queue.locks.submission_mutex);
     iree_hal_amdgpu_host_queue_resolve_waits(
-        &queue, iree_hal_semaphore_list_t{1, &semaphore_, &value}, &resolution);
+        &queue, iree_hal_semaphore_list_t{1, &semaphore_, &value},
+        prefer_device_waits, &resolution);
     iree_slim_mutex_unlock(&queue.locks.submission_mutex);
     iree_slim_mutex_deinitialize(&queue.locks.submission_mutex);
     return resolution;
@@ -338,6 +343,28 @@ TEST_F(SemaphoreTest, ExactWaitAndCoveredLaterProofRemainNative) {
   auto future = ResolveWait(0, 3, frontier);
   EXPECT_TRUE(future.needs_deferral);
   EXPECT_EQ(future.barrier_count, 0);
+}
+
+TEST_F(SemaphoreTest, PreferDeviceWaitsOverridesHostDeferral) {
+  FrontierBuilder builder;
+  const auto producer_axis = test_queue_axis(1);
+  ASSERT_TRUE(iree_hal_amdgpu_semaphore_publish_signal(
+      semaphore_, producer_axis, builder.Build({{producer_axis, 9}}), 9, 2));
+
+  auto deferred = ResolveWait(0, 2, /*frontier=*/nullptr,
+                              IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_DEFER);
+  EXPECT_TRUE(deferred.needs_deferral);
+  EXPECT_EQ(deferred.barrier_count, 0);
+
+  auto device = ResolveWait(0, 2, /*frontier=*/nullptr,
+                            IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_DEFER,
+                            /*prefer_device_waits=*/true);
+  ASSERT_FALSE(device.needs_deferral);
+  ASSERT_EQ(device.barrier_count, 1);
+  EXPECT_EQ(device.barrier_strategy,
+            IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_AQL_BARRIER_VALUE);
+  EXPECT_EQ(device.barriers[0].axis, producer_axis);
+  EXPECT_EQ(device.barriers[0].target_epoch, 9u);
 }
 
 TEST_F(SemaphoreTest, FanInWaitUsesOnlyItsExactSignalFrontier) {

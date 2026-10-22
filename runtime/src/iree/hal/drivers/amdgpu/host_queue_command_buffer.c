@@ -24,7 +24,9 @@
 iree_status_t iree_hal_amdgpu_host_queue_validate_execute_flags(
     iree_hal_queue_execute_flags_t flags) {
   const iree_hal_queue_execute_flags_t supported_flags =
-      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME;
+      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME |
+      IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS |
+      IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION;
   if (IREE_UNLIKELY(iree_any_bit_set(flags, ~supported_flags))) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "unsupported execute flags: 0x%" PRIx64, flags);
@@ -698,6 +700,32 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_pm4_command_buffer(
   return status;
 }
 
+// Returns true when the next submission on |queue| may skip its host
+// notification. Submissions parked for ring capacity resume from completion
+// drains, which a deferred in-flight tail would delay until a polling timeout,
+// so deferral stops while a drain-reclaimed ring is more than half full and the
+// newest in-flight submissions keep notifying.
+static bool iree_hal_amdgpu_host_queue_may_defer_host_notification(
+    iree_hal_amdgpu_host_queue_t* queue) {
+  if (!queue->device_epoch.can_defer_host_notification) {
+    return false;
+  }
+  const iree_hal_amdgpu_notification_ring_t* notification_ring =
+      &queue->notification_ring;
+  const uint64_t last_drained = (uint64_t)iree_atomic_load(
+      (iree_atomic_int64_t*)&notification_ring->epoch.last_drained,
+      iree_memory_order_acquire);
+  if (notification_ring->epoch.next_submission - last_drained >
+      notification_ring->capacity / 2) {
+    return false;
+  }
+  const uint64_t kernarg_write = (uint64_t)iree_atomic_load(
+      &queue->kernarg_ring.write_position, iree_memory_order_relaxed);
+  const uint64_t kernarg_read = (uint64_t)iree_atomic_load(
+      &queue->kernarg_ring.read_position, iree_memory_order_acquire);
+  return kernarg_write - kernarg_read <= queue->kernarg_ring.capacity / 2;
+}
+
 iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_amdgpu_wait_resolution_t* resolution,
@@ -783,12 +811,17 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_command_buffer(
   iree_hal_resource_t* command_buffer_resource =
       (iree_hal_resource_t*)command_buffer;
   bool ready = false;
+  queue->device_epoch.defer_host_notification =
+      iree_any_bit_set(execute_flags,
+                       IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION) &&
+      iree_hal_amdgpu_host_queue_may_defer_host_notification(queue);
   iree_status_t status = iree_hal_amdgpu_host_queue_submit_command_buffer_block(
       queue, resolution, signal_semaphore_list, command_buffer, binding_table,
       /*binding_ptrs=*/NULL, program->first_block, inout_binding_resource_set,
       (iree_hal_amdgpu_reclaim_action_t){0}, &command_buffer_resource,
       /*operation_resource_count=*/1,
       IREE_HAL_AMDGPU_HOST_QUEUE_SUBMISSION_FLAG_RETAIN_RESOURCES, &ready);
+  queue->device_epoch.defer_host_notification = false;
   if (!iree_status_is_ok(status)) {
     iree_hal_resource_set_free(*inout_binding_resource_set);
     *inout_binding_resource_set = NULL;

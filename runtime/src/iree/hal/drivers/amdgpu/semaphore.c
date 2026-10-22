@@ -269,6 +269,29 @@ static uint64_t iree_hal_amdgpu_host_queue_epoch_wait_hint(
   return iree_min(remaining_ticks, wait_state->wait_timeout_hint);
 }
 
+// Returns true when |producer_epoch| has retired given a host epoch signal
+// |signal_value|. Epochs submitted with deferred host notification may retire
+// before the host epoch signal reflects them, so the producer queue's device
+// epoch is consulted while any are outstanding.
+static bool iree_hal_amdgpu_semaphore_epoch_wait_is_reached(
+    const iree_hal_amdgpu_host_queue_epoch_wait_t* wait_state,
+    hsa_signal_value_t signal_value, hsa_signal_value_t compare_value,
+    uint64_t producer_epoch) {
+  if (iree_hal_amdgpu_semaphore_epoch_is_reached(signal_value, compare_value)) {
+    return true;
+  }
+  const iree_hal_amdgpu_notification_ring_t* notification_ring =
+      &wait_state->host_queue->notification_ring;
+  if (!iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+          notification_ring, (uint64_t)IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
+                                 (uint64_t)signal_value)) {
+    return false;
+  }
+  return iree_hal_amdgpu_notification_ring_query_epoch_snapshot(
+             notification_ring)
+             .completed_epoch >= producer_epoch;
+}
+
 static iree_status_t iree_hal_amdgpu_semaphore_wait_for_epoch(
     const iree_hal_amdgpu_host_queue_epoch_wait_t* wait_state,
     uint64_t producer_epoch, iree_timeout_t timeout,
@@ -279,7 +302,8 @@ static iree_status_t iree_hal_amdgpu_semaphore_wait_for_epoch(
 
   hsa_signal_value_t signal_value = iree_hsa_signal_load_scacquire(
       IREE_LIBHSA(wait_state->libhsa), wait_state->epoch_signal);
-  if (iree_hal_amdgpu_semaphore_epoch_is_reached(signal_value, compare_value)) {
+  if (iree_hal_amdgpu_semaphore_epoch_wait_is_reached(
+          wait_state, signal_value, compare_value, producer_epoch)) {
     return iree_ok_status();
   }
   IREE_RETURN_IF_ERROR(
@@ -300,8 +324,8 @@ static iree_status_t iree_hal_amdgpu_semaphore_wait_for_epoch(
     for (;;) {
       signal_value = iree_hsa_signal_load_scacquire(
           IREE_LIBHSA(wait_state->libhsa), wait_state->epoch_signal);
-      if (iree_hal_amdgpu_semaphore_epoch_is_reached(signal_value,
-                                                     compare_value)) {
+      if (iree_hal_amdgpu_semaphore_epoch_wait_is_reached(
+              wait_state, signal_value, compare_value, producer_epoch)) {
         return iree_ok_status();
       }
       IREE_RETURN_IF_ERROR(
@@ -328,8 +352,8 @@ static iree_status_t iree_hal_amdgpu_semaphore_wait_for_epoch(
         IREE_LIBHSA(wait_state->libhsa), wait_state->epoch_signal,
         HSA_SIGNAL_CONDITION_LT, compare_value, wait_hint,
         HSA_WAIT_STATE_BLOCKED);
-    if (iree_hal_amdgpu_semaphore_epoch_is_reached(signal_value,
-                                                   compare_value)) {
+    if (iree_hal_amdgpu_semaphore_epoch_wait_is_reached(
+            wait_state, signal_value, compare_value, producer_epoch)) {
       return iree_ok_status();
     }
     IREE_RETURN_IF_ERROR(

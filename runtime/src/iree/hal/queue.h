@@ -280,6 +280,23 @@ enum iree_hal_queue_execute_flag_bits_t {
   // by stable storage until the signal semaphores indicate completion. Binding
   // table entries are still captured before iree_hal_queue_execute returns.
   IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME = 1ull << 0,
+
+  // Requests that waits on work already submitted to peer queues on the same
+  // device be resolved with device-side wait packets when the implementation
+  // supports them, even if it would otherwise resolve such waits on the host.
+  // Intended for short fork/join edges where the producer finishes soon after
+  // the consumer is submitted. Implementations may ignore this flag.
+  IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS = 1ull << 1,
+
+  // Hints that the caller will submit more work to the same queue soon and
+  // does not need prompt host observation of this submission's completion.
+  // Implementations may then skip the host completion notification for this
+  // submission and publish it together with the next notified submission.
+  // Signal semaphores still reach their values and device-side waiters still
+  // observe completion promptly; host waiters may observe it later. Intended
+  // for intermediate submissions of a known submission sequence such as a
+  // graph launch. Implementations may ignore this flag.
+  IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION = 1ull << 2,
 };
 
 // Bitfield controlling an exact-queue dispatch concurrency query.

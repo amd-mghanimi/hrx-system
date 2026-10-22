@@ -184,6 +184,44 @@ static iree_status_t iree_hal_amdgpu_host_queue_allocate_device_epoch_signal(
   return status;
 }
 
+// Enables IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION when skipped
+// host epoch decrements can be caught up with a PM4 write and host waiters can
+// read the device epoch signal in the meantime. Peer queues on other physical
+// devices wait on the host epoch signal, so a deferred epoch could be part of a
+// cross-device wait cycle; deferral requires every queue in the epoch table to
+// share the device wait group.
+static void iree_hal_amdgpu_host_queue_initialize_host_notification_deferral(
+    const iree_hal_amdgpu_host_queue_params_t* params,
+    iree_hal_amdgpu_host_queue_t* queue) {
+  const iree_hal_amdgpu_epoch_signal_table_t* epoch_table =
+      queue->epoch_registration_table;
+  if (!queue->device_epoch.signal || !queue->pm4_ib_slots ||
+      params->memory.device_epoch_signal_host_agent_count == 0 ||
+      params->memory.device_epoch_signal_host_agent_count > UINT32_MAX ||
+      epoch_table->device_wait_group_size < epoch_table->queue_count) {
+    return;
+  }
+  uint64_t timestamp_frequency = 0;
+  iree_status_t status = iree_hsa_system_get_info(
+      IREE_LIBHSA(params->hardware.libhsa), HSA_SYSTEM_INFO_TIMESTAMP_FREQUENCY,
+      &timestamp_frequency);
+  if (iree_status_is_ok(status)) {
+    status = iree_hsa_amd_agents_allow_access(
+        IREE_LIBHSA(params->hardware.libhsa),
+        (uint32_t)params->memory.device_epoch_signal_host_agent_count,
+        params->memory.device_epoch_signal_host_agents, /*flags=*/NULL,
+        queue->device_epoch.signal);
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_status_free(status);
+    return;
+  }
+  queue->device_epoch.poll_timeout_hint =
+      iree_max(timestamp_frequency / 1000, (uint64_t)1);
+  queue->device_epoch.can_defer_host_notification = true;
+  queue->notification_ring.epoch.device_signal_is_host_readable = true;
+}
+
 iree_status_t iree_hal_amdgpu_host_queue_initialize_tsan_state(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_amdgpu_tsan_memory_policy_t* memory_policy,
@@ -567,6 +605,79 @@ void iree_hal_amdgpu_host_queue_record_failure(
   }
 }
 
+// Returns true when |epoch| has retired on |queue|, including epochs whose
+// host epoch signal decrement was deferred.
+static bool iree_hal_amdgpu_host_queue_epoch_is_complete(
+    const iree_hal_amdgpu_host_queue_t* queue, uint64_t epoch) {
+  return iree_hal_amdgpu_notification_ring_query_epoch_snapshot(
+             &queue->notification_ring)
+             .completed_epoch >= epoch;
+}
+
+// Returns the HSA timeout hint for blocking on the host epoch signal. Queues
+// that may defer host notifications bound each wait so deferred epochs are
+// observed from the device epoch signal even when no later epoch notifies.
+static uint64_t iree_hal_amdgpu_host_queue_epoch_signal_timeout_hint(
+    const iree_hal_amdgpu_host_queue_t* queue) {
+  return queue->device_epoch.can_defer_host_notification
+             ? queue->device_epoch.poll_timeout_hint
+             : UINT64_MAX;
+}
+
+enum {
+  IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL = 0,
+  IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_STOP_SIGNAL = 1,
+  IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT = 2,
+  IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_TIMEOUT = 2,
+};
+
+// Waits until |epoch_signal| satisfies |condition| against |value| or
+// |stop_signal| becomes nonzero, returning which one did, or
+// IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_TIMEOUT after |timeout_hint| ticks. Any
+// other result is an invalid index from HSA. ROCR multi-signal waits fault when
+// given a finite timeout, so timed waits block on |epoch_signal| alone and
+// check |stop_signal| afterward.
+static uint32_t iree_hal_amdgpu_host_queue_wait_epoch_signal_or_stop(
+    const iree_hal_amdgpu_host_queue_t* queue, hsa_signal_t epoch_signal,
+    hsa_signal_condition_t condition, hsa_signal_value_t value,
+    hsa_signal_t stop_signal, uint64_t timeout_hint) {
+  if (timeout_hint == UINT64_MAX) {
+    hsa_signal_t signals[IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT] = {
+        epoch_signal,
+        stop_signal,
+    };
+    hsa_signal_condition_t
+        conditions[IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT] = {
+            condition,
+            HSA_SIGNAL_CONDITION_NE,
+    };
+    hsa_signal_value_t
+        values[IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT] = {
+            value,
+            0,
+    };
+    return iree_hsa_amd_signal_wait_any(
+        IREE_LIBHSA(queue->libhsa),
+        IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT, signals, conditions,
+        values, UINT64_MAX, HSA_WAIT_STATE_BLOCKED,
+        /*satisfying_value=*/NULL);
+  }
+  const hsa_signal_value_t epoch_value = iree_hsa_signal_wait_scacquire(
+      IREE_LIBHSA(queue->libhsa), epoch_signal, condition, value, timeout_hint,
+      HSA_WAIT_STATE_BLOCKED);
+  const bool epoch_satisfied = condition == HSA_SIGNAL_CONDITION_LT
+                                   ? epoch_value < value
+                                   : epoch_value != value;
+  if (epoch_satisfied) {
+    return IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL;
+  }
+  if (iree_hsa_signal_load_scacquire(IREE_LIBHSA(queue->libhsa), stop_signal) !=
+      0) {
+    return IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_STOP_SIGNAL;
+  }
+  return IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_TIMEOUT;
+}
+
 iree_status_t iree_hal_amdgpu_host_queue_wait_for_setup_epoch(
     iree_hal_amdgpu_host_queue_t* queue, uint64_t epoch) {
   IREE_ASSERT_ARGUMENT(queue);
@@ -593,32 +704,25 @@ iree_status_t iree_hal_amdgpu_host_queue_wait_for_setup_epoch(
   const hsa_signal_value_t target_signal_value =
       (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - epoch);
   const hsa_signal_value_t compare_value = target_signal_value + 1;
+  const uint64_t timeout_hint =
+      iree_hal_amdgpu_host_queue_epoch_signal_timeout_hint(queue);
 
   if (stop_signal.handle) {
-    enum {
-      IREE_HAL_AMDGPU_EPOCH_WAIT_EPOCH_SIGNAL = 0,
-      IREE_HAL_AMDGPU_EPOCH_WAIT_STOP_SIGNAL = 1,
-      IREE_HAL_AMDGPU_EPOCH_WAIT_SIGNAL_COUNT = 2,
-    };
-    hsa_signal_t signals[IREE_HAL_AMDGPU_EPOCH_WAIT_SIGNAL_COUNT] = {
-        epoch_signal,
-        stop_signal,
-    };
-    hsa_signal_condition_t conditions[IREE_HAL_AMDGPU_EPOCH_WAIT_SIGNAL_COUNT] =
-        {
-            HSA_SIGNAL_CONDITION_LT,
-            HSA_SIGNAL_CONDITION_NE,
-        };
-    hsa_signal_value_t values[IREE_HAL_AMDGPU_EPOCH_WAIT_SIGNAL_COUNT] = {
-        compare_value,
-        0,
-    };
-    const uint32_t signal_index = iree_hsa_amd_signal_wait_any(
-        IREE_LIBHSA(queue->libhsa), IREE_HAL_AMDGPU_EPOCH_WAIT_SIGNAL_COUNT,
-        signals, conditions, values, UINT64_MAX, HSA_WAIT_STATE_BLOCKED,
-        /*satisfying_value=*/NULL);
+    uint32_t signal_index = IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL;
+    while (!iree_hal_amdgpu_host_queue_epoch_is_complete(queue, epoch)) {
+      signal_index = iree_hal_amdgpu_host_queue_wait_epoch_signal_or_stop(
+          queue, epoch_signal, HSA_SIGNAL_CONDITION_LT, compare_value,
+          stop_signal, timeout_hint);
+      if (signal_index == IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_TIMEOUT &&
+          timeout_hint != UINT64_MAX) {
+        signal_index = IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL;
+      } else if (signal_index !=
+                 IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL) {
+        break;
+      }
+    }
     if (IREE_UNLIKELY(signal_index >=
-                      IREE_HAL_AMDGPU_EPOCH_WAIT_SIGNAL_COUNT)) {
+                      IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT)) {
       iree_status_t error = iree_make_status(
           IREE_STATUS_INTERNAL,
           "hsa_amd_signal_wait_any returned invalid signal index %u while "
@@ -627,7 +731,8 @@ iree_status_t iree_hal_amdgpu_host_queue_wait_for_setup_epoch(
       iree_hal_amdgpu_host_queue_record_failure(queue,
                                                 iree_status_clone(error));
       return error;
-    } else if (signal_index == IREE_HAL_AMDGPU_EPOCH_WAIT_STOP_SIGNAL) {
+    } else if (signal_index ==
+               IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_STOP_SIGNAL) {
       iree_status_t error =
           iree_hal_amdgpu_host_queue_clone_error_status(queue);
       if (!iree_status_is_ok(error)) {
@@ -639,9 +744,11 @@ iree_status_t iree_hal_amdgpu_host_queue_wait_for_setup_epoch(
                               epoch);
     }
   } else {
-    (void)iree_hsa_signal_wait_scacquire(
-        IREE_LIBHSA(queue->libhsa), epoch_signal, HSA_SIGNAL_CONDITION_LT,
-        compare_value, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    while (!iree_hal_amdgpu_host_queue_epoch_is_complete(queue, epoch)) {
+      (void)iree_hsa_signal_wait_scacquire(
+          IREE_LIBHSA(queue->libhsa), epoch_signal, HSA_SIGNAL_CONDITION_LT,
+          compare_value, timeout_hint, HSA_WAIT_STATE_BLOCKED);
+    }
   }
 
   IREE_RETURN_IF_ERROR(iree_hal_amdgpu_host_queue_clone_error_status(queue));
@@ -669,34 +776,29 @@ void iree_hal_amdgpu_host_queue_wait_idle_before_deinitialize(
       (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
                            submitted_epoch);
   const hsa_signal_value_t idle_compare_value = idle_epoch_signal_value + 1;
+  const uint64_t timeout_hint =
+      iree_hal_amdgpu_host_queue_epoch_signal_timeout_hint(queue);
 
   // Submission is already shut out. Wait only for hardware to publish the final
   // submitted epoch so no late CP write can race with HSA queue/signal
   // teardown; the completion thread still owns notification-ring draining.
   if (stop_signal.handle) {
-    enum {
-      IREE_HAL_AMDGPU_IDLE_WAIT_EPOCH_SIGNAL = 0,
-      IREE_HAL_AMDGPU_IDLE_WAIT_STOP_SIGNAL = 1,
-      IREE_HAL_AMDGPU_IDLE_WAIT_SIGNAL_COUNT = 2,
-    };
-    hsa_signal_t signals[IREE_HAL_AMDGPU_IDLE_WAIT_SIGNAL_COUNT] = {
-        epoch_signal,
-        stop_signal,
-    };
-    hsa_signal_condition_t conditions[IREE_HAL_AMDGPU_IDLE_WAIT_SIGNAL_COUNT] =
-        {
-            HSA_SIGNAL_CONDITION_LT,
-            HSA_SIGNAL_CONDITION_NE,
-        };
-    hsa_signal_value_t values[IREE_HAL_AMDGPU_IDLE_WAIT_SIGNAL_COUNT] = {
-        idle_compare_value,
-        0,
-    };
-    const uint32_t signal_index = iree_hsa_amd_signal_wait_any(
-        IREE_LIBHSA(queue->libhsa), IREE_HAL_AMDGPU_IDLE_WAIT_SIGNAL_COUNT,
-        signals, conditions, values, UINT64_MAX, HSA_WAIT_STATE_BLOCKED,
-        /*satisfying_value=*/NULL);
-    if (IREE_UNLIKELY(signal_index >= IREE_HAL_AMDGPU_IDLE_WAIT_SIGNAL_COUNT)) {
+    uint32_t signal_index = IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL;
+    while (
+        !iree_hal_amdgpu_host_queue_epoch_is_complete(queue, submitted_epoch)) {
+      signal_index = iree_hal_amdgpu_host_queue_wait_epoch_signal_or_stop(
+          queue, epoch_signal, HSA_SIGNAL_CONDITION_LT, idle_compare_value,
+          stop_signal, timeout_hint);
+      if (signal_index == IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_TIMEOUT &&
+          timeout_hint != UINT64_MAX) {
+        signal_index = IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL;
+      } else if (signal_index !=
+                 IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL) {
+        break;
+      }
+    }
+    if (IREE_UNLIKELY(signal_index >=
+                      IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT)) {
       iree_status_t error = iree_make_status(
           IREE_STATUS_INTERNAL,
           "hsa_amd_signal_wait_any returned invalid signal index %u during "
@@ -705,9 +807,12 @@ void iree_hal_amdgpu_host_queue_wait_idle_before_deinitialize(
       iree_hal_amdgpu_host_queue_record_failure(queue, error);
     }
   } else {
-    (void)iree_hsa_signal_wait_scacquire(
-        IREE_LIBHSA(queue->libhsa), epoch_signal, HSA_SIGNAL_CONDITION_LT,
-        idle_compare_value, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    while (
+        !iree_hal_amdgpu_host_queue_epoch_is_complete(queue, submitted_epoch)) {
+      (void)iree_hsa_signal_wait_scacquire(
+          IREE_LIBHSA(queue->libhsa), epoch_signal, HSA_SIGNAL_CONDITION_LT,
+          idle_compare_value, timeout_hint, HSA_WAIT_STATE_BLOCKED);
+    }
   }
 }
 
@@ -718,12 +823,6 @@ static int iree_hal_amdgpu_host_queue_completion_thread_main(void* entry_arg) {
   iree_hal_amdgpu_host_queue_t* queue =
       (iree_hal_amdgpu_host_queue_t*)entry_arg;
 
-  enum {
-    IREE_HAL_AMDGPU_COMPLETION_WAIT_EPOCH_SIGNAL = 0,
-    IREE_HAL_AMDGPU_COMPLETION_WAIT_STOP_SIGNAL = 1,
-    IREE_HAL_AMDGPU_COMPLETION_WAIT_SIGNAL_COUNT = 2,
-  };
-
   hsa_signal_t epoch_signal =
       iree_hal_amdgpu_notification_ring_host_epoch_signal(
           &queue->notification_ring);
@@ -733,45 +832,54 @@ static int iree_hal_amdgpu_host_queue_completion_thread_main(void* entry_arg) {
 
   bool keep_running = true;
   while (keep_running) {
-    hsa_signal_t signals[IREE_HAL_AMDGPU_COMPLETION_WAIT_SIGNAL_COUNT] = {
-        epoch_signal,
-        stop_signal,
-    };
-    hsa_signal_condition_t
-        conditions[IREE_HAL_AMDGPU_COMPLETION_WAIT_SIGNAL_COUNT] = {
-            HSA_SIGNAL_CONDITION_NE,
-            HSA_SIGNAL_CONDITION_NE,
-        };
-    hsa_signal_value_t values[IREE_HAL_AMDGPU_COMPLETION_WAIT_SIGNAL_COUNT] = {
-        last_epoch_value,
-        0,
-    };
-    const uint32_t signal_index = iree_hsa_amd_signal_wait_any(
-        IREE_LIBHSA(queue->libhsa),
-        IREE_HAL_AMDGPU_COMPLETION_WAIT_SIGNAL_COUNT, signals, conditions,
-        values, UINT64_MAX, HSA_WAIT_STATE_BLOCKED,
-        /*satisfying_value=*/NULL);
+    // A submission may start deferring after this wait begins, so idle waits
+    // on deferring queues stay bounded too, just with a longer period.
+    uint64_t timeout_hint =
+        iree_hal_amdgpu_host_queue_epoch_signal_timeout_hint(queue);
+    if (timeout_hint != UINT64_MAX &&
+        !iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+            &queue->notification_ring,
+            IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - (uint64_t)last_epoch_value)) {
+      timeout_hint *= 10;
+    }
+    uint32_t signal_index =
+        iree_hal_amdgpu_host_queue_wait_epoch_signal_or_stop(
+            queue, epoch_signal, HSA_SIGNAL_CONDITION_NE, last_epoch_value,
+            stop_signal, timeout_hint);
+    if (signal_index == IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_TIMEOUT &&
+        timeout_hint != UINT64_MAX) {
+      // Deferred epochs are only visible in the device epoch signal, which the
+      // drain reads.
+      signal_index = IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL;
+    }
 
     {
       IREE_TRACE_ZONE_BEGIN_NAMED(
           z0, "iree_hal_amdgpu_host_queue_completion_thread_pump");
       IREE_TRACE_ZONE_APPEND_VALUE_I64(z0, signal_index);
 
-      if (signal_index == IREE_HAL_AMDGPU_COMPLETION_WAIT_EPOCH_SIGNAL) {
+      if (signal_index == IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_EPOCH_SIGNAL) {
         const uint64_t serviced_epoch =
             iree_hal_amdgpu_host_queue_drain_completions(queue);
         // A waiter may retire newer epochs while callbacks run. Their deferred
         // work still belongs to this thread and must keep the next wait awake.
+        // Epochs retired through the device epoch signal may run ahead of the
+        // host epoch signal; wait for the host signal to move past its current
+        // value rather than spinning until it catches up.
+        const hsa_signal_value_t host_epoch_value =
+            iree_hsa_signal_load_scacquire(IREE_LIBHSA(queue->libhsa),
+                                           epoch_signal);
         last_epoch_value =
-            (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
-                                 serviced_epoch);
+            iree_max(host_epoch_value,
+                     (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
+                                          serviced_epoch));
       }
 
       // An out-of-range index means every signal handle passed was null or
       // invalid, so nothing can ever wake this wait again. Fail the queue and
       // take the terminal path below rather than spinning on a dead wait.
       if (IREE_UNLIKELY(signal_index >=
-                        IREE_HAL_AMDGPU_COMPLETION_WAIT_SIGNAL_COUNT)) {
+                        IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_SIGNAL_COUNT)) {
         iree_hal_amdgpu_host_queue_record_failure(
             queue,
             iree_make_status(
@@ -780,7 +888,7 @@ static int iree_hal_amdgpu_host_queue_completion_thread_main(void* entry_arg) {
                 signal_index));
       }
 
-      if (signal_index == IREE_HAL_AMDGPU_COMPLETION_WAIT_STOP_SIGNAL ||
+      if (signal_index == IREE_HAL_AMDGPU_HOST_QUEUE_EPOCH_WAIT_STOP_SIGNAL ||
           iree_hal_amdgpu_host_queue_has_error(queue)) {
         // Close admission before the final drain so no epoch can be published
         // behind it. On the teardown path admission is already closed and this
@@ -954,6 +1062,8 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
   out_queue->profiling.memory = params->memory.profiling;
   out_queue->axis = params->identity.axis;
   out_queue->wait_barrier_strategy = params->hardware.wait_barrier_strategy;
+  out_queue->device_wait_barrier_strategy =
+      params->hardware.device_wait_barrier_strategy;
   out_queue->grid_sync_strategy = params->hardware.grid_sync_strategy;
   out_queue->vendor_packet_capabilities =
       params->hardware.vendor_packet_capabilities;
@@ -1142,6 +1252,8 @@ iree_status_t iree_hal_amdgpu_host_queue_initialize(
           iree_async_axis_queue_index(params->identity.axis),
           iree_hal_amdgpu_notification_ring_epoch_signal(
               &out_queue->notification_ring));
+      iree_hal_amdgpu_host_queue_initialize_host_notification_deferral(
+          params, out_queue);
     }
   }
 
@@ -1422,9 +1534,10 @@ typedef struct iree_hal_amdgpu_host_queue_op_submission_t {
 
 // Begins one direct/deferred queue operation attempt. The caller must pair this
 // with iree_hal_amdgpu_host_queue_op_submission_end exactly once.
-static inline void iree_hal_amdgpu_host_queue_op_submission_begin(
+static inline void iree_hal_amdgpu_host_queue_op_submission_begin_with_waits(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_semaphore_list_t wait_semaphore_list,
+    bool prefer_device_waits,
     iree_hal_amdgpu_host_queue_op_submission_t* out_submission) {
   out_submission->queue = queue;
   out_submission->deferred_op = NULL;
@@ -1434,7 +1547,19 @@ static inline void iree_hal_amdgpu_host_queue_op_submission_begin(
 
   iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_hal_amdgpu_host_queue_resolve_waits(queue, wait_semaphore_list,
+                                           prefer_device_waits,
                                            &out_submission->resolution);
+}
+
+// Begins one direct/deferred queue operation attempt using the queue's default
+// wait strategy.
+static inline void iree_hal_amdgpu_host_queue_op_submission_begin(
+    iree_hal_amdgpu_host_queue_t* queue,
+    const iree_hal_semaphore_list_t wait_semaphore_list,
+    iree_hal_amdgpu_host_queue_op_submission_t* out_submission) {
+  iree_hal_amdgpu_host_queue_op_submission_begin_with_waits(
+      queue, wait_semaphore_list, /*prefer_device_waits=*/false,
+      out_submission);
 }
 
 // Marks a captured pending op as retrying after notification-ring drain because
@@ -1598,8 +1723,10 @@ static iree_status_t iree_hal_amdgpu_host_queue_enqueue_execute(
   }
 
   iree_hal_amdgpu_host_queue_op_submission_t submission;
-  iree_hal_amdgpu_host_queue_op_submission_begin(queue, wait_semaphore_list,
-                                                 &submission);
+  iree_hal_amdgpu_host_queue_op_submission_begin_with_waits(
+      queue, wait_semaphore_list,
+      iree_any_bit_set(flags, IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS),
+      &submission);
   submission.resolution.payload_barriers = barriers;
   bool needs_staging = false;
   iree_status_t status = iree_hal_amdgpu_host_queue_validate_buffer_state(
