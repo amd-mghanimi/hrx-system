@@ -95,7 +95,8 @@ iree_hal_amdgpu_host_queue_initialize_profiling_completion_signals(
   uint64_t submission_epoch = 0;
   iree_slim_mutex_lock(&queue->locks.submission_mutex);
   iree_hal_amdgpu_host_queue_resolve_waits(
-      queue, iree_hal_semaphore_list_empty(), &resolution);
+      queue, iree_hal_semaphore_list_empty(),
+      /*prefer_device_waits=*/false, &resolution);
   iree_status_t status = iree_hal_amdgpu_host_queue_submit_dispatch_packet(
       queue, &resolution, iree_hal_semaphore_list_empty(), &dispatch_packet,
       &kernargs, sizeof(kernargs), /*operation_resources=*/NULL,

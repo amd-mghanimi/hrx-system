@@ -1712,6 +1712,7 @@ class QueueBenchmark : public benchmark::Fixture {
     iree_slim_mutex_lock(&host_queue->locks.submission_mutex);
     iree_hal_amdgpu_wait_resolution_t resolution;
     iree_hal_amdgpu_host_queue_resolve_waits(host_queue, wait_semaphore_list,
+                                             /*prefer_device_waits=*/false,
                                              &resolution);
     iree_status_t status = iree_ok_status();
     if (IREE_UNLIKELY(resolution.needs_deferral)) {

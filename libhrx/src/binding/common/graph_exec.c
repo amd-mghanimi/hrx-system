@@ -2355,13 +2355,15 @@ static iree_status_t iree_hal_streaming_graph_host_callback(
 // |dropped_graphs| are meaningful only to a child graph block, which carries
 // them down into the child's own walk, and |record_point| only to an event
 // record block, which receives it describing the point the record signals and
-// leaves it owning what it names.
+// leaves it owning what it names. |waits_only_on_launch| marks a wait list made
+// only of this launch's own block signals, which device-side waits resolve
+// shortly after submission.
 static iree_status_t iree_hal_streaming_graph_submit_block(
     iree_hal_streaming_graph_block_t* block,
     const iree_hal_streaming_graph_block_ptrs_t* ptrs,
     iree_hal_streaming_stream_t* stream, iree_hal_queue_t* cooperative_queue,
     uint64_t launch_stream_tail_value,
-    iree_hal_semaphore_list_t wait_semaphores,
+    iree_hal_semaphore_list_t wait_semaphores, bool waits_only_on_launch,
     iree_hal_semaphore_list_t signal_semaphores,
     iree_hal_streaming_recorded_point_t* record_point,
     iree_hal_streaming_dropped_graph_list_t* dropped_graphs,
@@ -2447,11 +2449,12 @@ static iree_status_t iree_hal_streaming_graph_submit_block(
               ? iree_hal_streaming_context_select_lane_queue(
                     stream->context, stream->queue, block->queue_lane)
               : stream->queue;
-      status = iree_hal_queue_execute(execute_queue, wait_semaphores,
-                                      signal_semaphores,
-                                      ptrs->attrs->execute.command_buffer,
-                                      iree_hal_buffer_binding_table_empty(),
-                                      IREE_HAL_QUEUE_EXECUTE_FLAG_NONE);
+      status = iree_hal_queue_execute(
+          execute_queue, wait_semaphores, signal_semaphores,
+          ptrs->attrs->execute.command_buffer,
+          iree_hal_buffer_binding_table_empty(),
+          waits_only_on_launch ? IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS
+                               : IREE_HAL_QUEUE_EXECUTE_FLAG_NONE);
       break;
     }
     case IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_HOST_CALL:
@@ -2691,6 +2694,8 @@ static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
                                 "event record block signals no timeline value");
     }
 
+    const bool waits_only_on_launch =
+        wait_count > 0 && wait_count == block->wait_semaphore_count;
     iree_hal_semaphore_list_t wait_semaphores = {
         .count = wait_count,
         .semaphores = wait_sems,
@@ -2729,8 +2734,8 @@ static iree_status_t iree_hal_streaming_graph_exec_submit_blocks_locked(
       if (iree_status_is_ok(status)) {
         status = iree_hal_streaming_graph_submit_block(
             block, &ptrs, stream, cooperative_queue, launch_stream_tail_value,
-            wait_semaphores, signal_semaphores, &record_point, dropped_graphs,
-            accepted_signals);
+            wait_semaphores, waits_only_on_launch, signal_semaphores,
+            &record_point, dropped_graphs, accepted_signals);
         if (iree_status_is_ok(status)) {
           for (uint16_t i = 0; i < block->signal_semaphore_count; ++i) {
             const uint16_t semaphore_index = ptrs.signal_semaphore_indices[i];
