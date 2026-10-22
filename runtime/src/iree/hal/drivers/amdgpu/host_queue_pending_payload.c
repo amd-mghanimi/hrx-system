@@ -517,7 +517,10 @@ iree_status_t iree_hal_amdgpu_host_queue_defer_execute(
     op->execute.command_buffer = command_buffer;
     op->execute.binding_resource_set = binding_resource_set;
     binding_resource_set = NULL;
-    op->execute.flags = flags;
+    // Operations that wait on the host are typically followed by dependents
+    // that also wait on the host for this one's completion, so it notifies.
+    op->execute.flags =
+        flags & ~IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION;
   }
 
   if (iree_status_is_ok(status) && binding_count > 0) {

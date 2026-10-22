@@ -1187,6 +1187,9 @@ static void iree_hal_amdgpu_physical_device_initialize_host_queue_construction(
               .kernarg = kernarg_memory,
               .pm4_ib_pool = host_memory_pools->fine_pool,
               .device_epoch_signal_pool = device_epoch_signal_pool,
+              .device_epoch_signal_host_agents = system->topology.cpu_agents,
+              .device_epoch_signal_host_agent_count =
+                  system->topology.cpu_agent_count,
               .block_pool = &physical_device->fine_host_block_pool,
               .profiling = profiling_memory,
               .transfer_context = &physical_device->buffer_transfer_context,

@@ -308,6 +308,86 @@ TEST_F(HostQueueCommandBufferTest, DispatchSummariesRetainPacketOrdinals) {
   EXPECT_EQ(summary->next, nullptr);
 }
 
+TEST_F(HostQueueCommandBufferTest,
+       DeferredHostNotificationsRetireAndCatchUpHostEpoch) {
+  iree_hal_amdgpu_logical_device_options_t options;
+  iree_hal_amdgpu_logical_device_options_initialize(&options);
+  options.preallocate_pools = 0;
+  // Deferral needs the device epoch signal of a queue with local peers.
+  iree_hal_amdgpu_topology_t topology = topology_;
+  topology.gpu_agent_queue_count = 2;
+
+  TestLogicalDevice test_device;
+  IREE_ASSERT_OK(
+      test_device.Initialize(&options, &libhsa_, &topology, host_allocator_));
+  iree_hal_amdgpu_host_queue_t* queue = test_device.first_host_queue();
+  ASSERT_NE(queue, nullptr);
+  if (!queue->device_epoch.can_defer_host_notification) {
+    GTEST_SKIP() << "queue cannot defer host notifications";
+  }
+
+  TwoDispatchCommandBuffer fixture;
+  IREE_ASSERT_OK(CreateTwoDispatchCommandBuffer(
+      &test_device, &fixture, IREE_HAL_COMMAND_BUFFER_MODE_DEFAULT));
+
+  Ref<iree_hal_semaphore_t> signal;
+  IREE_ASSERT_OK(CreateSemaphore(test_device.base_device(), signal.out()));
+  iree_hal_semaphore_t* signal_ptr = signal.get();
+  uint64_t signal_value = 0;
+  const iree_hal_semaphore_list_t signal_list = {
+      /*count=*/1,
+      /*semaphores=*/&signal_ptr,
+      /*payload_values=*/&signal_value,
+  };
+  const hsa_signal_t host_epoch_signal =
+      iree_hal_amdgpu_notification_ring_host_epoch_signal(
+          &queue->notification_ring);
+  const uint64_t first_epoch = queue->notification_ring.epoch.next_submission;
+
+  // Deferred submissions retire for host waiters without any later notified
+  // submission while the host epoch signal stays behind them.
+  for (signal_value = 1; signal_value <= 3; ++signal_value) {
+    IREE_ASSERT_OK(iree_hal_queue_execute(
+        &queue->base, iree_hal_semaphore_list_empty(), signal_list,
+        fixture.command_buffer, iree_hal_buffer_binding_table_empty(),
+        IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION));
+  }
+  --signal_value;
+  IREE_ASSERT_OK(iree_hal_semaphore_wait(signal, signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE));
+  const uint64_t deferred_epoch =
+      queue->notification_ring.epoch.next_submission;
+  EXPECT_EQ(deferred_epoch, first_epoch + 3);
+  EXPECT_EQ(queue->device_epoch.host_notified_epoch, first_epoch);
+  EXPECT_EQ(
+      iree_hsa_signal_load_scacquire(IREE_LIBHSA(&libhsa_), host_epoch_signal),
+      (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - first_epoch));
+
+  // The next notified submission moves the host epoch signal to its own epoch
+  // as if no decrement had been skipped.
+  signal_value = 4;
+  IREE_ASSERT_OK(iree_hal_queue_execute(
+      &queue->base, iree_hal_semaphore_list_empty(), signal_list,
+      fixture.command_buffer, iree_hal_buffer_binding_table_empty(),
+      IREE_HAL_QUEUE_EXECUTE_FLAG_NONE));
+  IREE_ASSERT_OK(iree_hal_semaphore_wait(signal, signal_value,
+                                         iree_infinite_timeout(),
+                                         IREE_ASYNC_WAIT_FLAG_NONE));
+  const uint64_t notified_epoch =
+      queue->notification_ring.epoch.next_submission;
+  EXPECT_EQ(notified_epoch, deferred_epoch + 1);
+  EXPECT_EQ(queue->device_epoch.host_notified_epoch, notified_epoch);
+  EXPECT_EQ(
+      iree_hsa_signal_wait_scacquire(
+          IREE_LIBHSA(&libhsa_), host_epoch_signal, HSA_SIGNAL_CONDITION_EQ,
+          (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
+                               notified_epoch),
+          UINT64_MAX, HSA_WAIT_STATE_BLOCKED),
+      (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
+                           notified_epoch));
+}
+
 TEST_F(HostQueueCommandBufferTest, TsanDispatchesUseSerializedShadowArena) {
   iree_hal_amdgpu_logical_device_options_t options;
   iree_hal_amdgpu_logical_device_options_initialize(&options);

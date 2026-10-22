@@ -293,6 +293,13 @@ typedef struct iree_hal_amdgpu_notification_ring_t {
     // waits still observe the same epoch sequence. Peer queues wait on this
     // signal: CP waits polling host memory slow dispatch on other queues.
     hsa_signal_t device_signal;
+    // True when the host may load |device_signal| directly. Required before
+    // any epoch may skip its host epoch decrement.
+    bool device_signal_is_host_readable;
+    // Last epoch submitted without a host epoch decrement of its own. The
+    // next notified epoch writes |signal| forward past it. Until then, epoch
+    // queries read |device_signal|, which retires every epoch first.
+    iree_atomic_int64_t last_deferred;
     // Next epoch to assign. Incremented by 1 per submission.
     uint64_t next_submission;
     // Last epoch observed by drain. The consumer stores with release after
@@ -386,6 +393,17 @@ hsa_signal_t iree_hal_amdgpu_notification_ring_host_epoch_signal(
 iree_hal_amdgpu_notification_epoch_snapshot_t
 iree_hal_amdgpu_notification_ring_query_epoch_snapshot(
     const iree_hal_amdgpu_notification_ring_t* ring);
+
+// Records that |epoch| was submitted without its own host epoch decrement.
+// Called by the submission path before ringing the doorbell for |epoch|.
+void iree_hal_amdgpu_notification_ring_defer_host_notification(
+    iree_hal_amdgpu_notification_ring_t* ring, uint64_t epoch);
+
+// Returns true when some epoch after |completed_epoch| was submitted without a
+// host epoch decrement, so host epoch signal waits alone may not observe it
+// until a later notified epoch completes.
+bool iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+    const iree_hal_amdgpu_notification_ring_t* ring, uint64_t completed_epoch);
 
 // Advances the submission epoch counter and returns the assigned one-based
 // frontier epoch. Called by the submission path after all AQL packets for a
