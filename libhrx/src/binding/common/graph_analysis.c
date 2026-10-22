@@ -25,7 +25,7 @@
 // join costs a partition boundary, which is several microseconds of host
 // submission and cross-queue wait latency, so small branches run inline on
 // stream 0 instead.
-#define IREE_HAL_STREAMING_GRAPH_MIN_WORKSTREAM_NODES 16
+#define IREE_HAL_STREAMING_GRAPH_MIN_WORKSTREAM_NODES 4
 
 // Threshold for "small" graphs that use simplified algorithms.
 #define IREE_HAL_STREAMING_GRAPH_SMALL_GRAPH_THRESHOLD 32
@@ -628,7 +628,7 @@ static uint32_t iree_hal_streaming_graph_coalesce_partitions(
 // - Partitions limited to MAX_PARTITION_SIZE (~2048) nodes
 // - Maximum MAX_WORKSTREAMS (~8) concurrent streams per partition; further
 //   independent nodes share stream 0
-// - Side workstreams need MIN_WORKSTREAM_NODES (~16) nodes;
+// - Side workstreams need MIN_WORKSTREAM_NODES (~4) nodes;
 //   HRX_GRAPH_MIN_WORKSTREAM_NODES overrides it (0 keeps every workstream)
 //
 // Complexity: O(N + E) with up to MAX_WORKSTREAMS workstreams per partition
