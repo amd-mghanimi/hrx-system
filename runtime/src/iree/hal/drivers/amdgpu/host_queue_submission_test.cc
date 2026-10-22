@@ -470,15 +470,33 @@ static iree_hal_profile_sink_t* NoopProfileSinkAsBase(NoopProfileSink* sink) {
   return reinterpret_cast<iree_hal_profile_sink_t*>(sink);
 }
 
-TEST(HostQueueSubmissionUnitTest, QueueOwnedKernargsRequireSystemAcquire) {
+TEST(HostQueueSubmissionUnitTest, HostKernargsRequireSystemAcquire) {
+  iree_hal_amdgpu_host_queue_t queue = {};
+  queue.kernarg_ring.publication.mode =
+      IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_NONE;
   EXPECT_EQ(iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-                IREE_HSA_FENCE_SCOPE_NONE),
+                &queue, IREE_HSA_FENCE_SCOPE_NONE),
             IREE_HSA_FENCE_SCOPE_SYSTEM);
   EXPECT_EQ(iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-                IREE_HSA_FENCE_SCOPE_AGENT),
+                &queue, IREE_HSA_FENCE_SCOPE_AGENT),
             IREE_HSA_FENCE_SCOPE_SYSTEM);
   EXPECT_EQ(iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-                IREE_HSA_FENCE_SCOPE_SYSTEM),
+                &queue, IREE_HSA_FENCE_SCOPE_SYSTEM),
+            IREE_HSA_FENCE_SCOPE_SYSTEM);
+}
+
+TEST(HostQueueSubmissionUnitTest, HdpPublishedKernargsRequireAgentAcquire) {
+  iree_hal_amdgpu_host_queue_t queue = {};
+  queue.kernarg_ring.publication.mode =
+      IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_HDP_FLUSH;
+  EXPECT_EQ(iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+                &queue, IREE_HSA_FENCE_SCOPE_NONE),
+            IREE_HSA_FENCE_SCOPE_AGENT);
+  EXPECT_EQ(iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+                &queue, IREE_HSA_FENCE_SCOPE_AGENT),
+            IREE_HSA_FENCE_SCOPE_AGENT);
+  EXPECT_EQ(iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+                &queue, IREE_HSA_FENCE_SCOPE_SYSTEM),
             IREE_HSA_FENCE_SCOPE_SYSTEM);
 }
 

@@ -881,7 +881,7 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_dispatch_packets(
   }
   const iree_hsa_fence_scope_t dispatch_acquire_scope =
       iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-          IREE_HSA_FENCE_SCOPE_AGENT);
+          queue, IREE_HSA_FENCE_SCOPE_AGENT);
   iree_hal_amdgpu_aql_packet_control_t dispatch_packet_control =
       (profile_dispatch_packet || profile_queue_device_event)
           ? iree_hal_amdgpu_aql_packet_control_barrier(
@@ -940,7 +940,7 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_dispatch_packets(
         pre_dispatch_kernarg_data, &pre_dispatch_setup);
     const iree_hsa_fence_scope_t pre_dispatch_acquire_scope =
         iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-            IREE_HSA_FENCE_SCOPE_AGENT);
+            queue, IREE_HSA_FENCE_SCOPE_AGENT);
     pre_dispatch_header = iree_hal_amdgpu_aql_make_header(
         IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH,
         iree_hal_amdgpu_aql_packet_control_barrier(
@@ -957,7 +957,7 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_dispatch_packets(
         pre_dispatch_kernarg_data, &pre_dispatch_setup);
     const iree_hsa_fence_scope_t pre_dispatch_acquire_scope =
         iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-            IREE_HSA_FENCE_SCOPE_AGENT);
+            queue, IREE_HSA_FENCE_SCOPE_AGENT);
     pre_dispatch_header = iree_hal_amdgpu_aql_make_header(
         IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH,
         iree_hal_amdgpu_aql_packet_control_barrier(
@@ -1023,7 +1023,7 @@ static iree_status_t iree_hal_amdgpu_host_queue_submit_dispatch_packets(
                   &queue->notification_ring);
     const iree_hsa_fence_scope_t profile_harvest_acquire_scope =
         iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-            IREE_HSA_FENCE_SCOPE_AGENT);
+            queue, IREE_HSA_FENCE_SCOPE_AGENT);
     profile_harvest_header = iree_hal_amdgpu_aql_make_header(
         IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH,
         iree_hal_amdgpu_aql_packet_control_barrier(
