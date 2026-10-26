@@ -225,12 +225,22 @@ static inline void iree_hal_amdgpu_host_queue_publish_submission_kernargs(
 // Returns the acquire scope required for device execution to observe
 // host-populated queue-owned kernargs. CPU-side publication and device-side
 // acquisition are independent: coherent host memory needs no explicit
-// publication step but still crosses from the host agent to the GPU agent.
+// publication step but still crosses from the host agent to the GPU agent, so
+// it requires SYSTEM scope. Device-local rings are published to device memory
+// with an HDP flush before any packet header commits; from then on the writes
+// are ordinary device memory and AGENT scope observes them, matching the
+// headers CLR uses with device kernargs.
 static inline iree_hsa_fence_scope_t
 iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
+    const iree_hal_amdgpu_host_queue_t* queue,
     iree_hsa_fence_scope_t minimum_acquire_scope) {
-  return iree_hal_amdgpu_host_queue_max_fence_scope(
-      minimum_acquire_scope, IREE_HSA_FENCE_SCOPE_SYSTEM);
+  const iree_hsa_fence_scope_t kernarg_acquire_scope =
+      queue->kernarg_ring.publication.mode ==
+              IREE_HAL_AMDGPU_KERNARG_RING_PUBLICATION_MODE_HDP_FLUSH
+          ? IREE_HSA_FENCE_SCOPE_AGENT
+          : IREE_HSA_FENCE_SCOPE_SYSTEM;
+  return iree_hal_amdgpu_host_queue_max_fence_scope(minimum_acquire_scope,
+                                                    kernarg_acquire_scope);
 }
 
 // Attempts to begin one barrier-shaped packet submission without waiting for

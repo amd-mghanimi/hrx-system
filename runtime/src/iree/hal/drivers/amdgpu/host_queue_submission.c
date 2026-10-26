@@ -1244,7 +1244,7 @@ uint64_t iree_hal_amdgpu_host_queue_finish_dispatch_submission(
   const iree_hsa_fence_scope_t dispatch_minimum_acquire_scope =
       submission->kernel.kernargs.blocks
           ? iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-                submission->minimum_acquire_scope)
+                queue, submission->minimum_acquire_scope)
           : submission->minimum_acquire_scope;
   iree_hal_amdgpu_aql_packet_control_t dispatch_packet_control =
       iree_hal_amdgpu_host_queue_final_dispatch_packet_control(
@@ -1275,7 +1275,7 @@ uint64_t iree_hal_amdgpu_host_queue_finish_dispatch_submission(
                   &queue->notification_ring);
     const iree_hsa_fence_scope_t profile_harvest_acquire_scope =
         iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-            IREE_HSA_FENCE_SCOPE_AGENT);
+            queue, IREE_HSA_FENCE_SCOPE_AGENT);
     profile_harvest_header = iree_hal_amdgpu_aql_make_header(
         IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH,
         queue_device_event
@@ -1787,7 +1787,7 @@ iree_status_t iree_hal_amdgpu_host_queue_submit_pm4_ib_with_binding_table_fixup(
         &fixup_slot->dispatch, submission.kernargs.blocks->data, &fixup_setup);
     const iree_hsa_fence_scope_t fixup_acquire_scope =
         iree_hal_amdgpu_host_queue_kernarg_acquire_scope(
-            IREE_HSA_FENCE_SCOPE_SYSTEM);
+            queue, IREE_HSA_FENCE_SCOPE_SYSTEM);
     const uint16_t fixup_header = iree_hal_amdgpu_aql_make_header(
         IREE_HSA_PACKET_TYPE_KERNEL_DISPATCH,
         iree_hal_amdgpu_host_queue_payload_dispatch_packet_control(
