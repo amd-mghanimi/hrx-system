@@ -8,6 +8,7 @@
 
 #include <string.h>
 
+#include "iree/hal/drivers/amdgpu/abi/signal.h"
 #include "iree/hal/utils/resource_set.h"
 
 // All frontier snapshot sizes are multiples of 16 bytes (header=16,
@@ -226,6 +227,9 @@ iree_status_t iree_hal_amdgpu_notification_ring_initialize(
       (iree_hal_amdgpu_reclaim_entry_t*)(base + reclaim_offset);
   out_ring->capacity = capacity;
   out_ring->epoch.device_signal.handle = 0;
+  out_ring->epoch.device_signal_is_host_readable = false;
+  iree_atomic_store(&out_ring->epoch.last_deferred, 0,
+                    iree_memory_order_release);
   iree_atomic_store(&out_ring->epoch.last_drained, 0,
                     iree_memory_order_release);
   iree_atomic_store(&out_ring->epoch.last_published, 0,
@@ -297,14 +301,48 @@ iree_hal_amdgpu_notification_ring_query_epoch_snapshot(
 
   const hsa_signal_value_t signal_value = iree_hsa_signal_load_scacquire(
       IREE_LIBHSA(ring->libhsa), ring->epoch.signal);
-  const uint64_t completed_epoch =
+  uint64_t completed_epoch =
       (uint64_t)IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - (uint64_t)signal_value;
+  if (iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+          ring, completed_epoch)) {
+    // The device epoch signal is decremented by the final packet of every
+    // epoch before the host epoch signal, so it is never behind.
+    const iree_amd_signal_t* device_signal =
+        (const iree_amd_signal_t*)ring->epoch.device_signal.handle;
+    const int64_t device_signal_value = iree_atomic_load(
+        (iree_atomic_int64_t*)&device_signal->value, iree_memory_order_acquire);
+    const uint64_t device_completed_epoch =
+        (uint64_t)IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
+        (uint64_t)device_signal_value;
+    completed_epoch = iree_max(completed_epoch, device_completed_epoch);
+  }
   const uint64_t published_epoch = (uint64_t)iree_atomic_load(
       &ring->epoch.last_published, iree_memory_order_acquire);
   return (iree_hal_amdgpu_notification_epoch_snapshot_t){
       .completed_epoch = completed_epoch,
       .published_epoch = published_epoch,
   };
+}
+
+void iree_hal_amdgpu_notification_ring_defer_host_notification(
+    iree_hal_amdgpu_notification_ring_t* ring, uint64_t epoch) {
+  IREE_ASSERT_ARGUMENT(ring);
+  IREE_ASSERT(ring->epoch.device_signal_is_host_readable,
+              "host notification deferral requires a host-readable device "
+              "epoch signal");
+  iree_atomic_store(&ring->epoch.last_deferred, (int64_t)epoch,
+                    iree_memory_order_release);
+}
+
+bool iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+    const iree_hal_amdgpu_notification_ring_t* ring, uint64_t completed_epoch) {
+  if (!ring->epoch.device_signal_is_host_readable) {
+    return false;
+  }
+  const uint64_t last_deferred = (uint64_t)iree_atomic_load(
+      (iree_atomic_int64_t*)&ring->epoch.last_deferred,
+      iree_memory_order_acquire);
+  return last_deferred > completed_epoch;
 }
 
 uint64_t iree_hal_amdgpu_notification_ring_advance_epoch(

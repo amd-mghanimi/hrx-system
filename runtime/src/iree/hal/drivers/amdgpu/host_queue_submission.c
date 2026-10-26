@@ -151,19 +151,61 @@ void iree_hal_amdgpu_host_queue_commit_signal_barrier(
 // device epoch signal handoff.
 static uint32_t iree_hal_amdgpu_host_queue_device_epoch_packet_count(
     const iree_hal_amdgpu_host_queue_t* queue) {
-  return queue->device_epoch.signal ? 1u : 0u;
+  return queue->device_epoch.signal &&
+                 !queue->device_epoch.defer_host_notification
+             ? 1u
+             : 0u;
 }
 
 // Records the trailing device epoch slot reserved at |trailing_packet_id|.
 static void iree_hal_amdgpu_host_queue_begin_device_epoch_slot(
     iree_hal_amdgpu_host_queue_t* queue, uint64_t trailing_packet_id) {
-  if (!queue->device_epoch.signal) return;
+  if (!queue->device_epoch.signal ||
+      queue->device_epoch.defer_host_notification) {
+    return;
+  }
   IREE_ASSERT(!queue->device_epoch.is_pending,
               "device epoch slot already pending");
   queue->device_epoch.is_pending = true;
   queue->device_epoch.pending_packet_id = trailing_packet_id;
   queue->device_epoch.pending_epoch =
       queue->notification_ring.epoch.next_submission;
+}
+
+// Writes the trailing packet that decrements the host epoch signal to |epoch|.
+// When earlier epochs skipped their decrement the signal is first written to
+// the value it would have held had they not, so host waiters keep observing
+// exact epoch counts.
+static uint16_t iree_hal_amdgpu_host_queue_write_host_epoch_packet(
+    iree_hal_amdgpu_host_queue_t* queue, uint64_t packet_id, uint64_t epoch,
+    iree_hal_amdgpu_aql_packet_t* packet, uint16_t* out_setup) {
+  const hsa_signal_t host_epoch_signal =
+      iree_hal_amdgpu_notification_ring_host_epoch_signal(
+          &queue->notification_ring);
+  const uint64_t host_notified_epoch = queue->device_epoch.host_notified_epoch;
+  queue->device_epoch.host_notified_epoch = epoch;
+  *out_setup = 0;
+  if (host_notified_epoch + 1 == epoch) {
+    return iree_hal_amdgpu_aql_emit_nop(
+        &packet->barrier_and,
+        iree_hal_amdgpu_aql_packet_control_barrier(IREE_HSA_FENCE_SCOPE_NONE,
+                                                   IREE_HSA_FENCE_SCOPE_NONE),
+        host_epoch_signal);
+  }
+  iree_hal_amdgpu_pm4_ib_slot_t* pm4_ib_slot =
+      &queue->pm4_ib_slots[packet_id & queue->aql_ring.mask];
+  iree_amd_signal_t* host_epoch_signal_abi =
+      (iree_amd_signal_t*)host_epoch_signal.handle;
+  const uint32_t dword_count = iree_hal_amdgpu_pm4_emit_write_data64(
+      pm4_ib_slot, (void*)&host_epoch_signal_abi->value,
+      (uint64_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - epoch + 1));
+  // The system release publishes the write before the completion signal
+  // decrement and its interrupt.
+  return iree_hal_amdgpu_aql_emit_pm4_ib(
+      &packet->pm4_ib, pm4_ib_slot, dword_count,
+      iree_hal_amdgpu_aql_packet_control_barrier(IREE_HSA_FENCE_SCOPE_NONE,
+                                                 IREE_HSA_FENCE_SCOPE_SYSTEM),
+      host_epoch_signal, out_setup);
 }
 
 void iree_hal_amdgpu_host_queue_ring_doorbell(
@@ -179,16 +221,28 @@ void iree_hal_amdgpu_host_queue_ring_doorbell(
     // decrement so host epoch waiters observe both signals retired.
     iree_hal_amdgpu_aql_packet_t* packet = iree_hal_amdgpu_aql_ring_packet(
         &queue->aql_ring, queue->device_epoch.pending_packet_id);
-    const uint16_t header = iree_hal_amdgpu_aql_emit_nop(
-        &packet->barrier_and,
-        iree_hal_amdgpu_aql_packet_control_barrier(IREE_HSA_FENCE_SCOPE_NONE,
-                                                   IREE_HSA_FENCE_SCOPE_NONE),
-        epoch_count ? iree_hal_amdgpu_notification_ring_host_epoch_signal(
-                          &queue->notification_ring)
-                    : iree_hsa_signal_null());
-    iree_hal_amdgpu_aql_ring_commit(packet, header, /*setup=*/0);
+    uint16_t setup = 0;
+    uint16_t header = 0;
+    if (epoch_count) {
+      header = iree_hal_amdgpu_host_queue_write_host_epoch_packet(
+          queue, queue->device_epoch.pending_packet_id,
+          queue->notification_ring.epoch.next_submission, packet, &setup);
+    } else {
+      header = iree_hal_amdgpu_aql_emit_nop(
+          &packet->barrier_and,
+          iree_hal_amdgpu_aql_packet_control_barrier(IREE_HSA_FENCE_SCOPE_NONE,
+                                                     IREE_HSA_FENCE_SCOPE_NONE),
+          iree_hsa_signal_null());
+    }
+    iree_hal_amdgpu_aql_ring_commit(packet, header, setup);
     last_packet_id = queue->device_epoch.pending_packet_id;
     queue->device_epoch.is_pending = false;
+  } else if (queue->device_epoch.defer_host_notification &&
+             queue->notification_ring.epoch.next_submission >
+                 queue->device_epoch.host_notified_epoch) {
+    iree_hal_amdgpu_notification_ring_defer_host_notification(
+        &queue->notification_ring,
+        queue->notification_ring.epoch.next_submission);
   }
   iree_hal_amdgpu_aql_ring_doorbell(&queue->aql_ring, last_packet_id);
 }

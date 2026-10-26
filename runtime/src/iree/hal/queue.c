@@ -389,7 +389,8 @@ iree_hal_queue_execute(iree_hal_queue_t* queue,
   IREE_TRACE_ZONE_BEGIN(z0);
   const iree_hal_queue_execute_flags_t known_flags =
       IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME |
-      IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS;
+      IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS |
+      IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION;
   if (IREE_UNLIKELY(!queue)) {
     IREE_RETURN_AND_END_ZONE_IF_ERROR(
         z0, iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "queue is null"));

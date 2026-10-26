@@ -1772,6 +1772,31 @@ static iree_status_t iree_hal_streaming_graph_record_partition(
   return status;
 }
 
+// Marks execute blocks whose completion only later execute blocks of the same
+// launch observe: a later execute block on the same lane, and so on the same
+// hardware queue, follows with only execute blocks in between. Such blocks may
+// skip their host completion notification because the later block publishes
+// it. Other block types may wait for their predecessors on the host, so any of
+// them in between keeps the earlier blocks notifying.
+static void iree_hal_streaming_graph_exec_mark_deferred_host_notifications(
+    iree_hal_streaming_graph_exec_t* exec) {
+  bool lane_has_later_execute[UINT8_MAX + 1] = {false};
+  for (uint32_t i = exec->block_count; i > 0; --i) {
+    iree_hal_streaming_graph_block_t* block = exec->blocks[i - 1];
+    if (block->type != IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_EXECUTE) {
+      memset(lane_has_later_execute, 0, sizeof(lane_has_later_execute));
+      continue;
+    }
+    if (lane_has_later_execute[block->queue_lane]) {
+      iree_hal_streaming_graph_block_ptrs_t ptrs;
+      iree_hal_streaming_graph_block_get_ptrs(block, &ptrs);
+      ptrs.attrs->execute.flags |=
+          IREE_HAL_QUEUE_EXECUTE_FLAG_DEFER_HOST_NOTIFICATION;
+    }
+    lane_has_later_execute[block->queue_lane] = true;
+  }
+}
+
 iree_status_t iree_hal_streaming_graph_exec_instantiate_from_template(
     iree_hal_streaming_graph_exec_t* exec,
     iree_hal_streaming_node_block_t* node_blocks, iree_host_size_t node_count) {
@@ -2100,6 +2125,7 @@ iree_status_t iree_hal_streaming_graph_exec_instantiate_from_template(
     }
   }
   exec->block_count = block_index;
+  iree_hal_streaming_graph_exec_mark_deferred_host_notifications(exec);
 
   IREE_TRACE_ZONE_END(z0);
   return iree_ok_status();
@@ -2453,8 +2479,10 @@ static iree_status_t iree_hal_streaming_graph_submit_block(
           execute_queue, wait_semaphores, signal_semaphores,
           ptrs->attrs->execute.command_buffer,
           iree_hal_buffer_binding_table_empty(),
-          waits_only_on_launch ? IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS
-                               : IREE_HAL_QUEUE_EXECUTE_FLAG_NONE);
+          ptrs->attrs->execute.flags |
+              (waits_only_on_launch
+                   ? IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS
+                   : IREE_HAL_QUEUE_EXECUTE_FLAG_NONE));
       break;
     }
     case IREE_HAL_STREAMING_GRAPH_BLOCK_TYPE_QUEUE_HOST_CALL:

@@ -7,6 +7,7 @@
 #include "iree/hal/drivers/amdgpu/util/notification_ring.h"
 
 #include <array>
+#include <cstring>
 #include <memory>
 #include <vector>
 
@@ -14,6 +15,7 @@
 #include "iree/async/semaphore.h"
 #include "iree/base/api.h"
 #include "iree/base/internal/arena.h"
+#include "iree/hal/drivers/amdgpu/abi/signal.h"
 #include "iree/hal/drivers/amdgpu/util/libhsa.h"
 #include "iree/testing/gtest.h"
 #include "iree/testing/status_matchers.h"
@@ -326,6 +328,77 @@ TEST_F(NotificationRingTest, DeviceCompletionWaitsForHostPublication) {
   EXPECT_EQ(iree_async_semaphore_query(semaphore), 1u);
   EXPECT_EQ(kernarg_position, 64u);
   iree_async_semaphore_release(semaphore);
+}
+
+TEST_F(NotificationRingTest, DeferredHostNotificationRetiresFromDeviceSignal) {
+  IREE_ASSERT_OK_AND_ASSIGN(auto ring, InitializeRing());
+  iree_async_semaphore_t* semaphore_a = CreateSemaphore();
+  iree_async_semaphore_t* semaphore_b = CreateSemaphore();
+
+  // Host memory stands in for the device epoch signal; the ring only loads its
+  // value.
+  iree_amd_signal_t device_signal;
+  memset(&device_signal, 0, sizeof(device_signal));
+  device_signal.value = IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE;
+  ring->epoch.device_signal.handle = (uint64_t)(uintptr_t)&device_signal;
+  ring->epoch.device_signal_is_host_readable = true;
+
+  ReclaimEntryForNextEpoch(ring.get());
+  const uint64_t epoch_a =
+      iree_hal_amdgpu_notification_ring_advance_epoch(ring.get());
+  PushNotification(ring.get(), epoch_a, semaphore_a, 1);
+  iree_hal_amdgpu_notification_ring_publish_epoch(ring.get(), epoch_a);
+  ReclaimEntryForNextEpoch(ring.get());
+  const uint64_t epoch_b =
+      iree_hal_amdgpu_notification_ring_advance_epoch(ring.get());
+  PushNotification(ring.get(), epoch_b, semaphore_b, 1);
+  iree_hal_amdgpu_notification_ring_publish_epoch(ring.get(), epoch_b);
+
+  // Without a deferred epoch only the host epoch signal counts, even when the
+  // device epoch signal is ahead of it.
+  device_signal.value = IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - epoch_a;
+  EXPECT_FALSE(iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+      ring.get(), /*completed_epoch=*/0));
+  uint64_t kernarg_position = 0;
+  EXPECT_EQ(
+      iree_hal_amdgpu_notification_ring_drain(
+          ring.get(), EmptyFrontier(), nullptr, nullptr, &kernarg_position),
+      0u);
+  EXPECT_EQ(iree_async_semaphore_query(semaphore_a), 0u);
+
+  // A deferred epoch retires from the device epoch signal while the host epoch
+  // signal has not moved.
+  iree_hal_amdgpu_notification_ring_defer_host_notification(ring.get(),
+                                                            epoch_a);
+  EXPECT_TRUE(iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+      ring.get(), /*completed_epoch=*/0));
+  EXPECT_EQ(iree_hal_amdgpu_notification_ring_query_epoch_snapshot(ring.get())
+                .completed_epoch,
+            epoch_a);
+  EXPECT_EQ(
+      iree_hal_amdgpu_notification_ring_drain(
+          ring.get(), EmptyFrontier(), nullptr, nullptr, &kernarg_position),
+      1u);
+  EXPECT_EQ(iree_async_semaphore_query(semaphore_a), 1u);
+  EXPECT_EQ(iree_async_semaphore_query(semaphore_b), 0u);
+
+  // The next notified epoch moves the host epoch signal past the deferred one,
+  // after which the device epoch signal is no longer consulted.
+  device_signal.value = IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - epoch_b;
+  iree_hsa_signal_store_screlease(
+      IREE_LIBHSA(&libhsa), ring->epoch.signal,
+      (hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE - epoch_b));
+  EXPECT_FALSE(iree_hal_amdgpu_notification_ring_has_deferred_host_notification(
+      ring.get(), epoch_b));
+  EXPECT_EQ(
+      iree_hal_amdgpu_notification_ring_drain(
+          ring.get(), EmptyFrontier(), nullptr, nullptr, &kernarg_position),
+      1u);
+  EXPECT_EQ(iree_async_semaphore_query(semaphore_b), 1u);
+
+  ring->epoch.device_signal.handle = 0;
+  iree_async_semaphore_release(semaphore_b);
+  iree_async_semaphore_release(semaphore_a);
 }
 
 TEST_F(NotificationRingTest, MultiplePerEpochAndSparseEpochs) {
