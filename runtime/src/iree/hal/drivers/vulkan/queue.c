@@ -9150,7 +9150,8 @@ iree_status_t iree_hal_vulkan_queue_submit_execute(
   IREE_TRACE_ZONE_BEGIN(z0);
 
   const iree_hal_queue_execute_flags_t known_flags =
-      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME;
+      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME |
+      IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS;
   iree_status_t status = iree_ok_status();
   if (iree_any_bit_set(flags, ~known_flags)) {
     status = iree_make_status(

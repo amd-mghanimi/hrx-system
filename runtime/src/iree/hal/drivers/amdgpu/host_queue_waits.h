@@ -44,8 +44,10 @@ typedef struct iree_hal_amdgpu_wait_resolution_t {
   uint8_t barrier_count;
   // True if at least one wait requires software deferral.
   bool needs_deferral;
+  // iree_hal_amdgpu_wait_barrier_strategy_t used to emit |barriers|.
+  uint8_t barrier_strategy;
   // Padding reserved to keep the fence scopes aligned.
-  uint8_t reserved[2];
+  uint8_t reserved[1];
   // Captured payload visibility, separate from dependency/control visibility.
   iree_hal_amdgpu_queue_barriers_t payload_barriers;
   // Number of wait semaphore edges represented by this resolution.
@@ -63,17 +65,22 @@ typedef struct iree_hal_amdgpu_wait_resolution_t {
 } iree_hal_amdgpu_wait_resolution_t;
 
 // Resolves a wait_semaphore_list into device-side barriers or software
-// deferral. Caller must hold submission_mutex.
+// deferral. When |prefer_device_waits| is set, waits on local peer queues use
+// the queue's device wait strategy even if ordinary waits are deferred to the
+// host. Caller must hold submission_mutex.
 void iree_hal_amdgpu_host_queue_resolve_waits(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_semaphore_list_t wait_semaphore_list,
+    bool prefer_device_waits,
     iree_hal_amdgpu_wait_resolution_t* out_resolution);
 
 // Writes one device-side wait barrier packet body and returns the header/setup
-// bits that will publish it. Caller must commit the packet header after this
-// returns. Caller must hold submission_mutex.
+// bits that will publish it using |resolution|'s barrier strategy. Caller must
+// commit the packet header after this returns. Caller must hold
+// submission_mutex.
 uint16_t iree_hal_amdgpu_host_queue_write_wait_barrier_packet_body(
     iree_hal_amdgpu_host_queue_t* queue,
+    const iree_hal_amdgpu_wait_resolution_t* resolution,
     const iree_hal_amdgpu_wait_barrier_t* barrier, uint64_t packet_id,
     hsa_signal_t completion_signal, iree_hsa_fence_scope_t acquire_scope,
     iree_hsa_fence_scope_t release_scope, iree_hal_amdgpu_aql_packet_t* packet,

@@ -24,7 +24,8 @@
 iree_status_t iree_hal_amdgpu_host_queue_validate_execute_flags(
     iree_hal_queue_execute_flags_t flags) {
   const iree_hal_queue_execute_flags_t supported_flags =
-      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME;
+      IREE_HAL_QUEUE_EXECUTE_FLAG_BORROW_BINDING_TABLE_LIFETIME |
+      IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS;
   if (IREE_UNLIKELY(iree_any_bit_set(flags, ~supported_flags))) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "unsupported execute flags: 0x%" PRIx64, flags);

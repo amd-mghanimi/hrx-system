@@ -1882,7 +1882,7 @@ uint64_t iree_hal_amdgpu_host_queue_finish_barrier_submission(
       uint16_t barrier_setup = 0;
       uint16_t barrier_header =
           iree_hal_amdgpu_host_queue_write_wait_barrier_packet_body(
-              queue, &resolution->barriers[i], first_packet_id + i,
+              queue, resolution, &resolution->barriers[i], first_packet_id + i,
               iree_hsa_signal_null(), resolution->barrier_acquire_scope,
               IREE_HSA_FENCE_SCOPE_NONE, barrier_packet, &barrier_setup);
       iree_hal_amdgpu_aql_ring_commit(barrier_packet, barrier_header,
@@ -1960,7 +1960,8 @@ uint64_t iree_hal_amdgpu_host_queue_finish_barrier_submission(
             queue, resolution, signal_semaphore_list);
     completion_header =
         iree_hal_amdgpu_host_queue_write_wait_barrier_packet_body(
-            queue, &resolution->barriers[resolution->barrier_count - 1],
+            queue, resolution,
+            &resolution->barriers[resolution->barrier_count - 1],
             first_packet_id + aql_packet_count - 1,
             iree_hal_amdgpu_notification_ring_epoch_signal(
                 &queue->notification_ring),

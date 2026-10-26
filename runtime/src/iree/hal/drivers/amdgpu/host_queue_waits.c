@@ -40,7 +40,7 @@ static bool iree_hal_amdgpu_host_queue_append_wait_barrier(
     iree_hal_amdgpu_wait_resolution_t* resolution, iree_async_axis_t axis,
     hsa_signal_t epoch_signal, uint64_t target_epoch,
     iree_hsa_fence_scope_t acquire_scope) {
-  if (queue->wait_barrier_strategy ==
+  if (resolution->barrier_strategy ==
       IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_DEFER) {
     return false;
   }
@@ -253,10 +253,14 @@ static bool iree_hal_amdgpu_host_queue_resolve_wait(
 void iree_hal_amdgpu_host_queue_resolve_waits(
     iree_hal_amdgpu_host_queue_t* queue,
     const iree_hal_semaphore_list_t wait_semaphore_list,
+    bool prefer_device_waits,
     iree_hal_amdgpu_wait_resolution_t* out_resolution) {
   out_resolution->payload_barriers = (iree_hal_amdgpu_queue_barriers_t){0};
   out_resolution->barrier_count = 0;
   out_resolution->needs_deferral = false;
+  out_resolution->barrier_strategy =
+      (uint8_t)(prefer_device_waits ? queue->device_wait_barrier_strategy
+                                    : queue->wait_barrier_strategy);
   memset(out_resolution->reserved, 0, sizeof(out_resolution->reserved));
   out_resolution->wait_count = wait_semaphore_list.count > UINT32_MAX
                                    ? UINT32_MAX
@@ -278,6 +282,7 @@ void iree_hal_amdgpu_host_queue_resolve_waits(
 
 uint16_t iree_hal_amdgpu_host_queue_write_wait_barrier_packet_body(
     iree_hal_amdgpu_host_queue_t* queue,
+    const iree_hal_amdgpu_wait_resolution_t* resolution,
     const iree_hal_amdgpu_wait_barrier_t* barrier, uint64_t packet_id,
     hsa_signal_t completion_signal, iree_hsa_fence_scope_t acquire_scope,
     iree_hsa_fence_scope_t release_scope, iree_hal_amdgpu_aql_packet_t* packet,
@@ -298,7 +303,8 @@ uint16_t iree_hal_amdgpu_host_queue_write_wait_barrier_packet_body(
       (iree_hsa_signal_value_t)(IREE_HAL_AMDGPU_EPOCH_INITIAL_VALUE -
                                 barrier->target_epoch + 1);
 
-  switch (queue->wait_barrier_strategy) {
+  switch (
+      (iree_hal_amdgpu_wait_barrier_strategy_t)resolution->barrier_strategy) {
     case IREE_HAL_AMDGPU_WAIT_BARRIER_STRATEGY_AQL_BARRIER_VALUE:
       return iree_hal_amdgpu_aql_emit_barrier_value(
           &packet->barrier_value,
@@ -339,7 +345,7 @@ void iree_hal_amdgpu_host_queue_emit_barriers(
         iree_hal_amdgpu_aql_ring_packet(&queue->aql_ring, first_packet_id + i);
     uint16_t setup = 0;
     uint16_t header = iree_hal_amdgpu_host_queue_write_wait_barrier_packet_body(
-        queue, &resolution->barriers[i], first_packet_id + i,
+        queue, resolution, &resolution->barriers[i], first_packet_id + i,
         iree_hsa_signal_null(), resolution->barrier_acquire_scope,
         IREE_HSA_FENCE_SCOPE_NONE, packet, &setup);
     iree_hal_amdgpu_aql_ring_commit(packet, header, setup);

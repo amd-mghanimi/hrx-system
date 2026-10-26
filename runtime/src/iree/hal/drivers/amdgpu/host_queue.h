@@ -224,6 +224,10 @@ typedef struct iree_hal_amdgpu_host_queue_params_t {
     iree_hal_amdgpu_aql_queue_execution_mode_t aql_execution_mode;
     // Device-side strategy used to resolve cross-queue epoch waits.
     iree_hal_amdgpu_wait_barrier_strategy_t wait_barrier_strategy;
+    // Device-side strategy used for waits whose submission prefers device
+    // waits. May differ from |wait_barrier_strategy| when host deferral is
+    // forced for ordinary waits.
+    iree_hal_amdgpu_wait_barrier_strategy_t device_wait_barrier_strategy;
     // Device-side strategy used to synchronize cooperative grids.
     iree_hal_amdgpu_grid_sync_strategy_t grid_sync_strategy;
     // Vendor-packet capabilities available to this queue.
@@ -628,6 +632,10 @@ typedef struct iree_hal_amdgpu_host_queue_t {
 
   // Device-side wait strategy selected once from the GPU ISA at initialization.
   iree_hal_amdgpu_wait_barrier_strategy_t wait_barrier_strategy;
+
+  // Device-side wait strategy used for submissions with
+  // IREE_HAL_QUEUE_EXECUTE_FLAG_PREFER_DEVICE_WAITS.
+  iree_hal_amdgpu_wait_barrier_strategy_t device_wait_barrier_strategy;
 
   // Cooperative grid synchronization strategy selected from the GPU ISA.
   iree_hal_amdgpu_grid_sync_strategy_t grid_sync_strategy;
